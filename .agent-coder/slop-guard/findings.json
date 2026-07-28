@@ -1,6 +1,6 @@
 [
   {
-    "id": "998f3936-6ae9-497f-9f0a-1630a3424bec",
+    "id": "96880230-cfb8-4074-a0a8-5daee3fea1c2",
     "ruleId": "quality-maxFileSize",
     "category": "maintainability",
     "severity": "information",
@@ -22,11 +22,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.320Z",
-    "updatedAt": "2026-07-28T22:38:32.320Z"
+    "detectedAt": "2026-07-28T22:48:38.687Z",
+    "updatedAt": "2026-07-28T22:48:38.687Z"
   },
   {
-    "id": "bfa93234-c305-4498-9373-85e54447de53",
+    "id": "175ba147-f72e-4aff-b752-9b5b9edb3b3d",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -48,11 +48,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.320Z",
-    "updatedAt": "2026-07-28T22:38:32.320Z"
+    "detectedAt": "2026-07-28T22:48:38.687Z",
+    "updatedAt": "2026-07-28T22:48:38.687Z"
   },
   {
-    "id": "0697643f-3de1-46d3-a6df-272c8c0e90e3",
+    "id": "4fcdd260-e611-4444-84d0-6074dafa97c0",
     "ruleId": "file-size-growth",
     "category": "file-size",
     "severity": "information",
@@ -76,11 +76,11 @@
     "missingInformation": [
       "Whether the size reflects a single justified responsibility or several mixed ones — this check only counts lines."
     ],
-    "detectedAt": "2026-07-28T22:38:32.321Z",
-    "updatedAt": "2026-07-28T22:38:32.321Z"
+    "detectedAt": "2026-07-28T22:48:38.688Z",
+    "updatedAt": "2026-07-28T22:48:38.688Z"
   },
   {
-    "id": "49cbced3-02b1-42fd-adfb-8e0d82c3d613",
+    "id": "3302534f-84fe-4b13-8b36-eabb27e6cc1b",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -105,11 +105,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.380Z",
-    "updatedAt": "2026-07-28T22:38:32.380Z"
+    "detectedAt": "2026-07-28T22:48:38.783Z",
+    "updatedAt": "2026-07-28T22:48:38.783Z"
   },
   {
-    "id": "be53b283-a267-4bd5-a90b-aa2db62f5a40",
+    "id": "704c95c2-bbeb-4225-94f9-c2004ed43e48",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -134,11 +134,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.591Z",
-    "updatedAt": "2026-07-28T22:38:32.591Z"
+    "detectedAt": "2026-07-28T22:48:39.125Z",
+    "updatedAt": "2026-07-28T22:48:39.125Z"
   },
   {
-    "id": "198cff5a-f150-428d-96a3-2d5dfec184ae",
+    "id": "aec7e8c3-8e25-4b0e-a79f-9d72c6c605fc",
     "ruleId": "quality-maxFileSize",
     "category": "maintainability",
     "severity": "information",
@@ -160,11 +160,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.622Z",
-    "updatedAt": "2026-07-28T22:38:32.622Z"
+    "detectedAt": "2026-07-28T22:48:39.146Z",
+    "updatedAt": "2026-07-28T22:48:39.146Z"
   },
   {
-    "id": "31d98e0c-2db6-42ee-86d6-a1c994391f34",
+    "id": "0dafebe7-d46a-40f8-91ad-ebe6db870f69",
     "ruleId": "duplicate-code-block",
     "category": "duplication",
     "severity": "information",
@@ -209,11 +209,11 @@
     "conflictingEvidence": [],
     "missingInformation": [],
     "estimatedRemovalLines": 18,
-    "detectedAt": "2026-07-28T22:38:32.626Z",
-    "updatedAt": "2026-07-28T22:38:32.626Z"
+    "detectedAt": "2026-07-28T22:48:39.148Z",
+    "updatedAt": "2026-07-28T22:48:39.148Z"
   },
   {
-    "id": "4eca19eb-92ee-4837-b99a-8e95a7e09872",
+    "id": "4bf027b8-13e4-41c0-968d-786e3c445e01",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -235,11 +235,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.629Z",
-    "updatedAt": "2026-07-28T22:38:32.629Z"
+    "detectedAt": "2026-07-28T22:48:39.151Z",
+    "updatedAt": "2026-07-28T22:48:39.151Z"
   },
   {
-    "id": "b2ec62d7-b7ef-4317-8726-f63d1a1fdf5b",
+    "id": "3ca32d29-3e35-48ed-b117-dadcbb9006eb",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -261,11 +261,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.633Z",
-    "updatedAt": "2026-07-28T22:38:32.633Z"
+    "detectedAt": "2026-07-28T22:48:39.154Z",
+    "updatedAt": "2026-07-28T22:48:39.154Z"
   },
   {
-    "id": "045fc2b5-8f72-4dec-af2b-85991b6a9224",
+    "id": "1e48703d-6c57-4824-bf9f-7e107c2e183d",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -290,11 +290,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.638Z",
-    "updatedAt": "2026-07-28T22:38:32.638Z"
+    "detectedAt": "2026-07-28T22:48:39.157Z",
+    "updatedAt": "2026-07-28T22:48:39.157Z"
   },
   {
-    "id": "eceabc00-d3b0-4ebf-aeed-a9c20eb0f086",
+    "id": "f3ae7bcc-795c-4d7b-93da-d3ac0e5e0e33",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -316,11 +316,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.638Z",
-    "updatedAt": "2026-07-28T22:38:32.638Z"
+    "detectedAt": "2026-07-28T22:48:39.157Z",
+    "updatedAt": "2026-07-28T22:48:39.157Z"
   },
   {
-    "id": "ba461a1e-6b71-4ed7-8d23-8c09f42e1c9e",
+    "id": "15b8feeb-48a8-42d6-ae6f-e18b25ee968f",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -345,11 +345,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.641Z",
-    "updatedAt": "2026-07-28T22:38:32.641Z"
+    "detectedAt": "2026-07-28T22:48:39.160Z",
+    "updatedAt": "2026-07-28T22:48:39.160Z"
   },
   {
-    "id": "8d5c1ed3-7415-42a8-bc4d-616f027e4861",
+    "id": "5643552b-7427-47a7-9c6f-a8385d44d807",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -371,11 +371,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.641Z",
-    "updatedAt": "2026-07-28T22:38:32.641Z"
+    "detectedAt": "2026-07-28T22:48:39.160Z",
+    "updatedAt": "2026-07-28T22:48:39.160Z"
   },
   {
-    "id": "9396023f-32d1-40fa-8b49-a9fd94117386",
+    "id": "3b610ccb-210b-4648-8d37-ea98b8006466",
     "ruleId": "quality-maxFileSize",
     "category": "maintainability",
     "severity": "information",
@@ -397,11 +397,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.649Z",
-    "updatedAt": "2026-07-28T22:38:32.649Z"
+    "detectedAt": "2026-07-28T22:48:39.165Z",
+    "updatedAt": "2026-07-28T22:48:39.165Z"
   },
   {
-    "id": "456ca892-5694-4944-9798-ceef948239f4",
+    "id": "6c734a4c-4ad6-44de-9d3f-23825c038261",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -426,11 +426,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.649Z",
-    "updatedAt": "2026-07-28T22:38:32.649Z"
+    "detectedAt": "2026-07-28T22:48:39.165Z",
+    "updatedAt": "2026-07-28T22:48:39.165Z"
   },
   {
-    "id": "bb650555-d96e-4244-b88a-bc448c3e118e",
+    "id": "0318172b-202a-4625-aaf3-3a73b24bec5d",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -452,11 +452,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.649Z",
-    "updatedAt": "2026-07-28T22:38:32.649Z"
+    "detectedAt": "2026-07-28T22:48:39.165Z",
+    "updatedAt": "2026-07-28T22:48:39.165Z"
   },
   {
-    "id": "6a7a19af-c620-415a-bf2c-02ee3a982446",
+    "id": "8ac717a8-5471-45e0-912d-e457d0b29dfb",
     "ruleId": "quality-noEmptyExceptionHandlers",
     "category": "error-handling",
     "severity": "information",
@@ -481,11 +481,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.649Z",
-    "updatedAt": "2026-07-28T22:38:32.649Z"
+    "detectedAt": "2026-07-28T22:48:39.165Z",
+    "updatedAt": "2026-07-28T22:48:39.165Z"
   },
   {
-    "id": "329cd70a-1e94-42e1-9160-41e4ae5b0390",
+    "id": "09cfc565-3194-4286-a4a3-5c5a73d23f02",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -507,11 +507,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.655Z",
-    "updatedAt": "2026-07-28T22:38:32.655Z"
+    "detectedAt": "2026-07-28T22:48:39.172Z",
+    "updatedAt": "2026-07-28T22:48:39.172Z"
   },
   {
-    "id": "7573552e-9557-43f2-a49a-165c9560d1a3",
+    "id": "f55501d3-181b-418a-9941-da69f441670c",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -536,11 +536,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.658Z",
-    "updatedAt": "2026-07-28T22:38:32.658Z"
+    "detectedAt": "2026-07-28T22:48:39.175Z",
+    "updatedAt": "2026-07-28T22:48:39.175Z"
   },
   {
-    "id": "abe25015-1afa-46b2-847f-dae7014dd42a",
+    "id": "fc843cb2-b439-4bf4-9bd7-04cddc274f31",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -562,11 +562,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.658Z",
-    "updatedAt": "2026-07-28T22:38:32.658Z"
+    "detectedAt": "2026-07-28T22:48:39.175Z",
+    "updatedAt": "2026-07-28T22:48:39.175Z"
   },
   {
-    "id": "1f392cc3-07d8-4191-be3b-ebeab17df4fd",
+    "id": "43e9abd6-236a-4ba1-882c-fa4a42177d4f",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -588,11 +588,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.662Z",
-    "updatedAt": "2026-07-28T22:38:32.662Z"
+    "detectedAt": "2026-07-28T22:48:39.182Z",
+    "updatedAt": "2026-07-28T22:48:39.182Z"
   },
   {
-    "id": "9956e500-bdf0-414f-b618-f5c2601eb029",
+    "id": "df6fe24e-552f-4ccd-89de-bf5f166dc7ad",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -617,11 +617,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.666Z",
-    "updatedAt": "2026-07-28T22:38:32.666Z"
+    "detectedAt": "2026-07-28T22:48:39.186Z",
+    "updatedAt": "2026-07-28T22:48:39.186Z"
   },
   {
-    "id": "1e990ee4-60a2-4755-9ecf-cf075940728f",
+    "id": "37c53b67-868c-4e79-ae85-9f1922bb1398",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -643,11 +643,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.666Z",
-    "updatedAt": "2026-07-28T22:38:32.666Z"
+    "detectedAt": "2026-07-28T22:48:39.186Z",
+    "updatedAt": "2026-07-28T22:48:39.186Z"
   },
   {
-    "id": "9064be35-e34f-4b1c-a2d8-ffd656424f94",
+    "id": "0344855f-ff43-4555-a1a1-eb0710036993",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -672,11 +672,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.670Z",
-    "updatedAt": "2026-07-28T22:38:32.670Z"
+    "detectedAt": "2026-07-28T22:48:39.190Z",
+    "updatedAt": "2026-07-28T22:48:39.190Z"
   },
   {
-    "id": "3332cc69-2fd6-4cc4-a377-ea9bce3f0e97",
+    "id": "c97f95a9-d290-4841-859c-c3a8f3e165cc",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -698,11 +698,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.670Z",
-    "updatedAt": "2026-07-28T22:38:32.670Z"
+    "detectedAt": "2026-07-28T22:48:39.190Z",
+    "updatedAt": "2026-07-28T22:48:39.190Z"
   },
   {
-    "id": "18fa28f4-bc6e-42eb-a767-46f203cfa7a7",
+    "id": "32265e84-a93e-4e25-84b9-83a36ac13cc9",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -727,11 +727,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.674Z",
-    "updatedAt": "2026-07-28T22:38:32.674Z"
+    "detectedAt": "2026-07-28T22:48:39.196Z",
+    "updatedAt": "2026-07-28T22:48:39.196Z"
   },
   {
-    "id": "2d2a20fc-9577-4e83-ae04-01c0c2a08130",
+    "id": "5a1b3ef3-8c5c-4029-bfe8-9794f22ad0cb",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -753,11 +753,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.674Z",
-    "updatedAt": "2026-07-28T22:38:32.674Z"
+    "detectedAt": "2026-07-28T22:48:39.196Z",
+    "updatedAt": "2026-07-28T22:48:39.196Z"
   },
   {
-    "id": "71c146d5-1746-4d45-bd51-2c2a52f03459",
+    "id": "356b8d52-2111-4170-ad5e-dfc883c127ab",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -779,11 +779,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.677Z",
-    "updatedAt": "2026-07-28T22:38:32.677Z"
+    "detectedAt": "2026-07-28T22:48:39.199Z",
+    "updatedAt": "2026-07-28T22:48:39.199Z"
   },
   {
-    "id": "0d17aa89-847e-465a-884d-9f13eab8d004",
+    "id": "b27a1ec8-2a3b-4e45-a9ea-fef91f6a5320",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -808,11 +808,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.679Z",
-    "updatedAt": "2026-07-28T22:38:32.679Z"
+    "detectedAt": "2026-07-28T22:48:39.202Z",
+    "updatedAt": "2026-07-28T22:48:39.202Z"
   },
   {
-    "id": "3d3db7ae-9215-42a6-9f9d-3b9b229af4bb",
+    "id": "88786de6-1bb2-4ef4-b1c0-fbe6cc909ea6",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -837,11 +837,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.681Z",
-    "updatedAt": "2026-07-28T22:38:32.681Z"
+    "detectedAt": "2026-07-28T22:48:39.205Z",
+    "updatedAt": "2026-07-28T22:48:39.205Z"
   },
   {
-    "id": "9d67e136-6f40-4aad-9ffa-bbba08c9da43",
+    "id": "b9b7efc6-d425-4b60-a089-d6ef371b4662",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -863,11 +863,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.681Z",
-    "updatedAt": "2026-07-28T22:38:32.681Z"
+    "detectedAt": "2026-07-28T22:48:39.205Z",
+    "updatedAt": "2026-07-28T22:48:39.205Z"
   },
   {
-    "id": "a7a717ad-f7fb-4c51-9a63-4ffce532e187",
+    "id": "489a1732-9e80-47cf-a748-7fcae69ce50d",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -892,11 +892,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.686Z",
-    "updatedAt": "2026-07-28T22:38:32.686Z"
+    "detectedAt": "2026-07-28T22:48:39.211Z",
+    "updatedAt": "2026-07-28T22:48:39.211Z"
   },
   {
-    "id": "b9b39a6e-a337-42c2-a361-90444baab8bd",
+    "id": "e2d993e1-89c9-4766-b5bd-932a661cf8d8",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -918,11 +918,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.686Z",
-    "updatedAt": "2026-07-28T22:38:32.686Z"
+    "detectedAt": "2026-07-28T22:48:39.211Z",
+    "updatedAt": "2026-07-28T22:48:39.211Z"
   },
   {
-    "id": "784ae58d-fbd4-4337-a665-d36c1c33d0a4",
+    "id": "048bebf9-ed1a-454e-9b80-e973fab73b46",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -944,11 +944,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.690Z",
-    "updatedAt": "2026-07-28T22:38:32.690Z"
+    "detectedAt": "2026-07-28T22:48:39.216Z",
+    "updatedAt": "2026-07-28T22:48:39.216Z"
   },
   {
-    "id": "eb29a237-8c0e-40a4-971b-3f2b6ed972f1",
+    "id": "689997f6-13fd-46dc-881a-eba88ff19408",
     "ruleId": "duplicate-code-block",
     "category": "duplication",
     "severity": "information",
@@ -981,11 +981,11 @@
     "conflictingEvidence": [],
     "missingInformation": [],
     "estimatedRemovalLines": 6,
-    "detectedAt": "2026-07-28T22:38:32.692Z",
-    "updatedAt": "2026-07-28T22:38:32.692Z"
+    "detectedAt": "2026-07-28T22:48:39.219Z",
+    "updatedAt": "2026-07-28T22:48:39.219Z"
   },
   {
-    "id": "800b2149-d464-4936-af9d-31e2c9c9d625",
+    "id": "c734a938-86f2-4eb5-bf91-bfffb5b7d8eb",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -1010,11 +1010,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.694Z",
-    "updatedAt": "2026-07-28T22:38:32.694Z"
+    "detectedAt": "2026-07-28T22:48:39.221Z",
+    "updatedAt": "2026-07-28T22:48:39.221Z"
   },
   {
-    "id": "3c65769d-8945-44c0-891a-701ad1fbd64b",
+    "id": "c89bea25-7617-4c71-9625-6a10e99c2808",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -1036,11 +1036,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.694Z",
-    "updatedAt": "2026-07-28T22:38:32.694Z"
+    "detectedAt": "2026-07-28T22:48:39.221Z",
+    "updatedAt": "2026-07-28T22:48:39.221Z"
   },
   {
-    "id": "521088ae-d82c-4966-ac55-1310562ea3cc",
+    "id": "517e0cc1-47ef-4dd8-8a2b-32b3c46952e7",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -1062,11 +1062,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.704Z",
-    "updatedAt": "2026-07-28T22:38:32.704Z"
+    "detectedAt": "2026-07-28T22:48:39.227Z",
+    "updatedAt": "2026-07-28T22:48:39.227Z"
   },
   {
-    "id": "fddb0d7b-18dd-4cc7-844d-d7f8454c6758",
+    "id": "08dabcb2-0c17-4b41-98f5-153ebc8707d5",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -1088,18 +1088,18 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.707Z",
-    "updatedAt": "2026-07-28T22:38:32.707Z"
+    "detectedAt": "2026-07-28T22:48:39.231Z",
+    "updatedAt": "2026-07-28T22:48:39.231Z"
   },
   {
-    "id": "e0080a11-2f8c-4a10-927a-54e4304f7a2e",
+    "id": "e654cad8-e8be-4f19-a451-0ff8f6b369dd",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
     "confidence": "confirmed",
     "disposition": "open",
-    "title": "File-wide decision-point count is 95 (if/else/for/while/case/catch/&&/||), ex...",
-    "description": "File-wide decision-point count is 95 (if/else/for/while/case/catch/&&/||), exceeding the configured limit of 15. This is a file-wide heuristic, not a per-function measurement — a parser is needed for that.",
+    "title": "File-wide decision-point count is 92 (if/else/for/while/case/catch/&&/||), ex...",
+    "description": "File-wide decision-point count is 92 (if/else/for/while/case/catch/&&/||), exceeding the configured limit of 15. This is a file-wide heuristic, not a per-function measurement — a parser is needed for that.",
     "engineeringImpact": "Flagged by an existing Phase 11 quality-rule heuristic; reused here, not re-derived.",
     "recommendation": "See the Governance quality-rules finding for this file (Check Quality Rules).",
     "filePath": "src/workload_http.cpp",
@@ -1109,410 +1109,127 @@
     "evidence": [
       {
         "filePath": "src/workload_http.cpp",
-        "description": "File-wide decision-point count is 95 (if/else/for/while/case/catch/&&/||), exceeding the configured limit of 15. This is a file-wide heuristic, not a per-function measurement — a parser is needed for that."
+        "description": "File-wide decision-point count is 92 (if/else/for/while/case/catch/&&/||), exceeding the configured limit of 15. This is a file-wide heuristic, not a per-function measurement — a parser is needed for that."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.712Z",
-    "updatedAt": "2026-07-28T22:38:32.712Z"
+    "detectedAt": "2026-07-28T22:48:39.237Z",
+    "updatedAt": "2026-07-28T22:48:39.237Z"
   },
   {
-    "id": "17b71433-e4d7-4246-8be1-c9040488771c",
-    "ruleId": "duplicate-code-block",
-    "category": "duplication",
-    "severity": "information",
-    "confidence": "confirmed",
-    "disposition": "open",
-    "title": "Duplicate 6+ line block repeated 3 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 267, 299, 334 in src/workload_http.cpp, verified by an exact text match.",
-    "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
-    "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
-    "filePath": "src/workload_http.cpp",
-    "lineStart": 267,
-    "lineEnd": 272,
-    "pipelineStage": "context",
-    "deterministic": true,
-    "blocking": false,
-    "evidence": [
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 267,
-        "lineEnd": 272,
-        "description": "Identical block at line 267."
-      },
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 299,
-        "lineEnd": 304,
-        "description": "Identical block at line 299."
-      },
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 334,
-        "lineEnd": 339,
-        "description": "Identical block at line 334."
-      }
-    ],
-    "conflictingEvidence": [],
-    "missingInformation": [],
-    "estimatedRemovalLines": 12,
-    "detectedAt": "2026-07-28T22:38:32.713Z",
-    "updatedAt": "2026-07-28T22:38:32.713Z"
-  },
-  {
-    "id": "75aa22f8-b145-4cbf-a9da-15287ba9db19",
-    "ruleId": "duplicate-code-block",
-    "category": "duplication",
-    "severity": "information",
-    "confidence": "confirmed",
-    "disposition": "open",
-    "title": "Duplicate 6+ line block repeated 3 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 268, 300, 335 in src/workload_http.cpp, verified by an exact text match.",
-    "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
-    "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
-    "filePath": "src/workload_http.cpp",
-    "lineStart": 268,
-    "lineEnd": 273,
-    "pipelineStage": "context",
-    "deterministic": true,
-    "blocking": false,
-    "evidence": [
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 268,
-        "lineEnd": 273,
-        "description": "Identical block at line 268."
-      },
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 300,
-        "lineEnd": 305,
-        "description": "Identical block at line 300."
-      },
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 335,
-        "lineEnd": 340,
-        "description": "Identical block at line 335."
-      }
-    ],
-    "conflictingEvidence": [],
-    "missingInformation": [],
-    "estimatedRemovalLines": 12,
-    "detectedAt": "2026-07-28T22:38:32.713Z",
-    "updatedAt": "2026-07-28T22:38:32.713Z"
-  },
-  {
-    "id": "f331be77-4460-476c-a111-a88433a42e1e",
-    "ruleId": "duplicate-code-block",
-    "category": "duplication",
-    "severity": "information",
-    "confidence": "confirmed",
-    "disposition": "open",
-    "title": "Duplicate 6+ line block repeated 3 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 269, 301, 336 in src/workload_http.cpp, verified by an exact text match.",
-    "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
-    "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
-    "filePath": "src/workload_http.cpp",
-    "lineStart": 269,
-    "lineEnd": 274,
-    "pipelineStage": "context",
-    "deterministic": true,
-    "blocking": false,
-    "evidence": [
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 269,
-        "lineEnd": 274,
-        "description": "Identical block at line 269."
-      },
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 301,
-        "lineEnd": 306,
-        "description": "Identical block at line 301."
-      },
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 336,
-        "lineEnd": 341,
-        "description": "Identical block at line 336."
-      }
-    ],
-    "conflictingEvidence": [],
-    "missingInformation": [],
-    "estimatedRemovalLines": 12,
-    "detectedAt": "2026-07-28T22:38:32.713Z",
-    "updatedAt": "2026-07-28T22:38:32.713Z"
-  },
-  {
-    "id": "be80641c-d493-4249-9637-c54fc9cb987b",
-    "ruleId": "duplicate-code-block",
-    "category": "duplication",
-    "severity": "information",
-    "confidence": "confirmed",
-    "disposition": "open",
-    "title": "Duplicate 6+ line block repeated 3 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 270, 302, 337 in src/workload_http.cpp, verified by an exact text match.",
-    "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
-    "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
-    "filePath": "src/workload_http.cpp",
-    "lineStart": 270,
-    "lineEnd": 275,
-    "pipelineStage": "context",
-    "deterministic": true,
-    "blocking": false,
-    "evidence": [
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 270,
-        "lineEnd": 275,
-        "description": "Identical block at line 270."
-      },
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 302,
-        "lineEnd": 307,
-        "description": "Identical block at line 302."
-      },
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 337,
-        "lineEnd": 342,
-        "description": "Identical block at line 337."
-      }
-    ],
-    "conflictingEvidence": [],
-    "missingInformation": [],
-    "estimatedRemovalLines": 12,
-    "detectedAt": "2026-07-28T22:38:32.713Z",
-    "updatedAt": "2026-07-28T22:38:32.713Z"
-  },
-  {
-    "id": "4f6384cc-9d0e-4afd-8f1b-8c55cf2e54da",
+    "id": "81c0e218-9675-4229-a3b1-d45585557052",
     "ruleId": "duplicate-code-block",
     "category": "duplication",
     "severity": "information",
     "confidence": "confirmed",
     "disposition": "open",
     "title": "Duplicate 6+ line block repeated 2 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 271, 338 in src/workload_http.cpp, verified by an exact text match.",
+    "description": "The same 6-line (or longer) block of code appears at lines 319, 346 in src/workload_http.cpp, verified by an exact text match.",
     "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
     "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
     "filePath": "src/workload_http.cpp",
-    "lineStart": 271,
-    "lineEnd": 276,
+    "lineStart": 319,
+    "lineEnd": 324,
     "pipelineStage": "context",
     "deterministic": true,
     "blocking": false,
     "evidence": [
       {
         "filePath": "src/workload_http.cpp",
-        "lineStart": 271,
-        "lineEnd": 276,
-        "description": "Identical block at line 271."
+        "lineStart": 319,
+        "lineEnd": 324,
+        "description": "Identical block at line 319."
       },
       {
         "filePath": "src/workload_http.cpp",
-        "lineStart": 338,
-        "lineEnd": 343,
-        "description": "Identical block at line 338."
+        "lineStart": 346,
+        "lineEnd": 351,
+        "description": "Identical block at line 346."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
     "estimatedRemovalLines": 6,
-    "detectedAt": "2026-07-28T22:38:32.713Z",
-    "updatedAt": "2026-07-28T22:38:32.713Z"
+    "detectedAt": "2026-07-28T22:48:39.239Z",
+    "updatedAt": "2026-07-28T22:48:39.239Z"
   },
   {
-    "id": "37761a40-6416-4fea-ae31-5fb1815fe387",
+    "id": "68d91143-4128-4ac2-90da-f3f95d7296da",
     "ruleId": "duplicate-code-block",
     "category": "duplication",
     "severity": "information",
     "confidence": "confirmed",
     "disposition": "open",
     "title": "Duplicate 6+ line block repeated 2 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 272, 339 in src/workload_http.cpp, verified by an exact text match.",
+    "description": "The same 6-line (or longer) block of code appears at lines 320, 347 in src/workload_http.cpp, verified by an exact text match.",
     "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
     "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
     "filePath": "src/workload_http.cpp",
-    "lineStart": 272,
-    "lineEnd": 277,
+    "lineStart": 320,
+    "lineEnd": 325,
     "pipelineStage": "context",
     "deterministic": true,
     "blocking": false,
     "evidence": [
       {
         "filePath": "src/workload_http.cpp",
-        "lineStart": 272,
-        "lineEnd": 277,
-        "description": "Identical block at line 272."
+        "lineStart": 320,
+        "lineEnd": 325,
+        "description": "Identical block at line 320."
       },
       {
         "filePath": "src/workload_http.cpp",
-        "lineStart": 339,
-        "lineEnd": 344,
-        "description": "Identical block at line 339."
+        "lineStart": 347,
+        "lineEnd": 352,
+        "description": "Identical block at line 347."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
     "estimatedRemovalLines": 6,
-    "detectedAt": "2026-07-28T22:38:32.713Z",
-    "updatedAt": "2026-07-28T22:38:32.713Z"
+    "detectedAt": "2026-07-28T22:48:39.239Z",
+    "updatedAt": "2026-07-28T22:48:39.239Z"
   },
   {
-    "id": "9d475475-d862-4bab-b0e6-9e796c7cc639",
+    "id": "2f1e0269-36fa-4872-a292-2fc1e4844c1b",
     "ruleId": "duplicate-code-block",
     "category": "duplication",
     "severity": "information",
     "confidence": "confirmed",
     "disposition": "open",
     "title": "Duplicate 6+ line block repeated 2 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 273, 340 in src/workload_http.cpp, verified by an exact text match.",
+    "description": "The same 6-line (or longer) block of code appears at lines 321, 348 in src/workload_http.cpp, verified by an exact text match.",
     "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
     "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
     "filePath": "src/workload_http.cpp",
-    "lineStart": 273,
-    "lineEnd": 278,
+    "lineStart": 321,
+    "lineEnd": 326,
     "pipelineStage": "context",
     "deterministic": true,
     "blocking": false,
     "evidence": [
       {
         "filePath": "src/workload_http.cpp",
-        "lineStart": 273,
-        "lineEnd": 278,
-        "description": "Identical block at line 273."
+        "lineStart": 321,
+        "lineEnd": 326,
+        "description": "Identical block at line 321."
       },
       {
         "filePath": "src/workload_http.cpp",
-        "lineStart": 340,
-        "lineEnd": 345,
-        "description": "Identical block at line 340."
+        "lineStart": 348,
+        "lineEnd": 353,
+        "description": "Identical block at line 348."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
     "estimatedRemovalLines": 6,
-    "detectedAt": "2026-07-28T22:38:32.713Z",
-    "updatedAt": "2026-07-28T22:38:32.713Z"
+    "detectedAt": "2026-07-28T22:48:39.239Z",
+    "updatedAt": "2026-07-28T22:48:39.239Z"
   },
   {
-    "id": "ccc2d822-6a8d-4b9e-84ed-81c371dc1c89",
-    "ruleId": "duplicate-code-block",
-    "category": "duplication",
-    "severity": "information",
-    "confidence": "confirmed",
-    "disposition": "open",
-    "title": "Duplicate 6+ line block repeated 2 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 274, 341 in src/workload_http.cpp, verified by an exact text match.",
-    "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
-    "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
-    "filePath": "src/workload_http.cpp",
-    "lineStart": 274,
-    "lineEnd": 279,
-    "pipelineStage": "context",
-    "deterministic": true,
-    "blocking": false,
-    "evidence": [
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 274,
-        "lineEnd": 279,
-        "description": "Identical block at line 274."
-      },
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 341,
-        "lineEnd": 346,
-        "description": "Identical block at line 341."
-      }
-    ],
-    "conflictingEvidence": [],
-    "missingInformation": [],
-    "estimatedRemovalLines": 6,
-    "detectedAt": "2026-07-28T22:38:32.713Z",
-    "updatedAt": "2026-07-28T22:38:32.713Z"
-  },
-  {
-    "id": "a13e1b44-3a8c-4299-b9f2-b08b3eead675",
-    "ruleId": "duplicate-code-block",
-    "category": "duplication",
-    "severity": "information",
-    "confidence": "confirmed",
-    "disposition": "open",
-    "title": "Duplicate 6+ line block repeated 2 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 291, 326 in src/workload_http.cpp, verified by an exact text match.",
-    "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
-    "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
-    "filePath": "src/workload_http.cpp",
-    "lineStart": 291,
-    "lineEnd": 296,
-    "pipelineStage": "context",
-    "deterministic": true,
-    "blocking": false,
-    "evidence": [
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 291,
-        "lineEnd": 296,
-        "description": "Identical block at line 291."
-      },
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 326,
-        "lineEnd": 331,
-        "description": "Identical block at line 326."
-      }
-    ],
-    "conflictingEvidence": [],
-    "missingInformation": [],
-    "estimatedRemovalLines": 6,
-    "detectedAt": "2026-07-28T22:38:32.713Z",
-    "updatedAt": "2026-07-28T22:38:32.713Z"
-  },
-  {
-    "id": "789df8a5-f9b6-4c5f-bbd9-21f31306f410",
-    "ruleId": "duplicate-code-block",
-    "category": "duplication",
-    "severity": "information",
-    "confidence": "confirmed",
-    "disposition": "open",
-    "title": "Duplicate 6+ line block repeated 2 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 292, 327 in src/workload_http.cpp, verified by an exact text match.",
-    "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
-    "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
-    "filePath": "src/workload_http.cpp",
-    "lineStart": 292,
-    "lineEnd": 297,
-    "pipelineStage": "context",
-    "deterministic": true,
-    "blocking": false,
-    "evidence": [
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 292,
-        "lineEnd": 297,
-        "description": "Identical block at line 292."
-      },
-      {
-        "filePath": "src/workload_http.cpp",
-        "lineStart": 327,
-        "lineEnd": 332,
-        "description": "Identical block at line 327."
-      }
-    ],
-    "conflictingEvidence": [],
-    "missingInformation": [],
-    "estimatedRemovalLines": 6,
-    "detectedAt": "2026-07-28T22:38:32.713Z",
-    "updatedAt": "2026-07-28T22:38:32.713Z"
-  },
-  {
-    "id": "63464f26-ddce-4737-98ac-6bb7f7d98a16",
+    "id": "7b802d68-400c-4c77-8e95-20b9a88e56f5",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -1534,11 +1251,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.715Z",
-    "updatedAt": "2026-07-28T22:38:32.715Z"
+    "detectedAt": "2026-07-28T22:48:39.242Z",
+    "updatedAt": "2026-07-28T22:48:39.242Z"
   },
   {
-    "id": "53a1c415-b822-4231-b7ff-3eed483dd97e",
+    "id": "ce5595ab-eaf1-4753-a64e-b5eb3d2c065a",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -1560,11 +1277,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.717Z",
-    "updatedAt": "2026-07-28T22:38:32.717Z"
+    "detectedAt": "2026-07-28T22:48:39.246Z",
+    "updatedAt": "2026-07-28T22:48:39.246Z"
   },
   {
-    "id": "65e91a63-6894-4417-95cf-8ca1ba414d83",
+    "id": "458bedf1-f7d0-418d-85d7-0e2db509d0f8",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -1586,11 +1303,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.719Z",
-    "updatedAt": "2026-07-28T22:38:32.719Z"
+    "detectedAt": "2026-07-28T22:48:39.250Z",
+    "updatedAt": "2026-07-28T22:48:39.250Z"
   },
   {
-    "id": "3c8c69e1-3ce4-4ba5-ba0d-4f91435a1b68",
+    "id": "286b2ba7-6be2-4a9e-a2b4-3acb77ece538",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -1615,11 +1332,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.722Z",
-    "updatedAt": "2026-07-28T22:38:32.722Z"
+    "detectedAt": "2026-07-28T22:48:39.254Z",
+    "updatedAt": "2026-07-28T22:48:39.254Z"
   },
   {
-    "id": "d9a8fb86-2cec-4da0-b9e6-70cfb37e209b",
+    "id": "27550ccd-8d4e-4b0c-9aca-3861da5a7d93",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -1641,18 +1358,18 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.722Z",
-    "updatedAt": "2026-07-28T22:38:32.722Z"
+    "detectedAt": "2026-07-28T22:48:39.254Z",
+    "updatedAt": "2026-07-28T22:48:39.254Z"
   },
   {
-    "id": "4e04a4e9-d222-4a30-9e23-16e2e0c92651",
+    "id": "980279b8-c82c-4f21-9ce1-debf9bacd25e",
     "ruleId": "quality-maxFileSize",
     "category": "maintainability",
     "severity": "information",
     "confidence": "confirmed",
     "disposition": "open",
-    "title": "File has 1192 lines, exceeding the configured limit of 1000.",
-    "description": "File has 1192 lines, exceeding the configured limit of 1000.",
+    "title": "File has 1178 lines, exceeding the configured limit of 1000.",
+    "description": "File has 1178 lines, exceeding the configured limit of 1000.",
     "engineeringImpact": "Flagged by an existing Phase 11 quality-rule heuristic; reused here, not re-derived.",
     "recommendation": "See the Governance quality-rules finding for this file (Check Quality Rules).",
     "filePath": "test/tests.cpp",
@@ -1662,23 +1379,23 @@
     "evidence": [
       {
         "filePath": "test/tests.cpp",
-        "description": "File has 1192 lines, exceeding the configured limit of 1000."
+        "description": "File has 1178 lines, exceeding the configured limit of 1000."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.727Z",
-    "updatedAt": "2026-07-28T22:38:32.727Z"
+    "detectedAt": "2026-07-28T22:48:39.262Z",
+    "updatedAt": "2026-07-28T22:48:39.262Z"
   },
   {
-    "id": "38502dde-cf0e-46da-a22b-2a49f1c26754",
+    "id": "f5e64be8-d477-450b-84d7-eba04b429521",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
     "confidence": "confirmed",
     "disposition": "open",
-    "title": "File-wide decision-point count is 112 (if/else/for/while/case/catch/&&/||), e...",
-    "description": "File-wide decision-point count is 112 (if/else/for/while/case/catch/&&/||), exceeding the configured limit of 15. This is a file-wide heuristic, not a per-function measurement — a parser is needed for that.",
+    "title": "File-wide decision-point count is 109 (if/else/for/while/case/catch/&&/||), e...",
+    "description": "File-wide decision-point count is 109 (if/else/for/while/case/catch/&&/||), exceeding the configured limit of 15. This is a file-wide heuristic, not a per-function measurement — a parser is needed for that.",
     "engineeringImpact": "Flagged by an existing Phase 11 quality-rule heuristic; reused here, not re-derived.",
     "recommendation": "See the Governance quality-rules finding for this file (Check Quality Rules).",
     "filePath": "test/tests.cpp",
@@ -1688,201 +1405,16 @@
     "evidence": [
       {
         "filePath": "test/tests.cpp",
-        "description": "File-wide decision-point count is 112 (if/else/for/while/case/catch/&&/||), exceeding the configured limit of 15. This is a file-wide heuristic, not a per-function measurement — a parser is needed for that."
+        "description": "File-wide decision-point count is 109 (if/else/for/while/case/catch/&&/||), exceeding the configured limit of 15. This is a file-wide heuristic, not a per-function measurement — a parser is needed for that."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.727Z",
-    "updatedAt": "2026-07-28T22:38:32.727Z"
+    "detectedAt": "2026-07-28T22:48:39.262Z",
+    "updatedAt": "2026-07-28T22:48:39.262Z"
   },
   {
-    "id": "6b1b8697-bc1a-4630-a3ca-78878e4a0843",
-    "ruleId": "duplicate-code-block",
-    "category": "duplication",
-    "severity": "information",
-    "confidence": "confirmed",
-    "disposition": "open",
-    "title": "Duplicate 6+ line block repeated 2 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 294, 927 in test/tests.cpp, verified by an exact text match.",
-    "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
-    "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
-    "filePath": "test/tests.cpp",
-    "lineStart": 294,
-    "lineEnd": 299,
-    "pipelineStage": "context",
-    "deterministic": true,
-    "blocking": false,
-    "evidence": [
-      {
-        "filePath": "test/tests.cpp",
-        "lineStart": 294,
-        "lineEnd": 299,
-        "description": "Identical block at line 294."
-      },
-      {
-        "filePath": "test/tests.cpp",
-        "lineStart": 927,
-        "lineEnd": 932,
-        "description": "Identical block at line 927."
-      }
-    ],
-    "conflictingEvidence": [],
-    "missingInformation": [],
-    "estimatedRemovalLines": 6,
-    "detectedAt": "2026-07-28T22:38:32.729Z",
-    "updatedAt": "2026-07-28T22:38:32.729Z"
-  },
-  {
-    "id": "dcb63f7e-852c-438b-9ee7-9d5d5842e23a",
-    "ruleId": "duplicate-code-block",
-    "category": "duplication",
-    "severity": "information",
-    "confidence": "confirmed",
-    "disposition": "open",
-    "title": "Duplicate 6+ line block repeated 2 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 295, 928 in test/tests.cpp, verified by an exact text match.",
-    "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
-    "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
-    "filePath": "test/tests.cpp",
-    "lineStart": 295,
-    "lineEnd": 300,
-    "pipelineStage": "context",
-    "deterministic": true,
-    "blocking": false,
-    "evidence": [
-      {
-        "filePath": "test/tests.cpp",
-        "lineStart": 295,
-        "lineEnd": 300,
-        "description": "Identical block at line 295."
-      },
-      {
-        "filePath": "test/tests.cpp",
-        "lineStart": 928,
-        "lineEnd": 933,
-        "description": "Identical block at line 928."
-      }
-    ],
-    "conflictingEvidence": [],
-    "missingInformation": [],
-    "estimatedRemovalLines": 6,
-    "detectedAt": "2026-07-28T22:38:32.729Z",
-    "updatedAt": "2026-07-28T22:38:32.729Z"
-  },
-  {
-    "id": "2d5855dd-3ed1-4964-bab8-c067bb406d8c",
-    "ruleId": "duplicate-code-block",
-    "category": "duplication",
-    "severity": "information",
-    "confidence": "confirmed",
-    "disposition": "open",
-    "title": "Duplicate 6+ line block repeated 2 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 296, 929 in test/tests.cpp, verified by an exact text match.",
-    "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
-    "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
-    "filePath": "test/tests.cpp",
-    "lineStart": 296,
-    "lineEnd": 301,
-    "pipelineStage": "context",
-    "deterministic": true,
-    "blocking": false,
-    "evidence": [
-      {
-        "filePath": "test/tests.cpp",
-        "lineStart": 296,
-        "lineEnd": 301,
-        "description": "Identical block at line 296."
-      },
-      {
-        "filePath": "test/tests.cpp",
-        "lineStart": 929,
-        "lineEnd": 934,
-        "description": "Identical block at line 929."
-      }
-    ],
-    "conflictingEvidence": [],
-    "missingInformation": [],
-    "estimatedRemovalLines": 6,
-    "detectedAt": "2026-07-28T22:38:32.729Z",
-    "updatedAt": "2026-07-28T22:38:32.729Z"
-  },
-  {
-    "id": "57654b57-b72e-4686-901b-50382f0526a0",
-    "ruleId": "duplicate-code-block",
-    "category": "duplication",
-    "severity": "information",
-    "confidence": "confirmed",
-    "disposition": "open",
-    "title": "Duplicate 6+ line block repeated 2 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 297, 930 in test/tests.cpp, verified by an exact text match.",
-    "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
-    "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
-    "filePath": "test/tests.cpp",
-    "lineStart": 297,
-    "lineEnd": 302,
-    "pipelineStage": "context",
-    "deterministic": true,
-    "blocking": false,
-    "evidence": [
-      {
-        "filePath": "test/tests.cpp",
-        "lineStart": 297,
-        "lineEnd": 302,
-        "description": "Identical block at line 297."
-      },
-      {
-        "filePath": "test/tests.cpp",
-        "lineStart": 930,
-        "lineEnd": 935,
-        "description": "Identical block at line 930."
-      }
-    ],
-    "conflictingEvidence": [],
-    "missingInformation": [],
-    "estimatedRemovalLines": 6,
-    "detectedAt": "2026-07-28T22:38:32.729Z",
-    "updatedAt": "2026-07-28T22:38:32.729Z"
-  },
-  {
-    "id": "7d86b95d-f72f-4d12-be23-87c43ccbb1af",
-    "ruleId": "duplicate-code-block",
-    "category": "duplication",
-    "severity": "information",
-    "confidence": "confirmed",
-    "disposition": "open",
-    "title": "Duplicate 6+ line block repeated 2 times",
-    "description": "The same 6-line (or longer) block of code appears at lines 298, 931 in test/tests.cpp, verified by an exact text match.",
-    "engineeringImpact": "A bug fix or behaviour change applied to one copy is easy to miss applying to the others, causing silent divergence.",
-    "recommendation": "Extract the repeated block into a shared function/method and call it from each location instead of keeping duplicate copies.",
-    "filePath": "test/tests.cpp",
-    "lineStart": 298,
-    "lineEnd": 303,
-    "pipelineStage": "context",
-    "deterministic": true,
-    "blocking": false,
-    "evidence": [
-      {
-        "filePath": "test/tests.cpp",
-        "lineStart": 298,
-        "lineEnd": 303,
-        "description": "Identical block at line 298."
-      },
-      {
-        "filePath": "test/tests.cpp",
-        "lineStart": 931,
-        "lineEnd": 936,
-        "description": "Identical block at line 931."
-      }
-    ],
-    "conflictingEvidence": [],
-    "missingInformation": [],
-    "estimatedRemovalLines": 6,
-    "detectedAt": "2026-07-28T22:38:32.729Z",
-    "updatedAt": "2026-07-28T22:38:32.729Z"
-  },
-  {
-    "id": "bb5211b7-71b2-4a11-b5c2-0b12e36c0676",
+    "id": "45b0ff35-ec28-43f2-8562-96f2189be96a",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -1904,11 +1436,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.730Z",
-    "updatedAt": "2026-07-28T22:38:32.730Z"
+    "detectedAt": "2026-07-28T22:48:39.266Z",
+    "updatedAt": "2026-07-28T22:48:39.266Z"
   },
   {
-    "id": "adc6d2b5-b10b-4db4-a45b-17bafcf4cfeb",
+    "id": "883e7440-01ee-459c-8360-3341e2d3f6fc",
     "ruleId": "quality-maxNestingDepth",
     "category": "maintainability",
     "severity": "information",
@@ -1933,11 +1465,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.733Z",
-    "updatedAt": "2026-07-28T22:38:32.733Z"
+    "detectedAt": "2026-07-28T22:48:39.270Z",
+    "updatedAt": "2026-07-28T22:48:39.270Z"
   },
   {
-    "id": "ee6c4c39-cf06-4237-91eb-54545648b3c1",
+    "id": "798bfa83-5d86-45d6-ade7-3c5759a1aac6",
     "ruleId": "quality-maxFunctionComplexity",
     "category": "maintainability",
     "severity": "information",
@@ -1959,11 +1491,11 @@
     ],
     "conflictingEvidence": [],
     "missingInformation": [],
-    "detectedAt": "2026-07-28T22:38:32.733Z",
-    "updatedAt": "2026-07-28T22:38:32.733Z"
+    "detectedAt": "2026-07-28T22:48:39.270Z",
+    "updatedAt": "2026-07-28T22:48:39.270Z"
   },
   {
-    "id": "6c07d5a4-3b9c-48b5-84f6-9f7ddf5278c1",
+    "id": "e4e54f4b-a96c-47db-85d1-0def089d2654",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -1996,11 +1528,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "ff0c32ed-16c8-49b1-ac62-6b173b533c61",
+    "id": "0e51ccf6-6384-45d4-b64e-fc542e91fd12",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2033,11 +1565,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "0d917079-f62b-4f81-ba61-93428e71b9f5",
+    "id": "1fa1b166-5f41-41ea-90d5-a5367556127c",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2075,11 +1607,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "52cd6bef-bcb1-4f4f-97e8-3b7811fe36ad",
+    "id": "811caa93-8ed2-4076-8014-b4fa9919d035",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2117,11 +1649,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "f286f9a2-b961-4009-b988-11d9693d4b74",
+    "id": "52239890-b22b-4c1f-806d-fe81f19a8450",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2159,11 +1691,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "94fd6b38-2d12-4db0-ae0b-f847804506b5",
+    "id": "c2469e62-fe2f-4148-a86c-d5a8f63f956a",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2196,11 +1728,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "5108fca5-5700-46cb-b194-fe4109a78b77",
+    "id": "99b8bd50-7ab9-4108-82f9-22620ba4fef4",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2233,11 +1765,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "5a87975b-0721-4d65-ab5f-7c455b945fca",
+    "id": "02f5b673-82d8-4f1f-a94d-1d18faabbb67",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2270,11 +1802,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "b308a58c-f5df-45b2-b4fe-cf4fbff35b9c",
+    "id": "cec02715-8597-48be-b8fc-f6cef4406554",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2307,11 +1839,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "6798a744-2f8e-49ab-9bee-2debfec63c23",
+    "id": "b456da56-c0da-4b9b-b2f3-abf9678866c7",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2344,11 +1876,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "39d78f8a-bdc0-40e3-bf4b-e5cee2cff172",
+    "id": "26571bcc-ca42-4358-a117-fe6d0ef2890e",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2381,11 +1913,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "aba88f2c-aa4f-4c69-8d30-5807cb369ddf",
+    "id": "85ab9f68-6561-4c66-8945-1f826103a869",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2418,11 +1950,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "16b883be-013d-40ad-bd45-27cf0fc4a500",
+    "id": "7274136b-1f7c-4e9f-a2a6-51ed33ef9228",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2455,11 +1987,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "9cfcd25c-19ef-4ee7-85f3-1b0acc608686",
+    "id": "ea598f06-609b-4703-93bd-8aebbb4df36e",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2492,11 +2024,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "46cfba42-d1a5-45a9-ae38-9ffddd774abd",
+    "id": "7481ac3b-9b23-4787-9b0b-c885034e9f96",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2529,11 +2061,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "1ba77535-6298-477b-b4b1-8ded59c45989",
+    "id": "47f87d27-9e1c-4ed3-8a93-d19f206ff3f0",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2566,11 +2098,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "933ae340-657b-42f4-a46e-80a806ba5f34",
+    "id": "9609c895-a2ae-4717-ac02-4e51fe711caf",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2603,11 +2135,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "f8b57ef0-7047-498f-83e6-7c53c09f06fa",
+    "id": "a56cad21-ff2d-4357-8663-3aafa71937d3",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2640,11 +2172,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "6166017f-26f6-438a-8a71-6a5d1b010440",
+    "id": "e201542c-1cb7-452c-8164-9918bda6f39f",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2677,11 +2209,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "8f44b5b8-fe88-4a65-ba37-47a72c8e31c3",
+    "id": "9eaecd97-983d-4a48-b800-822b03bd323c",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2714,11 +2246,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "e2b35399-f70e-4a82-aa68-263c35ed0494",
+    "id": "9dca2a74-fb12-43a3-b85e-ab837c8ed6f5",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2751,11 +2283,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "af3ad55a-7995-440b-a8e4-57498b6625c0",
+    "id": "47eea0e5-f849-4016-aab0-fc2ac849550b",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2788,11 +2320,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "cb681304-6e13-4562-9c6e-e71e8f55fe65",
+    "id": "9fb85140-30f4-41d6-90dd-d4210c61567f",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2825,11 +2357,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "8177c515-5239-400b-8cb3-f431f217e365",
+    "id": "b2ec618d-3ca3-41ec-8211-82e099f42fc7",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2862,11 +2394,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "dcb71843-f5cd-46fb-8c44-de92f60828df",
+    "id": "d3cb6acc-2c53-43a7-b0dd-18f6b8ee1dc4",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2899,11 +2431,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "dfbe23db-79d0-45d2-b1e7-19fd26ecab68",
+    "id": "b4ccc903-b8a3-44a1-8d1a-7e063707098e",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2936,11 +2468,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "121603af-5f49-435e-bc19-af502a5edb68",
+    "id": "254238fd-9793-45f2-a10d-85ba3f795ce8",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -2973,18 +2505,18 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "831a238c-d3f7-471e-8ae8-e9eefcd6bd00",
+    "id": "4b1c4d21-eb08-40fe-840e-3c9b69ac8f2e",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/masterai.hpp",
@@ -3159,24 +2691,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "8857b931-d34a-4ff6-a41f-4dcd045a4386",
+    "id": "e1812ecd-c8c8-4f03-8ab9-38cd4cd770ee",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/platform.cpp",
@@ -3351,24 +2888,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "ed923096-af81-4885-8443-b4cf276ec812",
+    "id": "320e7c9a-d340-43cf-8351-108c9f9137aa",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/security.cpp",
@@ -3543,24 +3085,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "2203cdd6-9ac3-4066-bd90-3b9016613a09",
+    "id": "d2f9e95a-134f-4de2-9a60-e2e7dc1751c7",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/json.hpp",
@@ -3735,24 +3282,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "0c0746b7-7b90-4dd0-9ff5-9bdf39118c23",
+    "id": "24b8c54f-c9b1-4703-8022-2ac965d6c81e",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/json.cpp",
@@ -3927,24 +3479,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "b6223bc0-5dd3-4600-9d48-8c8ebf96567e",
+    "id": "041c4d88-932f-4200-b2de-852e36ff38a9",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/models.cpp",
@@ -4119,24 +3676,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "48f37a53-224c-4e93-93bf-22cffc6eb947",
+    "id": "12ad543b-d5a0-468f-8dec-892b8ea22c49",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/server.cpp",
@@ -4311,24 +3873,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "f0372be0-4ddb-41ad-98bf-9f2cf1cf6c46",
+    "id": "fd105294-f986-43cb-85bb-7c2ab6eaa35a",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/identity.cpp",
@@ -4503,24 +4070,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "8c3ce3f7-ed1d-4bec-a03c-9bc1b2c9650f",
+    "id": "e59d3872-3571-405b-aef0-7d556f3b5105",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/workflows.cpp",
@@ -4695,24 +4267,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "f5313609-fba8-485a-b518-9e3d039404cf",
+    "id": "49ca59a7-5e97-4626-a84d-0e39fcd10f17",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/config.cpp",
@@ -4887,24 +4464,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "b592c0c3-e457-4374-b390-55726856ce72",
+    "id": "e2b3c4d1-32dd-417a-9afc-4667556e89ae",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/storage.cpp",
@@ -5079,24 +4661,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "08d4a94a-2a2a-421a-848a-b7bbd1c6c0d1",
+    "id": "4cc88e1b-f8a3-48e2-9d49-652e9114c0a0",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/inference.cpp",
@@ -5271,24 +4858,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "764ce354-6f47-47ac-9d9b-ab50c0b4dc09",
+    "id": "96e8acbf-9cd9-49fa-ba36-641cb958408f",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/downloads.cpp",
@@ -5463,24 +5055,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "27c244b3-80cf-4243-9e31-936c22f85342",
+    "id": "b06d6d34-3329-4243-873e-7f453b838098",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/benchmarks.cpp",
@@ -5655,24 +5252,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "9866fa2a-4df0-4f3e-acf5-b076b4d4339b",
+    "id": "58d8cd51-865d-4732-bf16-19efebea64b4",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/mcp.cpp",
@@ -5847,24 +5449,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "7769a908-4ff2-426b-851a-dc1b75387d2a",
+    "id": "16aa2fca-e3af-4361-8691-b6c78cbc1804",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/mcp_outbound.cpp",
@@ -6039,24 +5646,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "e0d218df-0489-4e68-b3ba-5a62ea247aa6",
+    "id": "ac937a47-cc68-4759-bdec-265d242c18e1",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/ide.cpp",
@@ -6231,24 +5843,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "fee61201-bad9-4bb9-9709-4b42640b5a94",
+    "id": "2c420a37-aa54-43dc-9eda-8a05f99feddf",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/server_internal.hpp",
@@ -6423,24 +6040,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "901bca65-1410-4dc6-b25f-0a077ee5f9f0",
+    "id": "357bd0b9-52da-4a6e-a0f0-a709f35e4ba4",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/integration_http.cpp",
@@ -6615,24 +6237,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "3501a0da-e1c2-462c-a09b-db92733df08c",
+    "id": "9df56a7c-bb82-4b75-9446-9c4d656d1e7c",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/http_support.cpp",
@@ -6807,24 +6434,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "7abddf61-83fa-4d42-b1b6-0b24868b50ba",
+    "id": "de9fbcf9-bf7e-4059-9450-8d43bb6df7b4",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/web_ui.cpp",
@@ -6999,24 +6631,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "b3a0683b-decc-4c0e-b0eb-06c75ac5bc4a",
+    "id": "13800687-b8e5-4876-888e-c371b0fd7725",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/operations.cpp",
@@ -7191,24 +6828,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "5b995971-9191-42e1-8bd5-289cefc6fc3f",
+    "id": "d6f1519e-f1de-4df8-9944-84a1aeb40ec0",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/operations_cli.hpp",
@@ -7383,24 +7025,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "b63d6b93-e9db-41d0-9c2e-fee601678f35",
+    "id": "8200c05e-8906-462d-9c21-6e659682f66b",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/operations_cli.cpp",
@@ -7575,24 +7222,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "9a598e3a-c1e6-4c72-bc20-987cfcc7e515",
+    "id": "7c926171-e5b0-4208-939b-7dd5609032e1",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/performance.cpp",
@@ -7767,24 +7419,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "edf40542-97c4-4948-9f3e-0f6bc2bcc4c9",
+    "id": "9ede6770-8bd0-4821-8f92-4dd12c069cc1",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/performance_cli.hpp",
@@ -7959,24 +7616,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "daa56ce6-7bff-44b9-944b-d621cfda1c68",
+    "id": "238ebc35-2d48-461a-986c-c92b1269edb9",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/performance_cli.cpp",
@@ -8151,29 +7813,34 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "02da5fe0-3a93-4358-9a22-f82765352324",
+    "id": "2de81a79-3856-4c73-bd01-195be0dfacec",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/workload_http.cpp",
     "lineStart": 11,
-    "lineEnd": 634,
+    "lineEnd": 647,
     "symbolName": "masterai",
     "pipelineStage": "context",
     "deterministic": true,
@@ -8343,24 +8010,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "541a94ca-5d59-4aaa-a3b5-3d749d14cf8f",
+    "id": "60a4c86e-b21e-4ca3-bfce-0cf2b8ed8fbb",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/mcp_outbound_internal.hpp",
@@ -8535,24 +8207,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "59cb9c94-ab59-459a-ba95-11e5d6d720bd",
+    "id": "473d103c-d062-45bd-9950-afd41002748b",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/query.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/mcp_outbound_service.cpp",
@@ -8727,24 +8404,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "9a5766de-7ddb-4816-b33d-1b3b5d893d5e",
+    "id": "cf22e208-1688-4e0e-aca4-5c794d5f9282",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/memory.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/query.cpp",
@@ -8919,24 +8601,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "5729607d-e265-4223-abf9-d7f93cec10fb",
+    "id": "d1873474-d3da-4f23-b2ab-7a69b0fac983",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/indexing.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/memory.cpp",
@@ -9111,24 +8798,29 @@
         "filePath": "src/indexing.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "aa8b78ae-040e-4d7b-a83c-973cc2bb6217",
+    "id": "2e42a3ca-99d6-4869-8a0b-9453a13ebcb3",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
     "confidence": "inferred",
     "disposition": "open",
     "title": "Possible duplicate function \"masterai\"",
-    "description": "A function named \"masterai\" also exists in 32 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "description": "A function named \"masterai\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, README.md. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/indexing.cpp",
@@ -9303,17 +8995,219 @@
         "filePath": "src/memory.cpp",
         "symbolName": "masterai",
         "description": "Same-normalized-name function also declared at src/memory.cpp:14."
+      },
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Same-normalized-name function also declared at README.md:1."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "c30b1564-9a84-4df3-8403-b008bec7a482",
+    "id": "68e66ba1-c2d8-4c23-a85a-64caa4c760a1",
+    "ruleId": "duplicate-symbol-name",
+    "category": "duplication",
+    "severity": "information",
+    "confidence": "inferred",
+    "disposition": "open",
+    "title": "Possible duplicate function \"MasterAI\"",
+    "description": "A function named \"MasterAI\" also exists in 33 other file(s): src/masterai.hpp, src/platform.cpp, src/security.cpp, src/json.hpp, src/json.cpp, src/models.cpp, src/server.cpp, src/identity.cpp, src/workflows.cpp, src/config.cpp, src/storage.cpp, src/inference.cpp, src/downloads.cpp, src/benchmarks.cpp, src/mcp.cpp, src/mcp_outbound.cpp, src/ide.cpp, src/server_internal.hpp, src/integration_http.cpp, src/http_support.cpp, src/web_ui.cpp, src/operations.cpp, src/operations_cli.hpp, src/operations_cli.cpp, src/performance.cpp, src/performance_cli.hpp, src/performance_cli.cpp, src/workload_http.cpp, src/mcp_outbound_internal.hpp, src/mcp_outbound_service.cpp, src/query.cpp, src/memory.cpp, src/indexing.cpp. Same-name symbols across files are not automatically duplicate responsibilities — this is a candidate to investigate, not a confirmed finding.",
+    "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
+    "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
+    "filePath": "README.md",
+    "lineStart": 1,
+    "lineEnd": 1,
+    "symbolName": "MasterAI",
+    "pipelineStage": "context",
+    "deterministic": true,
+    "blocking": false,
+    "evidence": [
+      {
+        "filePath": "README.md",
+        "symbolName": "MasterAI",
+        "description": "Declared at README.md:1."
+      },
+      {
+        "filePath": "src/masterai.hpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/masterai.hpp:22."
+      },
+      {
+        "filePath": "src/platform.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/platform.cpp:30."
+      },
+      {
+        "filePath": "src/security.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/security.cpp:29."
+      },
+      {
+        "filePath": "src/json.hpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/json.hpp:13."
+      },
+      {
+        "filePath": "src/json.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/json.cpp:11."
+      },
+      {
+        "filePath": "src/models.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/models.cpp:11."
+      },
+      {
+        "filePath": "src/server.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/server.cpp:31."
+      },
+      {
+        "filePath": "src/identity.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/identity.cpp:17."
+      },
+      {
+        "filePath": "src/workflows.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/workflows.cpp:15."
+      },
+      {
+        "filePath": "src/config.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/config.cpp:13."
+      },
+      {
+        "filePath": "src/storage.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/storage.cpp:24."
+      },
+      {
+        "filePath": "src/inference.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/inference.cpp:34."
+      },
+      {
+        "filePath": "src/downloads.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/downloads.cpp:20."
+      },
+      {
+        "filePath": "src/benchmarks.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/benchmarks.cpp:7."
+      },
+      {
+        "filePath": "src/mcp.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/mcp.cpp:19."
+      },
+      {
+        "filePath": "src/mcp_outbound.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/mcp_outbound.cpp:44."
+      },
+      {
+        "filePath": "src/ide.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/ide.cpp:27."
+      },
+      {
+        "filePath": "src/server_internal.hpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/server_internal.hpp:17."
+      },
+      {
+        "filePath": "src/integration_http.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/integration_http.cpp:15."
+      },
+      {
+        "filePath": "src/http_support.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/http_support.cpp:7."
+      },
+      {
+        "filePath": "src/web_ui.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/web_ui.cpp:8."
+      },
+      {
+        "filePath": "src/operations.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/operations.cpp:18."
+      },
+      {
+        "filePath": "src/operations_cli.hpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/operations_cli.hpp:7."
+      },
+      {
+        "filePath": "src/operations_cli.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/operations_cli.cpp:14."
+      },
+      {
+        "filePath": "src/performance.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/performance.cpp:13."
+      },
+      {
+        "filePath": "src/performance_cli.hpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/performance_cli.hpp:4."
+      },
+      {
+        "filePath": "src/performance_cli.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/performance_cli.cpp:12."
+      },
+      {
+        "filePath": "src/workload_http.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/workload_http.cpp:11."
+      },
+      {
+        "filePath": "src/mcp_outbound_internal.hpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/mcp_outbound_internal.hpp:15."
+      },
+      {
+        "filePath": "src/mcp_outbound_service.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/mcp_outbound_service.cpp:10."
+      },
+      {
+        "filePath": "src/query.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/query.cpp:16."
+      },
+      {
+        "filePath": "src/memory.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/memory.cpp:14."
+      },
+      {
+        "filePath": "src/indexing.cpp",
+        "symbolName": "masterai",
+        "description": "Same-normalized-name function also declared at src/indexing.cpp:18."
+      }
+    ],
+    "conflictingEvidence": [],
+    "missingInformation": [
+      "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
+    ],
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
+  },
+  {
+    "id": "6b77deb8-2b5c-4df7-8141-88176961187c",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9346,11 +9240,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "1d32ca56-ecfb-4b46-a720-adf26202b96c",
+    "id": "93633d22-dd45-4b57-b154-d08edc70ac77",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9383,11 +9277,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "747aa27f-6e56-44f1-813f-d474df2c4f40",
+    "id": "2b6a94a4-2ef8-42ea-93e1-e0cd147bd3e8",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9420,11 +9314,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "c13fb289-2136-498f-b1c8-975e05395f1c",
+    "id": "ffef635f-394f-4090-a132-862248b8d4d2",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9457,11 +9351,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "a7d0623e-ef46-4291-aba7-8871f00ebd82",
+    "id": "6fbd668d-fd0b-41a1-876d-c5e849e870d5",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9494,11 +9388,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "f002006e-ee83-41ee-b46d-529ac24c962c",
+    "id": "c43fbfb3-603b-4d5d-903a-c5ae6d922984",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9531,11 +9425,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "85cd5e84-531c-4759-8c87-fa6fd89c41e9",
+    "id": "e1553370-b96e-4573-971b-4c5a0c8297dc",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9568,11 +9462,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "a8abb0f4-d7e8-4c7e-97b4-76b7c7950e34",
+    "id": "d81ad276-f9e4-4ffe-9e55-b1ecee48d894",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9605,11 +9499,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "20b9e1b0-a323-4367-b2d5-a7f177b47b00",
+    "id": "c15362f7-4d91-4432-8e67-0899ed46324b",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9642,11 +9536,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "ea686030-2f12-478e-9f9a-2d4a3803fc56",
+    "id": "c663c61f-7e1d-417c-a02a-499128cef214",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9679,11 +9573,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "f39dacac-d2c7-4396-8c28-a3a89ac0887c",
+    "id": "26a38166-2595-418c-a3bf-e2dec0e8d03d",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9716,11 +9610,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "7587548f-0aa1-4b52-b8e2-912eb3764593",
+    "id": "385fae52-3640-4deb-b065-86b909476591",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9753,11 +9647,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "789c0ca4-a011-47c9-9a4e-3b955a930e31",
+    "id": "b77184d8-48ac-4e44-a7b1-b779e4a21c06",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9790,11 +9684,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "a091a6be-b3f0-4ed1-ba3c-3749be299111",
+    "id": "8dbce305-b26a-4c92-a02f-c887a1a00663",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9827,11 +9721,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "de1fa18d-ccf1-4a0e-b992-cae708748826",
+    "id": "5da7eb47-22e0-47ee-98d3-3f58347019e0",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9864,11 +9758,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "a334d2a8-9e7f-4b80-93a1-90198789bca5",
+    "id": "f56d307b-0f1f-48b1-b1e8-8a96e461dab4",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9901,11 +9795,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "4552a8b9-56a4-47f3-9875-748b7205867e",
+    "id": "b411df92-b713-4079-ae3e-0695be05daa3",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9931,18 +9825,18 @@
       {
         "filePath": "src/workload_http.cpp",
         "symbolName": "WorkloadHttpController",
-        "description": "Same-normalized-name function also declared at src/workload_http.cpp:136."
+        "description": "Same-normalized-name function also declared at src/workload_http.cpp:171."
       }
     ],
     "conflictingEvidence": [],
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "ad13d733-2022-4965-addf-c824731332f0",
+    "id": "29b62aaa-b37b-4884-99c1-10c4df2dc6a8",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9953,8 +9847,8 @@
     "engineeringImpact": "If the responsibilities genuinely overlap, maintaining two implementations doubles the surface area for future bugs and divergent behaviour.",
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "src/workload_http.cpp",
-    "lineStart": 136,
-    "lineEnd": 163,
+    "lineStart": 171,
+    "lineEnd": 198,
     "symbolName": "WorkloadHttpController",
     "pipelineStage": "context",
     "deterministic": true,
@@ -9963,7 +9857,7 @@
       {
         "filePath": "src/workload_http.cpp",
         "symbolName": "WorkloadHttpController",
-        "description": "Declared at src/workload_http.cpp:136."
+        "description": "Declared at src/workload_http.cpp:171."
       },
       {
         "filePath": "src/server_internal.hpp",
@@ -9975,11 +9869,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "63745dd3-1d08-4111-a7e0-7780b52edccf",
+    "id": "31bfb7d8-448d-4bf9-b778-571a9689331d",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -9991,7 +9885,7 @@
     "recommendation": "Compare the two implementations. If they serve the same responsibility, extend the existing one instead of keeping both; if they are legitimately distinct (different language/toolchain/domain), no action is needed.",
     "filePath": "test/test_support.hpp",
     "lineStart": 13,
-    "lineEnd": 67,
+    "lineEnd": 77,
     "symbolName": "masterai_test",
     "pipelineStage": "context",
     "deterministic": true,
@@ -10012,11 +9906,11 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   },
   {
-    "id": "3c88eceb-73de-4e98-ab15-510909ed37a1",
+    "id": "4f7635d5-673c-42ad-a8c1-106a6c974a13",
     "ruleId": "duplicate-symbol-name",
     "category": "duplication",
     "severity": "information",
@@ -10049,7 +9943,7 @@
     "missingInformation": [
       "Whether the two symbols' responsibilities actually overlap — this detector only compares names, not behaviour."
     ],
-    "detectedAt": "2026-07-28T22:38:32.859Z",
-    "updatedAt": "2026-07-28T22:38:32.859Z"
+    "detectedAt": "2026-07-28T22:48:39.481Z",
+    "updatedAt": "2026-07-28T22:48:39.481Z"
   }
 ]
