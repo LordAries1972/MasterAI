@@ -1,0 +1,28 @@
+{
+  "claude:claude-haiku-4-5-20251001": {
+    "provider": "claude",
+    "model": "claude-haiku-4-5-20251001",
+    "structuredOutputValidCount": 3,
+    "structuredOutputInvalidCount": 0,
+    "totalLatencyMs": 10974,
+    "latencySampleCount": 3,
+    "patchAcceptedCount": 0,
+    "patchRejectedCount": 0,
+    "hallucinatedFileCount": 0,
+    "unsupportedApiCount": 0,
+    "invariantViolationCount": 0
+  },
+  "codex:gpt-5-pro": {
+    "provider": "codex",
+    "model": "gpt-5-pro",
+    "structuredOutputValidCount": 0,
+    "structuredOutputInvalidCount": 0,
+    "totalLatencyMs": 37327,
+    "latencySampleCount": 1,
+    "patchAcceptedCount": 0,
+    "patchRejectedCount": 0,
+    "hallucinatedFileCount": 0,
+    "unsupportedApiCount": 0,
+    "invariantViolationCount": 0
+  }
+}

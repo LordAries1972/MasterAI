@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "blockCriticalFindings": true,
+  "maximumFileLines": 1500,
+  "maximumNestingDepth": 6,
+  "maximumDuplicateBlockLines": 6,
+  "suppressedRuleIds": [],
+  "pathOverrides": [],
+  "routingFeedbackEnabled": true,
+  "authorshipCalibrationEnabled": true,
+  "refinementLoopEnabled": true
+}

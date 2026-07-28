@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/masterai.dir/link.d CMakeFiles/masterai.dir/mnt/f/Projects/C++/MasterAI/src/main.cpp.o -o masterai  libmasterai_core.a -lpthread -ldl /usr/lib/x86_64-linux-gnu/libpam.so

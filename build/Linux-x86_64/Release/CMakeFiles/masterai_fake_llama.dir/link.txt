@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/masterai_fake_llama.dir/link.d CMakeFiles/masterai_fake_llama.dir/mnt/f/Projects/C++/MasterAI/test/fake_llama_server.cpp.o -o masterai_fake_llama

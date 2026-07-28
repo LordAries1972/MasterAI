@@ -1,0 +1,74 @@
+[
+  {
+    "requestId": "03d220b7-836b-4979-9413-225b5053ff28",
+    "provider": "claude",
+    "model": "claude-haiku-4-5-20251001",
+    "taskShape": "adversarialReview",
+    "latencyMs": 3325,
+    "inputTokens": 1406,
+    "outputTokens": 137,
+    "failed": false,
+    "id": "434f0b72-7457-4256-a63f-1793663df03f",
+    "recordedAt": "2026-07-27T23:56:53.019Z"
+  },
+  {
+    "requestId": "39f3b188-4f0e-4d39-b8d1-3acdb755ffe9",
+    "provider": "codex",
+    "model": "unknown",
+    "taskShape": "architectureAnalysisBounded",
+    "latencyMs": 177278,
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "failed": true,
+    "id": "dc0da824-75a0-4c45-9324-d96e21ba006f",
+    "recordedAt": "2026-07-27T23:58:55.180Z"
+  },
+  {
+    "requestId": "af31faef-a0ff-4b42-8fff-24aa10cd5341",
+    "provider": "claude",
+    "model": "claude-haiku-4-5-20251001",
+    "taskShape": "adversarialReview",
+    "latencyMs": 4347,
+    "inputTokens": 2080,
+    "outputTokens": 138,
+    "failed": false,
+    "id": "5f6bb93e-bf1a-4429-8131-4956527e935f",
+    "recordedAt": "2026-07-28T03:29:56.771Z"
+  },
+  {
+    "requestId": "cd2d40d4-de36-436c-a72d-3228746cb013",
+    "provider": "claude",
+    "model": "claude-haiku-4-5-20251001",
+    "taskShape": "adversarialReview",
+    "latencyMs": 3302,
+    "inputTokens": 2076,
+    "outputTokens": 93,
+    "failed": false,
+    "id": "9536733a-4c3d-43ca-94de-e0ac6d25c60a",
+    "recordedAt": "2026-07-28T03:31:06.481Z"
+  },
+  {
+    "requestId": "958b714d-5ac5-421c-b6ff-110de47f099e",
+    "provider": "codex",
+    "model": "gpt-5-pro",
+    "taskShape": "errorExplanation",
+    "latencyMs": 37327,
+    "inputTokens": 1414,
+    "outputTokens": 960,
+    "failed": false,
+    "id": "7c8c6fb4-85e9-4399-ac9e-eb1f4033ea6f",
+    "recordedAt": "2026-07-28T12:01:02.305Z"
+  },
+  {
+    "requestId": "dfddb01a-1d1e-4e57-b398-7bbbc5fe0da1",
+    "provider": "codex",
+    "model": "unknown",
+    "taskShape": "finalImplementationPatchMultiFile",
+    "latencyMs": 1538,
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "failed": true,
+    "id": "f47f1e0b-58c3-4412-8e7d-90f4549de304",
+    "recordedAt": "2026-07-28T22:40:54.227Z"
+  }
+]

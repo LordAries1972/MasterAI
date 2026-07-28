@@ -1,0 +1,8 @@
+F:/Projects/C++/MasterAI/build/Windows-x64/Debug/CMakeFiles/masterai_core.dir
+F:/Projects/C++/MasterAI/build/Windows-x64/Debug/CMakeFiles/masterai.dir
+F:/Projects/C++/MasterAI/build/Windows-x64/Debug/CMakeFiles/masterai_fake_llama.dir
+F:/Projects/C++/MasterAI/build/Windows-x64/Debug/CMakeFiles/masterai_fake_mcp.dir
+F:/Projects/C++/MasterAI/build/Windows-x64/Debug/CMakeFiles/masterai_tests.dir
+F:/Projects/C++/MasterAI/build/Windows-x64/Debug/CMakeFiles/test.dir
+F:/Projects/C++/MasterAI/build/Windows-x64/Debug/CMakeFiles/edit_cache.dir
+F:/Projects/C++/MasterAI/build/Windows-x64/Debug/CMakeFiles/rebuild_cache.dir

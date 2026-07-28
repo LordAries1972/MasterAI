@@ -1,0 +1,189 @@
+[
+  {
+    "relativePath": "rules/initial-ruleset.md",
+    "languageId": "markdown",
+    "contentHash": "37227da9db98f0306a9ee0ad2fcf5411a32919a36bb8b23d5de6a6673785013d",
+    "documentVersion": 7,
+    "timestampMs": 1785198933841,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "rules/initial-ruleset.md",
+    "languageId": "markdown",
+    "contentHash": "aba4d8a1914ac3b48452818992b8dfcad8ac4b1c07c6f6a65052fca571243d0b",
+    "documentVersion": 8,
+    "timestampMs": 1785198938258,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "rules/initial-ruleset.md",
+    "languageId": "markdown",
+    "contentHash": "b4d835c5f096677cf260dddbdc906ac7910da9393f645acc80bb31ff43311e2e",
+    "documentVersion": 22,
+    "timestampMs": 1785198944311,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "rules/initial-ruleset.md",
+    "languageId": "markdown",
+    "contentHash": "3407ada8261ae7a7584854c1302bdde6361d03d4c9f013920f7da5c7a95bf5f3",
+    "documentVersion": 24,
+    "timestampMs": 1785198945497,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "docs/Objectives.md",
+    "languageId": "markdown",
+    "contentHash": "8e2811f81561de059038e56f842babe66bc14b1fddd318f569dbfd74523bdf7d",
+    "documentVersion": 3,
+    "timestampMs": 1785202456181,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "docs/Objectives.md",
+    "languageId": "markdown",
+    "contentHash": "768553a63be6f8b159f8fa07e947e2898c0382264d0d7a4e4239d199f3671590",
+    "documentVersion": 4,
+    "timestampMs": 1785203552361,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "docs/Objectives.md",
+    "languageId": "markdown",
+    "contentHash": "669e9a6014ff1e222f6d702b8e1fa3e0ebf2a0549bd535adc045140627d898a9",
+    "documentVersion": 5,
+    "timestampMs": 1785204068498,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "docs/Objectives.md",
+    "languageId": "markdown",
+    "contentHash": "b39dd101275368021a47c8b53001da0b136999930053afa34101f27ad7881ae1",
+    "documentVersion": 6,
+    "timestampMs": 1785204246517,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "docs/architecture/ADR-0001-cpp17-native-architecture.md",
+    "languageId": "markdown",
+    "contentHash": "efe15162f511a68cbde12b25fbf15ff0a958882243da093aae0160f15085087a",
+    "documentVersion": 2,
+    "timestampMs": 1785204246716,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "docs/Objectives.md",
+    "languageId": "markdown",
+    "contentHash": "45d781bf06df6a5fc57973a8dbbfe7d92075bf14ebdc874256139ff4059cae03",
+    "documentVersion": 7,
+    "timestampMs": 1785206216099,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "docs/Objectives.md",
+    "languageId": "markdown",
+    "contentHash": "309d6bb25dd35622f1627bf1127dd35457604201975afd739c1376704101d5ec",
+    "documentVersion": 8,
+    "timestampMs": 1785206520597,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "rules/initial-ruleset.md",
+    "languageId": "markdown",
+    "contentHash": "7029084d983dd83b73790344533f12a22ad9d074992f62af6007957ad701aee7",
+    "documentVersion": 2,
+    "timestampMs": 1785206969024,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": ".vscode/settings.json",
+    "languageId": "json",
+    "contentHash": "aab949afe1f0c6a97f0f303e3eae493284b8f521e5e815af05c4a0cba8b0c9cc",
+    "documentVersion": 3,
+    "timestampMs": 1785239902480,
+    "outcome": "valid",
+    "toolIdentity": "JSON.parse",
+    "durationMs": 1,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": ".vscode/settings.json",
+    "languageId": "json",
+    "contentHash": "7449335c15fd28dc364ec9583003d64a8ee7541de143c7061413de078d616603",
+    "documentVersion": 9,
+    "timestampMs": 1785239906016,
+    "outcome": "valid",
+    "toolIdentity": "JSON.parse",
+    "durationMs": 157,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": ".vscode/settings.json",
+    "languageId": "json",
+    "contentHash": "eba651cf1055fbf9adf0db247c7a9adc3324d6445c61a1ef13c8957f341bb687",
+    "documentVersion": 10,
+    "timestampMs": 1785239911327,
+    "outcome": "valid",
+    "toolIdentity": "JSON.parse",
+    "durationMs": 35,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": ".vscode/settings.json",
+    "languageId": "json",
+    "contentHash": "eabba627249621c40d1b01144cb9024af3eac079bb7e95a13040ba14ce7d6944",
+    "documentVersion": 19,
+    "timestampMs": 1785239922220,
+    "outcome": "valid",
+    "toolIdentity": "JSON.parse",
+    "durationMs": 1,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "src/security.cpp",
+    "languageId": "cpp",
+    "contentHash": "c9615aa71f0e40209917479352dc051c0aa7e660b0436ef383f4592ff9199480",
+    "documentVersion": 2,
+    "timestampMs": 1785240216343,
+    "outcome": "tool-unavailable",
+    "toolIdentity": "g++/clang++/cl",
+    "durationMs": 1265,
+    "diagnosticFingerprints": []
+  }
+]

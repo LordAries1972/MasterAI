@@ -1,0 +1,20 @@
+{
+    "agentCoder.integration.languageModelToolsEnabled": true,
+    "agentCoder.integration.languageModelChatProviderEnabled": true,
+    "agentCoder.integration.mcpClientEnabled": true,
+    "agentCoder.integration.approvalPromptsEnabled": true,
+    "agentCoder.integration.adaptiveRoutingEnabled": true,
+    "agentCoder.integration.defaultStrategy": "single",
+    "agentCoder.integration.headlessReadOnlyEnabled": true,
+    "agentCoder.integration.auditRetentionDays": 90,
+    "agentCoder.liveContext.enabled": true,
+    "agentCoder.liveValidation.continuous": true,
+    "agentCoder.liveValidation.debounceMs": 650,
+    "agentCoder.liveValidation.publishDiagnostics": true,
+    "agentCoder.liveValidation.persistHistory": true,
+    "agentCoder.liveAI.enabled": true,
+    "agentCoder.liveAI.cooldownMs": 30000,
+    "agentCoder.liveAI.maximumInputTokens": 8000,
+    "agentCoder.slopGuard.liveMonitoring": true,
+    "agentCoder.slopGuard.statusBar": true
+}

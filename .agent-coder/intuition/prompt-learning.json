@@ -1,0 +1,123 @@
+{
+  "outcomes": [
+    {
+      "promptStrategyId": "verified-default",
+      "promptStrategyVersion": 1,
+      "requestId": "03d220b7-836b-4979-9413-225b5053ff28",
+      "taskType": "explain-intelligence-network-signals",
+      "providerId": "claude",
+      "modelId": "claude-haiku-4-5-20251001",
+      "promptTokens": 1406,
+      "completionTokens": 137,
+      "attempts": 1,
+      "responseSchemaValid": true,
+      "assumptionsRejected": 0,
+      "evidenceCoverage": 0,
+      "patchAccepted": false,
+      "userCorrectionRequired": false,
+      "rolledBack": false,
+      "finalOutcome": "partially_successful",
+      "verificationEvidence": [],
+      "appliedIntuitionRuleIds": [],
+      "verified": false,
+      "recordedAt": "2026-07-27T23:56:53.028Z"
+    },
+    {
+      "promptStrategyId": "verified-default",
+      "promptStrategyVersion": 1,
+      "requestId": "af31faef-a0ff-4b42-8fff-24aa10cd5341",
+      "taskType": "generate-bug-heatmap-narrative",
+      "providerId": "claude",
+      "modelId": "claude-haiku-4-5-20251001",
+      "promptTokens": 2080,
+      "completionTokens": 138,
+      "attempts": 1,
+      "responseSchemaValid": true,
+      "assumptionsRejected": 0,
+      "evidenceCoverage": 0,
+      "patchAccepted": false,
+      "userCorrectionRequired": false,
+      "rolledBack": false,
+      "finalOutcome": "partially_successful",
+      "verificationEvidence": [],
+      "appliedIntuitionRuleIds": [],
+      "verified": false,
+      "recordedAt": "2026-07-28T03:29:57.399Z"
+    },
+    {
+      "promptStrategyId": "verified-default",
+      "promptStrategyVersion": 1,
+      "requestId": "cd2d40d4-de36-436c-a72d-3228746cb013",
+      "taskType": "generate-bug-heatmap-narrative",
+      "providerId": "claude",
+      "modelId": "claude-haiku-4-5-20251001",
+      "promptTokens": 2076,
+      "completionTokens": 93,
+      "attempts": 1,
+      "responseSchemaValid": true,
+      "assumptionsRejected": 0,
+      "evidenceCoverage": 0,
+      "patchAccepted": false,
+      "userCorrectionRequired": false,
+      "rolledBack": false,
+      "finalOutcome": "partially_successful",
+      "verificationEvidence": [],
+      "appliedIntuitionRuleIds": [],
+      "verified": false,
+      "recordedAt": "2026-07-28T03:31:06.492Z"
+    },
+    {
+      "promptStrategyId": "verified-default",
+      "promptStrategyVersion": 1,
+      "requestId": "958b714d-5ac5-421c-b6ff-110de47f099e",
+      "taskType": "explain-symbol",
+      "providerId": "codex",
+      "modelId": "gpt-5-pro",
+      "promptTokens": 1414,
+      "completionTokens": 960,
+      "attempts": 1,
+      "responseSchemaValid": false,
+      "assumptionsRejected": 0,
+      "evidenceCoverage": 0,
+      "patchAccepted": false,
+      "userCorrectionRequired": false,
+      "rolledBack": false,
+      "finalOutcome": "partially_successful",
+      "verificationEvidence": [],
+      "appliedIntuitionRuleIds": [],
+      "verified": false,
+      "recordedAt": "2026-07-28T12:01:02.401Z"
+    }
+  ],
+  "lessons": [],
+  "audit": [
+    {
+      "id": "057309f4-3f15-4fcb-98e1-aeec5dcbcfcc",
+      "timestamp": "2026-07-27T23:56:53.028Z",
+      "action": "record-outcome",
+      "targetId": "03d220b7-836b-4979-9413-225b5053ff28",
+      "detail": "Outcome remains temporary and cannot influence ranking."
+    },
+    {
+      "id": "464a07e5-ca98-4f10-ac52-cda3833b2332",
+      "timestamp": "2026-07-28T03:29:57.399Z",
+      "action": "record-outcome",
+      "targetId": "af31faef-a0ff-4b42-8fff-24aa10cd5341",
+      "detail": "Outcome remains temporary and cannot influence ranking."
+    },
+    {
+      "id": "f650d853-0174-4001-a563-f35e924692fc",
+      "timestamp": "2026-07-28T03:31:06.492Z",
+      "action": "record-outcome",
+      "targetId": "cd2d40d4-de36-436c-a72d-3228746cb013",
+      "detail": "Outcome remains temporary and cannot influence ranking."
+    },
+    {
+      "id": "a6ac82ab-4265-49f3-af52-8136a2b0def5",
+      "timestamp": "2026-07-28T12:01:02.401Z",
+      "action": "record-outcome",
+      "targetId": "958b714d-5ac5-421c-b6ff-110de47f099e",
+      "detail": "Outcome remains temporary and cannot influence ranking."
+    }
+  ]
+}
