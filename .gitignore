@@ -1,0 +1,64 @@
+# CMake build trees and generated build-system files
+/build/
+/bin/
+/obj/
+/out/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+build.ninja
+.ninja_deps
+.ninja_log
+Testing/
+
+# Compiled binaries, libraries, objects, and debug symbols
+*.a
+*.app
+*.dll
+*.dylib
+*.exe
+*.ilk
+*.lib
+*.o
+*.obj
+*.pdb
+*.so
+*.so.*
+
+# Local model payloads. Keep the repository-owned layout and schema.
+/models/**
+!/models/**/
+!/models/**/.keep
+!/models/manifest.schema.json
+
+# Large downloaded payloads, archives, and interrupted transfers
+*.7z
+*.bin
+*.ckpt
+*.ggml
+*.gguf
+*.gz
+*.onnx
+*.part
+*.partial
+*.pt
+*.pth
+*.safetensors
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.zst
+*.tmp
+*.zip
+*.zst
+
+# Common editor and operating-system debris
+.DS_Store
+Thumbs.db
+*.suo
+*.user
+*.VC.db
+*.VC.VC.opendb
+

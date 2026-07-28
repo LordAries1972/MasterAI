@@ -185,5 +185,16 @@
     "toolIdentity": "g++/clang++/cl",
     "durationMs": 1265,
     "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "src/security.cpp",
+    "languageId": "cpp",
+    "contentHash": "56d547af21e859ffeef70d3ea9f7577b5382778d8f6ffb326f9eeabef2152eea",
+    "documentVersion": 2,
+    "timestampMs": 1785279346510,
+    "outcome": "tool-unavailable",
+    "toolIdentity": "g++/clang++/cl",
+    "durationMs": 18753,
+    "diagnosticFingerprints": []
   }
 ]

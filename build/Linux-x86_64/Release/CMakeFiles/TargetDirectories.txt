@@ -1,7 +1,0 @@
-/mnt/f/Projects/C++/MasterAI/build/Linux-x86_64/Release/CMakeFiles/masterai_core.dir
-/mnt/f/Projects/C++/MasterAI/build/Linux-x86_64/Release/CMakeFiles/masterai.dir
-/mnt/f/Projects/C++/MasterAI/build/Linux-x86_64/Release/CMakeFiles/masterai_fake_llama.dir
-/mnt/f/Projects/C++/MasterAI/build/Linux-x86_64/Release/CMakeFiles/masterai_tests.dir
-/mnt/f/Projects/C++/MasterAI/build/Linux-x86_64/Release/CMakeFiles/test.dir
-/mnt/f/Projects/C++/MasterAI/build/Linux-x86_64/Release/CMakeFiles/edit_cache.dir
-/mnt/f/Projects/C++/MasterAI/build/Linux-x86_64/Release/CMakeFiles/rebuild_cache.dir
