@@ -162,8 +162,9 @@ The current source includes native implementations for:
 - System-wide memory admission, OS reserve protection, bounded work queues,
   pressure actions, profiles, status, and inference leases.
 - A cancellable, checksummed, disk-generation project index foundation with
-  recovery, partial publication, literal search, bounded background rebuilds,
-  and authenticated status/rebuild/cancel routes.
+  recovery, partial publication, unchanged-file elimination, affected-path
+  updates, literal and exact-boundary symbol search, typed/coalesced triggers,
+  bounded background work, and authenticated status/rebuild/cancel routes.
 
 Implementation does not automatically mean operational certification. The next
 section records the distinction.
@@ -202,10 +203,11 @@ strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
 WSL. Release packaging certification on the pinned Ubuntu 24.04 and Debian 13
 hosts is still outstanding.
 
-Phase 15 already has a bounded native indexing service and disk-generation
-recovery tests. It remains in progress until representative large-project
-resource-ceiling evidence, richer change triggers, and platform-specific I/O
-decisions are complete.
+Phase 15 already has a bounded native indexing service, affected-path updates,
+typed/coalesced trigger admission, and disk-generation recovery tests. It
+remains in progress until representative large-project resource-ceiling
+evidence, live change-source adapters, deeper symbol extraction, and
+platform-specific I/O decisions are complete.
 
 No release may be called production-ready until the functional, security,
 migration, recovery, MCP conformance, performance, resource-ceiling, retrieval,

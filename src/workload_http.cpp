@@ -141,11 +141,23 @@ std::string index_job_state(const IndexJobState state) {
     return "failed";
 }
 
+std::string index_trigger(const IndexTrigger trigger) {
+    switch (trigger) {
+        case IndexTrigger::manual: return "manual";
+        case IndexTrigger::save: return "save";
+        case IndexTrigger::watcher: return "watcher";
+        case IndexTrigger::branch_switch: return "branch-switch";
+        case IndexTrigger::periodic: return "periodic";
+    }
+    return "manual";
+}
+
 // Serializes only bounded progress and diagnostics, never indexed content.
 std::string index_status_json(const std::string& project_id,
                               const IndexServiceStatus& status) {
     return "{\"projectId\":\"" + json_escape(project_id) +
            "\",\"state\":\"" + index_job_state(status.state) +
+           "\",\"trigger\":\"" + index_trigger(status.trigger) +
            "\",\"queuePosition\":" +
            std::to_string(status.queue_position) +
            ",\"generation\":" +

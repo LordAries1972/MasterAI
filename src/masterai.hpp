@@ -904,6 +904,8 @@ public:
                        const std::atomic_bool& cancellation);
     std::vector<IndexChunk> search_text(const std::string& literal,
                                         std::size_t maximum_results) const;
+    std::vector<IndexChunk> search_symbol(
+        const std::string& symbol, std::size_t maximum_results) const;
     IndexStatus status() const;
 
 private:
@@ -913,9 +915,18 @@ private:
 
 enum class IndexJobState { absent, queued, running, ready, cancelled, failed };
 
+enum class IndexTrigger {
+    manual,
+    save,
+    watcher,
+    branch_switch,
+    periodic
+};
+
 struct IndexServiceStatus {
     IndexStatus index;
     IndexJobState state{IndexJobState::absent};
+    IndexTrigger trigger{IndexTrigger::manual};
     std::size_t queue_position{0U};
 };
 
@@ -929,6 +940,9 @@ public:
     ProjectIndexService& operator=(const ProjectIndexService&) = delete;
 
     bool request_rebuild(const ProjectRecord& project);
+    bool request_update(const ProjectRecord& project,
+                        const std::vector<std::filesystem::path>& changed_paths,
+                        IndexTrigger trigger);
     bool cancel(const std::string& project_id);
     std::optional<IndexServiceStatus> status(
         const std::string& project_id) const;

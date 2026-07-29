@@ -1060,29 +1060,65 @@ void test_phase_fifteen_disk_backed_indexing() {
                 first.partial && first.disk_bytes > 0U &&
                 !index.search_text("searchable_symbol", 8U).empty(),
             "disk-backed index did not publish bounded partial results");
+    const auto unchanged = index.rebuild(cancellation, 0U);
+    require(unchanged.generation == 2U &&
+                unchanged.files_unchanged == 2U &&
+                unchanged.files_indexed == 0U,
+            "unchanged-file elimination rebuilt stable project content");
     write_text(project_root / "src" / "two.cpp",
                "// changed\nint updated_symbol = searchable_symbol;\n");
     const auto second =
         index.update({project_root / "src" / "two.cpp"}, cancellation);
-    require(second.generation == 2U &&
-                !index.search_text("updated_symbol", 8U).empty(),
-            "incremental trigger did not publish a new generation");
+    require(second.generation == 3U && second.files_indexed == 1U &&
+                !index.search_symbol("updated_symbol", 8U).empty() &&
+                index.search_symbol("symbol", 8U).empty() &&
+                !index.search_text("searchable_symbol", 8U).empty(),
+            "affected-path update or exact symbol retrieval was not incremental");
     const auto manifest = index_root / "phase15" / "manifest";
     std::ifstream manifest_input(manifest);
     std::uint64_t generation = 0U;
     std::string segment_name;
     std::string digest;
     manifest_input >> generation >> segment_name >> digest;
+    manifest_input.close();
     write_text(index_root / "phase15" / segment_name, "corrupt");
     masterai::ProjectIndexer recovered(project, index_root, memory);
-    require(recovered.status().generation == 1U &&
+    require(recovered.status().generation == 2U &&
                 !recovered.search_text("searchable_symbol", 8U).empty(),
             "corrupt active segment did not preserve the prior generation");
     cancellation.store(true);
     const auto cancelled = recovered.rebuild(cancellation, 1U);
     require(cancelled.cancelled &&
-                recovered.status().generation == 1U,
+                recovered.status().generation == 2U,
             "cancelled rebuild replaced the last valid generation");
+    cancellation.store(false);
+    bool escaped_path_rejected = false;
+    try {
+        recovered.update({temporary.path() / "outside.cpp"}, cancellation);
+    } catch (const std::invalid_argument&) {
+        escaped_path_rejected = true;
+    }
+    require(escaped_path_rejected,
+            "incremental update accepted a path outside the project");
+    std::filesystem::remove(project_root / "src" / "two.cpp");
+    const auto removed_one = recovered.update(
+        {project_root / "src" / "two.cpp"}, cancellation);
+    require(removed_one.generation == 3U &&
+                recovered.search_symbol("second_symbol", 8U).empty() &&
+                !recovered.search_symbol("searchable_symbol", 8U).empty(),
+            "deleted-path update retained stale symbol chunks");
+    std::filesystem::remove(project_root / "src" / "one.cpp");
+    const auto removed_all = recovered.update(
+        {project_root / "src" / "one.cpp"}, cancellation);
+    masterai::ProjectIndexer empty_recovered(project, index_root, memory);
+    require(removed_all.generation == 4U && removed_all.chunks == 0U &&
+                empty_recovered.status().generation == 4U &&
+                empty_recovered.search_text("searchable_symbol", 8U).empty(),
+            "empty generation was not durably published after deletion");
+    write_text(project_root / "src" / "one.cpp",
+               "// one\nint searchable_symbol = 1;\n");
+    write_text(project_root / "src" / "two.cpp",
+               "// two\nint second_symbol = searchable_symbol;\n");
 
     masterai::ProjectIndexService service(
         temporary.path() / "service-indexes", memory, 2U);
@@ -1104,6 +1140,34 @@ void test_phase_fifteen_disk_backed_indexing() {
                 service_status->index.generation == 1U &&
                 service_status->index.files_indexed == 2U,
             "bounded index service did not publish observable completion");
+    write_text(project_root / "src" / "two.cpp",
+               "// saved\nint saved_symbol = searchable_symbol;\n");
+    bool update_admitted = false;
+    for (unsigned int attempt = 0U; attempt < 200U && !update_admitted;
+         ++attempt) {
+        update_admitted = service.request_update(
+            project, {project_root / "src" / "two.cpp"},
+            masterai::IndexTrigger::save);
+        if (!update_admitted) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    require(update_admitted, "save trigger was not admitted after rebuild");
+    for (unsigned int attempt = 0U; attempt < 200U; ++attempt) {
+        service_status = service.status(project.id);
+        if (service_status &&
+            service_status->state == masterai::IndexJobState::ready &&
+            service_status->index.generation == 2U) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    require(service_status &&
+                service_status->state == masterai::IndexJobState::ready &&
+                service_status->trigger == masterai::IndexTrigger::save &&
+                service_status->index.generation == 2U &&
+                service_status->index.files_indexed == 1U,
+            "save trigger did not publish one affected-path generation");
 
     masterai::RecordStore records(temporary.path() / "http-database");
     records.open();
@@ -1130,6 +1194,9 @@ void test_phase_fifteen_disk_backed_indexing() {
                 workloads.index_status(request, true, {}).find(
                     "\"state\":\"ready\"") != std::string::npos,
             "index status route bypassed project binding or hid ready state");
+    require(workloads.index_status(request, true, {}).find(
+                "\"trigger\":\"save\"") != std::string::npos,
+            "index status route omitted the applied change trigger");
     request.method = "POST";
     request.target = "/api/v1/projects/phase15/index/rebuild";
     require(workloads

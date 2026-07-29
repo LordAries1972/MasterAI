@@ -84,11 +84,13 @@ Current phase status:
 - Phase 14: Complete — system-wide byte reservations, OS safety reserve,
   deterministic pressure actions, bounded prioritized work, minimal/balanced/
   performance profiles, live status, and inference admission are validated.
-- Phase 15: In progress — cancellable bounded discovery, immutable checksummed
-  disk generations, prior-generation recovery, partial publication, literal
-  search, deduplicated background rebuilds, authenticated project-bound
-  status/rebuild/cancel routes, and Debug/Release validation are implemented;
-  representative large-project ceiling evidence, richer change triggers, and
+- Phase 15: In progress — cancellable bounded discovery, unchanged-file
+  elimination, affected-path incremental updates, exact identifier-boundary
+  symbol lookup, immutable checksummed disk generations, prior-generation
+  recovery, empty/deleted-path publication, typed and coalesced change
+  triggers, bounded background work, authenticated project-bound routes, and
+  Debug/Release validation are implemented. Representative large-project
+  ceiling evidence, live editor/watcher/branch trigger adapters, and
   platform-specific I/O benchmark decisions remain.
 - Phase 16: Planned — add deadline-bound hybrid project retrieval, ranking,
   deduplication, context budgeting, and context-source disclosure.
@@ -125,6 +127,15 @@ Validation evidence recorded on 2026-07-29:
   queued/active work, publishes observable completion, and preserves the
   existing disk-generation validation for restart recovery, corrupt-active
   fallback, partial publication, incremental update, and cancellation.
+- Phase 15 affected-path updates now reuse every unaffected chunk, remove
+  deleted-file chunks including the final empty generation, reject
+  project-escaping paths, and replace stale corrupt generation filenames
+  safely. Stable full scans report unchanged-file elimination.
+- Exact symbol lookup observes C/C++-style identifier boundaries. The bounded
+  service accepts explicit save, watcher, branch-switch, and periodic trigger
+  types, coalesces queued affected paths, promotes branch/periodic work to a
+  full scan, and reports the applied trigger through the authenticated status
+  route.
 - `GET /api/v1/projects/{id}/index`,
   `POST /api/v1/projects/{id}/index/rebuild`, and
   `POST /api/v1/projects/{id}/index/cancel` now use the authenticated native
@@ -219,9 +230,9 @@ These objective groups are not yet implemented or not yet validated:
 - Ubuntu 24.04 and Debian 13 packaging certification (deferred by operator)
   plus later-phase conformance and performance suites.
 - Remaining Phase 15–20 performance expansion: representative indexing ceiling
-  evidence, richer incremental triggers, hybrid retrieval, bounded cache
-  layers, safe prompt reuse, host calibration, and optional advanced
-  throughput work.
+  evidence, live change-source adapters and portable-versus-native I/O
+  benchmark decisions, hybrid retrieval, bounded cache layers, safe prompt
+  reuse, host calibration, and optional advanced throughput work.
 
 ## 1. Executive Design
 
@@ -1888,10 +1899,13 @@ Exit criteria:
 ### Phase 15 — Incremental disk-backed project indexing
 
 Status: In progress. The native disk segment/generation foundation,
-fixed-capacity background service, authenticated project-bound
+fixed-capacity background service, unchanged-file elimination, affected-path
+updates, exact identifier-boundary symbol lookup, deleted/empty generation
+publication, typed/coalesced trigger admission, authenticated project-bound
 status/rebuild/cancel routes, and focused Windows Debug/Release validation
-exist. A representative large-project ceiling run, richer symbol and
-change-trigger coverage, and platform-specific I/O benchmark decisions remain.
+exist. A representative large-project ceiling run, live editor/watcher/branch
+trigger adapters, deeper language-aware symbol extraction, and
+platform-specific I/O benchmark decisions remain.
 
 Purpose:
 

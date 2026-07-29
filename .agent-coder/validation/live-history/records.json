@@ -196,5 +196,16 @@
     "toolIdentity": "g++/clang++/cl",
     "durationMs": 18753,
     "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": ".vscode/settings.json",
+    "languageId": "json",
+    "contentHash": "0a08f17886852c2dd1d49383e40a30888f96cc07c48c889c9c0d0dc9f4cf36b7",
+    "documentVersion": 2,
+    "timestampMs": 1785360624925,
+    "outcome": "valid",
+    "toolIdentity": "JSON.parse",
+    "durationMs": 2,
+    "diagnosticFingerprints": []
   }
 ]
