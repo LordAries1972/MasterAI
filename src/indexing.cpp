@@ -656,4 +656,26 @@ std::optional<IndexServiceStatus> ProjectIndexService::status(
                               IndexTrigger::manual, 0U};
 }
 
+// Phase 16: reads whatever generation is currently published for the
+// project without disturbing the background worker's queue state.
+IndexSearchResult ProjectIndexService::search_text(
+    const std::string& project_id, const std::string& literal,
+    const std::size_t maximum_results) const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    const auto found = state_->indexes.find(project_id);
+    if (found == state_->indexes.end()) return {};
+    return {found->second->search_text(literal, maximum_results),
+            found->second->status().generation, true};
+}
+
+IndexSearchResult ProjectIndexService::search_symbol(
+    const std::string& project_id, const std::string& symbol,
+    const std::size_t maximum_results) const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    const auto found = state_->indexes.find(project_id);
+    if (found == state_->indexes.end()) return {};
+    return {found->second->search_symbol(symbol, maximum_results),
+            found->second->status().generation, true};
+}
+
 }  // namespace masterai

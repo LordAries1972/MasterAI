@@ -42,8 +42,15 @@ std::string application_script();
 // Returns the OS-account sign-in document.
 std::string login_page();
 
-// Returns the authenticated programming workspace document.
-std::string application_page(const UserRecord& user);
+// Returns one authenticated workspace document for a single section --
+// "chat", "projects", "models-inventory", "models-download",
+// "models-downloads", "models-benchmarks", "admin-create", or "admin-users".
+// Each section is served at its own URL (see server.cpp's /app/* routes) so
+// switching sections is a normal full-page navigation, not a client-side
+// panel swap. chat_id, when non-empty, preloads that conversation's history
+// on the chat section.
+std::string application_page(const UserRecord& user, const std::string& section,
+                             const std::string& chat_id = "");
 
 class IntegrationHttpController final {
 public:
@@ -113,6 +120,9 @@ public:
     std::string list_downloads() const;
     std::string create_download(Request& request, const UserRecord& user);
     std::string run_download(Request& request, const UserRecord& user);
+    std::string pause_download(Request& request, const UserRecord& user);
+    std::string cancel_download(Request& request, const UserRecord& user);
+    std::string remove_download(Request& request, const UserRecord& user);
     std::string list_benchmarks() const;
     std::string recommend_benchmark(Request& request) const;
     std::string run_benchmark(Request& request, const UserRecord& user);

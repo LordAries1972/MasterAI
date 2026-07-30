@@ -40,7 +40,9 @@
       "required": ["enabled", "sessionMinutes"],
       "properties": {
         "enabled": {"const": true},
-        "sessionMinutes": {"type": "integer", "minimum": 1, "maximum": 10080}
+        "sessionMinutes": {"type": "integer", "minimum": 1, "maximum": 10080},
+        "allowLocalPasswordAccounts": {"type": "boolean"},
+        "allowOsIdentityAccounts": {"type": "boolean"}
       }
     },
     "workspace": {
@@ -71,6 +73,25 @@
       "required": ["curlExecutable"],
       "properties": {
         "curlExecutable": {"type": "string"}
+      }
+    },
+    "indexing": {
+      "type": "object", "additionalProperties": false,
+      "required": ["watchProjectFiles"],
+      "properties": {
+        "watchProjectFiles": {"type": "boolean"}
+      }
+    },
+    "retrieval": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "deadlineMilliseconds", "maximumContextBytes",
+        "maximumChunksPerSource", "maximumTotalChunks"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "deadlineMilliseconds": {"type": "integer", "minimum": 1, "maximum": 30000},
+        "maximumContextBytes": {"type": "integer", "minimum": 1, "maximum": 4194304},
+        "maximumChunksPerSource": {"type": "integer", "minimum": 1, "maximum": 256},
+        "maximumTotalChunks": {"type": "integer", "minimum": 1, "maximum": 1024}
       }
     }
   }

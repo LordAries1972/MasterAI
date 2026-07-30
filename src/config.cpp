@@ -158,7 +158,7 @@ AppConfig ConfigurationManager::load(
         const auto root = parse_json(read_file(settings));
         require_only(root, {"schemaVersion", "server", "tls", "auth",
                             "workspace", "models", "inference", "downloads",
-                            "memory"}, "");
+                            "memory", "indexing", "retrieval"}, "");
         config.schema_version =
             static_cast<int>(root.required("schemaVersion").as_integer());
 
@@ -190,12 +190,17 @@ AppConfig ConfigurationManager::load(
 
         const auto& auth = root.required("auth");
         require_only(auth, {"enabled", "sessionMinutes",
-                            "allowLocalPasswordAccounts"}, "auth.");
+                            "allowLocalPasswordAccounts",
+                            "allowOsIdentityAccounts"}, "auth.");
         config.authentication_enabled = auth.required("enabled").as_boolean();
         config.session_minutes = positive(auth, "sessionMinutes", 10080U);
         if (const auto* local_accounts =
                 auth.optional("allowLocalPasswordAccounts")) {
             config.allow_local_password_accounts = local_accounts->as_boolean();
+        }
+        if (const auto* os_accounts =
+                auth.optional("allowOsIdentityAccounts")) {
+            config.allow_os_identity_accounts = os_accounts->as_boolean();
         }
 
         const auto& workspace = root.required("workspace");
@@ -235,6 +240,31 @@ AppConfig ConfigurationManager::load(
             config.curl_executable =
                 downloads->required("curlExecutable").as_string();
         }
+
+        if (const auto* indexing = root.optional("indexing")) {
+            require_only(*indexing, {"watchProjectFiles"}, "indexing.");
+            config.watch_project_files =
+                indexing->required("watchProjectFiles").as_boolean();
+        }
+
+        if (const auto* retrieval = root.optional("retrieval")) {
+            require_only(*retrieval,
+                         {"enabled", "deadlineMilliseconds",
+                          "maximumContextBytes", "maximumChunksPerSource",
+                          "maximumTotalChunks"},
+                         "retrieval.");
+            config.retrieval_enabled =
+                retrieval->required("enabled").as_boolean();
+            config.retrieval_deadline_milliseconds = static_cast<std::uint32_t>(
+                positive(*retrieval, "deadlineMilliseconds", 30000U));
+            config.retrieval_maximum_context_bytes =
+                positive(*retrieval, "maximumContextBytes", 4U * 1024U * 1024U);
+            config.retrieval_maximum_chunks_per_source =
+                static_cast<std::uint32_t>(
+                    positive(*retrieval, "maximumChunksPerSource", 256U));
+            config.retrieval_maximum_total_chunks = static_cast<std::uint32_t>(
+                positive(*retrieval, "maximumTotalChunks", 1024U));
+        }
     }
     apply_values(config, environment);
     apply_values(config, overrides);
@@ -269,6 +299,12 @@ void ConfigurationManager::validate(const AppConfig& config) {
     }
     if (!config.authentication_enabled) {
         throw std::runtime_error("authentication cannot be disabled");
+    }
+    if (!config.allow_local_password_accounts &&
+        !config.allow_os_identity_accounts) {
+        throw std::runtime_error(
+            "at least one of local password accounts or OS identity accounts "
+            "must remain enabled");
     }
     if (config.minimum_free_ram_percent > 50U ||
         config.critical_memory_percent < 80U ||
@@ -312,7 +348,9 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         std::string(c.authentication_enabled ? "true" : "false") +
         ",\"sessionMinutes\":" + std::to_string(c.session_minutes) +
         ",\"allowLocalPasswordAccounts\":" +
-        (c.allow_local_password_accounts ? "true" : "false") + "},\n"
+        (c.allow_local_password_accounts ? "true" : "false") +
+        ",\"allowOsIdentityAccounts\":" +
+        (c.allow_os_identity_accounts ? "true" : "false") + "},\n"
         "  \"workspace\":{\"runtimeRoot\":" + quote(c.runtime_root.string()) +
         ",\"modelsRoot\":" + quote(c.models_root.string()) + "},\n"
         "  \"models\":{\"memoryReserveMiB\":" +
@@ -328,7 +366,19 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         quote(c.llama_server_executable.string()) +
         ",\"runnerPort\":" + std::to_string(c.runner_port) + "},\n"
         "  \"downloads\":{\"curlExecutable\":" +
-        quote(c.curl_executable.string()) + "}\n}\n";
+        quote(c.curl_executable.string()) + "},\n"
+        "  \"indexing\":{\"watchProjectFiles\":" +
+        (c.watch_project_files ? "true" : "false") + "},\n"
+        "  \"retrieval\":{\"enabled\":" +
+        (c.retrieval_enabled ? "true" : "false") +
+        ",\"deadlineMilliseconds\":" +
+        std::to_string(c.retrieval_deadline_milliseconds) +
+        ",\"maximumContextBytes\":" +
+        std::to_string(c.retrieval_maximum_context_bytes) +
+        ",\"maximumChunksPerSource\":" +
+        std::to_string(c.retrieval_maximum_chunks_per_source) +
+        ",\"maximumTotalChunks\":" +
+        std::to_string(c.retrieval_maximum_total_chunks) + "}\n}\n";
 }
 
 void ConfigurationManager::save_atomic(const AppConfig& config,

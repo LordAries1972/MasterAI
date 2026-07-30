@@ -94,5 +94,17 @@
     "failed": false,
     "id": "4089bcb2-0daf-44de-951a-7b80bc9f350b",
     "recordedAt": "2026-07-29T22:31:28.722Z"
+  },
+  {
+    "requestId": "4b93f1b4-4f78-45ba-992e-293654ed136b",
+    "provider": "claude",
+    "model": "unknown",
+    "taskShape": "finalImplementationPatchMultiFile",
+    "latencyMs": 33400,
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "failed": true,
+    "id": "20c491c1-d539-414f-baad-f46a33d39f61",
+    "recordedAt": "2026-07-30T12:47:09.113Z"
   }
 ]

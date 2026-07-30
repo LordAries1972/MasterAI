@@ -164,7 +164,10 @@ The current source includes native implementations for:
 - A cancellable, checksummed, disk-generation project index foundation with
   recovery, partial publication, unchanged-file elimination, affected-path
   updates, literal and exact-boundary symbol search, typed/coalesced triggers,
-  bounded background work, and authenticated status/rebuild/cancel routes.
+  bounded background work, and authenticated status/rebuild/cancel/notify
+  routes, plus a native `ProjectWatcher` file-watcher/branch-switch adapter
+  (`indexing.watchProjectFiles`, on by default) that drives the same service
+  automatically without any external editor or version-control hook.
 
 Implementation does not automatically mean operational certification. The next
 section records the distinction.
@@ -191,7 +194,7 @@ Status below reflects the evidence recorded in
 | 12 | Measured control-plane optimization | Complete for measured native scope |
 | 13 | Query measurement and resource baseline | Complete |
 | 14 | Bounded-memory foundation | Complete |
-| 15 | Incremental disk-backed indexing | In progress |
+| 15 | Incremental disk-backed indexing | Exit criteria evidence recorded; Release validation pending |
 | 16 | Deadline-bound hybrid retrieval | Planned |
 | 17 | Security-partitioned cache hierarchy | Planned |
 | 18 | Prompt-prefix and KV/session reuse | Planned |
@@ -203,11 +206,15 @@ strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
 WSL. Release packaging certification on the pinned Ubuntu 24.04 and Debian 13
 hosts is still outstanding.
 
-Phase 15 already has a bounded native indexing service, affected-path updates,
-typed/coalesced trigger admission, and disk-generation recovery tests. It
-remains in progress until representative large-project resource-ceiling
-evidence, live change-source adapters, deeper symbol extraction, and
-platform-specific I/O decisions are complete.
+Phase 15 has a bounded native indexing service, affected-path updates,
+typed/coalesced trigger admission, disk-generation recovery tests, a native
+`ProjectWatcher` file-watcher/branch-switch adapter that calls the indexing
+service automatically (no external editor or VCS hook required), a
+representative large-project ceiling measurement (`masterai index-probe`),
+and a recorded platform-I/O backend decision. Both of its exit criteria now
+have current evidence on Windows Debug; Windows Release build/test validation
+for this change set, and deeper language-aware symbol extraction, remain
+outstanding.
 
 No release may be called production-ready until the functional, security,
 migration, recovery, MCP conformance, performance, resource-ceiling, retrieval,
@@ -451,10 +458,27 @@ Scan the model tree:
 ./build/Linux-x86_64/Release/masterai scan-models ./models
 ```
 
-A discovered file is not automatically trusted. MasterAI verifies size,
-digest, provenance, license state, path containment, backend compatibility, and
-hardware suitability before promotion to `Ready`, then rechecks integrity
-before loading.
+A discovered file is not automatically trusted. `scan()` — used by every
+inventory, chat, and download request — only ever reads a persisted
+verification cache (`models_root/.verified-cache.json`); it never hashes
+files itself, so a page load never blocks on multi-gigabyte SHA-256 work. Run
+`verify-models` after adding, replacing, or removing files under
+`models-root` to hash every discovered model against its manifest and refresh
+that cache:
+
+```powershell
+.\build\Windows-x64\Release\masterai.exe verify-models .\models
+# or: .\scripts\rehash.ps1 -BuildType Release
+```
+
+```sh
+./build/Linux-x86_64/Release/masterai verify-models ./models
+```
+
+Verification covers size, digest, provenance, license state, path
+containment, backend compatibility, and hardware suitability before
+promotion to `Ready`; load time rechecks integrity again regardless of the
+cache.
 
 The current release baseline supports a separately supervised
 `llama.cpp`-compatible GGUF backend. Real-model operational certification is
@@ -465,20 +489,25 @@ still pending, as noted in [Project status](#project-status).
 The native service provides browser workflows for:
 
 - First-administrator setup and login
-- Project and chat management
+- Project and auto-titled chat management, with each workspace section
+  (`/app/chat`, `/app/projects`, `/app/models/inventory`,
+  `/app/models/download`, `/app/models/benchmarks`, `/app/admin/create`,
+  `/app/admin/users`) served at its own URL and gated by role
 - Ready-model selection and loading
 - Incrementally streamed responses and cancellation
 - Bounded UTF-8 source/text attachments
-- Model inventory and suitability
-- Download jobs and progress
+- Model inventory and suitability, including a cached verification state so
+  page loads never block on hashing model files
+- Download jobs and progress, with pause, resume, cancel, and remove controls
 - Benchmarks and recommendations
 - Resource, memory, request, and indexing status
 - Administrative settings and operations
 
 HTTP APIs are versioned under `/api/v1/`. Implemented capability areas include
-authentication, users, projects, chats, models, downloads, benchmarks,
-resources, memory, request metrics, project indexes, MCP integrations, and IDE
-connections.
+authentication, users, projects, chats, models, downloads (including
+`.../model-downloads/{id}/pause`, `.../cancel`, and `.../remove`),
+benchmarks, resources, memory, request metrics, project indexes, MCP
+integrations, and IDE connections.
 
 Inputs are bounded and strictly parsed. Administrative mutations require the
 applicable identity, role, scope, project binding, host/origin checks, CSRF
@@ -535,7 +564,8 @@ masterai configure [settings-file]
 masterai serve [settings-file]
 masterai probe [storage-root]
 masterai scan-models [models-root]
-masterai download-model <settings> <url> <revision> <sha256> <category> <model-id> <filename> --accept-license
+masterai verify-models [models-root]
+masterai download-model <settings> <url> <revision> <sha256> <category> <model-id> <filename> <display-name> <architecture> <quantization> <license-spdx-id> <size-bytes> <minimum-ram-mib> <recommended-ram-mib> --accept-license
 masterai benchmark-model <settings> <model-id> <quick|standard|extended>
 masterai mcp-stdio [settings-file] [vscode|visual-studio]
 masterai ide-token-store <settings-file> <vscode|visual-studio>
@@ -549,6 +579,7 @@ masterai runtime-root <settings>
 masterai upgrade <settings> <active> <candidate> <rollback-root>
 masterai rollback <settings> <active> <receipt>
 masterai performance-probe [iterations]
+masterai index-probe <project-root> [index-root]
 masterai security-status [runtime-root]
 ```
 
@@ -598,7 +629,13 @@ model weights, downloads, inference responses, and MCP data as untrusted.
 
 Key controls include:
 
-- Native OS identity verification (`LogonUserW` on Windows and PAM on Linux)
+- Locally stored, MasterAI-hashed password accounts as the default sign-in
+  path (`allow_local_password_accounts`, on by default), so setup and login
+  do not depend on an external identity provider being present.
+- Optional native OS identity verification (`LogonUserW` on Windows and PAM
+  on Linux) as an explicit opt-in (`allow_os_identity_accounts`, off by
+  default) for operators who want accounts mapped to their OS/Windows
+  identity instead of, or alongside, locally stored passwords.
 - No storage, hashing, reversible encryption, logging, or forwarding of OS
   passwords
 - Immediate erasure of transient credential buffers
@@ -696,8 +733,8 @@ sh ./scripts/verify-objectives.sh
 
 Near-term work is:
 
-1. Complete Phase 15 large-project indexing evidence, change triggers, and I/O
-   decisions.
+1. Validate Phase 15 on Windows Release (Debug already validated) and, longer
+   term, evaluate deeper language-aware symbol extraction.
 2. Implement Phase 16 deadline-bound hybrid retrieval with disclosed,
    authorized context.
 3. Add Phase 17 byte-bounded, security-partitioned caches with precise

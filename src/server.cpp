@@ -19,6 +19,7 @@
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #elif defined(__linux__)
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -167,6 +168,31 @@ std::string cookie_token(const Request& request) {
     return found->second.substr(value_start, end - value_start);
 }
 
+// Phase 16: renders one RetrievalOutcome's disclosure list as the raw JSON
+// array embedded into a QueryTrace so /api/v1/queries/{id} lets callers
+// inspect exactly which project sources were supplied to the model.
+std::string retrieval_disclosure_json(const RetrievalOutcome& outcome) {
+    std::string body = "{\"strategy\":" + json_string(outcome.strategy) +
+                       ",\"partial\":" +
+                       (outcome.partial ? "true" : "false") +
+                       ",\"diagnostic\":" + json_string(outcome.diagnostic) +
+                       ",\"entries\":[";
+    bool first = true;
+    for (const auto& entry : outcome.disclosure) {
+        if (!first) body += ",";
+        first = false;
+        body += "{\"source\":" + json_string(entry.source) +
+                ",\"relativePath\":" + json_string(entry.relative_path) +
+                ",\"offset\":" + std::to_string(entry.offset) +
+                ",\"indexGeneration\":" +
+                std::to_string(entry.index_generation) +
+                ",\"score\":" + std::to_string(entry.score) +
+                ",\"included\":" + (entry.included ? "true" : "false") +
+                ",\"reason\":" + json_string(entry.reason) + "}";
+    }
+    return body + "]}";
+}
+
 }  // namespace
 
 class HttpServer::State final {
@@ -229,6 +255,10 @@ public:
         }
         indexes = std::make_unique<ProjectIndexService>(
             value.runtime_root / "indexes", *memory);
+        if (value.watch_project_files) {
+            watcher =
+                std::make_unique<ProjectWatcher>(*projects, *indexes);
+        }
         workloads = std::make_unique<
             server_internal::WorkloadHttpController>(
             configuration, *projects, *attachments, inference.get(),
@@ -311,7 +341,13 @@ public:
         }
         if (request.method == "GET" && request.target == "/health/ready") {
             const OsIdentityProvider identity;
-            const bool ready = !users->setup_required() && identity.available();
+            // Readiness only depends on the OS identity provider when OS
+            // sign-in is actually enabled; the default locally stored
+            // password path has no such external dependency.
+            const bool auth_path_ready =
+                configuration.allow_local_password_accounts ||
+                (configuration.allow_os_identity_accounts && identity.available());
+            const bool ready = !users->setup_required() && auth_path_ready;
             return response(
                 ready ? 200 : 503, ready ? "OK" : "Service Unavailable",
                 "{\"status\":\"" + std::string(ready ? "ready" : "not_ready") +
@@ -544,8 +580,60 @@ public:
         if (request.method == "GET" && request.target == "/models") {
             return workloads->model_inventory_page();
         }
-        if (request.method == "GET" && request.target == "/app") {
-            return application_page(*user);
+        if (request.method == "GET" && request.target.rfind("/app", 0U) == 0U) {
+            const bool can_manage_settings =
+                user->role == UserRole::administrator ||
+                user->role == UserRole::developer;
+            const bool is_administrator = user->role == UserRole::administrator;
+            const std::string target = request.target;
+            // Each workspace section is served at its own URL -- switching
+            // sections is a normal page navigation, not a client-side panel
+            // swap. A role that can't reach a section (typed directly or
+            // via a stale bookmark) is redirected to chat rather than shown
+            // a page whose underlying API calls would 403 anyway.
+            if (target == "/app") {
+                return application_page(*user, "chat");
+            }
+            if (target.rfind("/app/chat/", 0U) == 0U) {
+                return application_page(*user, "chat",
+                                        target.substr(10U));
+            }
+            if (target == "/app/projects") {
+                return can_manage_settings
+                           ? application_page(*user, "projects")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/models/inventory") {
+                return can_manage_settings
+                           ? application_page(*user, "models-inventory")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/models/download") {
+                return can_manage_settings
+                           ? application_page(*user, "models-download")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/models/downloads") {
+                // Active downloads now lives at the bottom of the download
+                // page itself; keep the old URL working as a redirect.
+                return response(302, "Found", "", {"Location: /app/models/download"});
+            }
+            if (target == "/app/models/benchmarks") {
+                return can_manage_settings
+                           ? application_page(*user, "models-benchmarks")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/admin/create") {
+                return is_administrator
+                           ? application_page(*user, "admin-create")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/admin/users") {
+                return is_administrator
+                           ? application_page(*user, "admin-users")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            return response(404, "Not Found", "{\"error\":\"not_found\"}");
         }
         if (request.method == "GET" &&
             request.target == "/api/v1/projects") {
@@ -651,6 +739,24 @@ public:
             request.target.compare(request.target.size() - 4U, 4U, "/run") == 0) {
             return workloads->run_download(request, *user);
         }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/model-downloads/", 0U) == 0U &&
+            request.target.size() > 6U &&
+            request.target.compare(request.target.size() - 6U, 6U, "/pause") == 0) {
+            return workloads->pause_download(request, *user);
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/model-downloads/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U, "/cancel") == 0) {
+            return workloads->cancel_download(request, *user);
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/model-downloads/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U, "/remove") == 0) {
+            return workloads->remove_download(request, *user);
+        }
         if (request.method == "GET" &&
             request.target == "/api/v1/benchmarks") {
             return workloads->list_benchmarks();
@@ -670,6 +776,13 @@ public:
             return std::move(*integration_response);
         }
         return response(404, "Not Found", "{\"error\":\"not_found\"}");
+    }
+
+    // Called from HttpServer::stop() (outside this class's private section)
+    // so a graceful shutdown doesn't have to wait out an in-flight
+    // download's full transfer.
+    void cancel_all_downloads() noexcept {
+        if (downloads) downloads->cancel_all();
     }
 
 private:
@@ -722,6 +835,9 @@ private:
     }
 
     std::string setup(Request& request) {
+        if (!configuration.allow_os_identity_accounts) {
+            return response(403, "Forbidden", "{\"error\":\"os_accounts_disabled\"}");
+        }
         if (!users->setup_required()) {
             return response(409, "Conflict", "{\"error\":\"setup_complete\"}");
         }
@@ -809,14 +925,17 @@ private:
             const auto username = root.required("username").as_string();
             auto password = root.required_mutable("password").take_string();
             // Accounts with a stored local password hash are verified
-            // locally; every other account keeps going through the OS.
+            // locally; every other account only falls through to the OS when
+            // OS-identity sign-in is explicitly enabled -- otherwise there is
+            // nothing to authenticate against and this must not shell out to
+            // the OS at all.
             const auto local_candidate = users->find_by_principal(username);
             std::optional<UserRecord> user;
             if (local_candidate && !local_candidate->password_hash.empty()) {
                 if (verify_password(password, local_candidate->password_hash)) {
                     user = local_candidate;
                 }
-            } else {
+            } else if (configuration.allow_os_identity_accounts) {
                 const auto result = OsIdentityProvider().authenticate(username, password);
                 if (result.authenticated()) {
                     user = users->find_by_principal(result.principal);
@@ -907,7 +1026,10 @@ private:
             body += "{\"id\":\"" + json_escape(chat.id) +
                     "\",\"projectId\":\"" + json_escape(chat.project_id) +
                     "\",\"modelId\":\"" + json_escape(chat.model_id) +
-                    "\",\"messageCount\":" +
+                    "\",\"title\":\"" + json_escape(chat.title) +
+                    "\",\"createdAtEpochSeconds\":" +
+                    std::to_string(chat.created_at_epoch_seconds) +
+                    ",\"messageCount\":" +
                     std::to_string(chat.messages.size()) + "}";
         }
         return response(200, "OK", body + "]}");
@@ -1077,8 +1199,39 @@ private:
                                QueryStatus::retrieving);
             queries.transition(query_id, QueryStage::retrieval,
                                QueryStatus::retrieving);
-            const auto inference_prompt =
-                assemble_inference_prompt(root, *chat, user);
+            // Phase 16: retrieve a small, ranked, explainable evidence set
+            // from the project's own Phase 15 index -- bounded by a request
+            // deadline and a hard byte/chunk budget -- instead of ever
+            // injecting the whole project. The chat's own project has
+            // already been re-authorized for this user just above via
+            // chats->find_for_owner(), so a membership/policy change is
+            // reflected on the very next message.
+            auto inference_prompt = assemble_inference_prompt(root, *chat, user);
+            if (configuration.retrieval_enabled && !chat->project_id.empty()) {
+                if (const auto project = projects->find(chat->project_id)) {
+                    RetrievalPlanner planner(*indexes);
+                    RetrievalRequest retrieval_request;
+                    retrieval_request.project = *project;
+                    retrieval_request.query_text = inference_prompt;
+                    retrieval_request.deadline = std::chrono::milliseconds(
+                        configuration.retrieval_deadline_milliseconds);
+                    retrieval_request.maximum_context_bytes =
+                        configuration.retrieval_maximum_context_bytes;
+                    retrieval_request.maximum_chunks_per_source =
+                        configuration.retrieval_maximum_chunks_per_source;
+                    retrieval_request.maximum_total_chunks =
+                        configuration.retrieval_maximum_total_chunks;
+                    const auto retrieved = planner.retrieve(retrieval_request);
+                    inference_prompt += retrieved.context_text;
+                    if (inference_prompt.size() > configuration.max_request_bytes) {
+                        throw std::runtime_error(
+                            "assembled chat context exceeds policy");
+                    }
+                    queries.record_retrieval(
+                        query_id, retrieved.partial,
+                        retrieval_disclosure_json(retrieved));
+                }
+            }
             queries.transition(query_id, QueryStage::ranking,
                                QueryStatus::retrieving);
             queries.transition(query_id, QueryStage::prompt_assembly,
@@ -1251,6 +1404,10 @@ private:
     std::unique_ptr<server_internal::WorkloadHttpController> workloads;
     std::unique_ptr<MemoryBudgetManager> memory;
     std::unique_ptr<ProjectIndexService> indexes;
+    // Declared after `indexes` so it is destroyed first: the watcher thread
+    // must stop calling indexes->request_update() before indexes itself is
+    // torn down.
+    std::unique_ptr<ProjectWatcher> watcher;
     QueryCoordinator queries;
     std::string setup_token;
     std::string setup_hash;
@@ -1305,6 +1462,15 @@ bool HttpServer::run(std::atomic_bool& stop_requested) {
         log(LogLevel::error, "server.socket_failed", "Could not create listener.");
         return false;
     }
+#if defined(_WIN32)
+    // A freshly created socket is inheritable by default, and downloads.cpp
+    // launches curl.exe with bInheritHandles=TRUE (to hand it a log file
+    // handle). Without this, curl.exe would silently inherit a duplicate of
+    // the listening socket too, and keep the port bound even after this
+    // process exits, so a later restart fails with server.bind_failed until
+    // that orphaned child is found and killed by hand.
+    SetHandleInformation(reinterpret_cast<HANDLE>(listener), HANDLE_FLAG_INHERIT, 0);
+#endif
     socket_ = static_cast<std::intptr_t>(listener);
 
     int exclusive = 1;
@@ -1356,6 +1522,12 @@ bool HttpServer::run(std::atomic_bool& stop_requested) {
         if (client == invalid_socket) {
             continue;
         }
+#if defined(_WIN32)
+        // Same reasoning as the listener above: this connection's own worker
+        // thread may run a model download and launch curl.exe on it, which
+        // must not inherit a handle to this client socket either.
+        SetHandleInformation(reinterpret_cast<HANDLE>(client), HANDLE_FLAG_INHERIT, 0);
+#endif
 
         // Reap any worker threads that have already finished before deciding
         // whether there's room for another one, so workers_ never grows
@@ -1506,12 +1678,22 @@ void HttpServer::stop() noexcept {
         socket_ = -1;
     }
 
-    // Wait for in-flight request-handling threads to finish naturally (an
-    // active download is not force-cancelled by shutdown -- a known,
-    // accepted limitation) up to a generous bound, then detach any
-    // stragglers so this call -- and the state_ destruction that follows it
-    // in ~HttpServer() -- is never blocked indefinitely by a stuck request.
-    // Detaching here is only safe because the process is exiting.
+    // Signal every in-flight download to stop immediately, rather than
+    // letting shutdown wait out its full transfer: without this, a large
+    // in-progress download could keep this call (and stop.ps1's 30-second
+    // wait for the process to exit) blocked for as long as the transfer
+    // itself takes.
+    if (state_) {
+        state_->cancel_all_downloads();
+    }
+
+    // Wait for in-flight request-handling threads to finish naturally (the
+    // download signalled above still has to notice, terminate its curl
+    // child, and unwind, which is normally well within a few seconds) up to
+    // a generous bound, then detach any stragglers so this call -- and the
+    // state_ destruction that follows it in ~HttpServer() -- is never
+    // blocked indefinitely by a stuck request. Detaching here is only safe
+    // because the process is exiting.
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::minutes(5);
     while (active_connections_.load() > 0U &&

@@ -3,7 +3,14 @@ param(
     [ValidateSet('Debug', 'Release')]
     [string]$BuildType = 'Debug',
     [ValidateSet('Windows-x64')]
-    [string]$Platform = 'Windows-x64'
+    [string]$Platform = 'Windows-x64',
+    # Hashes every model file under models-root against its manifest and
+    # writes the verification cache the running server trusts, so new or
+    # changed models stop reporting as "unverified" in the UI. This is the
+    # only place model files get hashed -- the server itself never re-hashes
+    # a multi-gigabyte GGUF file on a page load or chat request.
+    [switch]$VerifyModels,
+    [string]$ModelsRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -77,3 +84,13 @@ if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed.' }
 
 cmake --build $buildRoot --config $BuildType --parallel
 if ($LASTEXITCODE -ne 0) { throw 'MasterAI build failed.' }
+
+if ($VerifyModels) {
+    if (-not $ModelsRoot) { $ModelsRoot = Join-Path $projectRoot 'models' }
+    $binary = Join-Path $buildRoot 'masterai.exe'
+    Write-Host "Verifying models under $ModelsRoot ..."
+    & $binary verify-models $ModelsRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw 'MasterAI model verification reported one or more failures.'
+    }
+}

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -47,11 +48,17 @@ struct AppConfig {
     std::filesystem::path tls_private_key_file;
     bool authentication_enabled{true};
     std::uint64_t session_minutes{480};
-    // Off by default: enables locally stored, MasterAI-hashed password
-    // accounts (POST /api/v1/setup/local, POST /api/v1/users) as an
-    // alternative to OS-verified sign-in for operators without an OS
-    // password (e.g. Windows Hello PIN-only accounts).
-    bool allow_local_password_accounts{false};
+    // On by default: locally stored, MasterAI-hashed password accounts
+    // (POST /api/v1/setup/local, POST /api/v1/users) are the default sign-in
+    // system and do not depend on the OS identity provider being present or
+    // configured.
+    bool allow_local_password_accounts{true};
+    // Off by default: OS-verified sign-in (Windows LogonUserW / Linux PAM,
+    // via POST /api/v1/setup and the OS fallback branch of login()) is an
+    // explicit opt-in, not a requirement. Enable it for operators who want
+    // accounts mapped to their OS/Windows identity instead of, or alongside,
+    // locally stored passwords.
+    bool allow_os_identity_accounts{false};
     std::uint64_t max_request_bytes{16U * 1024U * 1024U};
     std::uint32_t request_timeout_seconds{30};
     std::uint32_t max_concurrent_connections{64};
@@ -68,6 +75,20 @@ struct AppConfig {
     std::filesystem::path llama_server_executable;
     std::filesystem::path curl_executable;
     std::uint16_t runner_port{7081};
+    // On by default: a native ProjectWatcher observes every catalog project's
+    // root for file saves and `.git/HEAD` branch switches and forwards them
+    // into ProjectIndexService::request_update automatically. Off disables
+    // only the automatic adapter; the authenticated index/notify route and
+    // manual rebuild remain available either way.
+    bool watch_project_files{true};
+    // Phase 16: deadline-bound hybrid retrieval budget applied once per chat
+    // message before prompt assembly. Disabling retrieval leaves attachment
+    // context (Phase 5) untouched.
+    bool retrieval_enabled{true};
+    std::uint32_t retrieval_deadline_milliseconds{1500U};
+    std::uint64_t retrieval_maximum_context_bytes{16U * 1024U};
+    std::uint32_t retrieval_maximum_chunks_per_source{6U};
+    std::uint32_t retrieval_maximum_total_chunks{20U};
 };
 
 class ConfigurationManager final {
@@ -299,7 +320,12 @@ enum class ModelState {
     loading,
     loaded,
     failed,
-    quarantined
+    quarantined,
+    // Manifest is well-formed (a valid queued/in-progress download wrote it
+    // before the transfer started), but its model file has not landed on
+    // disk yet -- distinct from `invalid`, which means something is actually
+    // wrong rather than merely not finished yet.
+    downloading
 };
 
 struct ModelManifest {
@@ -337,13 +363,50 @@ public:
     explicit ModelRegistry(std::filesystem::path model_root,
                            HardwareInfo hardware = {},
                            std::uint64_t memory_reserve_mib = 2048);
+    // Fast path used on every page load/API call: trusts the on-disk
+    // verification cache (see verify() below) instead of hashing model
+    // files, so an inventory/downloads/chat request never blocks on
+    // multi-gigabyte SHA-256 work. A model with no matching cache entry
+    // (new, or changed since it was last verified) comes back as
+    // ModelState::unverified rather than ready.
     std::vector<ModelRecord> scan() const;
+    // Slow path used only by the `masterai verify-models` CLI command (see
+    // scripts/build.ps1 -VerifyModels): actually hashes every discovered
+    // model file, reporting each one through `progress` as it completes, and
+    // persists the results to the verification cache so subsequent scan()
+    // calls recognize them as verified without re-hashing. Returns the
+    // number of models newly confirmed verified.
+    std::size_t verify(
+        const std::function<void(const std::string& model_id, bool verified,
+                                 const std::string& message)>& progress) const;
 
 private:
     std::filesystem::path model_root_;
     HardwareInfo hardware_;
     std::uint64_t memory_reserve_mib_{2048};
 };
+
+// Writes model_directory/manifest.json in the one shape ModelRegistry::scan()
+// (via load_manifest in models.cpp) accepts, from fields the caller has
+// already validated. Shared by the download HTTP route and the
+// download-model CLI command so both ways of fetching a model produce a
+// manifest ModelRegistry can actually recognize -- a model file that lands
+// without one is invisible to the inventory no matter how it got there.
+// Throws std::runtime_error if the file cannot be written.
+void write_model_manifest(const std::filesystem::path& model_directory,
+                          const std::string& model_id,
+                          const std::string& display_name,
+                          const std::string& category,
+                          const std::string& architecture,
+                          const std::string& quantization,
+                          std::uint64_t minimum_ram_mib,
+                          std::uint64_t recommended_ram_mib,
+                          const std::string& filename,
+                          std::uint64_t size_bytes,
+                          const std::string& sha256,
+                          const std::string& source_url,
+                          const std::string& revision,
+                          const std::string& license_spdx);
 
 enum class Suitability { unsupported, memory_risk, slow, usable, recommended };
 
@@ -486,6 +549,11 @@ struct ChatRecord {
     std::string owner_id;
     std::string project_id;
     std::string model_id;
+    // Derived from the first user message once one exists; "New chat" until
+    // then. Never accepted from client input, so it can never carry markup
+    // or exceed the truncation this store applies when deriving it.
+    std::string title{"New chat"};
+    std::uint64_t created_at_epoch_seconds{0};
     std::vector<ChatMessage> messages;
 };
 
@@ -500,6 +568,8 @@ public:
                 const std::string& content);
     std::optional<ChatRecord> find_for_owner(const std::string& chat_id,
                                              const std::string& owner_id) const;
+    // Newest first, so callers can split "recent" from "history" by index
+    // without re-sorting.
     std::vector<ChatRecord> list_for_owner(const std::string& owner_id) const;
 
 private:
@@ -616,7 +686,22 @@ public:
     DownloadJob run(const std::string& id, const std::atomic_bool& cancellation);
     std::optional<DownloadJob> find(const std::string& id) const;
     std::vector<DownloadJob> list() const;
+    // Pauses an in-flight transfer (must currently be transferring): signals
+    // the running run() call to stop the transport and leave the job in the
+    // resumable 'paused' state rather than 'cancelled'.
+    void pause(const std::string& id);
+    // Stops a download. If it is currently in flight, signals the running
+    // run() call to terminate the transport and land in 'cancelled'
+    // (non-resumable); otherwise marks it cancelled immediately.
     void cancel(const std::string& id);
+    // Signals every currently in-flight transfer to stop, without waiting for
+    // them to land -- used during process shutdown so an active download
+    // does not keep the server alive past its graceful-stop window.
+    void cancel_all() noexcept;
+    // Discards a finished/paused/queued job's record and any leftover
+    // partial or quarantined artifact. Rejected while the job is in flight --
+    // pause() or cancel() it first.
+    void remove(const std::string& id);
 
 private:
     void restore();
@@ -635,6 +720,16 @@ private:
     // same id is rejected instead of racing the first over the same
     // destination/.part file.
     std::set<std::string> in_flight_;
+    // Cross-request signal for each in-flight run(): a separate HTTP request
+    // (pause/cancel/shutdown) sets these flags to interrupt the transfer
+    // thread, which is otherwise blocked inside run() for the whole transfer
+    // and cannot observe anything but the atomic_bool its own caller passed
+    // in.
+    struct RunSignal {
+        std::atomic_bool cancellation{false};
+        std::atomic_bool pause_requested{false};
+    };
+    std::map<std::string, std::shared_ptr<RunSignal>> signals_;
 };
 
 enum class BenchmarkProfile { quick, standard, extended };
@@ -760,6 +855,11 @@ struct QueryTrace {
     std::uint64_t runner_peak_resident_memory_bytes{0};
     bool partial_retrieval{false};
     std::string diagnostic;
+    // Phase 16: raw JSON array of RetrievalOutcome disclosure entries
+    // (which chunks/files, index generation, ranking reason, and whether
+    // each was included or omitted by the context budget). Empty when
+    // retrieval never ran for this query.
+    std::string retrieval_disclosure;
 };
 
 // Owns bounded, monotonic query traces. Callers explicitly transition through
@@ -781,6 +881,11 @@ public:
     void record_inference(const std::string& id,
                           const GenerationResult& result,
                           std::uint64_t time_to_first_token_microseconds);
+    // Phase 16: records the retrieval disclosure separately from the
+    // terminal diagnostic set by finish(), so a later successful finish()
+    // does not erase what was actually retrieved.
+    void record_retrieval(const std::string& id, bool partial,
+                          std::string disclosure_json);
     void finish(const std::string& id, QueryStatus status,
                 std::string diagnostic = {});
     std::optional<QueryTrace> find(const std::string& id) const;
@@ -990,6 +1095,15 @@ struct IndexServiceStatus {
     std::size_t queue_position{0U};
 };
 
+// Phase 16: bundles a live search result with the disk generation it was
+// read from, so callers can disclose exactly which index snapshot the
+// evidence came from and detect a not-yet-indexed project.
+struct IndexSearchResult {
+    std::vector<IndexChunk> chunks;
+    std::uint64_t generation{0};
+    bool available{false};
+};
+
 class ProjectIndexService final {
 public:
     ProjectIndexService(std::filesystem::path index_root,
@@ -1006,10 +1120,111 @@ public:
     bool cancel(const std::string& project_id);
     std::optional<IndexServiceStatus> status(
         const std::string& project_id) const;
+    // Phase 16: read-only literal/symbol lookups against whatever index
+    // generation is currently published for the project. `available` is
+    // false, with an empty chunk list, when no generation has ever
+    // published for this project yet.
+    IndexSearchResult search_text(const std::string& project_id,
+                                  const std::string& literal,
+                                  std::size_t maximum_results) const;
+    IndexSearchResult search_symbol(const std::string& project_id,
+                                    const std::string& symbol,
+                                    std::size_t maximum_results) const;
 
 private:
     class State;
     std::unique_ptr<State> state_;
+};
+
+// Native live adapter for Phase 15: watches every ProjectCatalog project's
+// root directory (Windows `ReadDirectoryChangesW`, Linux `inotify`, both
+// recursive and bounded) and forwards observed changes into
+// ProjectIndexService::request_update without any external editor, IDE
+// plugin, or version-control hook. A change to a project's `.git/HEAD` is
+// reported as IndexTrigger::branch_switch (forcing a full rescan); every
+// other observed file change is reported as IndexTrigger::watcher with the
+// specific changed paths. Owns one background thread; construction starts
+// watching immediately and the destructor stops and joins it.
+class ProjectWatcher final {
+public:
+    ProjectWatcher(ProjectCatalog& projects, ProjectIndexService& indexes);
+    ~ProjectWatcher();
+    ProjectWatcher(const ProjectWatcher&) = delete;
+    ProjectWatcher& operator=(const ProjectWatcher&) = delete;
+
+private:
+    class State;
+    std::unique_ptr<State> state_;
+};
+
+// Phase 16: deadline-bound hybrid retrieval over Phase 15 project indexes.
+struct RetrievalRequest {
+    ProjectRecord project;
+    std::string query_text;
+    std::chrono::milliseconds deadline{1500};
+    std::uint64_t maximum_context_bytes{16U * 1024U};
+    std::uint64_t maximum_chunks_per_source{6U};
+    std::uint64_t maximum_total_chunks{20U};
+};
+
+// One disclosed piece of evidence: which file/offset it came from, which
+// index generation supplied it, why it ranked, and whether the context
+// budget ultimately included or omitted it.
+struct RetrievalDisclosureEntry {
+    std::string source;
+    std::string relative_path;
+    std::uint64_t offset{0};
+    std::uint64_t index_generation{0};
+    double score{0.0};
+    bool included{false};
+    std::string reason;
+};
+
+struct RetrievalCandidate {
+    IndexChunk chunk;
+    RetrievalDisclosureEntry disclosure;
+};
+
+struct RetrievalOutcome {
+    std::string context_text;
+    std::vector<RetrievalDisclosureEntry> disclosure;
+    std::string strategy;
+    bool partial{false};
+    std::string diagnostic;
+};
+
+// Chooses the least expensive sufficient index-backed strategy (exact
+// symbol match, then exact literal text, then per-token lexical union),
+// running independent strategy steps across bounded parallel workers with a
+// hard wall-clock deadline. On expiry it stops launching further steps and
+// returns whatever evidence bounded workers already produced rather than
+// blocking; it never performs a security or membership decision itself --
+// callers must have already authorized the caller against `project` before
+// calling retrieve(). Semantic/embedding, dependency-neighbour, and MCP
+// resource strategies remain forward work (no embedding adapter or MCP
+// resource plumbing is wired to retrieval yet); this planner covers every
+// strategy that Phase 15's disk-backed index can actually serve today.
+class RetrievalPlanner final {
+public:
+    explicit RetrievalPlanner(ProjectIndexService& indexes);
+    RetrievalOutcome retrieve(const RetrievalRequest& request) const;
+
+private:
+    ProjectIndexService& indexes_;
+};
+
+// Applies per-source and total chunk/byte caps to already-ranked candidates.
+// Candidates must arrive sorted by descending score; the budgeter accepts
+// the highest-ranked evidence first and never truncates a chunk's text to
+// fit more chunks in.
+class ContextBudgeter final {
+public:
+    static RetrievalOutcome apply(std::vector<RetrievalCandidate> ranked,
+                                  const std::string& strategy, bool partial,
+                                  std::string diagnostic,
+                                  std::uint64_t maximum_context_bytes,
+                                  std::uint64_t maximum_chunks_per_source,
+                                  std::uint64_t maximum_total_chunks);
 };
 
 struct McpInboundTool {

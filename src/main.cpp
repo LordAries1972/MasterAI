@@ -14,10 +14,12 @@
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -25,6 +27,14 @@ std::atomic_bool stop_requested{false};
 
 void handle_signal(int) {
     stop_requested.store(true);
+}
+
+void raise_atomic_maximum(std::atomic<std::uint64_t>& target,
+                          const std::uint64_t candidate) {
+    std::uint64_t observed = target.load();
+    while (candidate > observed &&
+          !target.compare_exchange_weak(observed, candidate)) {
+    }
 }
 
 const char* model_state_name(const masterai::ModelState state) noexcept {
@@ -38,6 +48,7 @@ const char* model_state_name(const masterai::ModelState state) noexcept {
         case masterai::ModelState::loaded: return "loaded";
         case masterai::ModelState::failed: return "failed";
         case masterai::ModelState::quarantined: return "quarantined";
+        case masterai::ModelState::downloading: return "downloading";
     }
     return "unknown";
 }
@@ -52,6 +63,7 @@ void show_usage() {
         << "  masterai serve [settings-file]\n"
         << "  masterai probe [storage-root]\n"
         << "  masterai scan-models [models-root]\n"
+        << "  masterai verify-models [models-root]\n"
         << "  masterai download-model <settings> <url> <revision> <sha256> "
            "<category> <model-id> <filename> --accept-license\n"
         << "  masterai benchmark-model <settings> <model-id> "
@@ -74,6 +86,7 @@ void show_usage() {
            "<rollback-root>\n"
         << "  masterai rollback <settings> <active> <receipt>\n"
         << "  masterai performance-probe [iterations]\n"
+        << "  masterai index-probe <project-root> [index-root]\n"
         << "  masterai security-status [runtime-root]\n";
 }
 
@@ -132,9 +145,12 @@ void configure(const std::filesystem::path& settings) {
         prompt("Approved curl executable (blank disables downloads)",
                configuration.curl_executable.string());
     configuration.allow_local_password_accounts =
-        prompt("Allow locally stored password accounts in addition to OS "
-               "sign-in? (y/N)",
-               configuration.allow_local_password_accounts ? "y" : "N") == "y";
+        prompt("Allow locally stored password accounts? (Y/n)",
+               configuration.allow_local_password_accounts ? "y" : "n") != "n";
+    configuration.allow_os_identity_accounts =
+        prompt("Also allow OS-integrated (Windows/PAM) sign-in accounts? "
+               "(y/N)",
+               configuration.allow_os_identity_accounts ? "y" : "N") == "y";
     masterai::ConfigurationManager::save_atomic(configuration, settings);
     std::cout << "Validated configuration saved to " << settings.string() << "\n";
 }
@@ -315,11 +331,139 @@ int main(int argc, char* argv[]) {
             std::cout << "Models discovered: " << models.size() << '\n';
             return 0;
         }
+        if (command == "verify-models") {
+            // The one place model files are actually hashed: scan() (used by
+            // every inventory/chat/download request) instead trusts the
+            // cache this command writes, so a page load never blocks on
+            // gigabytes of SHA-256 work. Run this after adding or changing
+            // models to confirm them and make them selectable again.
+            const std::filesystem::path root =
+                argc >= 3 ? argv[2] : std::filesystem::path("models");
+            const auto hardware = masterai::probe_hardware(root);
+            std::size_t total = 0U;
+            std::size_t failed = 0U;
+            const auto verified_count = masterai::ModelRegistry(root, hardware, 2048U)
+                .verify([&](const std::string& id, const bool ok,
+                            const std::string& message) {
+                    ++total;
+                    if (ok) {
+                        std::cout << "[" << total << "] " << id << " ... OK\n";
+                    } else {
+                        ++failed;
+                        std::cout << "[" << total << "] " << id
+                                  << " ... FAILED: " << message << '\n';
+                    }
+                });
+            std::cout << "Verified " << verified_count << " model(s), "
+                      << failed << " failed, out of " << total
+                      << " checked.\n";
+            return failed == 0U ? 0 : 1;
+        }
+        if (command == "index-probe") {
+            // Phase 15's representative large-project ceiling measurement:
+            // drives the real ProjectIndexer (the same class the running
+            // service's worker thread uses) through a full rebuild followed
+            // by a one-file incremental update over an actual project tree,
+            // and reports elapsed time, disk bytes, and this process's
+            // resident-memory delta/peak so the results are directly
+            // comparable to the configured memory ceiling.
+            if (argc < 3) {
+                throw std::runtime_error(
+                    "index-probe requires a project root and accepts an "
+                    "optional scratch index-root");
+            }
+            const std::filesystem::path project_root(argv[2]);
+            if (!std::filesystem::is_directory(project_root)) {
+                throw std::runtime_error("project root is not a directory");
+            }
+            const std::filesystem::path index_root =
+                argc >= 4 ? std::filesystem::path(argv[3])
+                          : std::filesystem::temp_directory_path() /
+                                "masterai-index-probe";
+            std::filesystem::remove_all(index_root);
+            const auto hardware = masterai::probe_hardware(project_root);
+            auto policy = masterai::MemoryBudgetManager::policy_for(
+                masterai::ResourceProfile::balanced, hardware);
+            masterai::MemoryBudgetManager memory(policy, hardware);
+            masterai::ProjectRecord project{"index-probe", "index-probe",
+                                            project_root};
+            masterai::ProjectIndexer index(project, index_root, memory);
+            std::atomic_bool cancellation{false};
+
+            std::atomic_bool sampling{true};
+            std::atomic<std::uint64_t> peak_resident{0};
+            const auto before = masterai::probe_process_resources();
+            std::thread sampler([&]() {
+                while (sampling.load()) {
+                    raise_atomic_maximum(
+                        peak_resident,
+                        masterai::probe_process_resources()
+                            .resident_memory_bytes);
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(50));
+                }
+            });
+            const auto start = std::chrono::steady_clock::now();
+            const auto rebuild_result = index.rebuild(cancellation, 0U);
+            const auto rebuild_elapsed = std::chrono::steady_clock::now() - start;
+
+            std::filesystem::path touched;
+            for (const auto& entry :
+                 std::filesystem::recursive_directory_iterator(project_root)) {
+                if (entry.is_regular_file()) {
+                    touched = entry.path();
+                    break;
+                }
+            }
+            std::chrono::steady_clock::duration update_elapsed{};
+            masterai::IndexStatus update_result;
+            if (!touched.empty()) {
+                const auto update_start = std::chrono::steady_clock::now();
+                update_result = index.update({touched}, cancellation);
+                update_elapsed =
+                    std::chrono::steady_clock::now() - update_start;
+            }
+            sampling.store(false);
+            sampler.join();
+            const auto after = masterai::probe_process_resources();
+
+            const auto rebuild_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    rebuild_elapsed)
+                    .count();
+            const auto update_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    update_elapsed)
+                    .count();
+            std::cout << std::fixed << std::setprecision(2);
+            std::cout << "filesDiscovered\t" << rebuild_result.files_discovered << '\n'
+                      << "filesIndexed\t" << rebuild_result.files_indexed << '\n'
+                      << "chunks\t" << rebuild_result.chunks << '\n'
+                      << "diskBytes\t" << rebuild_result.disk_bytes << '\n'
+                      << "rebuildElapsedMs\t" << rebuild_ms << '\n'
+                      << "incrementalUpdateElapsedMs\t" << update_ms << '\n'
+                      << "residentBeforeBytes\t" << before.resident_memory_bytes << '\n'
+                      << "residentAfterBytes\t" << after.resident_memory_bytes << '\n'
+                      << "residentPeakBytes\t" << peak_resident.load() << '\n'
+                      << "residentDeltaBytes\t"
+                      << (after.resident_memory_bytes >
+                                  before.resident_memory_bytes
+                              ? after.resident_memory_bytes -
+                                    before.resident_memory_bytes
+                              : 0U)
+                      << '\n'
+                      << "memoryHardLimitBytes\t" << policy.hard_limit_bytes
+                      << '\n';
+            std::filesystem::remove_all(index_root);
+            return 0;
+        }
         if (command == "download-model") {
-            if (argc != 10 || std::string(argv[9]) != "--accept-license") {
+            if (argc != 17 || std::string(argv[16]) != "--accept-license") {
                 throw std::runtime_error(
                     "download-model requires settings, URL, immutable revision, "
-                    "SHA-256, category, model ID, filename, and --accept-license");
+                    "SHA-256, category, model ID, filename, display name, "
+                    "architecture, quantization, license SPDX ID, size in bytes, "
+                    "minimum RAM MiB, recommended RAM MiB, and --accept-license");
             }
             const auto configuration =
                 masterai::ConfigurationManager::load(argv[2]);
@@ -330,9 +474,16 @@ int main(int argc, char* argv[]) {
             const std::filesystem::path category(argv[6]);
             const std::filesystem::path model_id(argv[7]);
             const std::filesystem::path filename(argv[8]);
+            const std::string display_name(argv[9]);
+            const std::string architecture(argv[10]);
+            const std::string quantization(argv[11]);
+            const std::string license_spdx(argv[12]);
             static const std::set<std::string> categories{
                 "general-programming", "code-completion", "code-review",
                 "debugging", "documentation", "embeddings-code-search"};
+            static const std::set<std::string> licenses{
+                "Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause",
+                "CC-BY-4.0", "Llama-3.1", "Llama-3.2", "Gemma"};
             if (filename.filename() != filename) {
                 throw std::runtime_error("download filename must be a leaf name");
             }
@@ -342,6 +493,44 @@ int main(int argc, char* argv[]) {
                 throw std::runtime_error(
                     "download category or model ID is invalid");
             }
+            const auto is_safe_identifier = [](const std::string& value) {
+                if (value.empty() || value.size() > 96U || value.front() == '.' ||
+                    value.back() == '.') {
+                    return false;
+                }
+                return std::all_of(value.begin(), value.end(), [](const char c) {
+                    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                           (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+                           c == '.';
+                });
+            };
+            if (display_name.empty() || display_name.size() > 160U ||
+                !is_safe_identifier(architecture) ||
+                !is_safe_identifier(quantization) ||
+                licenses.find(license_spdx) == licenses.end()) {
+                throw std::runtime_error(
+                    "download display name, architecture, quantization, or "
+                    "license SPDX ID is invalid");
+            }
+            const auto size_bytes = std::stoull(argv[13]);
+            const auto minimum_ram_mib = std::stoull(argv[14]);
+            const auto recommended_ram_mib = std::stoull(argv[15]);
+            if (size_bytes == 0U || minimum_ram_mib == 0U ||
+                recommended_ram_mib < minimum_ram_mib) {
+                throw std::runtime_error(
+                    "download size or RAM recommendation is invalid");
+            }
+            const auto model_directory =
+                configuration.models_root / category / model_id;
+            // Written now, before the transfer runs, exactly like the HTTP
+            // download route -- without this, ModelRegistry::scan() never
+            // recognizes the fetched file as a model at all, so it could
+            // never reach Ready and nothing could actually chat with it.
+            masterai::write_model_manifest(
+                model_directory, model_id.string(), display_name,
+                category.string(), architecture, quantization,
+                minimum_ram_mib, recommended_ram_mib, filename.string(),
+                size_bytes, argv[5], argv[3], argv[4], license_spdx);
             masterai::RecordStore records(configuration.runtime_root / "database");
             records.open();
             masterai::DownloadManager downloads(
@@ -349,8 +538,8 @@ int main(int argc, char* argv[]) {
                 records);
             const auto job = downloads.create(
                 {argv[3], argv[4], argv[5],
-                 configuration.models_root / category / model_id / filename,
-                 true});
+                 model_directory / filename, true, minimum_ram_mib,
+                 recommended_ram_mib});
             std::cout << "Download job " << job.id()
                       << " queued; existing partial data will be resumed.\n";
             const auto result = downloads.run(job.id(), stop_requested);

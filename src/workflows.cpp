@@ -280,6 +280,34 @@ void ProjectCatalog::persist(const ProjectRecord& project) {
 
 ChatStore::ChatStore(RecordStore& records) : records_(&records) { restore(); }
 
+// Derives a short sidebar title from a user's first message: single line,
+// collapsed whitespace, truncated with an ellipsis so long prompts don't
+// blow out the sidebar layout.
+namespace {
+std::string derive_chat_title(const std::string& content) {
+    std::string collapsed;
+    collapsed.reserve(content.size());
+    bool last_was_space = false;
+    for (const char ch : content) {
+        const bool is_space = ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
+        if (is_space) {
+            if (!last_was_space && !collapsed.empty()) collapsed.push_back(' ');
+            last_was_space = true;
+        } else {
+            collapsed.push_back(ch);
+            last_was_space = false;
+        }
+    }
+    while (!collapsed.empty() && collapsed.back() == ' ') collapsed.pop_back();
+    constexpr std::size_t kMaxTitleLength = 60U;
+    if (collapsed.size() > kMaxTitleLength) {
+        collapsed.resize(kMaxTitleLength);
+        collapsed += "...";
+    }
+    return collapsed.empty() ? "New chat" : collapsed;
+}
+}  // namespace
+
 ChatRecord ChatStore::create(const std::string& owner_id,
                              const std::string& project_id,
                              const std::string& model_id) {
@@ -289,7 +317,8 @@ ChatRecord ChatStore::create(const std::string& owner_id,
         throw std::invalid_argument("chat identity is outside policy");
     }
     const auto id = random_id();
-    ChatRecord record{id, owner_id, project_id, model_id, {}};
+    ChatRecord record{id, owner_id, project_id, model_id, "New chat",
+                      epoch_seconds(), {}};
     chats_.emplace(id, record);
     persist(record);
     return record;
@@ -305,6 +334,9 @@ void ChatStore::append(const std::string& chat_id, const ChatRole role,
     if (content.empty() || content.size() > 1024U * 1024U ||
         found->second.messages.size() >= 10000U) {
         throw std::invalid_argument("chat message is outside policy");
+    }
+    if (role == ChatRole::user && found->second.messages.empty()) {
+        found->second.title = derive_chat_title(content);
     }
     found->second.messages.push_back(ChatMessage{role, content, epoch_seconds()});
     persist(found->second);
@@ -327,26 +359,76 @@ std::vector<ChatRecord> ChatStore::list_for_owner(
     for (const auto& item : chats_) {
         if (item.second.owner_id == owner_id) result.push_back(item.second);
     }
+    std::sort(result.begin(), result.end(),
+              [](const ChatRecord& left, const ChatRecord& right) {
+                  return left.created_at_epoch_seconds >
+                         right.created_at_epoch_seconds;
+              });
     return result;
 }
 
 void ChatStore::restore() {
     for (const auto& item : records_->list("chats")) {
         const auto fields = unpack(item.second);
-        if (fields.size() < 4U || (fields.size() - 4U) % 3U != 0U ||
+        // The 6-field header (owner, project, model, title, createdAt,
+        // count) was added after chats already existed on some installs; a
+        // record written under the prior 4-field header (owner, project,
+        // model, count) always has a total field count congruent to 1 mod 3
+        // (4 + 3*messages), while the current header always lands on 0 mod 3
+        // (6 + 3*messages) -- that split is exact and content-independent,
+        // so it safely tells the two schemas apart without guessing.
+        const bool current_format =
+            fields.size() >= 6U && fields.size() % 3U == 0U;
+        const bool legacy_format =
+            !current_format && fields.size() >= 4U && fields.size() % 3U == 1U;
+        if ((!current_format && !legacy_format) ||
             !safe_identifier(item.first) || !safe_identifier(fields[0]) ||
             !safe_identifier(fields[1]) || !safe_identifier(fields[2])) {
             throw std::runtime_error("persisted chat record is invalid");
         }
-        ChatRecord chat{item.first, fields[0], fields[1], fields[2], {}};
-        const auto count = std::stoull(fields[3]);
-        if (count != (fields.size() - 4U) / 3U || count > 10000U) {
+        ChatRecord chat;
+        chat.id = item.first;
+        chat.owner_id = fields[0];
+        chat.project_id = fields[1];
+        chat.model_id = fields[2];
+        std::size_t message_start;
+        std::uint64_t declared_count;
+        if (current_format) {
+            chat.title = fields[3];
+            chat.created_at_epoch_seconds = std::stoull(fields[4]);
+            declared_count = std::stoull(fields[5]);
+            message_start = 6U;
+            if (declared_count != (fields.size() - 6U) / 3U) {
+                throw std::runtime_error("persisted chat message count is invalid");
+            }
+        } else {
+            declared_count = std::stoull(fields[3]);
+            message_start = 4U;
+            if (declared_count != (fields.size() - 4U) / 3U) {
+                throw std::runtime_error("persisted chat message count is invalid");
+            }
+        }
+        if (declared_count > 10000U) {
             throw std::runtime_error("persisted chat message count is invalid");
         }
-        for (std::size_t index = 4U; index < fields.size(); index += 3U) {
+        for (std::size_t index = message_start; index < fields.size(); index += 3U) {
             chat.messages.push_back(
                 {parse_role(fields[index]), fields[index + 1U],
                  std::stoull(fields[index + 2U])});
+        }
+        if (!current_format) {
+            // Upgrade in memory using the same title/timestamp rules a new
+            // chat gets, then persist once so this record reads as
+            // current-format from now on.
+            for (const auto& message : chat.messages) {
+                if (message.role == ChatRole::user) {
+                    chat.title = derive_chat_title(message.content);
+                    break;
+                }
+            }
+            chat.created_at_epoch_seconds = chat.messages.empty()
+                ? epoch_seconds() : chat.messages.front().created_at_epoch_seconds;
+            persist(chat);
         }
         chats_.emplace(chat.id, std::move(chat));
     }
@@ -355,7 +437,8 @@ void ChatStore::restore() {
 void ChatStore::persist(const ChatRecord& chat) {
     if (records_ == nullptr) return;
     std::vector<std::string> fields{
-        chat.owner_id, chat.project_id, chat.model_id,
+        chat.owner_id, chat.project_id, chat.model_id, chat.title,
+        std::to_string(chat.created_at_epoch_seconds),
         std::to_string(chat.messages.size())};
     for (const auto& message : chat.messages) {
         fields.push_back(role_name(message.role));

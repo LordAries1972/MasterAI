@@ -74,8 +74,23 @@ std::string read_bounded_file(const std::filesystem::path& path) {
     return content.str();
 }
 
+// Thrown by load_manifest() when a manifest parses and validates cleanly but
+// its model file hasn't landed on disk yet -- carries the already-parsed
+// manifest so scan() can still populate the inventory row's name/category
+// instead of leaving it blank the way a genuinely invalid manifest would.
+class ModelFileIncomplete final : public std::runtime_error {
+public:
+    ModelFileIncomplete(ModelManifest manifest_value, const std::string& message)
+        : std::runtime_error(message), manifest_(std::move(manifest_value)) {}
+    const ModelManifest& manifest() const noexcept { return manifest_; }
+
+private:
+    ModelManifest manifest_;
+};
+
 ModelManifest load_manifest(const std::filesystem::path& model_directory,
-                            const std::string& expected_category) {
+                            const std::string& expected_category,
+                            const bool verify_hash) {
     const JsonValue root = parse_json(read_bounded_file(model_directory / "manifest.json"));
     require_only(root, {"schemaVersion", "id", "displayName", "category",
                         "model", "requirements", "files", "backends",
@@ -167,21 +182,165 @@ ModelManifest load_manifest(const std::filesystem::path& model_directory,
     }
 
     const std::filesystem::path model_file = model_directory / manifest.model_file;
-    if (!is_path_within(model_directory, model_file) ||
-        !std::filesystem::is_regular_file(model_file) ||
+    if (!is_path_within(model_directory, model_file)) {
+        throw std::runtime_error("model file escapes its model directory");
+    }
+    // A queued/in-progress download writes this manifest before the transfer
+    // starts (see create_download in workload_http.cpp), so a model file that
+    // simply hasn't arrived yet is an expected, temporary condition -- not a
+    // corrupt or tampered manifest. Report it distinctly (ModelState::downloading,
+    // carrying the manifest we already parsed) so the inventory can still show
+    // the model's name instead of a blank "invalid" row.
+    if (!std::filesystem::exists(model_file)) {
+        throw ModelFileIncomplete(manifest, "model file has not finished downloading yet");
+    }
+    if (!std::filesystem::is_regular_file(model_file) ||
         std::filesystem::is_symlink(model_file)) {
-        throw std::runtime_error("model file is missing or escapes its model directory");
+        throw std::runtime_error("model file is not a regular file");
     }
     if (std::filesystem::file_size(model_file) != manifest.model_size_bytes) {
         throw std::runtime_error("model file size does not match its manifest");
     }
-    if (!constant_time_equal(sha256_file_hex(model_file), manifest.model_sha256)) {
+    // Hashing a multi-gigabyte GGUF file is far too slow to repeat on every
+    // inventory/chat/download page load (see ModelRegistry::scan(), which
+    // passes verify_hash=false and instead consults the on-disk verification
+    // cache). Only the `masterai verify-models` CLI path -- ModelRegistry::
+    // verify() -- asks for the real hash here.
+    if (verify_hash &&
+        !constant_time_equal(sha256_file_hex(model_file), manifest.model_sha256)) {
         throw std::runtime_error("model file SHA-256 does not match its manifest");
     }
     return manifest;
 }
 
+// Escapes embedded JSON text for the manifest/cache strings built below.
+// Kept local (rather than shared with the HTTP layer's own json_escape)
+// because this file has no dependency on server_internal.hpp and the CLI
+// caller has none at all -- duplicated the same way allowed_categories/
+// allowed_licenses already are here versus workload_http.cpp.
+std::string manifest_json_escape(const std::string& value) {
+    std::string output;
+    for (const char character : value) {
+        if (character == '"' || character == '\\') output.push_back('\\');
+        output.push_back(character);
+    }
+    return output;
+}
+
+// Name of the cache file (see VerificationCache below) that records which
+// model files have already had their SHA-256 confirmed against their
+// manifest, so ModelRegistry::scan() never has to hash gigabytes of model
+// data just to answer a page load.
+constexpr const char* kVerificationCacheFile = ".verified-cache.json";
+
+struct VerifiedEntry {
+    std::string sha256;
+    std::uint64_t size_bytes{0};
+};
+
+// Reads the verification cache written by ModelRegistry::verify(). Absent,
+// empty, or corrupt cache files are treated as "nothing verified yet" --
+// every model simply reports as unverified until an operator runs
+// `masterai verify-models`, rather than failing scan() outright.
+std::map<std::string, VerifiedEntry> read_verification_cache(
+    const std::filesystem::path& model_root) {
+    std::map<std::string, VerifiedEntry> cache;
+    const auto path = model_root / kVerificationCacheFile;
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error)) {
+        return cache;
+    }
+    try {
+        const JsonValue root = parse_json(read_bounded_file(path));
+        for (const auto& item : root.required("models").as_object()) {
+            VerifiedEntry entry;
+            entry.sha256 = item.second.required("sha256").as_string();
+            entry.size_bytes = positive_number(item.second, "sizeBytes");
+            cache.emplace(item.first, std::move(entry));
+        }
+    } catch (const std::exception&) {
+        // A hand-edited or truncated cache file is no different from a
+        // missing one: everything just re-reports as unverified until the
+        // next `masterai verify-models` run rewrites it cleanly.
+        return {};
+    }
+    return cache;
+}
+
+void write_verification_cache(
+    const std::filesystem::path& model_root,
+    const std::map<std::string, VerifiedEntry>& cache) {
+    std::string body{"{\"schemaVersion\":1,\"models\":{"};
+    bool first = true;
+    for (const auto& [id, entry] : cache) {
+        if (!first) body += ",";
+        first = false;
+        body += "\"" + manifest_json_escape(id) + "\":{\"sha256\":\"" +
+                manifest_json_escape(entry.sha256) + "\",\"sizeBytes\":" +
+                std::to_string(entry.size_bytes) + "}";
+    }
+    body += "}}";
+    const auto path = model_root / kVerificationCacheFile;
+    const auto temporary =
+        std::filesystem::path(path.string() + ".tmp");
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        stream << body;
+        if (!stream.good()) {
+            throw std::runtime_error("verification cache could not be written");
+        }
+    }
+    std::error_code error;
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        throw std::runtime_error("verification cache could not be committed");
+    }
+}
+
 }  // namespace
+
+void write_model_manifest(const std::filesystem::path& model_directory,
+                          const std::string& model_id,
+                          const std::string& display_name,
+                          const std::string& category,
+                          const std::string& architecture,
+                          const std::string& quantization,
+                          const std::uint64_t minimum_ram_mib,
+                          const std::uint64_t recommended_ram_mib,
+                          const std::string& filename,
+                          const std::uint64_t size_bytes,
+                          const std::string& sha256,
+                          const std::string& source_url,
+                          const std::string& revision,
+                          const std::string& license_spdx) {
+    std::filesystem::create_directories(model_directory);
+    std::ofstream manifest_stream(model_directory / "manifest.json",
+                                  std::ios::binary | std::ios::trunc);
+    manifest_stream <<
+        "{\"schemaVersion\":1,\"id\":\"" + manifest_json_escape(model_id) +
+        "\",\"displayName\":\"" + manifest_json_escape(display_name) +
+        "\",\"category\":\"" + manifest_json_escape(category) +
+        "\",\"model\":{\"format\":\"gguf\",\"architecture\":\"" +
+        manifest_json_escape(architecture) + "\",\"quantization\":\"" +
+        manifest_json_escape(quantization) +
+        "\"},\"requirements\":{\"minimumRamMiB\":" +
+        std::to_string(minimum_ram_mib) + ",\"recommendedRamMiB\":" +
+        std::to_string(recommended_ram_mib) + ",\"estimatedDiskMiB\":" +
+        std::to_string((size_bytes + 1024ULL * 1024ULL - 1ULL) /
+                       (1024ULL * 1024ULL)) +
+        "},\"files\":[{\"path\":\"" + manifest_json_escape(filename) +
+        "\",\"sizeBytes\":" + std::to_string(size_bytes) +
+        ",\"sha256\":\"" + manifest_json_escape(sha256) +
+        "\"}],\"backends\":[\"llama-cpp\"],\"provenance\":{\"sourceUrl\":\"" +
+        manifest_json_escape(source_url) + "\",\"revision\":\"" +
+        manifest_json_escape(revision) +
+        "\"},\"license\":{\"spdx\":\"" + manifest_json_escape(license_spdx) +
+        "\",\"accepted\":true},\"hardware\":{\"cpuFeatures\":[],"
+        "\"gpuBackend\":\"\"}}";
+    if (!manifest_stream.good()) {
+        throw std::runtime_error("manifest could not be written");
+    }
+}
 
 ModelRegistry::ModelRegistry(std::filesystem::path model_root,
                              HardwareInfo hardware,
@@ -196,6 +355,10 @@ std::vector<ModelRecord> ModelRegistry::scan() const {
     if (root_error || !std::filesystem::is_directory(root)) {
         return records;
     }
+    // Read once per scan() call rather than per model: this is a single
+    // small JSON file, versus the gigabytes of hashing it lets every model
+    // below skip.
+    const auto verified = read_verification_cache(root);
 
     for (const auto& category_entry : std::filesystem::directory_iterator(root)) {
         if (!category_entry.is_directory() || category_entry.is_symlink()) {
@@ -210,10 +373,39 @@ std::vector<ModelRecord> ModelRegistry::scan() const {
             if (!model_entry.is_directory() || model_entry.is_symlink()) {
                 continue;
             }
+            // A directory with no manifest.json was never a tracked
+            // download or model at all -- most commonly leftover litter from
+            // an earlier, invalid session (a stray folder, an aborted
+            // experiment). create_download() always writes the manifest
+            // before a transfer starts, so any real, known model always has
+            // one; skip anything that doesn't instead of surfacing it as a
+            // confusing "invalid" inventory row.
+            if (!std::filesystem::is_regular_file(model_entry.path() /
+                                                   "manifest.json")) {
+                continue;
+            }
             ModelRecord record;
             record.directory = model_entry.path();
             try {
-                record.manifest = load_manifest(record.directory, category);
+                // verify_hash=false: never hash the model file here. Whether
+                // it's trusted as verified comes entirely from the cache
+                // lookup below, populated only by `masterai verify-models`.
+                record.manifest =
+                    load_manifest(record.directory, category, /*verify_hash=*/false);
+                const auto cached = verified.find(record.manifest.id);
+                const bool is_verified =
+                    cached != verified.end() &&
+                    cached->second.sha256 == record.manifest.model_sha256 &&
+                    cached->second.size_bytes == record.manifest.model_size_bytes;
+                if (!is_verified) {
+                    record.state = ModelState::unverified;
+                    record.diagnostic =
+                        "This model has not been hash-verified yet. Run "
+                        "'.\\scripts\\rehash.ps1' to verify it and make it "
+                        "available.";
+                    records.push_back(std::move(record));
+                    continue;
+                }
                 bool features_available = true;
                 for (const auto& feature : record.manifest.required_cpu_features) {
                     if (hardware_.cpu_features.find(feature) ==
@@ -243,6 +435,10 @@ std::vector<ModelRecord> ModelRegistry::scan() const {
                         "Manifest, license, provenance, size, digest, and hardware "
                         "suitability checks passed.";
                 }
+            } catch (const ModelFileIncomplete& incomplete) {
+                record.manifest = incomplete.manifest();
+                record.state = ModelState::downloading;
+                record.diagnostic = incomplete.what();
             } catch (const std::exception& exception) {
                 record.state = ModelState::invalid;
                 record.diagnostic = exception.what();
@@ -251,6 +447,60 @@ std::vector<ModelRecord> ModelRegistry::scan() const {
         }
     }
     return records;
+}
+
+std::size_t ModelRegistry::verify(
+    const std::function<void(const std::string&, bool, const std::string&)>&
+        progress) const {
+    std::error_code root_error;
+    const auto root = std::filesystem::weakly_canonical(model_root_, root_error);
+    if (root_error || !std::filesystem::is_directory(root)) {
+        return 0U;
+    }
+    // Start from what's already verified so a partial/interrupted run, or
+    // one where only some models changed on disk, doesn't discard hashes
+    // that are still perfectly valid.
+    auto cache = read_verification_cache(root);
+    std::size_t verified_count = 0U;
+
+    for (const auto& category_entry : std::filesystem::directory_iterator(root)) {
+        if (!category_entry.is_directory() || category_entry.is_symlink()) {
+            continue;
+        }
+        const std::string category = category_entry.path().filename().string();
+        if (allowed_categories.find(category) == allowed_categories.end()) {
+            continue;
+        }
+        for (const auto& model_entry :
+             std::filesystem::directory_iterator(category_entry.path())) {
+            if (!model_entry.is_directory() || model_entry.is_symlink() ||
+                !std::filesystem::is_regular_file(model_entry.path() /
+                                                   "manifest.json")) {
+                continue;
+            }
+            const auto directory = model_entry.path();
+            const std::string id = directory.filename().string();
+            try {
+                // verify_hash=true: this is the one place a model file's
+                // SHA-256 actually gets computed.
+                const auto manifest =
+                    load_manifest(directory, category, /*verify_hash=*/true);
+                cache[manifest.id] =
+                    VerifiedEntry{manifest.model_sha256, manifest.model_size_bytes};
+                ++verified_count;
+                if (progress) progress(manifest.id, true, "");
+            } catch (const ModelFileIncomplete&) {
+                // Not yet downloaded -- nothing to verify, and not an error;
+                // leave any prior cache entry (there shouldn't be one) alone
+                // and say nothing rather than reporting a false failure.
+            } catch (const std::exception& exception) {
+                cache.erase(id);
+                if (progress) progress(id, false, exception.what());
+            }
+        }
+    }
+    write_verification_cache(root, cache);
+    return verified_count;
 }
 
 SuitabilityResult assess_model(const ModelManifest& manifest,

@@ -1,0 +1,147 @@
+[
+  {
+    "id": "dbc0a401-3ead-47bf-aa84-a8b4a758dfed",
+    "taskId": "b65e082f-7b48-4312-9699-0ac1ce591967",
+    "objective": "GOAL\nWe now need to add 1GB, 3GB, 5GB & 7GB ram support options into our ram selector for viable models.\n\nWe also need to have each section of the options page, be put into their own seperate sections with options on the sidebar to view them.",
+    "command": "proposeProjectFix",
+    "providerId": "claude",
+    "createdAt": "2026-07-30T12:46:32.038Z",
+    "updatedAt": "2026-07-30T12:47:09.139Z",
+    "paused": false,
+    "cancelled": false,
+    "nodes": [
+      {
+        "id": "b65e082f-7b48-4312-9699-0ac1ce591967:proposeProjectFix-1",
+        "operationClass": "retrieve_context",
+        "objective": "GOAL\nWe now need to add 1GB, 3GB, 5GB & 7GB ram support options into our ram selector for viable models.\n\nWe also need to have each section of the options page, be put into their own seperate sections with options on the sidebar to view them.",
+        "reason": "Select real workspace evidence before changing files.",
+        "prerequisites": [],
+        "expectedEvidence": [
+          "Workspace file content and hashes"
+        ],
+        "affectedFiles": [
+          "src/workload_http.cpp"
+        ],
+        "risk": "low",
+        "reversibility": "fully_reversible",
+        "requiresUserApproval": false,
+        "requiresProviderCall": false,
+        "requiresValidation": false,
+        "retryLimit": 1,
+        "status": "completed",
+        "owner": "local-agent",
+        "inputs": [
+          "src/workload_http.cpp"
+        ],
+        "outputs": [],
+        "evidence": [
+          "src/workload_http.cpp"
+        ],
+        "retryCount": 0,
+        "userInterventionRequired": false,
+        "startedAt": "2026-07-30T12:46:32.058Z",
+        "completedAt": "2026-07-30T12:46:35.288Z",
+        "durationMs": 3230
+      },
+      {
+        "id": "b65e082f-7b48-4312-9699-0ac1ce591967:proposeProjectFix-2",
+        "operationClass": "ask_provider",
+        "objective": "GOAL\nWe now need to add 1GB, 3GB, 5GB & 7GB ram support options into our ram selector for viable models.\n\nWe also need to have each section of the options page, be put into their own seperate sections with options on the sidebar to view them.",
+        "reason": "Generate a bounded change from the selected evidence.",
+        "prerequisites": [
+          "b65e082f-7b48-4312-9699-0ac1ce591967:proposeProjectFix-1"
+        ],
+        "expectedEvidence": [
+          "Schema-validated provider response"
+        ],
+        "affectedFiles": [
+          "src/workload_http.cpp"
+        ],
+        "risk": "low",
+        "reversibility": "fully_reversible",
+        "requiresUserApproval": false,
+        "requiresProviderCall": true,
+        "requiresValidation": false,
+        "retryLimit": 1,
+        "status": "failed",
+        "owner": "provider",
+        "inputs": [
+          "src/workload_http.cpp"
+        ],
+        "outputs": [
+          "Request was aborted."
+        ],
+        "evidence": [],
+        "retryCount": 0,
+        "userInterventionRequired": false,
+        "startedAt": "2026-07-30T12:46:35.288Z",
+        "completedAt": "2026-07-30T12:47:09.139Z"
+      },
+      {
+        "id": "b65e082f-7b48-4312-9699-0ac1ce591967:proposeProjectFix-3",
+        "operationClass": "propose_edit",
+        "objective": "GOAL\nWe now need to add 1GB, 3GB, 5GB & 7GB ram support options into our ram selector for viable models.\n\nWe also need to have each section of the options page, be put into their own seperate sections with options on the sidebar to view them.",
+        "reason": "Construct guarded file patches.",
+        "prerequisites": [
+          "b65e082f-7b48-4312-9699-0ac1ce591967:proposeProjectFix-2"
+        ],
+        "expectedEvidence": [
+          "Validated patch or explicit no-change result"
+        ],
+        "affectedFiles": [
+          "src/workload_http.cpp"
+        ],
+        "risk": "medium",
+        "reversibility": "fully_reversible",
+        "requiresUserApproval": false,
+        "requiresProviderCall": false,
+        "requiresValidation": false,
+        "retryLimit": 1,
+        "status": "blocked",
+        "owner": "local-agent",
+        "inputs": [
+          "src/workload_http.cpp"
+        ],
+        "outputs": [
+          "Blocked by an earlier operation failure."
+        ],
+        "evidence": [],
+        "retryCount": 0,
+        "userInterventionRequired": false
+      },
+      {
+        "id": "b65e082f-7b48-4312-9699-0ac1ce591967:proposeProjectFix-4",
+        "operationClass": "apply_approved_edit",
+        "objective": "GOAL\nWe now need to add 1GB, 3GB, 5GB & 7GB ram support options into our ram selector for viable models.\n\nWe also need to have each section of the options page, be put into their own seperate sections with options on the sidebar to view them.",
+        "reason": "Apply only the locally validated patch set.",
+        "prerequisites": [
+          "b65e082f-7b48-4312-9699-0ac1ce591967:proposeProjectFix-3"
+        ],
+        "expectedEvidence": [
+          "Atomic write result",
+          "Rollback batch"
+        ],
+        "affectedFiles": [
+          "src/workload_http.cpp"
+        ],
+        "risk": "high",
+        "reversibility": "fully_reversible",
+        "requiresUserApproval": false,
+        "requiresProviderCall": false,
+        "requiresValidation": true,
+        "retryLimit": 1,
+        "status": "blocked",
+        "owner": "local-agent",
+        "inputs": [
+          "src/workload_http.cpp"
+        ],
+        "outputs": [
+          "Blocked by an earlier operation failure."
+        ],
+        "evidence": [],
+        "retryCount": 0,
+        "userInterventionRequired": false
+      }
+    ]
+  }
+]

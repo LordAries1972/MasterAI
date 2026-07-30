@@ -250,11 +250,18 @@ void test_verified_model_promotion_and_load_recheck() {
         "\"hardware\":{\"cpuFeatures\":[],\"gpuBackend\":\"\"}}";
     write_text(directory / "manifest.json", manifest);
 
-    std::clog << "  scanning registry\n";
+    std::clog << "  verifying registry\n";
     masterai::HardwareInfo hardware;
     hardware.available_ram_mib = 8192U;
-    const auto models =
-        masterai::ModelRegistry(model_root, hardware, 1024U).scan();
+    const masterai::ModelRegistry registry(model_root, hardware, 1024U);
+    std::size_t verified_count = 0U;
+    registry.verify([&](const std::string&, const bool ok, const std::string&) {
+        if (ok) ++verified_count;
+    });
+    require(verified_count == 1U, "verify() did not confirm the fixture model");
+
+    std::clog << "  scanning registry\n";
+    const auto models = registry.scan();
     require(models.size() == 1U &&
             models.front().state == masterai::ModelState::ready,
             "verified suitable model was not promoted to Ready");
@@ -1340,6 +1347,256 @@ void test_phase_fifteen_disk_backed_indexing() {
             "branch-switch notify route did not promote a full-scan trigger");
 }
 
+// Exercises the native Phase 15 live adapter end to end: a real ProjectWatcher
+// observing a real project directory on disk, with no HTTP layer and no
+// external editor/watcher/VCS process involved, must itself notice a file
+// save and a `.git/HEAD` branch switch and forward them into a real
+// ProjectIndexService.
+void test_phase_fifteen_project_watcher() {
+    TemporaryDirectory temporary;
+    const auto project_root = temporary.path() / "watched-project";
+    std::filesystem::create_directories(project_root / "src");
+    std::filesystem::create_directories(project_root / ".git");
+    write_text(project_root / "src" / "one.cpp",
+               "// one\nint watcher_symbol = 1;\n");
+    write_text(project_root / ".git" / "HEAD", "ref: refs/heads/main\n");
+
+    masterai::RecordStore records(temporary.path() / "watcher-database");
+    records.open();
+    masterai::ProjectCatalog catalog(temporary.path(), records);
+    const auto project =
+        catalog.add("watched", "Watched project", project_root);
+
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware,
+        512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+    masterai::ProjectIndexService service(
+        temporary.path() / "watcher-indexes", memory, 2U);
+
+    // Constructing the watcher starts its background thread; it must find
+    // and index the project on its own, with nobody calling
+    // request_rebuild/request_update directly.
+    masterai::ProjectWatcher watcher(catalog, service);
+
+    std::optional<masterai::IndexServiceStatus> status;
+    for (unsigned int attempt = 0U; attempt < 400U; ++attempt) {
+        status = service.status("watched");
+        if (status && status->state == masterai::IndexJobState::ready &&
+            status->index.generation >= 1U) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    require(status && status->state == masterai::IndexJobState::ready &&
+                status->index.files_indexed >= 1U,
+            "ProjectWatcher did not discover and index a new project on its own");
+    const auto initial_generation = status->index.generation;
+
+    write_text(project_root / "src" / "two.cpp",
+               "// two\nint second_watcher_symbol = watcher_symbol;\n");
+    for (unsigned int attempt = 0U; attempt < 400U; ++attempt) {
+        status = service.status("watched");
+        if (status && status->state == masterai::IndexJobState::ready &&
+            status->index.generation > initial_generation) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    require(status && status->index.generation > initial_generation &&
+                status->trigger == masterai::IndexTrigger::watcher &&
+                status->index.files_indexed >= 1U,
+            "ProjectWatcher did not forward an observed file save");
+    const auto after_save_generation = status->index.generation;
+
+    write_text(project_root / ".git" / "HEAD", "ref: refs/heads/feature\n");
+    for (unsigned int attempt = 0U; attempt < 400U; ++attempt) {
+        status = service.status("watched");
+        if (status && status->state == masterai::IndexJobState::ready &&
+            status->trigger == masterai::IndexTrigger::branch_switch &&
+            status->index.generation > after_save_generation) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    require(status && status->trigger == masterai::IndexTrigger::branch_switch &&
+                status->index.generation > after_save_generation,
+            "ProjectWatcher did not forward a .git/HEAD branch switch as a "
+            "full-scan trigger");
+}
+
+// Verifies Phase 16 deadline-bound hybrid retrieval: exact-symbol strategy
+// selection and fusion/dedup across an identifier and its literal text,
+// live re-read of a project's current index generation with no planner-side
+// caching (so index/membership changes are reflected on the very next
+// call), a near-zero deadline that returns quickly with partial evidence
+// instead of blocking, context-budget capping with full disclosure of what
+// was included versus omitted, and query-trace disclosure recording that
+// survives a later successful finish().
+void test_phase_sixteen_deadline_bound_retrieval() {
+    TemporaryDirectory temporary;
+    const auto project_root = temporary.path() / "retrieval-project";
+    std::filesystem::create_directories(project_root / "src");
+    write_text(project_root / "src" / "one.cpp",
+               "// one\nint retrieval_marker_symbol = 41;\n");
+    masterai::ProjectRecord project{"phase16", "Phase 16", project_root};
+
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware,
+        512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+    masterai::ProjectIndexService service(
+        temporary.path() / "retrieval-indexes", memory, 2U);
+
+    masterai::RetrievalPlanner planner(service);
+    masterai::RetrievalRequest request;
+    request.project = project;
+    request.query_text = "please look at retrieval_marker_symbol";
+    request.deadline = std::chrono::milliseconds(2000);
+    request.maximum_context_bytes = 16U * 1024U;
+    request.maximum_chunks_per_source = 6U;
+    request.maximum_total_chunks = 20U;
+
+    const auto before_index = planner.retrieve(request);
+    require(before_index.context_text.empty() &&
+                before_index.disclosure.empty() && !before_index.partial,
+            "retrieval fabricated evidence for a project with no published index");
+
+    require(service.request_rebuild(project),
+            "index rebuild was not admitted for the retrieval fixture");
+    std::optional<masterai::IndexServiceStatus> status;
+    for (unsigned int attempt = 0U; attempt < 200U; ++attempt) {
+        status = service.status(project.id);
+        if (status && status->state == masterai::IndexJobState::ready) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    require(status && status->state == masterai::IndexJobState::ready,
+            "retrieval fixture index did not settle before retrieval");
+
+    const auto found = planner.retrieve(request);
+    require(!found.partial && found.strategy == "exact_symbol" &&
+                !found.disclosure.empty() &&
+                found.context_text.find("retrieval_marker_symbol") !=
+                    std::string::npos &&
+                found.context_text.find("src") != std::string::npos,
+            "exact-symbol retrieval did not surface the indexed evidence");
+    require(found.disclosure.front().included &&
+                found.disclosure.front().index_generation ==
+                    status->index.generation,
+            "retrieval disclosure omitted the index generation it read from");
+
+    // Fusion/dedup relies on canonical chunk identity: the same unchanged
+    // chunk returned by an exact-symbol lookup and a literal-text lookup
+    // must carry the same id, or the planner's fused map (keyed by id)
+    // could not collapse them into one disclosure row instead of two.
+    const auto symbol_hit =
+        service.search_symbol(project.id, "retrieval_marker_symbol", 8U);
+    const auto text_hit =
+        service.search_text(project.id, "retrieval_marker_symbol", 8U);
+    require(symbol_hit.available && text_hit.available &&
+                symbol_hit.chunks.size() == 1U && text_hit.chunks.size() == 1U &&
+                symbol_hit.chunks.front().id == text_hit.chunks.front().id,
+            "index search results lost the canonical chunk identity retrieval "
+            "fusion depends on");
+
+    // No planner-side caching: updating the index and calling retrieve again
+    // with the same planner instance must see the new generation immediately.
+    write_text(project_root / "src" / "one.cpp",
+               "// one\nint retrieval_marker_symbol = 41;\n"
+               "int second_retrieval_marker = 2;\n");
+    bool update_admitted = false;
+    for (unsigned int attempt = 0U; attempt < 200U && !update_admitted;
+         ++attempt) {
+        update_admitted = service.request_update(
+            project, {project_root / "src" / "one.cpp"},
+            masterai::IndexTrigger::save);
+        if (!update_admitted) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    require(update_admitted, "retrieval fixture update was not admitted");
+    for (unsigned int attempt = 0U; attempt < 200U; ++attempt) {
+        status = service.status(project.id);
+        if (status && status->state == masterai::IndexJobState::ready &&
+            status->index.generation > found.disclosure.front().index_generation) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    masterai::RetrievalRequest updated_request = request;
+    updated_request.query_text = "second_retrieval_marker";
+    const auto after_update = planner.retrieve(updated_request);
+    require(!after_update.disclosure.empty() &&
+                after_update.disclosure.front().index_generation >
+                    found.disclosure.front().index_generation,
+            "retrieval read a stale index generation after an incremental update");
+
+    // Deadline-bound: an already-expired deadline must return quickly with
+    // partial evidence rather than blocking on any strategy step.
+    masterai::RetrievalRequest expired_request = request;
+    expired_request.deadline = std::chrono::milliseconds(0);
+    const auto deadline_started = std::chrono::steady_clock::now();
+    const auto expired = planner.retrieve(expired_request);
+    const auto deadline_elapsed = std::chrono::steady_clock::now() - deadline_started;
+    require(deadline_elapsed < std::chrono::seconds(2) &&
+                (expired.partial || expired.disclosure.empty()),
+            "deadline-bound retrieval blocked instead of returning bounded "
+            "partial evidence");
+
+    // Context budgeting: synthetic ranked candidates exceeding the byte
+    // budget must keep the highest-ranked evidence and disclose the rest as
+    // omitted rather than truncating a kept chunk's text.
+    std::vector<masterai::RetrievalCandidate> ranked;
+    for (unsigned int index = 0U; index < 5U; ++index) {
+        masterai::IndexChunk chunk;
+        chunk.id = "chunk-" + std::to_string(index);
+        chunk.relative_path = "src/big.cpp";
+        chunk.offset = index * 4096ULL;
+        chunk.language = "cpp";
+        chunk.text = std::string(3000U, 'x');
+        chunk.digest = "digest-" + std::to_string(index);
+        masterai::RetrievalDisclosureEntry disclosure;
+        disclosure.source = "exact_text";
+        disclosure.relative_path = chunk.relative_path;
+        disclosure.offset = chunk.offset;
+        disclosure.index_generation = 1U;
+        disclosure.score = 5.0 - static_cast<double>(index);
+        disclosure.reason = "synthetic";
+        ranked.push_back({chunk, disclosure});
+    }
+    const auto budgeted = masterai::ContextBudgeter::apply(
+        ranked, "exact_text", false, "", 7000U, 6U, 20U);
+    std::size_t included_count = 0U;
+    for (const auto& entry : budgeted.disclosure) {
+        if (entry.included) ++included_count;
+    }
+    require(budgeted.disclosure.size() == 5U && included_count < 5U &&
+                included_count >= 2U &&
+                budgeted.context_text.size() <= 7000U + 5U * 200U,
+            "context budgeter admitted more evidence than the byte cap allows");
+    require(budgeted.disclosure.front().included &&
+                !budgeted.disclosure.back().included,
+            "context budgeter did not prefer the highest-ranked evidence");
+
+    // Query-trace disclosure: recorded retrieval survives a later successful
+    // finish() call, which passes an empty diagnostic by default.
+    masterai::QueryCoordinator queries;
+    const auto query_id = queries.begin("user", project.id, "model");
+    queries.record_retrieval(query_id, found.partial,
+                             "{\"strategy\":\"exact_symbol\",\"entries\":[]}");
+    queries.finish(query_id, masterai::QueryStatus::completed);
+    const auto trace = queries.find(query_id);
+    require(trace && trace->retrieval_disclosure ==
+                          "{\"strategy\":\"exact_symbol\",\"entries\":[]}" &&
+                trace->diagnostic.empty(),
+            "a successful finish() erased the recorded retrieval disclosure");
+    require(masterai::QueryCoordinator::to_json(*trace).find(
+                "\"retrievalDisclosure\":{") != std::string::npos,
+            "query trace JSON omitted the retrieval disclosure");
+}
+
 }  // namespace
 
 int main() {
@@ -1371,6 +1628,8 @@ int main() {
         run("query measurement", test_phase_thirteen_query_measurement);
         run("bounded memory", test_phase_fourteen_bounded_memory);
         run("disk-backed indexing", test_phase_fifteen_disk_backed_indexing);
+        run("live project watcher", test_phase_fifteen_project_watcher);
+        run("deadline-bound retrieval", test_phase_sixteen_deadline_bound_retrieval);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

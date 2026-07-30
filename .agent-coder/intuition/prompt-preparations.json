@@ -364,5 +364,53 @@
     ],
     "estimatedTokens": 108,
     "preparedAt": "2026-07-29T22:30:55.006Z"
+  },
+  {
+    "requestId": "4b93f1b4-4f78-45ba-992e-293654ed136b",
+    "taskType": "propose-multi-file-edit",
+    "strategyId": "verified-default",
+    "strategyVersion": 1,
+    "questionType": "generate_tests",
+    "appliedRuleIds": [],
+    "conflictCount": 0,
+    "componentSources": [
+      {
+        "id": "acceptance_criteria",
+        "source": "question builder",
+        "estimatedTokens": 40
+      },
+      {
+        "id": "constraints",
+        "source": "confirmed request and project governance",
+        "estimatedTokens": 1
+      },
+      {
+        "id": "stop_conditions",
+        "source": "question builder and safety policy",
+        "estimatedTokens": 19
+      },
+      {
+        "id": "validation_rules",
+        "source": "question builder",
+        "estimatedTokens": 18
+      },
+      {
+        "id": "current_state",
+        "source": "agent lifecycle",
+        "estimatedTokens": 13
+      },
+      {
+        "id": "response_format",
+        "source": "question builder",
+        "estimatedTokens": 16
+      },
+      {
+        "id": "token_limit",
+        "source": "token ceiling",
+        "estimatedTokens": 2
+      }
+    ],
+    "estimatedTokens": 109,
+    "preparedAt": "2026-07-30T12:46:35.320Z"
   }
 ]

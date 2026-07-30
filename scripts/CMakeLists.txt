@@ -34,6 +34,8 @@ add_library(masterai_core STATIC
     ../src/query.cpp
     ../src/memory.cpp
     ../src/indexing.cpp
+    ../src/project_watcher.cpp
+    ../src/retrieval.cpp
     ../src/performance_cli.cpp
     ../src/http_support.cpp
     ../src/integration_http.cpp

@@ -5,7 +5,9 @@
 #include "server_internal.hpp"
 #include "json.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <fstream>
 #include <stdexcept>
 
 namespace masterai::server_internal {
@@ -23,6 +25,7 @@ std::string model_state(const ModelState state) {
         case ModelState::loaded: return "loaded";
         case ModelState::failed: return "failed";
         case ModelState::quarantined: return "quarantined";
+        case ModelState::downloading: return "downloading";
     }
     return "unknown";
 }
@@ -247,7 +250,11 @@ std::string WorkloadHttpController::model_inventory() const {
                     json_escape(model.manifest.category) +
                     "\",\"state\":\"" + model_state(model.state) +
                     "\",\"diagnostic\":\"" +
-                    json_escape(model.diagnostic) + "\"}";
+                    json_escape(model.diagnostic) +
+                    "\",\"minimumRamMiB\":" +
+                    std::to_string(model.manifest.minimum_ram_mib) +
+                    ",\"recommendedRamMiB\":" +
+                    std::to_string(model.manifest.recommended_ram_mib) + "}";
         }
         return response(200, "OK", body + "]}");
     } catch (const std::exception&) {
@@ -540,10 +547,18 @@ std::string WorkloadHttpController::list_downloads() const {
     for (const auto& job : state_->downloads->list()) {
         if (!first) body += ",";
         first = false;
+        // modelId/filename are derived from the destination path rather than
+        // stored again -- models_root/category/model_id/filename is the one
+        // place that layout is defined (see create_download below).
+        const auto& destination = job.request().destination;
         body += "{\"id\":\"" + job.id() + "\",\"state\":\"" +
                 download_state(job.state()) + "\",\"completedBytes\":" +
                 std::to_string(job.completed_bytes()) +
-                ",\"diagnostic\":\"" + json_escape(job.diagnostic()) + "\"}";
+                ",\"modelId\":\"" +
+                json_escape(destination.parent_path().filename().string()) +
+                "\",\"filename\":\"" +
+                json_escape(destination.filename().string()) +
+                "\",\"diagnostic\":\"" + json_escape(job.diagnostic()) + "\"}";
     }
     return response(200, "OK", body + "]}");
 }
@@ -557,7 +572,7 @@ std::string WorkloadHttpController::create_download(
     }
     try {
         const auto root = parse_json(request.body);
-        if (root.as_object().size() != 9U) {
+        if (root.as_object().size() != 14U) {
             throw std::runtime_error("unexpected download field");
         }
         const auto filename = root.required("filename").as_string();
@@ -578,6 +593,39 @@ std::string WorkloadHttpController::create_download(
         if (minimum <= 0 || recommended < minimum) {
             throw std::runtime_error("download RAM recommendation is invalid");
         }
+        // The remaining fields exist purely so a manifest.json can be
+        // written alongside the model file once it lands -- without one,
+        // ModelRegistry::scan() never recognizes a downloaded file as a
+        // model at all, so it can never reach Ready and nothing could ever
+        // actually chat with it. This mirrors models.cpp's own manifest
+        // validation exactly (kept in sync by hand, same as the categories
+        // set above) rather than relaxing it for downloads specifically.
+        const auto display_name = root.required("displayName").as_string();
+        const auto architecture = root.required("architecture").as_string();
+        const auto quantization = root.required("quantization").as_string();
+        const auto license_spdx = root.required("licenseSpdx").as_string();
+        const auto size_bytes = root.required("sizeBytes").as_integer();
+        static const std::set<std::string> licenses{
+            "Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause",
+            "CC-BY-4.0", "Llama-3.1", "Llama-3.2", "Gemma"};
+        const auto is_safe_identifier = [](const std::string& value) {
+            if (value.empty() || value.size() > 96U || value.front() == '.' ||
+                value.back() == '.') {
+                return false;
+            }
+            return std::all_of(value.begin(), value.end(), [](const char c) {
+                return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                       (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+                       c == '.';
+            });
+        };
+        if (display_name.empty() || display_name.size() > 160U ||
+            !is_safe_identifier(architecture) ||
+            !is_safe_identifier(quantization) ||
+            licenses.find(license_spdx) == licenses.end() ||
+            size_bytes <= 0) {
+            throw std::runtime_error("download manifest field is invalid");
+        }
         // RAM is advisory only at download time (reported below via
         // hardwareRecommendation), never blocking: a model can be fetched
         // now and run later, on this machine or another. ModelRegistry
@@ -592,13 +640,31 @@ std::string WorkloadHttpController::create_download(
                 ? hardware.available_ram_mib -
                       state_->configuration.memory_reserve_mib
                 : 0U;
+        const auto source_url = root.required("sourceUrl").as_string();
+        const auto revision = root.required("immutableRevision").as_string();
+        const auto sha256 = root.required("expectedSha256").as_string();
+        const auto license_accepted = root.required("licenseAccepted").as_boolean();
+        if (!is_safe_identifier(revision) ||
+            (source_url.rfind("https://huggingface.co/", 0U) != 0U &&
+             source_url.rfind("https://github.com/", 0U) != 0U) ||
+            !license_accepted) {
+            throw std::runtime_error("download provenance is invalid");
+        }
+        const auto model_directory =
+            state_->configuration.models_root / category / model_id;
+        // Written now, before the transfer runs, so ModelRegistry::scan()
+        // can recognize the file the moment it lands (and, until then,
+        // reports this model as invalid/missing rather than not existing at
+        // all -- a truthful "downloading" state instead of silence).
+        write_model_manifest(model_directory, model_id, display_name, category,
+                             architecture, quantization,
+                             static_cast<std::uint64_t>(minimum),
+                             static_cast<std::uint64_t>(recommended), filename,
+                             static_cast<std::uint64_t>(size_bytes), sha256,
+                             source_url, revision, license_spdx);
         const auto job = state_->downloads->create(
-            {root.required("sourceUrl").as_string(),
-             root.required("immutableRevision").as_string(),
-             root.required("expectedSha256").as_string(),
-             state_->configuration.models_root / category / model_id /
-                 filename,
-             root.required("licenseAccepted").as_boolean(),
+            {source_url, revision, sha256,
+             model_directory / filename, license_accepted,
              static_cast<std::uint64_t>(minimum),
              static_cast<std::uint64_t>(recommended)});
         state_->audit.append("download.create", user.id, "success", job.id());
@@ -643,6 +709,70 @@ std::string WorkloadHttpController::run_download(
     } catch (const std::exception&) {
         return response(409, "Conflict",
                         "{\"error\":\"download_run_failed\"}");
+    }
+}
+
+// Requests a pause of an in-flight transfer; the run() call already blocked
+// on that job's own /run request observes the signal and persists the
+// resulting 'paused' state itself once it unwinds.
+std::string WorkloadHttpController::pause_download(
+    Request& request, const UserRecord& user) {
+    if (state_->downloads == nullptr ||
+        !role_allows(user.role, "downloads.manage")) {
+        return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+    }
+    const std::string prefix{"/api/v1/model-downloads/"};
+    const auto id = request.target.substr(
+        prefix.size(), request.target.size() - prefix.size() - 6U);
+    try {
+        state_->downloads->pause(id);
+        state_->audit.append("download.pause", user.id, "success", id);
+        return response(202, "Accepted", "{\"id\":\"" + id + "\"}");
+    } catch (const std::exception&) {
+        return response(409, "Conflict",
+                        "{\"error\":\"download_pause_failed\"}");
+    }
+}
+
+// Stops a download, whether queued, paused, or actively transferring.
+std::string WorkloadHttpController::cancel_download(
+    Request& request, const UserRecord& user) {
+    if (state_->downloads == nullptr ||
+        !role_allows(user.role, "downloads.manage")) {
+        return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+    }
+    const std::string prefix{"/api/v1/model-downloads/"};
+    const auto id = request.target.substr(
+        prefix.size(), request.target.size() - prefix.size() - 7U);
+    try {
+        state_->downloads->cancel(id);
+        state_->audit.append("download.cancel", user.id, "success", id);
+        return response(202, "Accepted", "{\"id\":\"" + id + "\"}");
+    } catch (const std::exception&) {
+        return response(409, "Conflict",
+                        "{\"error\":\"download_cancel_failed\"}");
+    }
+}
+
+// Discards a finished/paused/queued download's record and its leftover
+// on-disk artifact (a completed model file itself is never touched -- only
+// its own .part/.quarantine leftovers are).
+std::string WorkloadHttpController::remove_download(
+    Request& request, const UserRecord& user) {
+    if (state_->downloads == nullptr ||
+        !role_allows(user.role, "downloads.manage")) {
+        return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+    }
+    const std::string prefix{"/api/v1/model-downloads/"};
+    const auto id = request.target.substr(
+        prefix.size(), request.target.size() - prefix.size() - 7U);
+    try {
+        state_->downloads->remove(id);
+        state_->audit.append("download.remove", user.id, "success", id);
+        return response(200, "OK", "{\"id\":\"" + id + "\"}");
+    } catch (const std::exception&) {
+        return response(409, "Conflict",
+                        "{\"error\":\"download_remove_failed\"}");
     }
 }
 

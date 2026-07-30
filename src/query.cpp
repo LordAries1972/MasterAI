@@ -203,6 +203,23 @@ void QueryCoordinator::record_inference(
         static_cast<double>(result.prompt_tokens) / seconds;
 }
 
+// Phase 16: records the retrieval outcome independently of the terminal
+// diagnostic so a later successful finish() (which passes an empty
+// diagnostic by default) cannot erase what was actually retrieved.
+void QueryCoordinator::record_retrieval(const std::string& id,
+                                        const bool partial,
+                                        std::string disclosure_json) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    auto& trace = state_->required(id);
+    trace.partial_retrieval = partial;
+    // Never truncate raw JSON mid-token: an oversized caller-built disclosure
+    // is replaced wholesale by a still-valid, explicitly marked stand-in.
+    trace.retrieval_disclosure =
+        disclosure_json.size() > 16384U
+            ? "{\"entries\":[],\"omittedForSize\":true}"
+            : std::move(disclosure_json);
+}
+
 // Closes the final active stage and publishes a terminal state and sanitized
 // bounded diagnostic. Cancellation is also attached to the active stage.
 void QueryCoordinator::finish(const std::string& id, const QueryStatus status,
@@ -285,6 +302,9 @@ std::string QueryCoordinator::to_json(const QueryTrace& trace) {
            std::to_string(trace.runner_peak_resident_memory_bytes) +
            ",\"partialRetrieval\":" +
            (trace.partial_retrieval ? "true" : "false") +
+           ",\"retrievalDisclosure\":" +
+           (trace.retrieval_disclosure.empty() ? "null"
+                                               : trace.retrieval_disclosure) +
            ",\"diagnostic\":" + json_string(trace.diagnostic) + "}";
 }
 

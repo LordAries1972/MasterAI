@@ -34,5 +34,22 @@
     "failed": false,
     "usageAvailable": true,
     "id": "1f62352e-8d1e-4aea-ab91-3477464772b2"
+  },
+  {
+    "taskType": "propose-multi-file-edit",
+    "requestId": "4b93f1b4-4f78-45ba-992e-293654ed136b",
+    "provider": "claude",
+    "model": "unknown",
+    "estimatedInputTokens": 50827,
+    "latencyMs": 33400,
+    "recordedAtMs": 1785415628765,
+    "files": [],
+    "callKind": "primary",
+    "actualInputTokens": 0,
+    "actualOutputTokens": 0,
+    "schemaValid": false,
+    "failed": true,
+    "usageAvailable": false,
+    "id": "4a70c2da-2b13-4f19-8bd1-f78359f65cb5"
   }
 ]

@@ -14,7 +14,7 @@
     "agentCoder.liveValidation.persistHistory": true,
     "agentCoder.liveAI.enabled": true,
     "agentCoder.liveAI.cooldownMs": 30000,
-    "agentCoder.liveAI.maximumInputTokens": 8000,
+    "agentCoder.liveAI.maximumInputTokens": 15000,
     "agentCoder.slopGuard.liveMonitoring": true,
     "agentCoder.slopGuard.statusBar": true,
     "cmake.sourceDirectory": "F:/Projects/C++/MasterAI/scripts",

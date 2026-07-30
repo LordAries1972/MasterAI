@@ -219,5 +219,58 @@
     },
     "hiddenSensitiveData": false,
     "durationMs": 12
+  },
+  {
+    "id": "d0ec4d9e-0aae-4d1e-9548-e817d0849cb8",
+    "timestamp": "2026-07-30T12:46:35.246Z",
+    "updatedAt": "2026-07-30T12:46:35.262Z",
+    "taskId": "4b93f1b4-4f78-45ba-992e-293654ed136b",
+    "category": "memory",
+    "title": "Retrieve local engineering memory",
+    "summary": "Selected 0 of 0 local memory record(s) within 0 tokens.",
+    "status": "completed",
+    "evidence": [
+      "0 stale record(s) excluded",
+      "0 conflict(s) withheld",
+      "Selected memory contents remained local and were not transmitted to the configured provider"
+    ],
+    "reasoningEvidence": {
+      "confirmedFacts": [],
+      "unknowns": [],
+      "validationPerformed": [
+        "Related file hashes checked against the current project index",
+        "Token budget enforced after reliability ranking"
+      ]
+    },
+    "hiddenSensitiveData": false,
+    "durationMs": 16
+  },
+  {
+    "id": "c110ccc1-c4a8-4c9e-bfaf-d903949ad311",
+    "timestamp": "2026-07-30T12:46:35.336Z",
+    "updatedAt": "2026-07-30T12:46:35.350Z",
+    "taskId": "4b93f1b4-4f78-45ba-992e-293654ed136b",
+    "category": "provider",
+    "title": "Construct intelligent provider question",
+    "summary": "Prepared generate_tests with strategy \"Verified Engineering Default\".",
+    "status": "completed",
+    "evidence": [
+      "7 source-labelled prompt component(s)",
+      "0 approved scoped intuition rule(s) applied",
+      "0 intuition conflict(s) resolved by precedence"
+    ],
+    "reasoningEvidence": {
+      "unknowns": [
+        "Project facts not present in the supplied evidence remain unknown."
+      ],
+      "policyDecision": "No higher-precedence directive conflicted with an applied intuition rule.",
+      "validationPerformed": [
+        "Acceptance criteria included",
+        "Validation requirements included",
+        "Stop conditions included"
+      ]
+    },
+    "hiddenSensitiveData": false,
+    "durationMs": 14
   }
 ]

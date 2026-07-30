@@ -241,6 +241,13 @@ DownloadJob DownloadManager::run(const std::string& id,
         throw DownloadAlreadyRunning(id);
     }
     in_flight_.insert(id);
+    // Owns the cross-request pause/cancel signal for this run: a separate
+    // HTTP request (pause_download/cancel_download, or shutdown's
+    // cancel_all()) locates this same shared_ptr by id and flips its flags,
+    // which is the only way to reach a transfer that is blocked inside this
+    // function on another thread for the whole download.
+    const auto signal = std::make_shared<RunSignal>();
+    signals_[id] = signal;
     // Safe to hold a reference into jobs_ across the unlocked phases below:
     // std::map insertion (the only other mutation create() performs) never
     // invalidates references to existing elements, and in_flight_ rules out
@@ -252,18 +259,21 @@ DownloadJob DownloadManager::run(const std::string& id,
     const auto partial = std::filesystem::path(destination.string() + ".part");
     lock.unlock();
 
-    // Guarantees in_flight_ is cleared on every exit path -- success,
-    // failure, exception, or cancellation -- so a retry is never blocked by
-    // a stale entry.
+    // Guarantees in_flight_ and signals_ are cleared on every exit path --
+    // success, failure, exception, or cancellation -- so a retry is never
+    // blocked by a stale entry and pause()/cancel() never signal a shared_ptr
+    // nobody is listening to anymore.
     struct InFlightGuard {
         std::mutex& guarded_mutex;
         std::set<std::string>& in_flight;
+        std::map<std::string, std::shared_ptr<RunSignal>>& signals;
         std::string job_id;
         ~InFlightGuard() {
             std::lock_guard<std::mutex> guard(guarded_mutex);
             in_flight.erase(job_id);
+            signals.erase(job_id);
         }
-    } release{mutex_, in_flight_, id};
+    } release{mutex_, in_flight_, signals_, id};
 
     std::filesystem::create_directories(destination.parent_path());
     const std::uint64_t existing =
@@ -280,10 +290,20 @@ DownloadJob DownloadManager::run(const std::string& id,
             "--proto", "=https", "--tlsv1.2", "--fail", "--location",
             "--silent", "--show-error", "--continue-at", "-", "--output",
             partial.string(), job.request().source_url};
+        // run_curl's own wait loop only ever consults this one flag, but a
+        // pause/cancel request arrives on a different thread as a mutation of
+        // signal->cancellation (the caller-supplied `cancellation` reference
+        // is otherwise the only thing that thread could observe). The
+        // progress tick below -- which already runs once per ~100ms wait
+        // iteration -- is what folds both sources in before each check.
+        std::atomic_bool combined_cancellation{false};
         const int exit_code = run_curl(
             approved_curl_, arguments,
             download_root_ / "logs" / ("download-" + id + ".log"),
-            cancellation, [&]() {
+            combined_cancellation, [&]() {
+                if (cancellation.load() || signal->cancellation.load()) {
+                    combined_cancellation.store(true);
+                }
                 std::error_code error;
                 const auto size = std::filesystem::file_size(partial, error);
                 if (error) return;
@@ -296,9 +316,17 @@ DownloadJob DownloadManager::run(const std::string& id,
                     persist(job);
                 }
             });
-        if (cancellation.load()) {
+        if (combined_cancellation.load()) {
             std::lock_guard<std::mutex> tick(mutex_);
-            job.cancel();
+            // A pause request lands the job back in the resumable 'paused'
+            // state; a stop request (or the caller's own cancellation flag,
+            // e.g. process shutdown) lands it in the terminal 'cancelled'
+            // state instead.
+            if (signal->pause_requested.load()) {
+                job.pause();
+            } else {
+                job.cancel();
+            }
             persist(job);
             return job;
         }
@@ -378,12 +406,77 @@ std::vector<DownloadJob> DownloadManager::list() const {
     return result;
 }
 
+void DownloadManager::pause(const std::string& id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (jobs_.find(id) == jobs_.end()) {
+        throw std::invalid_argument("download job not found");
+    }
+    const auto in_flight = in_flight_.find(id);
+    if (in_flight == in_flight_.end()) {
+        throw std::invalid_argument("download is not currently transferring");
+    }
+    // The transfer's own run() call (on another thread) observes this at its
+    // next ~100ms progress tick and lands the job in 'paused' itself; pause()
+    // never mutates job state directly, since only the thread inside run()
+    // knows the transfer has actually stopped.
+    const auto signal = signals_.find(id);
+    if (signal != signals_.end()) {
+        signal->second->pause_requested.store(true);
+        signal->second->cancellation.store(true);
+    }
+}
+
 void DownloadManager::cancel(const std::string& id) {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = jobs_.find(id);
     if (found == jobs_.end()) throw std::invalid_argument("download job not found");
+    const auto in_flight = in_flight_.find(id);
+    if (in_flight != in_flight_.end()) {
+        // Signal the running transfer to stop rather than mutating state
+        // here directly -- run() itself transitions to 'cancelled' once it
+        // observes this and unwinds, avoiding a state race with its own
+        // in-progress persist() calls.
+        const auto signal = signals_.find(id);
+        if (signal != signals_.end()) {
+            signal->second->pause_requested.store(false);
+            signal->second->cancellation.store(true);
+        }
+        return;
+    }
     found->second.cancel();
     persist(found->second);
+}
+
+void DownloadManager::remove(const std::string& id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(id);
+    if (found == jobs_.end()) throw std::invalid_argument("download job not found");
+    if (in_flight_.find(id) != in_flight_.end()) {
+        throw std::invalid_argument("an in-flight download cannot be removed");
+    }
+    const auto& destination = found->second.request().destination;
+    const auto partial = std::filesystem::path(destination.string() + ".part");
+    std::error_code ignored;
+    std::filesystem::remove(partial, ignored);
+    std::filesystem::remove(
+        std::filesystem::path(partial.string() + ".quarantine." + id), ignored);
+    records_.erase("downloads", id);
+    jobs_.erase(found);
+}
+
+void DownloadManager::cancel_all() noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& id : in_flight_) {
+            const auto signal = signals_.find(id);
+            if (signal != signals_.end()) {
+                signal->second->pause_requested.store(false);
+                signal->second->cancellation.store(true);
+            }
+        }
+    } catch (const std::exception&) {
+        // Best-effort: shutdown must never throw out of this call.
+    }
 }
 
 void DownloadManager::persist(const DownloadJob& job) {

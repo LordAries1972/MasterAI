@@ -84,18 +84,46 @@ Current phase status:
 - Phase 14: Complete — system-wide byte reservations, OS safety reserve,
   deterministic pressure actions, bounded prioritized work, minimal/balanced/
   performance profiles, live status, and inference admission are validated.
-- Phase 15: In progress — cancellable bounded discovery, unchanged-file
-  elimination, affected-path incremental updates, exact identifier-boundary
-  symbol lookup, immutable checksummed disk generations, prior-generation
-  recovery, empty/deleted-path publication, typed and coalesced change
-  triggers, bounded background work, authenticated project-bound routes, an
-  authenticated `index/notify` ingress for live save/watcher/branch-switch/
-  periodic trigger adapters, and Debug/Release validation are implemented.
-  Representative large-project ceiling evidence, an actual native or
-  editor-side file-watcher/branch-switch adapter that calls the new ingress,
-  and platform-specific I/O benchmark decisions remain.
-- Phase 16: Planned — add deadline-bound hybrid project retrieval, ranking,
-  deduplication, context budgeting, and context-source disclosure.
+- Phase 15: Both exit criteria now have current evidence — cancellable bounded
+  discovery, unchanged-file elimination, affected-path incremental updates,
+  exact identifier-boundary symbol lookup, immutable checksummed disk
+  generations, prior-generation recovery, empty/deleted-path publication,
+  typed and coalesced change triggers, bounded background work, authenticated
+  project-bound routes, an authenticated `index/notify` ingress, a native
+  `ProjectWatcher` file-watcher/branch-switch adapter that calls the same
+  service automatically (no external caller required), a representative
+  large-project ceiling measurement (`masterai index-probe`), and a recorded
+  platform-I/O backend decision are implemented and Windows Debug-validated.
+  Deeper language-aware symbol extraction remains a forward enhancement, not
+  an exit-criterion blocker (see
+  [docs/performance/phase-15-incremental-indexing.md](performance/phase-15-incremental-indexing.md)).
+  Windows Release build/test validation for this change set is now recorded
+  below (2026-07-31).
+- Phase 16: Implemented, exit validation pending — a `RetrievalPlanner`
+  chooses the least expensive sufficient strategy across exact identifier
+  symbol match, exact literal text match, and a per-token lexical union, all
+  read directly from the Phase 15 disk-backed index; independent strategy
+  steps run across a small bounded worker pool under a hard wall-clock
+  deadline that returns whatever evidence already exists instead of blocking
+  once expired; results fuse and deduplicate on the index's own canonical
+  chunk identity; a `ContextBudgeter` applies per-source and total chunk/byte
+  caps, always keeping the highest-ranked evidence and never truncating a
+  kept chunk's text; every candidate (included or omitted) is disclosed with
+  its file, offset, index generation, score, and reason, recorded on the
+  Phase 13 `QueryTrace` (`retrievalDisclosure`, independent of the terminal
+  diagnostic) and exposed through the existing authenticated
+  `GET /api/v1/queries/{id}` route; and no project/session state is cached
+  inside the planner, so a project's current authorization is re-checked and
+  its current index generation is re-read on every call. Current/open-file,
+  recent-change, diagnostics/build-log, semantic/embedding,
+  dependency-neighbour, conversation-memory, and authorized-MCP-resource
+  strategies remain forward work: no embedding adapter, build-log ingestion,
+  or MCP-resource-to-retrieval plumbing exists yet, so they are not among the
+  strategies `RetrievalPlanner` can choose from today. The exit criterion
+  requiring an authored retrieval evaluation set that demonstrates measured
+  improvement over full-text-only retrieval has not been produced and remains
+  outstanding; the membership/policy invalidation exit criterion is satisfied
+  by construction (see above) and by targeted tests.
 - Phase 17: Planned — introduce a security-partitioned, byte-bounded cache
   hierarchy with precise invalidation and administrative trimming.
 - Phase 18: Planned — integrate compatible prompt-prefix and runner
@@ -119,6 +147,83 @@ as explicitly deferred. Phase 4–7 implementation tests do not substitute for
 the real backend/model, interrupted external transfer, and same-host benchmark
 exit checks listed above. Phase 8 still requires its external-client
 operational check.
+
+Validation evidence recorded on 2026-07-31:
+
+- Windows x64 Debug build completed under strict C++17 and
+  `masterai_core_tests` passed after: flipping the identity defaults so
+  locally stored password accounts (`allow_local_password_accounts`) are on
+  by default and native OS-verified sign-in (`allow_os_identity_accounts`) is
+  an explicit opt-in, gating `POST /api/v1/setup` accordingly and making
+  `/health/ready` depend on the OS identity provider only when OS sign-in is
+  enabled; adding a persisted model verification cache (`verify-models` CLI
+  command and `ModelRegistry::verify`) so `scan()` never hashes files on the
+  request path; extending `download-model`/the download-create route to
+  write a full manifest (display name, architecture, quantization, license
+  SPDX ID, size, RAM estimates) up front so an in-progress download shows as
+  `downloading` rather than being invisible; adding pause/cancel/remove
+  download controls (`POST .../model-downloads/{id}/pause|cancel|remove`)
+  and process-shutdown cancellation of in-flight transfers; deriving and
+  persisting chat titles from each chat's first user message with
+  backward-compatible restore of pre-existing chat records; and splitting the
+  web
+  application into per-URL, role-gated sections
+  (`/app/chat`, `/app/projects`, `/app/models/inventory`,
+  `/app/models/download`, `/app/models/benchmarks`, `/app/admin/create`,
+  `/app/admin/users`). Release build/test validation for this change set is
+  still outstanding (blocked by a currently running Release-built
+  `masterai.exe` holding the executable open) and remains to be recorded
+  before this work is considered validated on both build types.
+- Windows x64 Debug build completed under strict C++17 and
+  `masterai_core_tests` passed (including a new `test_phase_fifteen_project_watcher`
+  case) after adding `src/project_watcher.cpp`'s native `ProjectWatcher`: a
+  `ReadDirectoryChangesW`/I/O-completion-port watcher on Windows and a
+  recursive, 16,384-directory-bounded `inotify` watcher on Linux, both
+  debouncing bursts of raw OS events into one `IndexTrigger::watcher` call per
+  project, special-casing `.git/HEAD` changes as `IndexTrigger::branch_switch`,
+  issuing an immediate baseline `request_rebuild` for a project seen for the
+  first time, and falling back to a 30-minute `IndexTrigger::periodic` rescan
+  per project as a safety net. It is constructed by `HttpServer::State`
+  alongside `ProjectIndexService` (new `indexing.watchProjectFiles` /
+  `AppConfig::watch_project_files` config flag, on by default) and destroyed
+  before it so its thread stops calling into the index service first. A new
+  `masterai index-probe <project-root> [index-root]` CLI command drove a real
+  `ProjectIndexer` through a full rebuild and a one-file incremental update
+  over both this repository's own `src/` tree and a synthetic 10,000-file/
+  ~41&nbsp;MiB tree, reporting elapsed time and this process's own peak
+  resident-memory delta; peak resident memory (72.7&nbsp;MiB at 10,000 files)
+  stayed far below the configured hard limit (6.29&nbsp;GiB), and this evidence
+  is recorded, with the accompanying platform-I/O backend decision, in
+  [docs/performance/phase-15-incremental-indexing.md](performance/phase-15-incremental-indexing.md).
+- Windows x64 Release build (Ninja/MSVC 19.38, strict `/std:c++17`) completed
+  and `masterai_core_tests` passed, closing out the Release validation that
+  was outstanding above for both the identity-default/download-manifest/
+  chat-title/per-URL-web-section change set and the `ProjectWatcher`/
+  `index-probe` change set; both are now Windows Debug- and
+  Release-validated. This same Release run, together with an immediately
+  preceding Debug build/test run, also validates Phase 16: implementing
+  `RetrievalPlanner`/`ContextBudgeter` (`src/retrieval.cpp`), the
+  `ProjectIndexService::search_text`/`search_symbol` read path used to reach
+  a project's live published index generation, the `retrieval.*`
+  configuration section (`deadlineMilliseconds`, `maximumContextBytes`,
+  `maximumChunksPerSource`, `maximumTotalChunks`, `enabled`), wiring
+  retrieval into `send_chat_message`'s existing `retrieval_planning`/
+  `retrieval`/`ranking` stages ahead of prompt assembly, and a new
+  `QueryCoordinator::record_retrieval` that attaches a `retrievalDisclosure`
+  JSON array to a query trace independently of its terminal diagnostic. The
+  new `test_phase_sixteen_deadline_bound_retrieval` case passed in both
+  build types, covering: no fabricated evidence before a project has a
+  published index; exact-symbol strategy selection with sticky sufficiency
+  (a symbol hit skips the more expensive literal-text and lexical steps);
+  canonical chunk-id fusion (identical chunk id returned by a symbol lookup
+  and a text lookup on the same identifier); live re-read of the current
+  index generation with no planner-side caching (an incremental update is
+  visible on the very next `retrieve()` call with the same planner
+  instance); a near-zero deadline returning bounded partial evidence in
+  under two seconds instead of blocking; `ContextBudgeter` preferring the
+  highest-ranked evidence and disclosing the rest as omitted under a byte
+  cap; and a recorded retrieval disclosure surviving a later successful
+  `QueryCoordinator::finish()` call.
 
 Validation evidence recorded on 2026-07-30:
 
@@ -247,10 +352,15 @@ These objective groups are not yet implemented or not yet validated:
   comparison, optional whisper.cpp integration, and MCP transports.
 - Ubuntu 24.04 and Debian 13 packaging certification (deferred by operator)
   plus later-phase conformance and performance suites.
-- Remaining Phase 15–20 performance expansion: representative indexing ceiling
-  evidence, live change-source adapters and portable-versus-native I/O
-  benchmark decisions, hybrid retrieval, bounded cache layers, safe prompt
-  reuse, host calibration, and optional advanced throughput work.
+- Remaining Phase 17–20 performance expansion: bounded cache layers, safe
+  prompt reuse, host calibration, and optional advanced throughput work.
+  Phase 15 (representative indexing ceiling evidence, live change-source
+  adapters, portable-versus-native I/O benchmark decision) and Phase 16
+  (deadline-bound hybrid retrieval over the strategies Phase 15's index can
+  serve today) are implemented and validated as described above; Phase 16's
+  authored retrieval-quality evaluation set remains outstanding, and
+  semantic/dependency/conversation-memory/MCP-resource retrieval strategies
+  remain deferred forward work pending their own supporting infrastructure.
 
 ## 1. Executive Design
 
@@ -1916,18 +2026,22 @@ Exit criteria:
 
 ### Phase 15 — Incremental disk-backed project indexing
 
-Status: In progress. The native disk segment/generation foundation,
-fixed-capacity background service, unchanged-file elimination, affected-path
-updates, exact identifier-boundary symbol lookup, deleted/empty generation
-publication, typed/coalesced trigger admission, authenticated project-bound
-status/rebuild/cancel/notify routes, and focused Windows Debug/Release
-validation exist. The `index/notify` route gives an external editor,
-watcher, or version-control process an authenticated, project-bound way to
-report a save/watcher/branch-switch/periodic event; no such native or
-editor-side process calls it automatically yet. A representative
-large-project ceiling run, an actual live file-watcher/branch-switch adapter,
-deeper language-aware symbol extraction, and platform-specific I/O benchmark
-decisions remain.
+Status: Complete. Both exit criteria have current evidence, and Windows
+Debug and Release build/test validation for the watcher/ceiling-run change
+set is recorded below (2026-07-31). The native disk segment/generation
+foundation, fixed-capacity background
+service, unchanged-file elimination, affected-path updates, exact
+identifier-boundary symbol lookup, deleted/empty generation publication,
+typed/coalesced trigger admission, authenticated project-bound
+status/rebuild/cancel/notify routes, a native `ProjectWatcher` adapter, a
+representative large-project ceiling measurement, a recorded I/O backend
+decision, and focused Windows Debug validation exist. The `index/notify`
+route still gives an external editor, IDE plugin, or version-control process
+an authenticated, project-bound way to report an event explicitly; separately,
+`ProjectWatcher` now also calls the same `ProjectIndexService` automatically
+for every catalog project, so no external caller is required for the common
+save/branch-switch case. Deeper language-aware symbol extraction remains a
+forward enhancement, not an exit-criterion blocker.
 
 Purpose:
 
@@ -1956,13 +2070,21 @@ Deliverables:
   before a large workspace is fully indexed.
 - Save/watcher/branch-switch/manual/periodic triggers with debounce,
   cancellation, backpressure, and affected-edge-only graph updates. An
-  authenticated `POST /api/v1/projects/{id}/index/notify` route now gives an
+  authenticated `POST /api/v1/projects/{id}/index/notify` route gives an
   external adapter a stable way to submit save/watcher/branch-switch/periodic
-  events; the live native or editor-side process that calls it on real file
-  and branch changes is a remaining deliverable.
-- A portable bounded worker-based file reader plus replaceable Windows
-  overlapped-I/O and Linux `io_uring` implementations only where benchmarks
-  justify them; correctness never depends on an optional I/O backend.
+  events, and the native `ProjectWatcher` (`src/project_watcher.cpp`) now also
+  calls the same service automatically: `ReadDirectoryChangesW`/an I/O
+  completion port on Windows, recursive bounded `inotify` on Linux, both
+  debounced per project and special-casing `.git/HEAD` as a branch-switch
+  full rescan.
+- A portable bounded worker-based file reader remains the correctness
+  baseline. Per the recorded 2026-07-31 decision in
+  [docs/performance/phase-15-incremental-indexing.md](performance/phase-15-incremental-indexing.md),
+  a replaceable Windows overlapped-I/O or Linux `io_uring` implementation is
+  not adopted yet: measured rebuild throughput against a representative
+  10,000-file synthetic tree left peak resident memory far below the
+  configured ceiling, so no bottleneck currently justifies the added
+  complexity.
 
 Installation/completion outcome:
 
@@ -1978,7 +2100,18 @@ Exit criteria:
 
 ### Phase 16 — Deadline-bound hybrid retrieval
 
-Status: Planned.
+Status: Implemented, exit validation pending. `RetrievalPlanner`
+(`src/retrieval.cpp`) and `ContextBudgeter` are implemented and wired into
+`send_chat_message`'s existing `retrieval_planning`/`retrieval`/`ranking`
+stages, replacing nothing (attachment context from Phase 5 is unchanged and
+still appended first). The exact-symbol/exact-text/lexical strategies that
+Phase 15's disk-backed index can actually serve are implemented, tested, and
+Windows Debug/Release validated (`test_phase_sixteen_deadline_bound_retrieval`
+in `test/tests.cpp`); the no-retrieval, current/open-files, recent-changes,
+diagnostics/build-log, semantic/embedding, dependency-neighbour,
+conversation-memory, and authorized-MCP-resource strategies are deliberately
+deferred (see Deliverables) since none of their supporting infrastructure
+exists yet. The authored-evaluation-set exit criterion is not yet produced.
 
 Purpose:
 
@@ -1994,22 +2127,69 @@ Deliverables:
 - A `RetrievalPlanner` that chooses the least expensive sufficient strategy:
   no retrieval, current/open files, exact path/symbol/text, recent changes,
   diagnostics/build logs, lexical, semantic, dependency neighbours,
-  conversation memory, or authorized MCP resources.
+  conversation memory, or authorized MCP resources. **Implemented:** no
+  retrieval (query too short or project not yet indexed), exact symbol,
+  exact text, and per-token lexical union, each read live from
+  `ProjectIndexService::search_text`/`search_symbol` with sufficiency
+  sticky across steps so a cheap symbol hit skips broader, more expensive
+  strategies entirely. **Deferred (forward work, no supporting
+  infrastructure exists):** current/open files, recent changes,
+  diagnostics/build logs, semantic/embedding, dependency neighbours,
+  conversation memory, and authorized MCP resources.
 - Parallel execution only across independent retrieval paths using bounded
-  workers and cooperative cancellation.
+  workers and cooperative cancellation. **Implemented:** a small in-process
+  worker pool (`DeadlineTaskPool` in `src/retrieval.cpp`) claims independent
+  per-strategy/per-token tasks; each worker checks the deadline before
+  claiming its next task rather than mid-task, matching this codebase's
+  existing cooperative-cancellation shape (`mcp_outbound.cpp`,
+  `inference.cpp`).
 - Hybrid fusion and reranking with canonical chunk identity, duplicate and
   overlap removal, freshness, source authority, symbol/dependency proximity,
-  and query intent.
+  and query intent. **Implemented:** fusion on the index's own canonical
+  chunk id (deduplicating overlap for free), with a bounded corroboration
+  bonus when more than one strategy surfaces the same chunk, and strategy
+  base-score ordering (symbol > literal text > lexical) as source authority.
+  **Deferred:** dependency-proximity and query-intent-specific reranking
+  signals beyond strategy/corroboration scoring.
 - A `ContextBudgeter` that reserves generation tokens, applies per-source and
   total chunk/token caps, prefers compact high-value evidence, and never
-  truncates security policy to admit more project text.
+  truncates security policy to admit more project text. **Implemented:**
+  per-source and total chunk caps plus a total context-byte cap
+  (`retrieval.maximumChunksPerSource`/`maximumTotalChunks`/
+  `maximumContextBytes` in configuration), always keeping the highest-ranked
+  evidence first and never truncating a kept chunk's text.
 - A request deadline budget. On expiry, the coordinator uses the strongest
   authorized evidence already found or proceeds without retrieval when safe;
-  it does not block indefinitely.
+  it does not block indefinitely. **Implemented:**
+  `retrieval.deadlineMilliseconds` bounds every retrieval call; an expired
+  deadline stops launching further strategy steps and returns whatever
+  bounded-worker results already exist, marking the outcome partial rather
+  than blocking.
 - Context disclosure recording which files/chunks and index generation were
   used, why they ranked, whether results were partial, and what was omitted.
+  **Implemented:** every candidate (included and omitted) is recorded with
+  its source strategy, relative path, offset, index generation, score,
+  inclusion state, and reason; the JSON array is attached to the Phase 13
+  `QueryTrace` via the new `QueryCoordinator::record_retrieval` (kept
+  independent of the terminal `diagnostic` field so a later successful
+  `finish()` cannot erase it) and surfaced through the existing
+  authenticated `GET /api/v1/queries/{id}` route as `retrievalDisclosure`.
 - Retrieval quality, latency, memory, stale-index, membership-change, and
-  authorization-boundary tests.
+  authorization-boundary tests. **Implemented:** strategy selection and
+  fusion/dedup correctness, live re-read of the current index generation
+  with no planner-side caching (an incremental index update is reflected on
+  the very next call), a near-zero deadline returning bounded partial
+  evidence instead of blocking, and context-budget capping with full
+  disclosure of included versus omitted evidence. Membership/policy
+  invalidation is structural (the caller re-authorizes the project on every
+  chat message via `ProjectCatalog::find` before calling
+  `RetrievalPlanner::retrieve`; the planner itself never caches an
+  authorization decision) rather than covered by a dedicated end-to-end HTTP
+  test, since Phase 15's own test suite similarly exercises
+  `WorkloadHttpController` rather than the private `HttpServer` chat
+  transport directly. A formal retrieval-quality evaluation set comparing
+  against full-text-only retrieval, and a dedicated latency/memory benchmark
+  under Phase 21's benchmark framework, remain outstanding.
 
 Installation/completion outcome:
 
