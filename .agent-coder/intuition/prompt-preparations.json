@@ -316,5 +316,53 @@
     ],
     "estimatedTokens": 1109,
     "preparedAt": "2026-07-28T22:40:52.650Z"
+  },
+  {
+    "requestId": "480a3b36-1b1f-4d36-b78f-2d1ff8c19a93",
+    "taskType": "explain-symbol",
+    "strategyId": "verified-default",
+    "strategyVersion": 1,
+    "questionType": "diagnose_failure",
+    "appliedRuleIds": [],
+    "conflictCount": 0,
+    "componentSources": [
+      {
+        "id": "acceptance_criteria",
+        "source": "question builder",
+        "estimatedTokens": 40
+      },
+      {
+        "id": "constraints",
+        "source": "confirmed request and project governance",
+        "estimatedTokens": 1
+      },
+      {
+        "id": "stop_conditions",
+        "source": "question builder and safety policy",
+        "estimatedTokens": 19
+      },
+      {
+        "id": "validation_rules",
+        "source": "question builder",
+        "estimatedTokens": 18
+      },
+      {
+        "id": "current_state",
+        "source": "agent lifecycle",
+        "estimatedTokens": 13
+      },
+      {
+        "id": "response_format",
+        "source": "question builder",
+        "estimatedTokens": 16
+      },
+      {
+        "id": "token_limit",
+        "source": "token ceiling",
+        "estimatedTokens": 1
+      }
+    ],
+    "estimatedTokens": 108,
+    "preparedAt": "2026-07-29T22:30:55.006Z"
   }
 ]

@@ -19,10 +19,28 @@
     "reservedForRepair": 5000,
     "reservedForValidation": 2000
   },
+  "validationPolicy": {
+    "enabled": true,
+    "minimumLevel": "V0",
+    "requireBuildTool": false,
+    "requireTestTool": false,
+    "failCommandOnValidationFailure": false,
+    "reportCommandCompletionToChat": true
+  },
   "liveActionFeedEnabled": true,
-  "tokenCeilings": {},
-  "hourlyRate": 75,
-  "currency": "USD",
+  "tokenCeilings": {
+    "finalImplementationPatchMultiFile": {
+      "maximumOutputTokens": 14000
+    },
+    "adversarialReview": {
+      "maximumOutputTokens": 5000
+    },
+    "designDocument": {
+      "maximumOutputTokens": 10000
+    }
+  },
+  "hourlyRate": 50,
+  "currency": "AUD",
   "featureAreas": {
     "decisionIntelligence": true,
     "governance": true,
@@ -80,5 +98,25 @@
     "problemSolvingContainer": true,
     "liveEngineeringContext": true,
     "slopGuard": true
+  },
+  "autonomousTaskBudget": {
+    "maximumDurationMs": 600000,
+    "maximumAIRequests": 20,
+    "maximumInputTokens": 200000,
+    "maximumOutputTokens": 40000,
+    "maximumFilesRead": 30,
+    "maximumFilesModified": 15,
+    "maximumCommands": 30,
+    "maximumRepairAttempts": 5
+  },
+  "tokenPolicy": {
+    "mode": "balanced",
+    "maximumTokensPerRequest": 24000,
+    "maximumTokensPerTask": 100000,
+    "maximumRequestsPerTask": 8,
+    "maximumExpensiveModelCallsPerTask": 2,
+    "warnAtBudgetPercentage": 75,
+    "requireApprovalAtBudgetPercentage": 90,
+    "hardStopAtBudgetPercentage": 100
   }
 }

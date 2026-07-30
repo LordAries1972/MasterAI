@@ -34,6 +34,7 @@
 namespace {
 
 using masterai_test::McpHttpFixture;
+using masterai_test::fake_curl_executable;
 using masterai_test::fake_llama_executable;
 using masterai_test::require;
 using masterai_test::TemporaryDirectory;
@@ -385,6 +386,94 @@ void test_phase_six_download_policy() {
     masterai::DownloadManager restored(transport, root, records);
     require(restored.find(persisted.id()).has_value(),
             "resumable download job state was not restored");
+}
+
+// Verifies the concurrency fix behind the "download blocks the progress bar"
+// bug: DownloadManager::run() must (a) let find()/list() return promptly for
+// other callers while a transfer is in flight, rather than blocking for the
+// whole transfer, and (b) reject a second concurrent run() for the same job
+// id instead of racing two transfers over the same .part file.
+void test_phase_sixteen_concurrent_downloads() {
+    const auto set_env = [](const char* name, const std::string& value) {
+#if defined(_WIN32)
+        _putenv_s(name, value.c_str());
+#else
+        setenv(name, value.c_str(), 1);
+#endif
+    };
+    // Slow enough (~10 chunks * 30ms) that a concurrent find() and a second
+    // run() attempt reliably land while the transfer is still in progress,
+    // but short enough not to make the suite noticeably slower.
+    set_env("MASTERAI_FAKE_CURL_TOTAL_BYTES", "200000");
+    set_env("MASTERAI_FAKE_CURL_CHUNK_BYTES", "20000");
+    set_env("MASTERAI_FAKE_CURL_CHUNK_DELAY_MS", "30");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    const auto transport = masterai_test::fake_curl_executable();
+    const auto root = temporary.path() / "downloads";
+    masterai::DownloadManager downloads(transport, root, records);
+    // Must match what fake_curl actually writes (200000 'x' bytes) so the
+    // transfer verifies as complete rather than being quarantined -- this
+    // test is about concurrency correctness, not digest mismatch handling
+    // (that path is already covered by test_phase_six_download_policy).
+    const auto digest = masterai::sha256_hex(std::string(200000U, 'x'));
+    const auto job = downloads.create(masterai::DownloadRequest{
+        "https://huggingface.co/owner/model/resolve/0123456789/model.gguf",
+        "0123456789", digest, root / "artifacts" / "model.gguf", true});
+
+    std::atomic_bool cancellation_a{false};
+    std::atomic_bool cancellation_b{false};
+    std::atomic_bool already_running_seen{false};
+    std::thread first([&]() { downloads.run(job.id(), cancellation_a); });
+
+    // Give the first run() a moment to begin the transfer, then confirm a
+    // second run() for the same id is rejected rather than starting a
+    // second transfer, and that find() keeps returning promptly (never
+    // blocked by the in-flight transfer) with advancing progress.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    try {
+        downloads.run(job.id(), cancellation_b);
+    } catch (const masterai::DownloadAlreadyRunning&) {
+        already_running_seen = true;
+    }
+    require(already_running_seen.load(),
+            "a concurrent run() for the same job id was not rejected");
+
+    std::uint64_t previous_bytes = 0U;
+    bool progress_advanced = false;
+    for (int i = 0; i < 5; ++i) {
+        const auto observed = downloads.find(job.id());
+        require(observed.has_value(), "find() failed while a transfer was in flight");
+        if (observed->completed_bytes() > previous_bytes) progress_advanced = true;
+        previous_bytes = observed->completed_bytes();
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
+    require(progress_advanced,
+            "completedBytes never advanced while polling during an active transfer");
+
+    first.join();
+    const auto finished = downloads.find(job.id());
+    require(finished.has_value() && finished->state() == masterai::DownloadState::complete,
+            "concurrent access left the download job in an unexpected state");
+    require(std::filesystem::file_size(root / "artifacts" / "model.gguf") == 200000U,
+            "download destination did not contain the full transferred content");
+
+    // The in-flight marker must be cleared after completion so retrying the
+    // same id is refused for the real reason (destination already exists),
+    // not a stale "already running" state.
+    std::atomic_bool cancellation_retry{false};
+    bool already_running_again = false;
+    try {
+        downloads.run(job.id(), cancellation_retry);
+    } catch (const masterai::DownloadAlreadyRunning&) {
+        already_running_again = true;
+    } catch (const std::exception&) {
+        // Expected: the destination already exists from the first run.
+    }
+    require(!already_running_again,
+            "in-flight marker was not released after the transfer finished");
 }
 
 void test_phase_seven_benchmarks() {
@@ -1203,6 +1292,52 @@ void test_phase_fifteen_disk_backed_indexing() {
                 .rebuild_index(request, administrator, false, {"phase15"})
                 .find("202 Accepted") != std::string::npos,
             "authorized index rebuild route did not admit background work");
+    for (unsigned int attempt = 0U; attempt < 200U; ++attempt) {
+        service_status = service.status("phase15");
+        if (service_status &&
+            service_status->state == masterai::IndexJobState::ready) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    require(service_status &&
+                service_status->state == masterai::IndexJobState::ready,
+            "route-triggered rebuild did not settle before notify checks");
+    request.target = "/api/v1/projects/phase15/index/notify";
+    request.body = "{\"trigger\":\"unsupported\",\"paths\":[]}";
+    require(workloads
+                .notify_index(request, administrator, false, {"phase15"})
+                .find("invalid_index_trigger") != std::string::npos,
+            "index notify route accepted an unsupported trigger");
+    request.body = "{\"trigger\":\"save\",\"paths\":[\"src/two.cpp\"]}";
+    std::string notify_response;
+    for (unsigned int attempt = 0U; attempt < 200U; ++attempt) {
+        notify_response =
+            workloads.notify_index(request, administrator, false, {"phase15"});
+        if (notify_response.find("202 Accepted") != std::string::npos) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    require(notify_response.find("202 Accepted") != std::string::npos &&
+                notify_response.find("\"trigger\":\"save\"") !=
+                    std::string::npos,
+            "authorized save notify route did not admit an affected-path update");
+    require(workloads
+                .notify_index(request, administrator, false, {"other-project"})
+                .find("project_binding_required") != std::string::npos,
+            "index notify route bypassed project binding");
+    request.body = "{\"trigger\":\"branch-switch\"}";
+    for (unsigned int attempt = 0U; attempt < 200U; ++attempt) {
+        service_status = service.status("phase15");
+        if (service_status &&
+            service_status->state == masterai::IndexJobState::ready) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    require(workloads
+                .notify_index(request, administrator, false, {"phase15"})
+                .find("\"trigger\":\"branch-switch\"") != std::string::npos,
+            "branch-switch notify route did not promote a full-scan trigger");
 }
 
 }  // namespace
@@ -1226,6 +1361,7 @@ int main() {
         run("runner supervisor", test_phase_four_runner_supervisor);
         run("chat and projects", test_phase_five_chat_and_projects);
         run("download policy", test_phase_six_download_policy);
+        run("concurrent downloads", test_phase_sixteen_concurrent_downloads);
         run("benchmarks", test_phase_seven_benchmarks);
         run("MCP inbound", test_phase_eight_mcp_inbound);
         run("MCP outbound policy", test_phase_nine_mcp_policy);

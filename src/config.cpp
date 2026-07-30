@@ -189,9 +189,14 @@ AppConfig ConfigurationManager::load(
         config.tls_private_key_file = tls.required("privateKeyFile").as_string();
 
         const auto& auth = root.required("auth");
-        require_only(auth, {"enabled", "sessionMinutes"}, "auth.");
+        require_only(auth, {"enabled", "sessionMinutes",
+                            "allowLocalPasswordAccounts"}, "auth.");
         config.authentication_enabled = auth.required("enabled").as_boolean();
         config.session_minutes = positive(auth, "sessionMinutes", 10080U);
+        if (const auto* local_accounts =
+                auth.optional("allowLocalPasswordAccounts")) {
+            config.allow_local_password_accounts = local_accounts->as_boolean();
+        }
 
         const auto& workspace = root.required("workspace");
         require_only(workspace, {"runtimeRoot", "modelsRoot"}, "workspace.");
@@ -305,7 +310,9 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         ",\"privateKeyFile\":" + quote(c.tls_private_key_file.string()) + "},\n"
         "  \"auth\":{\"enabled\":" +
         std::string(c.authentication_enabled ? "true" : "false") +
-        ",\"sessionMinutes\":" + std::to_string(c.session_minutes) + "},\n"
+        ",\"sessionMinutes\":" + std::to_string(c.session_minutes) +
+        ",\"allowLocalPasswordAccounts\":" +
+        (c.allow_local_password_accounts ? "true" : "false") + "},\n"
         "  \"workspace\":{\"runtimeRoot\":" + quote(c.runtime_root.string()) +
         ",\"modelsRoot\":" + quote(c.models_root.string()) + "},\n"
         "  \"models\":{\"memoryReserveMiB\":" +

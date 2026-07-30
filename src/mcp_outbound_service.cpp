@@ -22,6 +22,7 @@ McpOutboundRegistry::McpOutboundRegistry(RecordStore& records)
 // rejected so authority changes require an explicit remove-and-register action.
 McpOutboundServer McpOutboundRegistry::register_server(
     McpOutboundServer server) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (servers_.size() >= maximum_registry_servers ||
         servers_.find(server.id) != servers_.end()) {
         throw std::invalid_argument(
@@ -35,6 +36,7 @@ McpOutboundServer McpOutboundRegistry::register_server(
 
 // Removes one exact registry entry and its durable authority record.
 void McpOutboundRegistry::remove(const std::string& server_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (servers_.erase(server_id) == 0U) {
         throw std::invalid_argument("outbound MCP server does not exist");
     }
@@ -44,6 +46,7 @@ void McpOutboundRegistry::remove(const std::string& server_id) {
 // Returns a copy so callers cannot mutate registry authority in memory.
 std::optional<McpOutboundServer> McpOutboundRegistry::find(
     const std::string& server_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto found = servers_.find(server_id);
     return found == servers_.end()
                ? std::nullopt
@@ -52,6 +55,7 @@ std::optional<McpOutboundServer> McpOutboundRegistry::find(
 
 // Lists deterministic registry copies ordered by server identifier.
 std::vector<McpOutboundServer> McpOutboundRegistry::list() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<McpOutboundServer> result;
     result.reserve(servers_.size());
     for (const auto& server : servers_) result.push_back(server.second);

@@ -179,6 +179,7 @@ ProjectCatalog::ProjectCatalog(std::filesystem::path workspace_root,
 ProjectRecord ProjectCatalog::add(const std::string& id,
                                   const std::string& display_name,
                                   const std::filesystem::path& root) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!safe_identifier(id) || display_name.empty() ||
         display_name.size() > 160U || projects_.find(id) != projects_.end() ||
         !is_path_within(workspace_root_, root)) {
@@ -197,12 +198,14 @@ ProjectRecord ProjectCatalog::add(const std::string& id,
 }
 
 std::optional<ProjectRecord> ProjectCatalog::find(const std::string& id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto found = projects_.find(id);
     return found == projects_.end() ? std::nullopt
                                     : std::optional<ProjectRecord>(found->second);
 }
 
 std::vector<ProjectRecord> ProjectCatalog::list() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ProjectRecord> result;
     result.reserve(projects_.size());
     for (const auto& item : projects_) result.push_back(item.second);
@@ -280,6 +283,7 @@ ChatStore::ChatStore(RecordStore& records) : records_(&records) { restore(); }
 ChatRecord ChatStore::create(const std::string& owner_id,
                              const std::string& project_id,
                              const std::string& model_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!safe_identifier(owner_id) || !safe_identifier(project_id) ||
         !safe_identifier(model_id) || chats_.size() >= 10000U) {
         throw std::invalid_argument("chat identity is outside policy");
@@ -293,6 +297,7 @@ ChatRecord ChatStore::create(const std::string& owner_id,
 
 void ChatStore::append(const std::string& chat_id, const ChatRole role,
                        const std::string& content) {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto found = chats_.find(chat_id);
     if (found == chats_.end()) {
         throw std::invalid_argument("chat does not exist");
@@ -307,6 +312,7 @@ void ChatStore::append(const std::string& chat_id, const ChatRole role,
 
 std::optional<ChatRecord> ChatStore::find_for_owner(
     const std::string& chat_id, const std::string& owner_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto found = chats_.find(chat_id);
     if (found == chats_.end() || found->second.owner_id != owner_id) {
         return std::nullopt;
@@ -316,6 +322,7 @@ std::optional<ChatRecord> ChatStore::find_for_owner(
 
 std::vector<ChatRecord> ChatStore::list_for_owner(
     const std::string& owner_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ChatRecord> result;
     for (const auto& item : chats_) {
         if (item.second.owner_id == owner_id) result.push_back(item.second);
@@ -371,6 +378,7 @@ AttachmentStore::AttachmentStore(std::filesystem::path root,
 AttachmentRecord AttachmentStore::add_text(
     const std::string& owner_id, const std::string& project_id,
     const std::string& filename, const std::string& content) {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto leaf = std::filesystem::path(filename).filename();
     if (!safe_identifier(owner_id) || !safe_identifier(project_id) ||
         filename.empty() || filename.size() > 255U ||
@@ -406,6 +414,7 @@ AttachmentRecord AttachmentStore::add_text(
 
 std::optional<AttachmentRecord> AttachmentStore::find_for_owner(
     const std::string& id, const std::string& owner_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto found = attachments_.find(id);
     if (found == attachments_.end() || found->second.owner_id != owner_id) {
         return std::nullopt;
@@ -413,6 +422,10 @@ std::optional<AttachmentRecord> AttachmentStore::find_for_owner(
     return found->second;
 }
 
+// Not itself locked: it only calls the already-locked find_for_owner() above
+// and then does unlocked filesystem I/O, so locking here too would either
+// deadlock (non-recursive mutex_) or needlessly hold the lock across file
+// reads.
 std::string AttachmentStore::read_text_for_owner(
     const std::string& id, const std::string& owner_id) const {
     const auto record = find_for_owner(id, owner_id);

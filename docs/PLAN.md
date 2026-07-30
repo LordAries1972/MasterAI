@@ -88,10 +88,12 @@ Current phase status:
   elimination, affected-path incremental updates, exact identifier-boundary
   symbol lookup, immutable checksummed disk generations, prior-generation
   recovery, empty/deleted-path publication, typed and coalesced change
-  triggers, bounded background work, authenticated project-bound routes, and
-  Debug/Release validation are implemented. Representative large-project
-  ceiling evidence, live editor/watcher/branch trigger adapters, and
-  platform-specific I/O benchmark decisions remain.
+  triggers, bounded background work, authenticated project-bound routes, an
+  authenticated `index/notify` ingress for live save/watcher/branch-switch/
+  periodic trigger adapters, and Debug/Release validation are implemented.
+  Representative large-project ceiling evidence, an actual native or
+  editor-side file-watcher/branch-switch adapter that calls the new ingress,
+  and platform-specific I/O benchmark decisions remain.
 - Phase 16: Planned — add deadline-bound hybrid project retrieval, ranking,
   deduplication, context budgeting, and context-source disclosure.
 - Phase 17: Planned — introduce a security-partitioned, byte-bounded cache
@@ -117,6 +119,22 @@ as explicitly deferred. Phase 4–7 implementation tests do not substitute for
 the real backend/model, interrupted external transfer, and same-host benchmark
 exit checks listed above. Phase 8 still requires its external-client
 operational check.
+
+Validation evidence recorded on 2026-07-30:
+
+- Windows x64 Debug and Release builds completed under strict C++17 after
+  adding the authenticated `POST /api/v1/projects/{id}/index/notify` route,
+  and `masterai_core_tests` passed in both build types. The route accepts
+  only the closed save/watcher/branch-switch/periodic trigger vocabulary,
+  requires the same `projects.write` role and project binding as the
+  existing rebuild/cancel routes, rejects an unsupported trigger name,
+  forwards named affected paths for save/watcher triggers into the bounded
+  `ProjectIndexService::request_update` queue, promotes branch-switch and
+  periodic notifications to a full scan, and records an `index.notify` audit
+  entry per accepted request. This closes the gap between the previously
+  implemented trigger-admission logic and an actual external caller; a live
+  native or editor-side file-watcher/branch-switch process that calls this
+  route automatically is still outstanding.
 
 Validation evidence recorded on 2026-07-29:
 
@@ -1902,10 +1920,14 @@ Status: In progress. The native disk segment/generation foundation,
 fixed-capacity background service, unchanged-file elimination, affected-path
 updates, exact identifier-boundary symbol lookup, deleted/empty generation
 publication, typed/coalesced trigger admission, authenticated project-bound
-status/rebuild/cancel routes, and focused Windows Debug/Release validation
-exist. A representative large-project ceiling run, live editor/watcher/branch
-trigger adapters, deeper language-aware symbol extraction, and
-platform-specific I/O benchmark decisions remain.
+status/rebuild/cancel/notify routes, and focused Windows Debug/Release
+validation exist. The `index/notify` route gives an external editor,
+watcher, or version-control process an authenticated, project-bound way to
+report a save/watcher/branch-switch/periodic event; no such native or
+editor-side process calls it automatically yet. A representative
+large-project ceiling run, an actual live file-watcher/branch-switch adapter,
+deeper language-aware symbol extraction, and platform-specific I/O benchmark
+decisions remain.
 
 Purpose:
 
@@ -1933,7 +1955,11 @@ Deliverables:
 - Partial-index publication so exact path/text/symbol retrieval becomes useful
   before a large workspace is fully indexed.
 - Save/watcher/branch-switch/manual/periodic triggers with debounce,
-  cancellation, backpressure, and affected-edge-only graph updates.
+  cancellation, backpressure, and affected-edge-only graph updates. An
+  authenticated `POST /api/v1/projects/{id}/index/notify` route now gives an
+  external adapter a stable way to submit save/watcher/branch-switch/periodic
+  events; the live native or editor-side process that calls it on real file
+  and branch changes is a remaining deliverable.
 - A portable bounded worker-based file reader plus replaceable Windows
   overlapped-I/O and Linux `io_uring` implementations only where benchmarks
   justify them; correctness never depends on an optional I/O backend.

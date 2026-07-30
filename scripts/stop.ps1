@@ -16,7 +16,10 @@ if ($LASTEXITCODE -ne 0 -or -not $runtimeRoot) {
     throw 'MasterAI runtime root could not be resolved from settings.'
 }
 if (-not [IO.Path]::IsPathRooted($runtimeRoot)) {
-    $runtimeRoot = [IO.Path]::GetFullPath($runtimeRoot, $projectRoot)
+    # The two-argument GetFullPath(path, basePath) overload is .NET Core/5+
+    # only; combine with Join-Path first so this also works under Windows
+    # PowerShell 5.1 (.NET Framework), which only has the single-arg form.
+    $runtimeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot $runtimeRoot))
 }
 $pidFile = Join-Path $runtimeRoot 'run\masterai.pid'
 $stopFile = Join-Path $runtimeRoot 'run\stop.request'

@@ -74,4 +74,14 @@ inline std::filesystem::path fake_llama_executable() {
 #endif
 }
 
+// Resolves the minimal curl stand-in used to exercise DownloadManager::run()
+// without a real network transfer; see test/fake_curl.cpp.
+inline std::filesystem::path fake_curl_executable() {
+#if defined(_WIN32)
+    return std::filesystem::current_path() / "masterai_fake_curl.exe";
+#else
+    return std::filesystem::current_path() / "masterai_fake_curl";
+#endif
+}
+
 }  // namespace masterai_test

@@ -208,6 +208,7 @@ DownloadManager::DownloadManager(std::filesystem::path approved_curl,
 }
 
 DownloadJob DownloadManager::create(const DownloadRequest& request) {
+    std::lock_guard<std::mutex> lock(mutex_);
     DownloadJob job(request);
     if (!is_path_within(download_root_, request.destination) ||
         request.source_url.find(request.immutable_revision) == std::string::npos) {
@@ -222,20 +223,58 @@ DownloadJob DownloadManager::create(const DownloadRequest& request) {
     return job;
 }
 
+// Runs one transfer synchronously on the calling (request) thread, but never
+// holds mutex_ across the transfer itself: only the brief admission check,
+// each ~100ms progress tick, and the final state transition take the lock.
+// This is what lets other request threads keep calling find()/list()/cancel()
+// -- i.e. the frontend's own progress poll -- while a download is in flight,
+// instead of the whole server stalling for the download's full duration.
 DownloadJob DownloadManager::run(const std::string& id,
                                  const std::atomic_bool& cancellation) {
+    std::unique_lock<std::mutex> lock(mutex_);
     const auto found = jobs_.find(id);
     if (found == jobs_.end()) throw std::invalid_argument("download job not found");
+    if (in_flight_.find(id) != in_flight_.end()) {
+        // A second run() for the same id would race this one over the same
+        // .part file; reject it instead so the caller (the HTTP layer) can
+        // report 409 Conflict rather than corrupting the transfer.
+        throw DownloadAlreadyRunning(id);
+    }
+    in_flight_.insert(id);
+    // Safe to hold a reference into jobs_ across the unlocked phases below:
+    // std::map insertion (the only other mutation create() performs) never
+    // invalidates references to existing elements, and in_flight_ rules out
+    // a second run() mutating this same job concurrently. cancel() still can
+    // run concurrently, but it takes mutex_ too, so job's own mutations are
+    // always serialized with it.
     auto& job = found->second;
     const auto destination = job.request().destination;
     const auto partial = std::filesystem::path(destination.string() + ".part");
+    lock.unlock();
+
+    // Guarantees in_flight_ is cleared on every exit path -- success,
+    // failure, exception, or cancellation -- so a retry is never blocked by
+    // a stale entry.
+    struct InFlightGuard {
+        std::mutex& guarded_mutex;
+        std::set<std::string>& in_flight;
+        std::string job_id;
+        ~InFlightGuard() {
+            std::lock_guard<std::mutex> guard(guarded_mutex);
+            in_flight.erase(job_id);
+        }
+    } release{mutex_, in_flight_, id};
+
     std::filesystem::create_directories(destination.parent_path());
     const std::uint64_t existing =
         std::filesystem::is_regular_file(partial)
             ? static_cast<std::uint64_t>(std::filesystem::file_size(partial))
             : 0U;
-    job.begin(existing);
-    persist(job);
+    {
+        std::lock_guard<std::mutex> tick(mutex_);
+        job.begin(existing);
+        persist(job);
+    }
     try {
         const std::vector<std::string> arguments{
             "--proto", "=https", "--tlsv1.2", "--fail", "--location",
@@ -247,32 +286,62 @@ DownloadJob DownloadManager::run(const std::string& id,
             cancellation, [&]() {
                 std::error_code error;
                 const auto size = std::filesystem::file_size(partial, error);
-                if (!error && size > job.completed_bytes()) {
+                if (error) return;
+                // Locked only for this one progress-tick mutation, not for
+                // the wait between ticks, so the transfer's ~100ms polling
+                // loop never blocks other DownloadManager callers.
+                std::lock_guard<std::mutex> tick(mutex_);
+                if (size > job.completed_bytes()) {
                     job.record_progress(static_cast<std::uint64_t>(size));
                     persist(job);
                 }
             });
         if (cancellation.load()) {
+            std::lock_guard<std::mutex> tick(mutex_);
             job.cancel();
             persist(job);
             return job;
         }
         if (exit_code != 0 || !std::filesystem::is_regular_file(partial)) {
+            std::lock_guard<std::mutex> tick(mutex_);
             job.fail("download transport failed with exit code " +
                      std::to_string(exit_code));
             persist(job);
             return job;
         }
-        job.record_progress(
-            static_cast<std::uint64_t>(std::filesystem::file_size(partial)));
-        job.begin_verification();
-        persist(job);
+        {
+            std::lock_guard<std::mutex> tick(mutex_);
+            job.record_progress(
+                static_cast<std::uint64_t>(std::filesystem::file_size(partial)));
+            job.begin_verification();
+            persist(job);
+        }
+        // Checked before complete() (not after): a prior job may already
+        // have populated this destination (e.g. the same model queued
+        // twice). Removing the now-redundant partial and failing cleanly
+        // here avoids both an orphaned .part file and a job that reports
+        // complete without ever having moved its own download into place.
+        if (std::filesystem::exists(destination)) {
+            std::error_code ignored;
+            std::filesystem::remove(partial, ignored);
+            std::lock_guard<std::mutex> tick(mutex_);
+            job.fail("verified destination already exists from a prior download");
+            persist(job);
+            return job;
+        }
+        // Unlocked: hashing a potentially multi-gigabyte file is CPU-bound
+        // work that would otherwise block every other DownloadManager caller
+        // for its whole duration. No other thread touches this id's .part
+        // file while in_flight_ holds it.
         const auto actual = sha256_file_hex(partial);
-        job.complete(actual);
-        if (job.state() == DownloadState::complete) {
-            if (std::filesystem::exists(destination)) {
-                throw std::runtime_error("verified destination already exists");
-            }
+        DownloadState final_state;
+        {
+            std::lock_guard<std::mutex> tick(mutex_);
+            job.complete(actual);
+            persist(job);
+            final_state = job.state();
+        }
+        if (final_state == DownloadState::complete) {
             std::filesystem::rename(partial, destination);
         } else {
             const auto quarantine =
@@ -280,23 +349,29 @@ DownloadJob DownloadManager::run(const std::string& id,
             std::filesystem::rename(partial, quarantine);
         }
     } catch (const std::exception& exception) {
+        std::lock_guard<std::mutex> tick(mutex_);
         if (job.state() != DownloadState::complete &&
             job.state() != DownloadState::cancelled &&
             job.state() != DownloadState::quarantined) {
             job.fail(exception.what());
         }
+        persist(job);
+        return job;
     }
+    std::lock_guard<std::mutex> tick(mutex_);
     persist(job);
     return job;
 }
 
 std::optional<DownloadJob> DownloadManager::find(const std::string& id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto found = jobs_.find(id);
     return found == jobs_.end() ? std::nullopt
                                 : std::optional<DownloadJob>(found->second);
 }
 
 std::vector<DownloadJob> DownloadManager::list() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<DownloadJob> result;
     result.reserve(jobs_.size());
     for (const auto& item : jobs_) result.push_back(item.second);
@@ -304,6 +379,7 @@ std::vector<DownloadJob> DownloadManager::list() const {
 }
 
 void DownloadManager::cancel(const std::string& id) {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto found = jobs_.find(id);
     if (found == jobs_.end()) throw std::invalid_argument("download job not found");
     found->second.cancel();

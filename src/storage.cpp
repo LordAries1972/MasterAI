@@ -107,11 +107,14 @@ UserRole parse_role(const std::string& value) {
 
 std::string user_value(const UserRecord& user) {
     return hex(user.os_principal) + ":" + hex(user.display_name) + ":" +
-           role_name(user.role) + ":" + (user.enabled ? "1" : "0");
+           role_name(user.role) + ":" + (user.enabled ? "1" : "0") + ":" +
+           hex(user.password_hash);
 }
 
 UserRecord parse_user(const std::string& id, const std::string& value) {
-    // Stored user fields use ':' rather than tabs.
+    // Stored user fields use ':' rather than tabs. The password-hash field
+    // was added after release; records written before it have 4 fields and
+    // are treated as OS-verified accounts with no local password.
     std::vector<std::string> fields;
     std::size_t start = 0U;
     while (true) {
@@ -120,9 +123,12 @@ UserRecord parse_user(const std::string& id, const std::string& value) {
         if (next == std::string::npos) break;
         start = next + 1U;
     }
-    if (fields.size() != 4U) throw std::runtime_error("stored user is corrupt");
+    if (fields.size() != 4U && fields.size() != 5U) {
+        throw std::runtime_error("stored user is corrupt");
+    }
     return UserRecord{id, unhex(fields[0]), unhex(fields[1]),
-                      parse_role(fields[2]), fields[3] == "1"};
+                      parse_role(fields[2]), fields[3] == "1",
+                      fields.size() == 5U ? unhex(fields[4]) : std::string{}};
 }
 
 std::string random_id() {
@@ -211,6 +217,10 @@ void RecordStore::open() {
 
 void RecordStore::put(const std::string& collection, const std::string& key,
                       const std::string& value) {
+    // Locked for the whole body: appending the journal line and updating
+    // records_ must happen as one unit, or two concurrent request threads
+    // could interleave journal writes or race the in-memory map.
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!opened_ || !safe_name(collection) || !safe_name(key) ||
         value.size() > 16U * 1024U * 1024U) {
         throw std::invalid_argument("record write is outside policy");
@@ -221,6 +231,7 @@ void RecordStore::put(const std::string& collection, const std::string& key,
 }
 
 void RecordStore::erase(const std::string& collection, const std::string& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!opened_ || !safe_name(collection) || !safe_name(key)) {
         throw std::invalid_argument("record erase is outside policy");
     }
@@ -230,6 +241,7 @@ void RecordStore::erase(const std::string& collection, const std::string& key) {
 
 std::optional<std::string> RecordStore::get(const std::string& collection,
                                             const std::string& key) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto group = records_.find(collection);
     if (group == records_.end()) return std::nullopt;
     const auto item = group->second.find(key);
@@ -239,6 +251,7 @@ std::optional<std::string> RecordStore::get(const std::string& collection,
 
 std::vector<std::pair<std::string, std::string>>
 RecordStore::list(const std::string& collection) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<std::pair<std::string, std::string>> result;
     const auto group = records_.find(collection);
     if (group != records_.end()) {
@@ -248,6 +261,10 @@ RecordStore::list(const std::string& collection) const {
 }
 
 void RecordStore::checkpoint() {
+    // Locked for the whole body: this iterates records_ while writing the
+    // snapshot file and then truncates the journal, so no put()/erase() may
+    // observe or mutate state mid-checkpoint.
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!opened_) throw std::logic_error("record store is not open");
     const auto temporary = root_ / "records.snapshot.tmp";
     {
@@ -276,6 +293,9 @@ void RecordStore::checkpoint() {
 
 std::filesystem::path RecordStore::backup(
     const std::filesystem::path& backup_root) const {
+    // Locked so a concurrent checkpoint() cannot be mid-rewrite of the
+    // snapshot/journal files while they're being copied here.
+    std::lock_guard<std::mutex> lock(mutex_);
     std::filesystem::create_directories(backup_root);
     const auto now = std::chrono::system_clock::now().time_since_epoch().count();
     const auto target = backup_root / ("records-" + std::to_string(now));
@@ -416,18 +436,20 @@ bool role_allows(const UserRole role, const std::string& permission) {
 bool UserStore::setup_required() const { return records_.list("users").empty(); }
 
 UserRecord UserStore::create_first_administrator(
-    const std::string& principal, const std::string& display_name) {
+    const std::string& principal, const std::string& display_name,
+    const std::string& password_hash) {
     if (!setup_required()) throw std::logic_error("administrator already exists");
-    return add(principal, display_name, UserRole::administrator);
+    return add(principal, display_name, UserRole::administrator, password_hash);
 }
 
 UserRecord UserStore::add(const std::string& principal,
-                          const std::string& display_name, const UserRole role) {
+                          const std::string& display_name, const UserRole role,
+                          const std::string& password_hash) {
     if (principal.empty() || principal.size() > 256U || display_name.empty() ||
         display_name.size() > 160U || find_by_principal(principal).has_value()) {
         throw std::invalid_argument("user mapping is invalid or duplicate");
     }
-    UserRecord user{random_id(), principal, display_name, role, true};
+    UserRecord user{random_id(), principal, display_name, role, true, password_hash};
     records_.put("users", user.id, user_value(user));
     return user;
 }
@@ -446,10 +468,24 @@ std::optional<UserRecord> UserStore::find_by_id(const std::string& id) const {
     return value ? std::optional<UserRecord>(parse_user(id, *value)) : std::nullopt;
 }
 
+std::vector<UserRecord> UserStore::all() const {
+    std::vector<UserRecord> result;
+    for (const auto& item : records_.list("users")) {
+        result.push_back(parse_user(item.first, item.second));
+    }
+    return result;
+}
+
 AuditLog::AuditLog(std::filesystem::path path) : path_(std::move(path)) {}
 
 void AuditLog::append(const std::string& event, const std::string& actor,
                       const std::string& outcome, const std::string& detail) {
+    // Locked for the whole body: reading the previous hash-chain link and
+    // appending the next line must be atomic, or two concurrent callers (now
+    // routine, since almost every request appends an audit line) would race
+    // reading the same "previous" hash and could interleave or break the
+    // chain.
+    std::lock_guard<std::mutex> lock(mutex_);
     std::filesystem::create_directories(path_.parent_path());
     std::string previous(64U, '0');
     if (std::filesystem::exists(path_)) {
@@ -535,6 +571,7 @@ std::string ApiTokenStore::create(
     const std::string& user_id, const std::set<std::string>& scopes,
     const std::uint64_t now, const std::uint64_t lifetime,
     const std::set<std::string>& project_ids) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!safe_name(user_id) || scopes.empty() || lifetime == 0U ||
         now > std::numeric_limits<std::uint64_t>::max() - lifetime) {
         throw std::invalid_argument("API token parameters are invalid");
@@ -560,6 +597,7 @@ std::string ApiTokenStore::create(
 std::optional<ApiTokenStore::Token> ApiTokenStore::validate(
     const std::string& token, const std::string& required_scope,
     const std::uint64_t now) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto found = tokens_.find(sha256_hex(token));
     if (found == tokens_.end() || found->second.revoked ||
         now >= found->second.expires_at_epoch_seconds ||
@@ -570,6 +608,7 @@ std::optional<ApiTokenStore::Token> ApiTokenStore::validate(
 }
 
 void ApiTokenStore::revoke(const std::string& token) {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto found = tokens_.find(sha256_hex(token));
     if (found != tokens_.end()) {
         found->second.revoked = true;

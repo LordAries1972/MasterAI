@@ -152,6 +152,17 @@ std::string index_trigger(const IndexTrigger trigger) {
     return "manual";
 }
 
+// Parses the closed trigger vocabulary accepted from a live editor, file
+// watcher, or version-control adapter. Manual is excluded here because manual
+// rebuilds have their own dedicated route and admission rule.
+std::optional<IndexTrigger> parse_index_trigger(const std::string& value) {
+    if (value == "save") return IndexTrigger::save;
+    if (value == "watcher") return IndexTrigger::watcher;
+    if (value == "branch-switch") return IndexTrigger::branch_switch;
+    if (value == "periodic") return IndexTrigger::periodic;
+    return std::nullopt;
+}
+
 // Serializes only bounded progress and diagnostics, never indexed content.
 std::string index_status_json(const std::string& project_id,
                               const IndexServiceStatus& status) {
@@ -379,6 +390,57 @@ std::string WorkloadHttpController::cancel_index(
                         "\",\"state\":\"cancelling\"}");
 }
 
+// Accepts one live trigger from an authenticated editor, file-watcher, or
+// version-control adapter. Save/watcher triggers must name affected paths so
+// only those files are re-read; branch-switch/periodic notifications carry
+// no paths because the service always promotes them to a full scan.
+std::string WorkloadHttpController::notify_index(
+    Request& request, const UserRecord& user, const bool cookie_authenticated,
+    const std::set<std::string>& authenticated_project_ids) {
+    if (!role_allows(user.role, "projects.write")) {
+        return response(403, "Forbidden",
+                        "{\"error\":\"permission_denied\"}");
+    }
+    const auto resolution = resolve_index_project(
+        request, "/index/notify", state_->projects, cookie_authenticated,
+        authenticated_project_ids);
+    if (!resolution) {
+        return resolution.failure_response;
+    }
+    const auto& project = *resolution.project;
+    IndexTrigger trigger{};
+    std::vector<std::filesystem::path> changed_paths;
+    try {
+        const auto root = parse_json(request.body);
+        const auto parsed = parse_index_trigger(
+            root.required("trigger").as_string());
+        if (!parsed) {
+            return response(400, "Bad Request",
+                            "{\"error\":\"invalid_index_trigger\"}");
+        }
+        trigger = *parsed;
+        if (trigger == IndexTrigger::save || trigger == IndexTrigger::watcher) {
+            for (const auto& path : root.required("paths").as_array()) {
+                changed_paths.emplace_back(path.as_string());
+            }
+        }
+    } catch (const std::exception&) {
+        return response(400, "Bad Request",
+                        "{\"error\":\"invalid_index_notify_request\"}");
+    }
+    if (!state_->indexes.request_update(project, changed_paths, trigger)) {
+        return response(409, "Conflict",
+                        "{\"error\":\"index_update_not_admitted\"}");
+    }
+    state_->audit.append("index.notify", user.id, index_trigger(trigger),
+                         project.id);
+    return response(
+        202, "Accepted",
+        "{\"projectId\":\"" + json_escape(project.id) +
+            "\",\"state\":\"queued\",\"trigger\":\"" +
+            index_trigger(trigger) + "\"}");
+}
+
 // Stores one project-bound UTF-8 attachment through AttachmentStore policy.
 std::string WorkloadHttpController::create_attachment(
     Request& request, const UserRecord& user) {
@@ -427,6 +489,19 @@ std::string WorkloadHttpController::load_model(
         }
         for (const auto& model : state_->scan_models()) {
             if (model.manifest.id == id) {
+                // Suitability is gated here, at activation, rather than at
+                // download time: a model may be fetched on modest hardware
+                // and only loaded later, elsewhere or after a hardware
+                // upgrade. state == ready already encodes the fresh
+                // manifest/digest/hardware suitability pass from scan_models().
+                if (model.state != ModelState::ready) {
+                    state_->audit.append("model.load", user.id, "denied",
+                                         model.diagnostic);
+                    return response(
+                        409, "Conflict",
+                        "{\"error\":\"model_not_ready\",\"reason\":\"" +
+                            json_escape(model.diagnostic) + "\"}");
+                }
                 state_->inference->load(
                     model,
                     static_cast<unsigned int>(
@@ -503,6 +578,12 @@ std::string WorkloadHttpController::create_download(
         if (minimum <= 0 || recommended < minimum) {
             throw std::runtime_error("download RAM recommendation is invalid");
         }
+        // RAM is advisory only at download time (reported below via
+        // hardwareRecommendation), never blocking: a model can be fetched
+        // now and run later, on this machine or another. ModelRegistry
+        // already regates suitability at scan/Ready-promotion time, and the
+        // load route rechecks it again before starting a runner, so nothing
+        // downloaded here can load without a fresh suitability pass.
         const auto hardware =
             probe_hardware(state_->configuration.runtime_root / "downloads");
         const auto usable =
@@ -511,14 +592,6 @@ std::string WorkloadHttpController::create_download(
                 ? hardware.available_ram_mib -
                       state_->configuration.memory_reserve_mib
                 : 0U;
-        if (usable < static_cast<std::uint64_t>(minimum)) {
-            return response(
-                409, "Conflict",
-                "{\"error\":\"hardware_unsuitable\",\"requiredRamMiB\":" +
-                    std::to_string(minimum) +
-                    ",\"availableAfterReserveMiB\":" +
-                    std::to_string(usable) + "}");
-        }
         const auto job = state_->downloads->create(
             {root.required("sourceUrl").as_string(),
              root.required("immutableRevision").as_string(),
@@ -562,6 +635,11 @@ std::string WorkloadHttpController::run_download(
         return response(200, "OK",
                         "{\"id\":\"" + id + "\",\"state\":\"" +
                             download_state(job.state()) + "\"}");
+    } catch (const DownloadAlreadyRunning&) {
+        // Distinguished from the generic failure below so the frontend can
+        // tell "already downloading, keep polling" apart from a real error.
+        return response(409, "Conflict",
+                        "{\"error\":\"download_already_running\"}");
     } catch (const std::exception&) {
         return response(409, "Conflict",
                         "{\"error\":\"download_run_failed\"}");

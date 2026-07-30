@@ -22,6 +22,12 @@ if (-not (Test-Path -LiteralPath $Settings -PathType Leaf)) {
     if ($LASTEXITCODE -ne 0) { throw 'MasterAI configuration failed.' }
 }
 if ($Foreground) {
+    # MasterAI logs to stderr; under $ErrorActionPreference = 'Stop' (set
+    # above) PowerShell treats each stderr line from a native process as a
+    # terminating error, which would kill the server after its first log
+    # line. Foreground streaming only needs the exit code, not that
+    # sensitivity, so relax it for just this invocation.
+    $ErrorActionPreference = 'Continue'
     & $binary serve $Settings
     exit $LASTEXITCODE
 }
@@ -32,7 +38,10 @@ if ($LASTEXITCODE -ne 0 -or -not $runtimeRoot) {
     throw 'MasterAI runtime root could not be resolved from settings.'
 }
 if (-not [IO.Path]::IsPathRooted($runtimeRoot)) {
-    $runtimeRoot = [IO.Path]::GetFullPath($runtimeRoot, $projectRoot)
+    # The two-argument GetFullPath(path, basePath) overload is .NET Core/5+
+    # only; combine with Join-Path first so this also works under Windows
+    # PowerShell 5.1 (.NET Framework), which only has the single-arg form.
+    $runtimeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot $runtimeRoot))
 }
 $runRoot = Join-Path $runtimeRoot 'run'
 New-Item -ItemType Directory -Path $runRoot -Force | Out-Null

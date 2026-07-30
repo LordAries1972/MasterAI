@@ -184,11 +184,19 @@ void log(const LogLevel level, const std::string& event, const std::string& deta
 #endif
     std::ostringstream timestamp;
     timestamp << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
-    std::clog << "{\"time\":\"" << timestamp.str()
-              << "\",\"level\":\"" << level_name(level)
-              << "\",\"event\":\"" << sanitize_log_value(event)
-              << "\",\"detail\":\"" << sanitize_log_value(detail)
-              << "\"}\n";
+    // Build the whole line first and write it in one shot: now that the
+    // server is concurrent, this is called from many request threads at
+    // once, and a chain of separate operator<< calls could interleave
+    // mid-line even though each individual call is itself data-race-free.
+    std::ostringstream line;
+    line << "{\"time\":\"" << timestamp.str()
+         << "\",\"level\":\"" << level_name(level)
+         << "\",\"event\":\"" << sanitize_log_value(event)
+         << "\",\"detail\":\"" << sanitize_log_value(detail)
+         << "\"}\n";
+    static std::mutex log_mutex;
+    std::lock_guard<std::mutex> lock(log_mutex);
+    std::clog << line.str();
 }
 
 bool is_path_within(const std::filesystem::path& root,

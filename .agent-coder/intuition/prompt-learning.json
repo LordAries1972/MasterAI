@@ -87,6 +87,28 @@
       "appliedIntuitionRuleIds": [],
       "verified": false,
       "recordedAt": "2026-07-28T12:01:02.401Z"
+    },
+    {
+      "promptStrategyId": "verified-default",
+      "promptStrategyVersion": 1,
+      "requestId": "480a3b36-1b1f-4d36-b78f-2d1ff8c19a93",
+      "taskType": "explain-symbol",
+      "providerId": "claude",
+      "modelId": "claude-sonnet-5",
+      "promptTokens": 2046,
+      "completionTokens": 1000,
+      "attempts": 1,
+      "responseSchemaValid": false,
+      "assumptionsRejected": 0,
+      "evidenceCoverage": 0,
+      "patchAccepted": false,
+      "userCorrectionRequired": false,
+      "rolledBack": false,
+      "finalOutcome": "partially_successful",
+      "verificationEvidence": [],
+      "appliedIntuitionRuleIds": [],
+      "verified": false,
+      "recordedAt": "2026-07-29T22:31:29.419Z"
     }
   ],
   "lessons": [],
@@ -117,6 +139,20 @@
       "timestamp": "2026-07-28T12:01:02.401Z",
       "action": "record-outcome",
       "targetId": "958b714d-5ac5-421c-b6ff-110de47f099e",
+      "detail": "Outcome remains temporary and cannot influence ranking."
+    },
+    {
+      "id": "e7feea31-c990-45d7-95dc-69b4d4a217ea",
+      "timestamp": "2026-07-29T22:31:13.651Z",
+      "action": "record-outcome",
+      "targetId": "480a3b36-1b1f-4d36-b78f-2d1ff8c19a93",
+      "detail": "Outcome remains temporary and cannot influence ranking."
+    },
+    {
+      "id": "a7a19803-8469-40b8-b684-f06c61c8e889",
+      "timestamp": "2026-07-29T22:31:29.419Z",
+      "action": "record-outcome",
+      "targetId": "480a3b36-1b1f-4d36-b78f-2d1ff8c19a93",
       "detail": "Outcome remains temporary and cannot influence ranking."
     }
   ]

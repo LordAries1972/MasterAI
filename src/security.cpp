@@ -238,6 +238,164 @@ std::string sha256_file_hex(const std::filesystem::path& path) {
     return hex_encode(digest.data(), digest.size());
 }
 
+namespace {
+
+// OWASP-recommended floor for PBKDF2-HMAC-SHA256 as of this writing; local
+// accounts are the only credential MasterAI stores, so this cost applies
+// only there, never to OS-verified sign-in.
+constexpr unsigned int kPasswordHashIterations = 210000U;
+constexpr std::size_t kPasswordSaltBytes = 16U;
+constexpr std::size_t kPasswordHashBytes = 32U;
+
+std::string hex_decode(const std::string& text) {
+    if (text.empty() || text.size() % 2U != 0U) {
+        throw std::invalid_argument("hex value has an invalid length");
+    }
+    std::string result(text.size() / 2U, '\0');
+    for (std::size_t index = 0; index < result.size(); ++index) {
+        const auto nibble = [](const char character) -> unsigned int {
+            if (character >= '0' && character <= '9') {
+                return static_cast<unsigned int>(character - '0');
+            }
+            if (character >= 'a' && character <= 'f') {
+                return static_cast<unsigned int>(character - 'a') + 10U;
+            }
+            throw std::invalid_argument("hex value has an invalid digit");
+        };
+        result[index] = static_cast<char>(
+            (nibble(text[index * 2U]) << 4U) | nibble(text[index * 2U + 1U]));
+    }
+    return result;
+}
+
+#if defined(__linux__)
+// One HMAC-SHA256 operation over the Linux kernel crypto API, used only to
+// assemble PBKDF2 below (there is no kernel PBKDF2 primitive to call directly).
+std::array<std::uint8_t, 32> hmac_sha256_linux(
+    const std::vector<std::uint8_t>& key,
+    const std::vector<std::uint8_t>& message) {
+    const int algorithm_socket = socket(AF_ALG, SOCK_SEQPACKET, 0);
+    if (algorithm_socket < 0) {
+        throw std::runtime_error("Linux AF_ALG HMAC-SHA256 socket failed");
+    }
+    sockaddr_alg address{};
+    address.salg_family = AF_ALG;
+    std::strncpy(reinterpret_cast<char*>(address.salg_type), "hash",
+                sizeof(address.salg_type) - 1U);
+    std::strncpy(reinterpret_cast<char*>(address.salg_name), "hmac(sha256)",
+                sizeof(address.salg_name) - 1U);
+    if (bind(algorithm_socket, reinterpret_cast<sockaddr*>(&address),
+             sizeof(address)) != 0) {
+        close(algorithm_socket);
+        throw std::runtime_error("Linux AF_ALG HMAC-SHA256 bind failed");
+    }
+    if (setsockopt(algorithm_socket, SOL_ALG, ALG_SET_KEY, key.data(),
+                   static_cast<socklen_t>(key.size())) != 0) {
+        close(algorithm_socket);
+        throw std::runtime_error("Linux AF_ALG HMAC-SHA256 key setup failed");
+    }
+    const int operation = accept(algorithm_socket, nullptr, nullptr);
+    if (operation < 0) {
+        close(algorithm_socket);
+        throw std::runtime_error("Linux AF_ALG HMAC-SHA256 accept failed");
+    }
+    std::array<std::uint8_t, 32> digest{};
+    const ssize_t written = write(operation, message.data(), message.size());
+    const ssize_t received = read(operation, digest.data(), digest.size());
+    close(operation);
+    close(algorithm_socket);
+    if (written != static_cast<ssize_t>(message.size()) ||
+        received != static_cast<ssize_t>(digest.size())) {
+        throw std::runtime_error("Linux AF_ALG HMAC-SHA256 operation failed");
+    }
+    return digest;
+}
+#endif
+
+// RFC 8018 PBKDF2-HMAC-SHA256, restricted to a single derived block (32
+// bytes), which is all a SHA-256-sized key ever needs.
+std::vector<std::uint8_t> pbkdf2_hmac_sha256_32(
+    const std::string& password, const std::vector<std::uint8_t>& salt,
+    const unsigned int iterations) {
+#if defined(_WIN32)
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
+                                    nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0) {
+        throw std::runtime_error("BCrypt PBKDF2 initialization failed");
+    }
+    std::vector<std::uint8_t> derived(kPasswordHashBytes);
+    const NTSTATUS status = BCryptDeriveKeyPBKDF2(
+        algorithm,
+        reinterpret_cast<PUCHAR>(const_cast<char*>(password.data())),
+        static_cast<ULONG>(password.size()),
+        const_cast<PUCHAR>(salt.data()), static_cast<ULONG>(salt.size()),
+        iterations, derived.data(), static_cast<ULONG>(derived.size()), 0);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (status < 0) throw std::runtime_error("BCrypt PBKDF2 derivation failed");
+    return derived;
+#elif defined(__linux__)
+    const std::vector<std::uint8_t> key(password.begin(), password.end());
+    std::vector<std::uint8_t> block(salt);
+    block.push_back(0U);
+    block.push_back(0U);
+    block.push_back(0U);
+    block.push_back(1U);  // INT(1), big-endian, per RFC 8018.
+    auto u = hmac_sha256_linux(key, block);
+    std::array<std::uint8_t, 32> t = u;
+    for (unsigned int round = 1U; round < iterations; ++round) {
+        u = hmac_sha256_linux(key, std::vector<std::uint8_t>(u.begin(), u.end()));
+        for (std::size_t index = 0; index < t.size(); ++index) t[index] ^= u[index];
+    }
+    return std::vector<std::uint8_t>(t.begin(), t.end());
+#endif
+}
+
+}  // namespace
+
+std::string hash_password(std::string password) {
+    const auto salt = secure_random(kPasswordSaltBytes);
+    const auto derived =
+        pbkdf2_hmac_sha256_32(password, salt, kPasswordHashIterations);
+    std::fill(password.begin(), password.end(), '\0');
+    return "pbkdf2-sha256$" + std::to_string(kPasswordHashIterations) + "$" +
+           hex_encode(salt.data(), salt.size()) + "$" +
+           hex_encode(derived.data(), derived.size());
+}
+
+bool verify_password(std::string password, const std::string& encoded_hash) {
+    const auto first = encoded_hash.find('$');
+    const auto second =
+        first == std::string::npos ? std::string::npos : encoded_hash.find('$', first + 1U);
+    const auto third =
+        second == std::string::npos ? std::string::npos : encoded_hash.find('$', second + 1U);
+    if (first == std::string::npos || second == std::string::npos ||
+        third == std::string::npos ||
+        encoded_hash.compare(0U, first, "pbkdf2-sha256") != 0) {
+        std::fill(password.begin(), password.end(), '\0');
+        return false;
+    }
+    try {
+        const auto iterations = static_cast<unsigned int>(
+            std::stoul(encoded_hash.substr(first + 1U, second - first - 1U)));
+        const auto salt_hex = encoded_hash.substr(second + 1U, third - second - 1U);
+        const auto expected_hex = encoded_hash.substr(third + 1U);
+        if (iterations == 0U || iterations > 5000000U || salt_hex.empty() ||
+            expected_hex.size() != kPasswordHashBytes * 2U) {
+            std::fill(password.begin(), password.end(), '\0');
+            return false;
+        }
+        const auto decoded_salt = hex_decode(salt_hex);
+        const std::vector<std::uint8_t> salt(decoded_salt.begin(), decoded_salt.end());
+        const auto derived = pbkdf2_hmac_sha256_32(password, salt, iterations);
+        std::fill(password.begin(), password.end(), '\0');
+        return constant_time_equal(hex_encode(derived.data(), derived.size()),
+                                   expected_hex);
+    } catch (const std::exception&) {
+        std::fill(password.begin(), password.end(), '\0');
+        return false;
+    }
+}
+
 SessionStore::SessionStore(RecordStore& records) : records_(&records) {
     for (const auto& item : records.list("sessions")) {
         const auto first = item.second.find('|');
@@ -275,6 +433,7 @@ void SessionStore::persist(const std::string& token_hash,
 std::string SessionStore::create(const std::string& user_id,
                                  const std::uint64_t now_epoch_seconds,
                                  const std::uint64_t lifetime_seconds) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (user_id.empty() || lifetime_seconds == 0U ||
         now_epoch_seconds > std::numeric_limits<std::uint64_t>::max() - lifetime_seconds) {
         throw std::invalid_argument("invalid session parameters");
@@ -292,6 +451,7 @@ std::string SessionStore::create(const std::string& user_id,
 
 std::optional<SessionStore::Session> SessionStore::validate(
     const std::string& token, const std::uint64_t now_epoch_seconds) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto found = sessions_.find(sha256_hex(token));
     if (found == sessions_.end() || found->second.revoked ||
         now_epoch_seconds >= found->second.expires_at_epoch_seconds) {
@@ -301,6 +461,7 @@ std::optional<SessionStore::Session> SessionStore::validate(
 }
 
 void SessionStore::revoke(const std::string& token) {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto found = sessions_.find(sha256_hex(token));
     if (found != sessions_.end()) {
         found->second.revoked = true;
@@ -308,6 +469,9 @@ void SessionStore::revoke(const std::string& token) {
     }
 }
 
+// Not itself locked: it only calls the other public (independently locked)
+// methods below and never touches sessions_ directly, so locking here too
+// would deadlock on this class's non-recursive mutex_.
 std::string SessionStore::rotate(const std::string& token,
                                  const std::uint64_t now_epoch_seconds,
                                  const std::uint64_t lifetime_seconds) {
@@ -318,6 +482,7 @@ std::string SessionStore::rotate(const std::string& token,
 }
 
 void SessionStore::revoke_user(const std::string& user_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
     for (auto& item : sessions_) {
         if (item.second.user_id == user_id && !item.second.revoked) {
             item.second.revoked = true;

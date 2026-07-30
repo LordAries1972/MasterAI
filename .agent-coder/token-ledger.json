@@ -1,0 +1,38 @@
+[
+  {
+    "taskType": "explain-symbol",
+    "requestId": "480a3b36-1b1f-4d36-b78f-2d1ff8c19a93",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "estimatedInputTokens": 1772,
+    "latencyMs": 17902,
+    "recordedAtMs": 1785364272960,
+    "files": [],
+    "callKind": "primary",
+    "actualInputTokens": 1446,
+    "actualOutputTokens": 1000,
+    "schemaValid": false,
+    "estimatedCostUsd": 0.019338,
+    "failed": false,
+    "usageAvailable": true,
+    "id": "ccb1eb86-74f8-48f0-a22c-d1ec5b1f5c2e"
+  },
+  {
+    "taskType": "explain-symbol",
+    "requestId": "480a3b36-1b1f-4d36-b78f-2d1ff8c19a93:schema-retry",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "estimatedInputTokens": 1772,
+    "latencyMs": 12943,
+    "recordedAtMs": 1785364286607,
+    "files": [],
+    "callKind": "schema-correction-retry",
+    "actualInputTokens": 2046,
+    "actualOutputTokens": 1000,
+    "schemaValid": false,
+    "estimatedCostUsd": 0.021137999999999997,
+    "failed": false,
+    "usageAvailable": true,
+    "id": "1f62352e-8d1e-4aea-ab91-3477464772b2"
+  }
+]

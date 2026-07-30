@@ -16,7 +16,10 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace masterai {
@@ -28,6 +31,11 @@ bool constant_time_equal(const std::string& left, const std::string& right) noex
 std::vector<std::uint8_t> secure_random(std::size_t size);
 std::string sha256_hex(const std::string& value);
 std::string sha256_file_hex(const std::filesystem::path& path);
+// PBKDF2-HMAC-SHA256 password hashing for locally stored accounts (never
+// used for OS-mapped accounts, which are always verified by LogonUserW/PAM).
+// Both functions consume and zero their `password` argument.
+std::string hash_password(std::string password);
+bool verify_password(std::string password, const std::string& encoded_hash);
 
 struct AppConfig {
     int schema_version{1};
@@ -39,6 +47,11 @@ struct AppConfig {
     std::filesystem::path tls_private_key_file;
     bool authentication_enabled{true};
     std::uint64_t session_minutes{480};
+    // Off by default: enables locally stored, MasterAI-hashed password
+    // accounts (POST /api/v1/setup/local, POST /api/v1/users) as an
+    // alternative to OS-verified sign-in for operators without an OS
+    // password (e.g. Windows Hello PIN-only accounts).
+    bool allow_local_password_accounts{false};
     std::uint64_t max_request_bytes{16U * 1024U * 1024U};
     std::uint32_t request_timeout_seconds{30};
     std::uint32_t max_concurrent_connections{64};
@@ -89,6 +102,11 @@ private:
     std::map<std::string, std::map<std::string, std::string>> records_;
     unsigned int schema_version_{1};
     bool opened_{false};
+    // Guards records_ and the journal/snapshot files together so concurrent
+    // request threads never interleave journal writes or observe a
+    // checkpoint mid-rewrite. Mutable because get()/list() are logically
+    // read-only but still need to take the lock.
+    mutable std::mutex mutex_;
 };
 
 class SecretStore final {
@@ -190,6 +208,8 @@ private:
     void persist(const std::string& token_hash, const Session& session);
     std::map<std::string, Session> sessions_;
     RecordStore* records_{nullptr};
+    // Guards sessions_ against concurrent login/logout/refresh requests.
+    mutable std::mutex mutex_;
 };
 
 enum class UserRole { administrator, developer, viewer };
@@ -201,6 +221,11 @@ struct UserRecord {
     std::string display_name;
     UserRole role{UserRole::viewer};
     bool enabled{true};
+    // Empty for OS-verified accounts (checked via LogonUserW/PAM). Non-empty
+    // holds a PBKDF2 encoding for a locally stored password account, in
+    // which case os_principal is a chosen local username rather than an OS
+    // identity.
+    std::string password_hash;
 };
 
 class UserStore final {
@@ -208,12 +233,15 @@ public:
     explicit UserStore(RecordStore& records);
     bool setup_required() const;
     UserRecord create_first_administrator(const std::string& os_principal,
-                                          const std::string& display_name);
+                                          const std::string& display_name,
+                                          const std::string& password_hash = {});
     UserRecord add(const std::string& os_principal,
-                   const std::string& display_name, UserRole role);
+                   const std::string& display_name, UserRole role,
+                   const std::string& password_hash = {});
     std::optional<UserRecord> find_by_principal(
         const std::string& os_principal) const;
     std::optional<UserRecord> find_by_id(const std::string& id) const;
+    std::vector<UserRecord> all() const;
 
 private:
     RecordStore& records_;
@@ -227,6 +255,10 @@ public:
 
 private:
     std::filesystem::path path_;
+    // append() reads the whole file to find the previous hash-chain link and
+    // then writes the next line; both steps must happen as one atomic unit
+    // under concurrent callers or the chain breaks / lines interleave.
+    std::mutex mutex_;
 };
 
 class ApiTokenStore final {
@@ -254,6 +286,8 @@ private:
     void persist(const std::string& token_hash, const Token& token);
     RecordStore& records_;
     std::map<std::string, Token> tokens_;
+    // Guards tokens_ against concurrent create/validate/revoke calls.
+    mutable std::mutex mutex_;
 };
 
 enum class ModelState {
@@ -435,6 +469,8 @@ private:
     std::filesystem::path workspace_root_;
     std::map<std::string, ProjectRecord> projects_;
     RecordStore* records_{nullptr};
+    // Guards projects_ against concurrent add/find/list calls.
+    mutable std::mutex mutex_;
 };
 
 enum class ChatRole { user, assistant, system };
@@ -471,6 +507,8 @@ private:
     void persist(const ChatRecord& chat);
     std::map<std::string, ChatRecord> chats_;
     RecordStore* records_{nullptr};
+    // Guards chats_ against concurrent create/append/find/list calls.
+    mutable std::mutex mutex_;
 };
 
 struct AttachmentRecord {
@@ -500,6 +538,8 @@ private:
     std::filesystem::path root_;
     RecordStore& records_;
     std::map<std::string, AttachmentRecord> attachments_;
+    // Guards attachments_ against concurrent add/find/read calls.
+    mutable std::mutex mutex_;
 };
 
 class TranscriptionAdapter {
@@ -557,6 +597,16 @@ private:
     std::string diagnostic_;
 };
 
+// Thrown by DownloadManager::run() when a second run() call arrives for a
+// job id that already has a transfer in flight, so callers (the HTTP layer)
+// can report 409 Conflict instead of racing two curl invocations against the
+// same .part file.
+class DownloadAlreadyRunning final : public std::invalid_argument {
+public:
+    explicit DownloadAlreadyRunning(const std::string& id)
+        : std::invalid_argument("download already running: " + id) {}
+};
+
 class DownloadManager final {
 public:
     DownloadManager(std::filesystem::path approved_curl,
@@ -575,6 +625,16 @@ private:
     std::filesystem::path download_root_;
     RecordStore& records_;
     std::map<std::string, DownloadJob> jobs_;
+    // Guards jobs_ and in_flight_. Never held across the (potentially
+    // multi-minute) curl transfer itself in run() -- only around the brief
+    // admission check, each progress-tick persist, and final state
+    // transition -- so polling/list/cancel from other request threads is
+    // never blocked by an active download.
+    mutable std::mutex mutex_;
+    // Job ids with a run() currently executing, so a second run() for the
+    // same id is rejected instead of racing the first over the same
+    // destination/.part file.
+    std::set<std::string> in_flight_;
 };
 
 enum class BenchmarkProfile { quick, standard, extended };
@@ -1010,6 +1070,8 @@ private:
     void persist(const McpOutboundServer& server);
     RecordStore& records_;
     std::map<std::string, McpOutboundServer> servers_;
+    // Guards servers_ against concurrent register/remove/find/list calls.
+    mutable std::mutex mutex_;
 };
 
 struct McpOutboundCall {
@@ -1205,6 +1267,16 @@ private:
     AppConfig configuration_;
     class State;
     std::unique_ptr<State> state_;
+    // Thread-per-connection bookkeeping: one worker thread is spawned per
+    // accepted client (capped by configuration_.max_concurrent_connections)
+    // so a slow request (e.g. a model download) never blocks any other
+    // connection. active_connections_ is checked/incremented before a
+    // worker is spawned and decremented by the worker itself on exit; the
+    // "finished" flag lets run()'s accept loop reap completed threads
+    // without blocking, since std::thread has no non-blocking join check.
+    std::atomic<std::uint32_t> active_connections_{0};
+    std::mutex workers_mutex_;
+    std::vector<std::pair<std::thread, std::shared_ptr<std::atomic_bool>>> workers_;
 };
 
 }  // namespace masterai

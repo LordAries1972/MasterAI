@@ -104,6 +104,9 @@ public:
     std::string cancel_index(
         Request& request, const UserRecord& user, bool cookie_authenticated,
         const std::set<std::string>& authenticated_project_ids);
+    std::string notify_index(
+        Request& request, const UserRecord& user, bool cookie_authenticated,
+        const std::set<std::string>& authenticated_project_ids);
     std::string create_attachment(Request& request, const UserRecord& user);
     std::string load_model(Request& request, const UserRecord& user);
     std::string unload_model(const UserRecord& user);

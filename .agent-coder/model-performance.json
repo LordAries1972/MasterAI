@@ -24,5 +24,18 @@
     "hallucinatedFileCount": 0,
     "unsupportedApiCount": 0,
     "invariantViolationCount": 0
+  },
+  "claude:claude-sonnet-5": {
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "structuredOutputValidCount": 0,
+    "structuredOutputInvalidCount": 1,
+    "totalLatencyMs": 30845,
+    "latencySampleCount": 2,
+    "patchAcceptedCount": 0,
+    "patchRejectedCount": 0,
+    "hallucinatedFileCount": 0,
+    "unsupportedApiCount": 0,
+    "invariantViolationCount": 0
   }
 }

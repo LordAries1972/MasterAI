@@ -77,6 +77,18 @@ bool send_chunk(const NativeSocket socket, const std::string& value) {
     return send_all(socket, size.str() + "\r\n" + value + "\r\n");
 }
 
+// Distinguishes an invalid one-time setup token from other malformed setup
+// requests so setup() and setup_local() can each return the right status.
+struct InvalidSetupToken : std::runtime_error {
+    InvalidSetupToken() : std::runtime_error("setup_token_invalid") {}
+};
+
+struct SetupFields {
+    std::string username;
+    std::string password;
+    std::string display_name;
+};
+
 std::string asset_response(const char* content_type, const std::string& body) {
     return "HTTP/1.1 200 OK\r\nContent-Type: " + std::string(content_type) +
            "\r\nContent-Length: " + std::to_string(body.size()) +
@@ -241,15 +253,22 @@ public:
     std::string handle(std::string raw,
                        const NativeSocket stream_socket = invalid_socket) {
         const auto now = epoch_seconds();
-        while (!request_times.empty() && request_times.front() + 60U <= now) {
-            request_times.erase(request_times.begin());
+        // Locked only for this trim/check/push sequence -- a request thread
+        // never holds this lock while parsing, routing, or dispatching, so
+        // the rate limiter never becomes a serialization bottleneck under
+        // concurrent connections.
+        {
+            std::lock_guard<std::mutex> lock(request_times_mutex);
+            while (!request_times.empty() && request_times.front() + 60U <= now) {
+                request_times.erase(request_times.begin());
+            }
+            if (request_times.size() >= configuration.rate_limit_per_minute) {
+                return response(429, "Too Many Requests",
+                                "{\"error\":\"rate_limit_exceeded\"}",
+                                {"Retry-After: 60"});
+            }
+            request_times.push_back(now);
         }
-        if (request_times.size() >= configuration.rate_limit_per_minute) {
-            return response(429, "Too Many Requests",
-                            "{\"error\":\"rate_limit_exceeded\"}",
-                            {"Retry-After: 60"});
-        }
-        request_times.push_back(now);
         Request request;
         try {
             request = parse_request(raw, configuration.max_request_bytes);
@@ -308,6 +327,10 @@ public:
             return setup(request);
         }
         if (request.method == "POST" &&
+            request.target == "/api/v1/setup/local") {
+            return setup_local(request);
+        }
+        if (request.method == "POST" &&
             request.target == "/api/v1/auth/login") {
             return login(request);
         }
@@ -331,6 +354,8 @@ public:
             } else if (request.method == "GET" &&
                        request.target == "/api/v1/users/me") {
                 required_scope = "identity.read";
+            } else if (request.target == "/api/v1/users") {
+                required_scope = "users.manage";
             } else if (request.method == "GET" &&
                        request.target.rfind("/api/v1/projects", 0U) == 0U) {
                 required_scope = "projects.read";
@@ -359,7 +384,10 @@ public:
                              "/index/rebuild") == 0 ||
                          request.target.compare(
                              request.target.size() - 13U, 13U,
-                             "/index/cancel") == 0))) {
+                             "/index/cancel") == 0 ||
+                         request.target.compare(
+                             request.target.size() - 13U, 13U,
+                             "/index/notify") == 0))) {
                 required_scope = "projects.write";
             } else if (request.method == "POST" &&
                        request.target.rfind("/api/v1/chats", 0U) == 0U) {
@@ -440,6 +468,12 @@ public:
                 "\",\"principal\":\"" + json_escape(user->os_principal) +
                 "\",\"displayName\":\"" + json_escape(user->display_name) +
                 "\",\"role\":\"" + role(user->role) + "\"}");
+        }
+        if (request.method == "GET" && request.target == "/api/v1/users") {
+            return list_users(*user);
+        }
+        if (request.method == "POST" && request.target == "/api/v1/users") {
+            return create_user(request, *user);
         }
         if (request.method == "GET" && request.target == "/api/v1/models") {
             return workloads->model_inventory();
@@ -550,8 +584,27 @@ public:
                 request, *user, cookie_authenticated,
                 authenticated_project_ids);
         }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/projects/", 0U) == 0U &&
+            request.target.size() >= 13U &&
+            request.target.compare(request.target.size() - 13U, 13U,
+                                   "/index/notify") == 0) {
+            return workloads->notify_index(
+                request, *user, cookie_authenticated,
+                authenticated_project_ids);
+        }
         if (request.method == "GET" && request.target == "/api/v1/chats") {
             return list_chats(*user);
+        }
+        // Single-chat message history, added for the sidebar's chat-history
+        // panel: matches "/api/v1/chats/{id}" exactly (no further path
+        // segments), so it never collides with the "/messages" POST route
+        // below.
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/chats/", 0U) == 0U &&
+            request.target.size() > 14U &&
+            request.target.find('/', 14U) == std::string::npos) {
+            return get_chat_messages(request, *user);
         }
         if (request.method == "POST" && request.target == "/api/v1/chats") {
             if (!role_allows(user->role, "chats.write")) {
@@ -632,40 +685,109 @@ private:
         return "viewer";
     }
 
+    static UserRole parse_role_value(const std::string& value) {
+        if (value == "administrator") return UserRole::administrator;
+        if (value == "developer") return UserRole::developer;
+        if (value == "viewer") return UserRole::viewer;
+        throw std::runtime_error("requested role is invalid");
+    }
+
+    // Parses a first-admin setup body (setupToken/username/password/
+    // displayName), wipes the raw JSON, and checks the one-time token.
+    // Shared by setup() and setup_local(), which differ only in how they
+    // verify/store the resulting credential.
+    SetupFields parse_setup_fields(Request& request) {
+        auto root = parse_json(request.body);
+        std::fill(request.body.begin(), request.body.end(), '\0');
+        request.body.clear();
+        if (root.as_object().size() != 4U) {
+            throw std::runtime_error("unexpected setup field");
+        }
+        const auto token = root.required("setupToken").as_string();
+        auto username = root.required("username").as_string();
+        auto password = root.required_mutable("password").take_string();
+        auto display_name = root.required("displayName").as_string();
+        {
+            // Locked so the compare can never interleave with another
+            // thread's setup_hash/setup_token clear (see setup()/
+            // setup_local()), closing a TOCTOU window where two concurrent
+            // requests both pass validation before either clears the token.
+            std::lock_guard<std::mutex> lock(setup_mutex);
+            if (!constant_time_equal(sha256_hex(token), setup_hash)) {
+                std::fill(password.begin(), password.end(), '\0');
+                throw InvalidSetupToken();
+            }
+        }
+        return {std::move(username), std::move(password), std::move(display_name)};
+    }
+
     std::string setup(Request& request) {
         if (!users->setup_required()) {
             return response(409, "Conflict", "{\"error\":\"setup_complete\"}");
         }
         try {
-            auto root = parse_json(request.body);
-            std::fill(request.body.begin(), request.body.end(), '\0');
-            request.body.clear();
-            if (root.as_object().size() != 4U) {
-                throw std::runtime_error("unexpected setup field");
-            }
-            const auto token = root.required("setupToken").as_string();
-            const auto username = root.required("username").as_string();
-            auto password = root.required_mutable("password").take_string();
-            const auto display_name = root.required("displayName").as_string();
-            if (!constant_time_equal(sha256_hex(token), setup_hash)) {
-                audit.append("setup.first_admin", "anonymous", "denied",
-                             "invalid setup token");
-                return response(403, "Forbidden", "{\"error\":\"setup_token_invalid\"}");
-            }
-            const auto result = OsIdentityProvider().authenticate(username, password);
+            auto fields = parse_setup_fields(request);
+            const auto result = OsIdentityProvider().authenticate(
+                fields.username, fields.password);
             if (!result.authenticated()) {
-                audit.append("setup.first_admin", username, "denied",
+                audit.append("setup.first_admin", fields.username, "denied",
                              result.diagnostic);
                 return response(401, "Unauthorized",
                                 "{\"error\":\"os_authentication_failed\"}");
             }
-            const auto user =
-                users->create_first_administrator(result.principal, display_name);
-            setup_hash.clear();
-            setup_token.clear();
+            const auto user = users->create_first_administrator(
+                result.principal, fields.display_name);
+            {
+                std::lock_guard<std::mutex> lock(setup_mutex);
+                setup_hash.clear();
+                setup_token.clear();
+            }
             audit.append("setup.first_admin", user.id, "success",
                          "administrator mapped to OS principal");
             return response(201, "Created", "{\"status\":\"configured\"}");
+        } catch (const InvalidSetupToken&) {
+            audit.append("setup.first_admin", "anonymous", "denied",
+                         "invalid setup token");
+            return response(403, "Forbidden", "{\"error\":\"setup_token_invalid\"}");
+        } catch (const std::exception&) {
+            std::fill(request.body.begin(), request.body.end(), '\0');
+            request.body.clear();
+            return response(400, "Bad Request", "{\"error\":\"invalid_setup_request\"}");
+        }
+    }
+
+    // Creates the first administrator as a MasterAI-hashed local account
+    // instead of an OS-verified one. Only reachable when the operator has
+    // explicitly opted in via allowLocalPasswordAccounts (e.g. accounts with
+    // no OS password, such as Windows Hello PIN-only sign-in).
+    std::string setup_local(Request& request) {
+        if (!configuration.allow_local_password_accounts) {
+            return response(403, "Forbidden", "{\"error\":\"local_accounts_disabled\"}");
+        }
+        if (!users->setup_required()) {
+            return response(409, "Conflict", "{\"error\":\"setup_complete\"}");
+        }
+        try {
+            auto fields = parse_setup_fields(request);
+            if (fields.password.size() < 8U) {
+                std::fill(fields.password.begin(), fields.password.end(), '\0');
+                return response(400, "Bad Request", "{\"error\":\"password_too_short\"}");
+            }
+            const auto hash = hash_password(fields.password);
+            const auto user = users->create_first_administrator(
+                fields.username, fields.display_name, hash);
+            {
+                std::lock_guard<std::mutex> lock(setup_mutex);
+                setup_hash.clear();
+                setup_token.clear();
+            }
+            audit.append("setup.first_admin", user.id, "success",
+                         "administrator created with a local password");
+            return response(201, "Created", "{\"status\":\"configured\"}");
+        } catch (const InvalidSetupToken&) {
+            audit.append("setup.first_admin", "anonymous", "denied",
+                         "invalid setup token");
+            return response(403, "Forbidden", "{\"error\":\"setup_token_invalid\"}");
         } catch (const std::exception&) {
             std::fill(request.body.begin(), request.body.end(), '\0');
             request.body.clear();
@@ -686,13 +808,24 @@ private:
             }
             const auto username = root.required("username").as_string();
             auto password = root.required_mutable("password").take_string();
-            const auto result = OsIdentityProvider().authenticate(username, password);
-            const auto user = result.authenticated()
-                                  ? users->find_by_principal(result.principal)
-                                  : std::nullopt;
+            // Accounts with a stored local password hash are verified
+            // locally; every other account keeps going through the OS.
+            const auto local_candidate = users->find_by_principal(username);
+            std::optional<UserRecord> user;
+            if (local_candidate && !local_candidate->password_hash.empty()) {
+                if (verify_password(password, local_candidate->password_hash)) {
+                    user = local_candidate;
+                }
+            } else {
+                const auto result = OsIdentityProvider().authenticate(username, password);
+                if (result.authenticated()) {
+                    user = users->find_by_principal(result.principal);
+                }
+            }
+            std::fill(password.begin(), password.end(), '\0');
             if (!user || !user->enabled) {
                 audit.append("auth.login", username, "denied",
-                             "OS authentication or principal mapping failed");
+                             "authentication or principal mapping failed");
                 return response(401, "Unauthorized",
                                 "{\"error\":\"invalid_credentials\"}");
             }
@@ -710,6 +843,61 @@ private:
         }
     }
 
+    std::string list_users(const UserRecord& admin) const {
+        if (!role_allows(admin.role, "users.manage")) {
+            return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+        }
+        std::string body{"{\"users\":["};
+        bool first = true;
+        for (const auto& item : users->all()) {
+            if (!first) body += ",";
+            first = false;
+            body += "{\"id\":\"" + json_escape(item.id) + "\",\"username\":\"" +
+                    json_escape(item.os_principal) + "\",\"displayName\":\"" +
+                    json_escape(item.display_name) + "\",\"role\":\"" +
+                    role(item.role) + "\",\"enabled\":" +
+                    (item.enabled ? "true" : "false") + ",\"accountType\":\"" +
+                    (item.password_hash.empty() ? "os" : "local") + "\"}";
+        }
+        return response(200, "OK", body + "]}");
+    }
+
+    // Administrator-only creation of an additional locally stored password
+    // account. Distinct from setup_local(), which only ever creates the
+    // first administrator.
+    std::string create_user(Request& request, const UserRecord& admin) {
+        if (!configuration.allow_local_password_accounts) {
+            return response(403, "Forbidden", "{\"error\":\"local_accounts_disabled\"}");
+        }
+        if (!role_allows(admin.role, "users.manage")) {
+            return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+        }
+        try {
+            auto root = parse_json(request.body);
+            std::fill(request.body.begin(), request.body.end(), '\0');
+            request.body.clear();
+            if (root.as_object().size() != 4U) {
+                throw std::runtime_error("unexpected user field");
+            }
+            const auto username = root.required("username").as_string();
+            const auto display_name = root.required("displayName").as_string();
+            const auto requested_role = parse_role_value(root.required("role").as_string());
+            auto password = root.required_mutable("password").take_string();
+            if (password.size() < 8U) {
+                std::fill(password.begin(), password.end(), '\0');
+                return response(400, "Bad Request", "{\"error\":\"password_too_short\"}");
+            }
+            const auto hash = hash_password(password);
+            const auto created = users->add(username, display_name, requested_role, hash);
+            audit.append("users.create", admin.id, "success", created.id);
+            return response(201, "Created", "{\"id\":\"" + created.id + "\"}");
+        } catch (const std::exception&) {
+            std::fill(request.body.begin(), request.body.end(), '\0');
+            request.body.clear();
+            return response(400, "Bad Request", "{\"error\":\"invalid_user_request\"}");
+        }
+    }
+
     std::string list_chats(const UserRecord& user) const {
         std::string body{"{\"chats\":["};
         bool first = true;
@@ -721,6 +909,42 @@ private:
                     "\",\"modelId\":\"" + json_escape(chat.model_id) +
                     "\",\"messageCount\":" +
                     std::to_string(chat.messages.size()) + "}";
+        }
+        return response(200, "OK", body + "]}");
+    }
+
+    // Full message history for one chat, used by the sidebar to render a
+    // conversation when the operator selects it from the chat-history list.
+    // ChatStore already keeps every message in memory (see send_chat_message
+    // below, which is the only prior caller of find_for_owner()); this just
+    // exposes it over GET.
+    std::string get_chat_messages(Request& request, const UserRecord& user) const {
+        const std::string prefix{"/api/v1/chats/"};
+        const auto chat_id = request.target.substr(prefix.size());
+        const auto chat = chats->find_for_owner(chat_id, user.id);
+        if (!chat) {
+            return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
+        }
+        const auto role_name = [](const ChatRole role) {
+            switch (role) {
+                case ChatRole::user: return "user";
+                case ChatRole::assistant: return "assistant";
+                case ChatRole::system: return "system";
+            }
+            return "user";
+        };
+        std::string body{"{\"id\":\"" + json_escape(chat->id) +
+                         "\",\"projectId\":\"" + json_escape(chat->project_id) +
+                         "\",\"modelId\":\"" + json_escape(chat->model_id) +
+                         "\",\"messages\":["};
+        bool first = true;
+        for (const auto& message : chat->messages) {
+            if (!first) body += ",";
+            first = false;
+            body += "{\"role\":\"" + std::string(role_name(message.role)) +
+                    "\",\"content\":\"" + json_escape(message.content) +
+                    "\",\"createdAtEpochSeconds\":" +
+                    std::to_string(message.created_at_epoch_seconds) + "}";
         }
         return response(200, "OK", body + "]}");
     }
@@ -1030,7 +1254,13 @@ private:
     QueryCoordinator queries;
     std::string setup_token;
     std::string setup_hash;
+    // Guards the one-time setup token's check-and-clear as a single atomic
+    // unit (see parse_setup_fields()/setup()/setup_local()).
+    std::mutex setup_mutex;
     std::vector<std::uint64_t> request_times;
+    // Guards request_times only -- released before any auth/routing work, so
+    // it never becomes a bottleneck under concurrent connections.
+    std::mutex request_times_mutex;
 };
 
 HttpServer::HttpServer(std::string host, const std::uint16_t port)
@@ -1127,92 +1357,177 @@ bool HttpServer::run(std::atomic_bool& stop_requested) {
             continue;
         }
 
-#if defined(_WIN32)
-        const DWORD timeout_ms = configuration_.request_timeout_seconds * 1000U;
-        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
-        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
-                   reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
-#else
-        timeval client_timeout{};
-        client_timeout.tv_sec =
-            static_cast<long>(configuration_.request_timeout_seconds);
-        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &client_timeout,
-                   sizeof(client_timeout));
-        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &client_timeout,
-                   sizeof(client_timeout));
-#endif
-
-        std::string request;
-        std::array<char, 8192> buffer{};
-        while (request.size() < 16384U &&
-               request.find("\r\n\r\n") == std::string::npos) {
-            const auto received =
-                recv(client, buffer.data(), static_cast<int>(buffer.size()), 0);
-            if (received <= 0) {
-                break;
-            }
-            request.append(buffer.data(), static_cast<std::size_t>(received));
-        }
-        const auto header_end = request.find("\r\n\r\n");
-        bool invalid_length = false;
-        std::uint64_t content_length = 0U;
-        if (header_end != std::string::npos) {
-            const std::string headers = lower(request.substr(0U, header_end));
-            const std::string marker = "\r\ncontent-length:";
-            const auto position = headers.find(marker);
-            if (position != std::string::npos) {
-                const auto start = headers.find_first_not_of(
-                    ' ', position + marker.size());
-                const auto end = headers.find("\r\n", start);
-                try {
-                    content_length = std::stoull(
-                        headers.substr(start, end - start));
-                } catch (const std::exception&) {
-                    invalid_length = true;
+        // Reap any worker threads that have already finished before deciding
+        // whether there's room for another one, so workers_ never grows
+        // without bound across the server's lifetime.
+        {
+            std::lock_guard<std::mutex> lock(workers_mutex_);
+            for (auto it = workers_.begin(); it != workers_.end();) {
+                if (it->second->load()) {
+                    it->first.join();
+                    it = workers_.erase(it);
+                } else {
+                    ++it;
                 }
             }
-            while (!invalid_length &&
-                   content_length <= configuration_.max_request_bytes &&
-                   request.size() < header_end + 4U + content_length) {
-                const auto received =
-                    recv(client, buffer.data(), static_cast<int>(buffer.size()), 0);
-                if (received <= 0) break;
-                request.append(buffer.data(), static_cast<std::size_t>(received));
+        }
+
+        // A long-running request (most notably a model download) must never
+        // block any other connection -- including the frontend's own
+        // progress-poll requests, which is what previously produced a
+        // stalled progress bar and, once enough polls queued up past the
+        // listen backlog, a network error in the browser. Each accepted
+        // connection therefore gets its own worker thread, bounded by
+        // max_concurrent_connections so a runaway/duplicated client can't
+        // grow the thread count without limit; past the cap, reject
+        // immediately rather than queuing.
+        if (active_connections_.load() >= configuration_.max_concurrent_connections) {
+            send_all(client, response(503, "Service Unavailable",
+                                      "{\"error\":\"server_busy\"}",
+                                      {"Retry-After: 1"}));
+            close_socket(client);
+            continue;
+        }
+
+        ++active_connections_;
+        auto finished = std::make_shared<std::atomic_bool>(false);
+        std::thread worker([this, client, finished]() {
+            // Decrements active_connections_ and marks this worker reapable
+            // on every exit path, including an unexpected exception escaping
+            // handle() -- request routes already catch their own errors, so
+            // this is a defensive backstop, not an expected path.
+            struct WorkerGuard {
+                std::atomic<std::uint32_t>& active;
+                std::shared_ptr<std::atomic_bool> done;
+                ~WorkerGuard() {
+                    --active;
+                    done->store(true);
+                }
+            } guard{active_connections_, finished};
+
+            try {
+#if defined(_WIN32)
+                const DWORD timeout_ms =
+                    configuration_.request_timeout_seconds * 1000U;
+                setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                           reinterpret_cast<const char*>(&timeout_ms),
+                           sizeof(timeout_ms));
+                setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
+                           reinterpret_cast<const char*>(&timeout_ms),
+                           sizeof(timeout_ms));
+#else
+                timeval client_timeout{};
+                client_timeout.tv_sec =
+                    static_cast<long>(configuration_.request_timeout_seconds);
+                setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &client_timeout,
+                           sizeof(client_timeout));
+                setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &client_timeout,
+                           sizeof(client_timeout));
+#endif
+
+                std::string request;
+                std::array<char, 8192> buffer{};
+                while (request.size() < 16384U &&
+                       request.find("\r\n\r\n") == std::string::npos) {
+                    const auto received = recv(
+                        client, buffer.data(), static_cast<int>(buffer.size()), 0);
+                    if (received <= 0) {
+                        break;
+                    }
+                    request.append(buffer.data(), static_cast<std::size_t>(received));
+                }
+                const auto header_end = request.find("\r\n\r\n");
+                bool invalid_length = false;
+                std::uint64_t content_length = 0U;
+                if (header_end != std::string::npos) {
+                    const std::string headers = lower(request.substr(0U, header_end));
+                    const std::string marker = "\r\ncontent-length:";
+                    const auto position = headers.find(marker);
+                    if (position != std::string::npos) {
+                        const auto start = headers.find_first_not_of(
+                            ' ', position + marker.size());
+                        const auto end = headers.find("\r\n", start);
+                        try {
+                            content_length = std::stoull(
+                                headers.substr(start, end - start));
+                        } catch (const std::exception&) {
+                            invalid_length = true;
+                        }
+                    }
+                    while (!invalid_length &&
+                           content_length <= configuration_.max_request_bytes &&
+                           request.size() < header_end + 4U + content_length) {
+                        const auto received = recv(
+                            client, buffer.data(), static_cast<int>(buffer.size()), 0);
+                        if (received <= 0) break;
+                        request.append(buffer.data(), static_cast<std::size_t>(received));
+                    }
+                }
+                if (request.size() >= 16384U && header_end == std::string::npos) {
+                    send_all(client, response(431, "Request Header Fields Too Large",
+                                              "{\"error\":\"headers_too_large\"}"));
+                } else if (invalid_length ||
+                           content_length > configuration_.max_request_bytes) {
+                    send_all(client, response(413, "Payload Too Large",
+                                              "{\"error\":\"body_too_large\"}"));
+                } else {
+                    const auto outgoing = state_->handle(request, client);
+                    if (!outgoing.empty()) send_all(client, outgoing);
+                }
+            } catch (const std::exception& exception) {
+                log(LogLevel::error, "server.connection_failed", exception.what());
             }
+            close_socket(client);
+        });
+        {
+            std::lock_guard<std::mutex> lock(workers_mutex_);
+            workers_.emplace_back(std::move(worker), std::move(finished));
         }
-        if (request.size() >= 16384U && header_end == std::string::npos) {
-            send_all(client, response(431, "Request Header Fields Too Large",
-                                      "{\"error\":\"headers_too_large\"}"));
-        } else if (invalid_length ||
-                   content_length > configuration_.max_request_bytes) {
-            send_all(client, response(413, "Payload Too Large",
-                                      "{\"error\":\"body_too_large\"}"));
-        } else {
-            const auto outgoing = state_->handle(request, client);
-            if (!outgoing.empty()) send_all(client, outgoing);
-        }
-        close_socket(client);
     }
-    close_socket(listener);
-    socket_ = -1;
+    // stop() closes the listener (if not already closed by an external
+    // stop() call) and joins/detaches every in-flight worker thread. No
+    // request thread may still be running once this function returns,
+    // because ~HttpServer() destroys state_ immediately afterward.
+    stop();
     std::filesystem::remove(stop_file);
     log(LogLevel::info, "server.stopped", "Graceful stop completed.");
     return true;
 }
 
 void HttpServer::stop() noexcept {
-    if (socket_ == -1) {
-        return;
-    }
-    const auto listener = static_cast<NativeSocket>(socket_);
+    if (socket_ != -1) {
+        const auto listener = static_cast<NativeSocket>(socket_);
 #if defined(_WIN32)
-    shutdown(listener, SD_BOTH);
+        shutdown(listener, SD_BOTH);
 #else
-    shutdown(listener, SHUT_RDWR);
+        shutdown(listener, SHUT_RDWR);
 #endif
-    close_socket(listener);
-    socket_ = -1;
+        close_socket(listener);
+        socket_ = -1;
+    }
+
+    // Wait for in-flight request-handling threads to finish naturally (an
+    // active download is not force-cancelled by shutdown -- a known,
+    // accepted limitation) up to a generous bound, then detach any
+    // stragglers so this call -- and the state_ destruction that follows it
+    // in ~HttpServer() -- is never blocked indefinitely by a stuck request.
+    // Detaching here is only safe because the process is exiting.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::minutes(5);
+    while (active_connections_.load() > 0U &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    std::lock_guard<std::mutex> lock(workers_mutex_);
+    for (auto& worker : workers_) {
+        if (!worker.first.joinable()) continue;
+        if (worker.second->load()) {
+            worker.first.join();
+        } else {
+            worker.first.detach();
+        }
+    }
+    workers_.clear();
 }
 
 }  // namespace masterai

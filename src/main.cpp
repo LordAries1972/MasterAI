@@ -131,6 +131,10 @@ void configure(const std::filesystem::path& settings) {
     configuration.curl_executable =
         prompt("Approved curl executable (blank disables downloads)",
                configuration.curl_executable.string());
+    configuration.allow_local_password_accounts =
+        prompt("Allow locally stored password accounts in addition to OS "
+               "sign-in? (y/N)",
+               configuration.allow_local_password_accounts ? "y" : "N") == "y";
     masterai::ConfigurationManager::save_atomic(configuration, settings);
     std::cout << "Validated configuration saved to " << settings.string() << "\n";
 }

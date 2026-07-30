@@ -17,5 +17,8 @@
     "agentCoder.liveAI.maximumInputTokens": 8000,
     "agentCoder.slopGuard.liveMonitoring": true,
     "agentCoder.slopGuard.statusBar": true,
-    "cmake.sourceDirectory": "F:/Projects/C++/MasterAI/scripts"
+    "cmake.sourceDirectory": "F:/Projects/C++/MasterAI/scripts",
+    "agentCoder.documenter.defaultFormat": "markdown",
+    "agentCoder.documenter.includeGeneratedFiles": true,
+    "agentCoder.documenter.useAIOverview": true
 }

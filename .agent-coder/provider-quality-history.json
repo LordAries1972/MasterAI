@@ -70,5 +70,29 @@
     "failed": true,
     "id": "f47f1e0b-58c3-4412-8e7d-90f4549de304",
     "recordedAt": "2026-07-28T22:40:54.227Z"
+  },
+  {
+    "requestId": "480a3b36-1b1f-4d36-b78f-2d1ff8c19a93",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "taskShape": "errorExplanation",
+    "latencyMs": 17902,
+    "inputTokens": 1446,
+    "outputTokens": 1000,
+    "failed": false,
+    "id": "159c207e-3fcf-4621-bedf-a5847f29bc3b",
+    "recordedAt": "2026-07-29T22:31:13.620Z"
+  },
+  {
+    "requestId": "480a3b36-1b1f-4d36-b78f-2d1ff8c19a93:schema-retry",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "taskShape": "errorExplanation",
+    "latencyMs": 12943,
+    "inputTokens": 2046,
+    "outputTokens": 1000,
+    "failed": false,
+    "id": "4089bcb2-0daf-44de-951a-7b80bc9f350b",
+    "recordedAt": "2026-07-29T22:31:28.722Z"
   }
 ]
