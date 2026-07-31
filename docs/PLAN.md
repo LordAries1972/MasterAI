@@ -303,6 +303,47 @@ Current phase status:
 - Phase 36: Planned — full performance benchmark matrix, regression
   thresholds per optimization, and automated build-to-build comparison
   gating releases.
+- Phase 37: Implemented at a scoped-down level (2026-08-01) — the Machine
+  Learning module foundation described in the "Machine Learning Abilities"
+  section below. A new administrator-only `ml.dashboard.view` permission
+  (`role_allows`, `src/storage.cpp`) gates a real `MachineLearningRegistry`
+  (`src/ml.cpp`) that reports the module as enabled together with real
+  (currently zero) dashboard counts and the full 25-interface roadmap from
+  section 2, each tagged `available` or `planned` — only Dashboard was
+  `available` at this phase; Phase 38 below adds Projects. Reachable at
+  `GET /api/v1/ml/dashboard` and the new
+  "Machine Learning" sidebar entry (`/app/ml`) in `src/web_ui.cpp`, visible
+  only to administrators. This mirrors how Phase 20 begins a large gated
+  section: an honest acknowledgement that the subsystem exists, with no
+  fabricated data standing in for the training, dataset, or deployment work
+  the remaining 24 interfaces still require. `test_machine_learning_foundation_dashboard`
+  covers: `ml.dashboard.view` is administrator-only, every dashboard count
+  starts at zero, only the Dashboard interface reports `available`, and the
+  JSON serializer round-trips that state.
+- Phase 38: Implemented at a scoped-down level (2026-08-01) — Machine
+  Learning Projects (section 5 below), the organizational container later
+  training/dataset/deployment phases will attach to. Scoped down from
+  section 5's full field list to identity, intent, subject/task
+  classification, and lifecycle status (`MLProject`, `MLProjectStore`,
+  `src/ml.cpp`); the deferred fields (owner/contributor assignment,
+  security classification, approved data sources, target architecture/
+  deployment, success/evaluation/safety criteria, storage/compute
+  allocation) belong to the phases that actually consume them. New
+  administrator-only `ml.projects.view` / `ml.projects.create` /
+  `ml.projects.delete` permissions gate `GET`/`POST /api/v1/ml/projects`
+  and `POST /api/v1/ml/projects/{id}/delete`, and a new "Projects" entry
+  under the Machine Learning sidebar (`/app/ml/projects`) in
+  `src/web_ui.cpp` lists and creates them. `MachineLearningRegistry::
+  dashboard()` now takes an `MLProjectStore` and reports a real
+  `activeProjects` count (non-archived projects) instead of the Phase 37
+  placeholder zero. `test_machine_learning_projects_lifecycle` covers:
+  `ml.projects.*` permissions are administrator-only, a new project starts
+  at `draft` with its owner recorded, `set_status()` persists a real
+  transition and no-ops (not throws) for an unknown id, a project survives
+  reload through a second `MLProjectStore` over the same `RecordStore`
+  (matching `ChatStore`'s own reload guarantee), the dashboard's
+  `activeProjects` count reflects real projects and excludes archived
+  ones, and `remove()` actually deletes.
 
 Priority note: segmented prompt assembly (Phase 23), tokenization caching
 (Phase 23), lazy retrieval-content materialization (Phase 24), immutable
@@ -3528,6 +3569,24 @@ Exit criteria:
   optimization's fallback fails, or benchmark identity is incomplete.
 
 ## Machine Learning Abilities
+
+Implementation status: Phase 37 (see the phase list above) implements the
+Dashboard interface below at a foundation level — real, zero-valued counts
+and an honest `available`/`planned` tag on every one of the 25 interfaces
+in section 2. Phase 38 implements Projects (section 5) at a scoped-down
+level — identity, intent, subject/task classification, and lifecycle
+status only. Phase 39 implements the Model Registry (section 7) and
+Dataset Manager (section 10), both scoped down the same way — identity,
+provenance, and lifecycle/approval status only, not the full field list
+(evaluation results, safety assessment, hardware/runtime requirements,
+model hash/signature, dataset schema, quality score, versioning) that
+later training/evaluation/ingestion phases will attach to a registry
+entry or dataset once they exist. The dashboard's models-training,
+models-awaiting-evaluation, and deployed-models counts are now real,
+drawn from the Model Registry's own state counts. Every other capability
+in this section (Model Builder, training, fine-tuning, deployment, and
+everything through section 51) remains `Planned`: no implementation has
+started.
 
 This section extends the plan with an administrator-only Machine Learning
 administration and model-development module, covering the full lifecycle

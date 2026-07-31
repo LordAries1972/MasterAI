@@ -1912,6 +1912,258 @@ private:
 std::string advanced_optimization_registry_json(
     const std::vector<AdvancedOptimizationFeature>& features);
 
+// Machine Learning foundation phase (docs/PLAN.md "Machine Learning
+// Abilities" section 1-51): an administrator-only module for teaching and
+// building models, covering everything from dataset ingestion through
+// training, evaluation, deployment, and governance. That section describes
+// 25 sidebar interfaces (Dashboard, Projects, Model Registry, Model
+// Builder, Dataset Manager, ...); this registry is deliberately scoped down
+// to just the Dashboard's real, honest starting state -- every interface
+// beyond Dashboard is listed as "planned" and none of them exist yet. This
+// mirrors how AdvancedOptimizationRegistry above starts a large gated
+// section: a real, truthful acknowledgement that the subsystem exists and
+// is enabled, with zero fabricated data standing in for work not yet done.
+struct MachineLearningInterface {
+    std::string key;
+    std::string label;
+    // "available" once its own backing service exists; "planned" otherwise.
+    std::string status;
+};
+
+struct MachineLearningDashboard {
+    bool enabled{true};
+    std::string phase{"foundation"};
+    std::vector<MachineLearningInterface> interfaces;
+    // active_projects is real: it comes from MLProjectStore::list() (see
+    // dashboard() below), not a placeholder. The rest still start at zero
+    // because Phase 38 only implements Projects -- there is nothing yet
+    // that could produce a nonzero training/evaluation/deployment count.
+    std::uint64_t active_projects{0};
+    std::uint64_t models_training{0};
+    std::uint64_t models_awaiting_evaluation{0};
+    std::uint64_t models_awaiting_approval{0};
+    std::uint64_t deployed_models{0};
+    std::uint64_t failed_training_jobs{0};
+};
+
+class MachineLearningRegistry final {
+public:
+    MachineLearningRegistry();
+    // active_projects is the count of `projects` whose status isn't
+    // archived. models_training/models_awaiting_evaluation/deployed_models
+    // come from `models`' state counts (training/evaluation/production
+    // respectively). models_awaiting_approval and failed_training_jobs
+    // remain zero (see MachineLearningDashboard's comment above) -- there is
+    // no distinct "awaiting approval" state and no training-job system yet.
+    MachineLearningDashboard dashboard(const class MLProjectStore& projects,
+                                       const class ModelRegistryStore& models) const;
+
+private:
+    std::vector<MachineLearningInterface> interfaces_;
+};
+
+std::string machine_learning_dashboard_json(const MachineLearningDashboard& dashboard);
+
+// Phase 38: docs/PLAN.md "Machine Learning Abilities" section 5 (Machine
+// Learning Projects) -- the organizational container a later training/
+// dataset/deployment phase will attach to. Scoped down from the section's
+// full field list (owner/contributors, security classification, approved
+// data sources, target architecture/deployment, success/evaluation/safety
+// criteria, storage/compute allocation) to the subset that is meaningful
+// before any of those subsystems exist: identity, intent, subject/task
+// classification, and lifecycle status. The remaining fields belong to the
+// phases that actually consume them, not to this one.
+enum class MLProjectStatus {
+    draft,
+    data_collection,
+    data_preparation,
+    ready_for_training,
+    training,
+    evaluation,
+    awaiting_approval,
+    approved,
+    deployed,
+    paused,
+    archived
+};
+
+std::string ml_project_status_name(MLProjectStatus status);
+MLProjectStatus parse_ml_project_status(const std::string& status);
+
+struct MLProject {
+    std::string id;
+    std::string name;
+    std::string description;
+    std::string objective;
+    std::string subject_domain;
+    std::string model_task;
+    std::string owner_id;
+    MLProjectStatus status{MLProjectStatus::draft};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class MLProjectStore final {
+public:
+    MLProjectStore() = default;
+    explicit MLProjectStore(RecordStore& records);
+    MLProject create(const std::string& owner_id, const std::string& name,
+                     const std::string& description,
+                     const std::string& objective,
+                     const std::string& subject_domain,
+                     const std::string& model_task);
+    std::optional<MLProject> find(const std::string& id) const;
+    std::vector<MLProject> list() const;
+    // Returns false (no-op) if the project doesn't exist, so callers can
+    // turn that into a 404 the same way ChatStore::remove()'s callers do.
+    bool set_status(const std::string& id, MLProjectStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const MLProject& project);
+    RecordStore* records_{nullptr};
+    std::map<std::string, MLProject> projects_;
+    // Guards projects_ against concurrent create/list/set_status/remove
+    // calls, matching every other RecordStore-backed store in this file.
+    mutable std::mutex mutex_;
+};
+
+std::string ml_project_json(const MLProject& project);
+std::string ml_projects_json(const std::vector<MLProject>& projects);
+
+// Phase 39: docs/PLAN.md "Machine Learning Abilities" section 7 (Model
+// Registry) -- the authoritative catalog of models known to the ML module,
+// independent of the ModelManifest catalog the inference runner uses (that
+// one describes models ready to *serve*; this one tracks a model's whole
+// development lifecycle, including states -- imported, training,
+// quarantined -- that a servable model would never be in). Scoped down the
+// same way MLProject is: identity, provenance, and lifecycle state, not the
+// full field list (evaluation results, safety assessment, hardware/runtime
+// requirements, model hash/signature, change log) that later training and
+// evaluation phases will attach to a registry entry once they exist.
+enum class ModelRegistryState {
+    imported,
+    unverified,
+    verified,
+    training,
+    evaluation,
+    rejected,
+    approved,
+    staging,
+    production,
+    deprecated,
+    archived,
+    quarantined
+};
+
+std::string model_registry_state_name(ModelRegistryState state);
+ModelRegistryState parse_model_registry_state(const std::string& state);
+
+struct ModelRegistryEntry {
+    std::string id;
+    std::string name;
+    std::string display_name;
+    std::string version;
+    std::string family;
+    std::string task;
+    std::string format;
+    std::string source;
+    std::string license;
+    std::string owner_id;
+    ModelRegistryState state{ModelRegistryState::imported};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class ModelRegistryStore final {
+public:
+    ModelRegistryStore() = default;
+    explicit ModelRegistryStore(RecordStore& records);
+    ModelRegistryEntry create(const std::string& owner_id,
+                              const std::string& name,
+                              const std::string& display_name,
+                              const std::string& version,
+                              const std::string& family,
+                              const std::string& task,
+                              const std::string& format,
+                              const std::string& source,
+                              const std::string& license);
+    std::optional<ModelRegistryEntry> find(const std::string& id) const;
+    std::vector<ModelRegistryEntry> list() const;
+    // Enforces docs/PLAN.md section 7's rule that a model must never reach
+    // `production` merely because training finished: the transition to
+    // `production` is rejected (std::invalid_argument) unless the entry is
+    // already `approved` or `staging`. Every other transition is allowed --
+    // there is no evaluation/approval workflow yet to validate against.
+    bool set_state(const std::string& id, ModelRegistryState state);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const ModelRegistryEntry& entry);
+    RecordStore* records_{nullptr};
+    std::map<std::string, ModelRegistryEntry> entries_;
+    mutable std::mutex mutex_;
+};
+
+std::string model_registry_entry_json(const ModelRegistryEntry& entry);
+std::string model_registry_entries_json(
+    const std::vector<ModelRegistryEntry>& entries);
+
+// Phase 39: docs/PLAN.md "Machine Learning Abilities" section 10 (Dataset
+// Manager). Scoped down from the section's full field list (record/file
+// count, schema, data-quality score, sensitive-data status, duplicate rate,
+// train/validation/test split, dataset hash) to identity, provenance, and
+// approval status -- the fields that are meaningful before an actual
+// ingestion pipeline exists to populate the rest. Section 11 (Dataset
+// Versioning) is deliberately not implemented here: it requires a real
+// content pipeline to version, which this phase doesn't have.
+enum class DatasetApprovalStatus { pending, approved, rejected };
+
+std::string dataset_approval_status_name(DatasetApprovalStatus status);
+DatasetApprovalStatus parse_dataset_approval_status(const std::string& status);
+
+struct Dataset {
+    std::string id;
+    std::string name;
+    std::string description;
+    std::string subject_area;
+    std::string source;
+    std::string license;
+    std::string data_format;
+    std::string owner_id;
+    DatasetApprovalStatus approval_status{DatasetApprovalStatus::pending};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class DatasetStore final {
+public:
+    DatasetStore() = default;
+    explicit DatasetStore(RecordStore& records);
+    Dataset create(const std::string& owner_id, const std::string& name,
+                   const std::string& description,
+                   const std::string& subject_area,
+                   const std::string& source, const std::string& license,
+                   const std::string& data_format);
+    std::optional<Dataset> find(const std::string& id) const;
+    std::vector<Dataset> list() const;
+    bool set_approval_status(const std::string& id,
+                             DatasetApprovalStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const Dataset& dataset);
+    RecordStore* records_{nullptr};
+    std::map<std::string, Dataset> datasets_;
+    mutable std::mutex mutex_;
+};
+
+std::string dataset_json(const Dataset& dataset);
+std::string datasets_json(const std::vector<Dataset>& datasets);
+
 struct PerformanceSample {
     std::string name;
     std::uint64_t operations{0};

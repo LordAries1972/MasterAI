@@ -44,6 +44,7 @@ add_library(masterai_core STATIC
     ../src/calibration.cpp
     ../src/optimization_registry.cpp
     ../src/performance_cli.cpp
+    ../src/ml.cpp
     ../src/http_support.cpp
     ../src/integration_http.cpp
     ../src/web_ui.cpp

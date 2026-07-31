@@ -417,7 +417,18 @@ bool role_allows(const UserRole role, const std::string& permission) {
           "users.manage", "settings.manage", "ide.connect", "mcp.connect",
           "mcp.invoke", "mcp.tools.invoke", "projects.read",
           "projects.write", "chats.read", "chats.write", "attachments.write",
-          "downloads.manage", "benchmarks.read", "benchmarks.run"}},
+          "downloads.manage", "benchmarks.read", "benchmarks.run",
+          // Machine Learning module (docs/PLAN.md "Machine Learning
+          // Abilities" section 3): administrator-only, unlike every other
+          // permission above which developer/viewer also hold a subset of.
+          // The granular permissions section 3 recommends (Machine
+          // Learning Administrator, Data Administrator, ...) aren't
+          // implemented yet -- every ml.* permission maps to the single
+          // administrator role until a granular ML role model exists.
+          "ml.dashboard.view", "ml.projects.view", "ml.projects.create",
+          "ml.projects.delete", "ml.models.view", "ml.models.import",
+          "ml.models.approve", "ml.models.delete", "ml.datasets.view",
+          "ml.datasets.import", "ml.datasets.approve", "ml.datasets.delete"}},
         {UserRole::developer,
          {"identity.read", "models.read", "models.load", "tokens.create",
           "ide.connect", "mcp.connect", "mcp.invoke", "mcp.tools.invoke",

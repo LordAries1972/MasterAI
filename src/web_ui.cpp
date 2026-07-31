@@ -82,20 +82,31 @@ std::string application_script() {
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
         "catch(x){s.textContent='Setup failed: '+x.message;}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
-        "const [me,p,c,m,b,d,u]=await Promise.all([api('/api/v1/users/me'),"
+        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld]=await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
         "api('/api/v1/models').catch(()=>({models:[]})),"
         "api('/api/v1/benchmarks').catch(()=>({benchmarks:[]})),"
         "api('/api/v1/model-downloads').catch(()=>({downloads:[]})),"
-        "api('/api/v1/users').catch(()=>({users:[]}))]);"
+        "api('/api/v1/users').catch(()=>({users:[]})),"
+        // 403s for anyone who isn't an administrator (see role_allows'
+        // ml.dashboard.view) -- the catch keeps that a quiet, expected
+        // no-op rather than failing the whole page load for every role.
+        "api('/api/v1/ml/dashboard').catch("
+        "()=>({enabled:false,phase:'',activeProjects:0,modelsTraining:0,"
+        "modelsAwaitingEvaluation:0,modelsAwaitingApproval:0,"
+        "deployedModels:0,failedTrainingJobs:0,interfaces:[]})),"
+        "api('/api/v1/ml/projects').catch(()=>({projects:[]})),"
+        "api('/api/v1/ml/models').catch(()=>({models:[]})),"
+        "api('/api/v1/ml/datasets').catch(()=>({datasets:[]}))]);"
         "q('#who').textContent=me.displayName+' ('+me.role+')';"
         // A viewer's sidebar renders none of the settings pages, so these
         // elements legitimately don't exist -- guard every write instead of
         // assuming every page is present.
         "renderProjects(p.projects);renderModels(m.models);"
         "renderBenchmarks(b.benchmarks);renderDownloads(d.downloads);"
-        "renderUsers(u.users);"
+        "renderUsers(u.users);renderMlDashboard(ml);renderMlProjects(mlp.projects);"
+        "renderMlModels(mlm.models);renderMlDatasets(mld.datasets);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
         // Chat offers every downloaded, verified model whose backend/format
         // and required CPU/GPU features this machine actually has (state
@@ -306,6 +317,121 @@ std::string application_script() {
         "el.innerHTML=users.length?table(['User','Display name','Role'],"
         "users.map(x=>[esc(x.username),esc(x.displayName),esc(x.role)])):"
         "'<p>No users visible, or administrator access is required.</p>';}"
+        // Renders the Machine Learning foundation page: an acknowledgement
+        // line, the (currently always zero) dashboard counts, and the full
+        // interface roadmap with each entry tagged available/planned -- see
+        // MachineLearningRegistry's class comment in masterai.hpp.
+        "function renderMlDashboard(ml){const ack=q('#mlAck');if(!ack)return;"
+        "ack.textContent=ml.enabled?"
+        "'Machine Learning module is enabled ('+ml.phase+' phase).':"
+        "'Machine Learning module is unavailable.';"
+        "q('#mlStats').innerHTML=table(['Metric','Count'],["
+        "['Active projects','activeProjects'],"
+        "['Models training','modelsTraining'],"
+        "['Models awaiting evaluation','modelsAwaitingEvaluation'],"
+        "['Models awaiting approval','modelsAwaitingApproval'],"
+        "['Deployed models','deployedModels'],"
+        "['Failed training jobs','failedTrainingJobs']]"
+        ".map(([label,key])=>[label,String(ml[key])]));"
+        "q('#mlInterfaces').innerHTML=table(['Interface','Status'],"
+        "ml.interfaces.map(x=>[esc(x.label),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+esc(x.status)+"
+        "'</span>']));}"
+        // Renders the ML Projects list with a Delete button per row -- the
+        // only mutation this foundation phase supports beyond create, since
+        // status transitions belong to the training/evaluation/deployment
+        // phases that don't exist yet (see MLProjectStore's comment).
+        "function renderMlProjects(projects){const el=q('#mlProjectsList');"
+        "if(!el)return;"
+        "if(!projects.length){el.innerHTML='<p>No Machine Learning projects "
+        "yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Subject domain','Model task','Status',''],"
+        "projects.map(x=>[esc(x.name),esc(x.subjectDomain),esc(x.modelTask),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+esc(x.status)+"
+        "'</span>',"
+        "'<button type=\"button\" data-delete-ml-project=\"'+x.id+'\">Delete"
+        "</button>']));"
+        "for(const btn of el.querySelectorAll('[data-delete-ml-project]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/projects/'+"
+        "encodeURIComponent(btn.dataset.deleteMlProject)+'/delete','POST');"
+        "await load();}"
+        "catch(x){s.textContent='Delete Machine Learning project failed: '+"
+        "x.message;}});}}"
+        // Model Registry (docs/PLAN.md "Machine Learning Abilities" section
+        // 7): each row carries its own lifecycle-state dropdown so an
+        // administrator can move a model along its states one deliberate
+        // step at a time, plus a Delete button. The dropdown always lists
+        // every known state -- the server enforces the one hard rule
+        // (production requires approved/staging first, see
+        // ModelRegistryStore::set_state) and reports the reason back if it
+        // rejects the change.
+        "const MODEL_STATES=['imported','unverified','verified','training',"
+        "'evaluation','rejected','approved','staging','production',"
+        "'deprecated','archived','quarantined'];"
+        "function renderMlModels(models){const el=q('#mlModelsList');"
+        "if(!el)return;"
+        "if(!models.length){el.innerHTML='<p>No models registered yet.</p>';"
+        "return;}"
+        "el.innerHTML=table(['Name','Version','Family','Task','State','Set state',''],"
+        "models.map(x=>[esc(x.displayName||x.name),esc(x.version),"
+        "esc(x.family),esc(x.task),"
+        "'<span class=\"stateTag stateTag-'+esc(x.state)+'\">'+esc(x.state)+"
+        "'</span>',"
+        "'<select data-state-for=\"'+x.id+'\">'+MODEL_STATES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.state?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-state=\"'+x.id+'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-model=\"'+x.id+'\">Delete"
+        "</button>']));"
+        "for(const btn of el.querySelectorAll('[data-apply-state]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applyState;"
+        "const state=el.querySelector('[data-state-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/models/'+encodeURIComponent(id)+'/state',"
+        "'POST',{state});await load();}"
+        "catch(x){s.textContent='Update model state failed: '+x.message;}});}"
+        "for(const btn of el.querySelectorAll('[data-delete-ml-model]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/models/'+"
+        "encodeURIComponent(btn.dataset.deleteMlModel)+'/delete','POST');"
+        "await load();}"
+        "catch(x){s.textContent='Delete model failed: '+x.message;}});}}"
+        // Dataset Manager (docs/PLAN.md "Machine Learning Abilities"
+        // section 10): each row shows its approval status plus Approve,
+        // Reject, and Delete actions.
+        "function renderMlDatasets(datasets){const el=q('#mlDatasetsList');"
+        "if(!el)return;"
+        "if(!datasets.length){el.innerHTML='<p>No datasets registered yet.</p>';"
+        "return;}"
+        "el.innerHTML=table(['Name','Subject area','Format','Approval',''],"
+        "datasets.map(x=>[esc(x.name),esc(x.subjectArea),esc(x.dataFormat),"
+        "'<span class=\"stateTag stateTag-'+esc(x.approvalStatus)+'\">'+"
+        "esc(x.approvalStatus)+'</span>',"
+        "'<button type=\"button\" data-approve-ml-dataset=\"'+x.id+'\">Approve"
+        "</button> '+"
+        "'<button type=\"button\" data-reject-ml-dataset=\"'+x.id+'\">Reject"
+        "</button> '+"
+        "'<button type=\"button\" data-delete-ml-dataset=\"'+x.id+'\">Delete"
+        "</button>']));"
+        "for(const btn of el.querySelectorAll('[data-approve-ml-dataset]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/datasets/'+"
+        "encodeURIComponent(btn.dataset.approveMlDataset)+'/approve','POST',"
+        "{status:'approved'});await load();}"
+        "catch(x){s.textContent='Approve dataset failed: '+x.message;}});}"
+        "for(const btn of el.querySelectorAll('[data-reject-ml-dataset]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/datasets/'+"
+        "encodeURIComponent(btn.dataset.rejectMlDataset)+'/approve','POST',"
+        "{status:'rejected'});await load();}"
+        "catch(x){s.textContent='Reject dataset failed: '+x.message;}});}"
+        "for(const btn of el.querySelectorAll('[data-delete-ml-dataset]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/datasets/'+"
+        "encodeURIComponent(btn.dataset.deleteMlDataset)+'/delete','POST');"
+        "await load();}"
+        "catch(x){s.textContent='Delete dataset failed: '+x.message;}});}}"
         // Each row gets its own Start/resume, Pause, Stop, and Remove buttons
         // wired directly to that job's id -- nothing to hand-type, unlike the
         // old single manual 'Download job ID' field this replaces. The State
@@ -1028,7 +1154,29 @@ std::string application_script() {
         "q('#applyHfSource').addEventListener('click',applyHfSource);"
         "q('#applyGithubSource').addEventListener('click',applyGithubSource);"
         "q('#applyMsSource').addEventListener('click',applyMsSource);}"
-        "if(q('#newUser'))q('#newUser').addEventListener('submit',createUser);}});";
+        "if(q('#newUser'))q('#newUser').addEventListener('submit',createUser);"
+        "if(q('#newMlProject'))q('#newMlProject').addEventListener('submit',"
+        "e=>submit(e,'/api/v1/ml/projects',()=>({name:q('#mlProjectName').value,"
+        "description:q('#mlProjectDescription').value,"
+        "objective:q('#mlProjectObjective').value,"
+        "subjectDomain:q('#mlProjectSubjectDomain').value,"
+        "modelTask:q('#mlProjectModelTask').value})));"
+        "if(q('#newMlModel'))q('#newMlModel').addEventListener('submit',"
+        "e=>submit(e,'/api/v1/ml/models',()=>({name:q('#mlModelName').value,"
+        "displayName:q('#mlModelDisplayName').value,"
+        "version:q('#mlModelVersion').value,"
+        "family:q('#mlModelFamily').value,"
+        "task:q('#mlModelTask').value,"
+        "format:q('#mlModelFormat').value,"
+        "source:q('#mlModelSource').value,"
+        "license:q('#mlModelLicense').value})));"
+        "if(q('#newMlDataset'))q('#newMlDataset').addEventListener('submit',"
+        "e=>submit(e,'/api/v1/ml/datasets',()=>({name:q('#mlDatasetName').value,"
+        "description:q('#mlDatasetDescription').value,"
+        "subjectArea:q('#mlDatasetSubjectArea').value,"
+        "source:q('#mlDatasetSource').value,"
+        "license:q('#mlDatasetLicense').value,"
+        "dataFormat:q('#mlDatasetFormat').value})));}});";
 }
 
 // Presents the native OS account sign-in form without embedding credentials.
@@ -1266,6 +1414,99 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<section id=\"panel-models-benchmarks\" class=\"panel\"><div>"
             "<h2>Benchmarks</h2><div id=\"benchmarksList\">Loading...</div>"
             "</div></section>";
+    } else if (section == "ml-dashboard") {
+        // Foundation-phase acknowledgement page: confirms the Machine
+        // Learning module is enabled and shows its real (currently zero)
+        // counts alongside the full roadmap of interfaces from docs/PLAN.md
+        // "Machine Learning Abilities" section 2, each marked available or
+        // planned -- see MachineLearningRegistry's class comment in
+        // masterai.hpp for why nothing here is fabricated.
+        body =
+            "<section id=\"panel-ml-dashboard\" class=\"panel\"><div>"
+            "<h2>Machine Learning</h2>"
+            "<p id=\"mlAck\">Loading...</p>"
+            "<div id=\"mlStats\"></div>"
+            "</div><div>"
+            "<h2>Interfaces</h2>"
+            "<div id=\"mlInterfaces\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-projects") {
+        // Phase 38 (docs/PLAN.md "Machine Learning Abilities" section 5):
+        // create and list ML projects. Only the identity/intent/status
+        // fields MLProjectStore actually persists are collected here -- see
+        // that class's comment in masterai.hpp for the fields deferred to
+        // later phases.
+        body =
+            "<section id=\"panel-ml-projects\" class=\"panel\"><div>"
+            "<h2>New Machine Learning project</h2>"
+            "<form id=\"newMlProject\"><label>Name"
+            "<input id=\"mlProjectName\" required maxlength=\"160\"></label>"
+            "<label>Description<textarea id=\"mlProjectDescription\" "
+            "rows=\"2\"></textarea></label>"
+            "<label>Objective<textarea id=\"mlProjectObjective\" "
+            "rows=\"2\"></textarea></label>"
+            "<label>Subject domain<input id=\"mlProjectSubjectDomain\"></label>"
+            "<label>Model task<input id=\"mlProjectModelTask\"></label>"
+            "<button>Create project</button></form>"
+            "</div><div>"
+            "<h2>Projects</h2><div id=\"mlProjectsList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-models") {
+        // Phase 39 (docs/PLAN.md "Machine Learning Abilities" section 7):
+        // register and list Model Registry entries. Only the
+        // identity/provenance/lifecycle fields ModelRegistryStore actually
+        // persists are collected here -- see that class's comment in
+        // masterai.hpp for the fields deferred to later phases.
+        body =
+            "<section id=\"panel-ml-models\" class=\"panel\"><div>"
+            "<h2>Register a model</h2>"
+            "<form id=\"newMlModel\">"
+            "<label>Internal name (unique identifier)"
+            "<input id=\"mlModelName\" required maxlength=\"160\"></label>"
+            "<label>Display name<input id=\"mlModelDisplayName\"></label>"
+            "<label>Version<input id=\"mlModelVersion\" "
+            "placeholder=\"e.g. 1.0.0\"></label>"
+            "<label>Model family<input id=\"mlModelFamily\" "
+            "placeholder=\"e.g. Llama, Mistral\"></label>"
+            "<label>Model task<input id=\"mlModelTask\" "
+            "placeholder=\"e.g. text-classification\"></label>"
+            "<label>Model format<input id=\"mlModelFormat\" "
+            "placeholder=\"e.g. GGUF, ONNX, safetensors\"></label>"
+            "<label>Source<input id=\"mlModelSource\" "
+            "placeholder=\"where this model came from\"></label>"
+            "<label>License<input id=\"mlModelLicense\"></label>"
+            "<button>Register model</button></form>"
+            "</div><div>"
+            "<h2>Registered models</h2>"
+            "<div id=\"mlModelsList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-datasets") {
+        // Phase 39 (docs/PLAN.md "Machine Learning Abilities" section 10):
+        // register and list datasets, and approve or reject them. Only the
+        // identity/provenance/approval fields DatasetStore actually
+        // persists are collected here -- see that class's comment in
+        // masterai.hpp for the fields deferred to later phases (record/file
+        // count, schema, versioning, ...).
+        body =
+            "<section id=\"panel-ml-datasets\" class=\"panel\"><div>"
+            "<h2>Register a dataset</h2>"
+            "<form id=\"newMlDataset\">"
+            "<label>Name<input id=\"mlDatasetName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Description<textarea id=\"mlDatasetDescription\" "
+            "rows=\"2\"></textarea></label>"
+            "<label>Subject area<input id=\"mlDatasetSubjectArea\" "
+            "placeholder=\"e.g. customer support transcripts\"></label>"
+            "<label>Source<input id=\"mlDatasetSource\" "
+            "placeholder=\"where this data came from\"></label>"
+            "<label>License<input id=\"mlDatasetLicense\"></label>"
+            "<label>Data format<input id=\"mlDatasetFormat\" "
+            "placeholder=\"e.g. JSONL, CSV\"></label>"
+            "<button>Register dataset</button></form>"
+            "</div><div>"
+            "<h2>Registered datasets</h2>"
+            "<div id=\"mlDatasetsList\">Loading...</div>"
+            "</div></section>";
     } else if (section == "admin-create") {
         body =
             "<section id=\"panel-admin-create\" class=\"panel\">"
@@ -1311,7 +1552,17 @@ std::string application_page(const UserRecord& user, const std::string& section,
                                   section == "models-benchmarks");
     }
     if (is_administrator) {
-        sidebar_links += nav_link("/app/admin/create", "Create user",
+        sidebar_links += "<h3>Machine Learning</h3>" +
+                         nav_link("/app/ml", "Dashboard",
+                                  section == "ml-dashboard") +
+                         nav_link("/app/ml/projects", "Projects",
+                                  section == "ml-projects") +
+                         nav_link("/app/ml/models", "Model Registry",
+                                  section == "ml-models") +
+                         nav_link("/app/ml/datasets", "Dataset Manager",
+                                  section == "ml-datasets") +
+                         "<h3>Admin</h3>" +
+                         nav_link("/app/admin/create", "Create user",
                                   section == "admin-create") +
                          nav_link("/app/admin/users", "User list",
                                   section == "admin-users");
@@ -1471,10 +1722,13 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "th{color:var(--muted);font-weight:600;text-transform:uppercase;"
         "font-size:.7rem;letter-spacing:.05em}"
         ".stateTag{padding:.15rem .5rem;border-radius:1rem;font-size:.75rem}"
-        ".stateTag-ready{background:#0d3321;color:#5fe3a4}"
-        ".stateTag-invalid,.stateTag-failed,.stateTag-quarantined"
-        "{background:#3a1414;color:#f299a0}"
-        ".stateTag-downloading,.stateTag-unverified{background:#3a2f0d;color:#f2c96d}"
+        ".stateTag-ready,.stateTag-approved,.stateTag-production,"
+        ".stateTag-verified{background:#0d3321;color:#5fe3a4}"
+        ".stateTag-invalid,.stateTag-failed,.stateTag-quarantined,"
+        ".stateTag-rejected{background:#3a1414;color:#f299a0}"
+        ".stateTag-downloading,.stateTag-unverified,.stateTag-training,"
+        ".stateTag-evaluation,.stateTag-pending,.stateTag-imported,"
+        ".stateTag-staging{background:#3a2f0d;color:#f2c96d}"
         "#hfFields,#githubFields{border:1px solid var(--panel-border);"
         "border-radius:.5rem;padding:.5rem .75rem;margin-top:.5rem}"
         "</style></head><body>"

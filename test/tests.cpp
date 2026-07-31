@@ -3547,6 +3547,278 @@ void test_phase_twentysix_use_prediction_signals() {
             "model_usage_signals_json did not report the recorded signals");
 }
 
+// Machine Learning foundation phase: the registry must report a real,
+// honest empty state (every count zero, only Dashboard "available") rather
+// than fabricating activity, and the permission it's gated behind must be
+// administrator-only -- see MachineLearningRegistry's class comment in
+// masterai.hpp and docs/PLAN.md "Machine Learning Abilities" section 3.
+void test_machine_learning_foundation_dashboard() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.dashboard.view") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.dashboard.view") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.dashboard.view"),
+            "ml.dashboard.view must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::MLProjectStore empty_projects(records);
+    masterai::ModelRegistryStore empty_models(records);
+    const masterai::MachineLearningRegistry registry;
+    const auto dashboard = registry.dashboard(empty_projects, empty_models);
+    require(dashboard.enabled, "the Machine Learning module did not report enabled");
+    require(dashboard.active_projects == 0U && dashboard.models_training == 0U &&
+                dashboard.models_awaiting_evaluation == 0U &&
+                dashboard.models_awaiting_approval == 0U &&
+                dashboard.deployed_models == 0U &&
+                dashboard.failed_training_jobs == 0U,
+            "foundation-phase dashboard counts must start real and zero, not "
+            "fabricated");
+    require(!dashboard.interfaces.empty(),
+            "the Machine Learning interface roadmap was empty");
+    const auto dashboard_entry = std::find_if(
+        dashboard.interfaces.begin(), dashboard.interfaces.end(),
+        [](const masterai::MachineLearningInterface& interface) {
+            return interface.key == "dashboard";
+        });
+    require(dashboard_entry != dashboard.interfaces.end() &&
+                dashboard_entry->status == "available",
+            "the Dashboard interface must report available");
+    // Dashboard (Phase 37), Projects (Phase 38), and Model Registry /
+    // Dataset Manager (Phase 39) are the only interfaces with a real
+    // backing service so far; every other roadmap entry from docs/PLAN.md
+    // "Machine Learning Abilities" section 2 must still report planned
+    // rather than fabricating readiness ahead of its own phase.
+    for (const auto& interface : dashboard.interfaces) {
+        if (interface.key == "dashboard" || interface.key == "projects" ||
+            interface.key == "model-registry" ||
+            interface.key == "dataset-manager") {
+            continue;
+        }
+        require(interface.status == "planned",
+                "every interface without its own phase must still report "
+                "planned");
+    }
+
+    const auto json = masterai::machine_learning_dashboard_json(dashboard);
+    require(json.find("\"enabled\":true") != std::string::npos &&
+                json.find("\"activeProjects\":0") != std::string::npos &&
+                json.find("\"key\":\"dashboard\"") != std::string::npos &&
+                json.find("\"status\":\"available\"") != std::string::npos,
+            "machine_learning_dashboard_json did not report the dashboard "
+            "state");
+}
+
+// Phase 38: MLProjectStore must persist real projects (surviving a reload
+// from the same RecordStore, matching every other store in this codebase),
+// start every new project at draft, let an administrator move it through
+// status, and feed a truthful active-project count into the dashboard --
+// see MLProjectStore's class comment in masterai.hpp.
+void test_machine_learning_projects_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.projects.create") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.projects.create") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.projects.view"),
+            "ml.projects.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::MLProjectStore projects(records);
+    const auto project = projects.create(
+        "administrator-1", "C++ code analysis model",
+        "Reviews C++ diffs for defects.", "Reduce review turnaround time.",
+        "software engineering", "code-review");
+    require(!project.id.empty() && project.status == masterai::MLProjectStatus::draft &&
+                project.owner_id == "administrator-1",
+            "a newly created ML project must start at draft with its owner "
+            "recorded");
+    require(projects.list().size() == 1U,
+            "the created project was not visible in list()");
+
+    require(projects.set_status(project.id, masterai::MLProjectStatus::training),
+            "set_status() rejected a known project id");
+    require(projects.find(project.id)->status == masterai::MLProjectStatus::training,
+            "set_status() did not persist the new status");
+    require(!projects.set_status("nonexistent-project",
+                                 masterai::MLProjectStatus::training),
+            "set_status() must no-op for an unknown project id, not throw");
+
+    // A fresh MLProjectStore over the same RecordStore must see the same
+    // project after the process restarts -- restore() is what makes that
+    // true, mirroring ChatStore's own reload guarantee.
+    masterai::MLProjectStore reloaded(records);
+    const auto reloaded_project = reloaded.find(project.id);
+    require(reloaded_project.has_value() &&
+                reloaded_project->name == "C++ code analysis model" &&
+                reloaded_project->status == masterai::MLProjectStatus::training,
+            "MLProjectStore did not restore a persisted project after reload");
+
+    const masterai::MachineLearningRegistry registry;
+    masterai::ModelRegistryStore models(records);
+    require(registry.dashboard(reloaded, models).active_projects == 1U,
+            "the dashboard's active-project count did not reflect a real, "
+            "non-archived project");
+
+    require(projects.set_status(project.id, masterai::MLProjectStatus::archived),
+            "set_status() rejected archiving a known project id");
+    require(registry.dashboard(projects, models).active_projects == 0U,
+            "an archived project must not count as active");
+
+    require(projects.remove(project.id), "remove() rejected a known project id");
+    require(projects.list().empty(), "remove() did not delete the project");
+    require(!projects.remove(project.id),
+            "remove() must no-op for an already-removed project id, not throw");
+
+    const auto json = masterai::ml_project_json(project);
+    require(json.find("\"name\":\"C++ code analysis model\"") != std::string::npos &&
+                json.find("\"status\":\"draft\"") != std::string::npos,
+            "ml_project_json did not report the project's own fields");
+}
+
+// Phase 39: ModelRegistryStore must persist entries (surviving a reload),
+// start every new entry at imported, let an administrator move it through
+// states, refuse to jump straight to production without an approved/staging
+// entry (docs/PLAN.md "Machine Learning Abilities" section 7's rule), and
+// feed real training/evaluation/production counts into the dashboard.
+void test_machine_learning_model_registry_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.models.import") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.models.import") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.models.view"),
+            "ml.models.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::ModelRegistryStore models(records);
+    const auto entry = models.create("administrator-1", "cpp-review-model",
+                                     "C++ Review Model", "0.1.0", "llama",
+                                     "code-review", "gguf", "internal",
+                                     "MIT");
+    require(!entry.id.empty() &&
+                entry.state == masterai::ModelRegistryState::imported &&
+                entry.owner_id == "administrator-1",
+            "a newly created model registry entry must start at imported "
+            "with its owner recorded");
+    require(models.list().size() == 1U,
+            "the created model was not visible in list()");
+
+    bool production_rejected = false;
+    try {
+        models.set_state(entry.id, masterai::ModelRegistryState::production);
+    } catch (const std::exception&) {
+        production_rejected = true;
+    }
+    require(production_rejected,
+            "set_state() must reject production before approval");
+    require(models.find(entry.id)->state == masterai::ModelRegistryState::imported,
+            "a rejected state transition must not have mutated the entry");
+
+    require(models.set_state(entry.id, masterai::ModelRegistryState::training),
+            "set_state() rejected a known model id");
+    require(models.set_state(entry.id, masterai::ModelRegistryState::evaluation),
+            "set_state() rejected a known transition to evaluation");
+    require(models.set_state(entry.id, masterai::ModelRegistryState::approved),
+            "set_state() rejected a known transition to approved");
+    require(models.set_state(entry.id, masterai::ModelRegistryState::production),
+            "set_state() rejected production after approval");
+    require(!models.set_state("nonexistent-model",
+                              masterai::ModelRegistryState::approved),
+            "set_state() must no-op for an unknown model id, not throw");
+
+    masterai::ModelRegistryStore reloaded(records);
+    const auto reloaded_entry = reloaded.find(entry.id);
+    require(reloaded_entry.has_value() &&
+                reloaded_entry->name == "cpp-review-model" &&
+                reloaded_entry->state == masterai::ModelRegistryState::production,
+            "ModelRegistryStore did not restore a persisted entry after "
+            "reload");
+
+    masterai::MLProjectStore projects(records);
+    const masterai::MachineLearningRegistry registry;
+    require(registry.dashboard(projects, reloaded).deployed_models == 1U,
+            "the dashboard's deployed-model count did not reflect a real "
+            "production entry");
+
+    require(models.remove(entry.id), "remove() rejected a known model id");
+    require(models.list().empty(), "remove() did not delete the model");
+    require(!models.remove(entry.id),
+            "remove() must no-op for an already-removed model id, not throw");
+
+    const auto json = masterai::model_registry_entry_json(entry);
+    require(json.find("\"name\":\"cpp-review-model\"") != std::string::npos &&
+                json.find("\"state\":\"imported\"") != std::string::npos,
+            "model_registry_entry_json did not report the entry's own "
+            "fields");
+}
+
+// Phase 39: DatasetStore must persist datasets (surviving a reload), start
+// every new dataset at pending approval, let an administrator approve or
+// reject it, and report those fields in JSON -- see docs/PLAN.md "Machine
+// Learning Abilities" section 10.
+void test_machine_learning_dataset_manager_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.datasets.import") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.datasets.import") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.datasets.view"),
+            "ml.datasets.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::DatasetStore datasets(records);
+    const auto dataset = datasets.create(
+        "administrator-1", "cpp-review-transcripts",
+        "Support transcripts about C++ code review.", "software engineering",
+        "internal support tickets", "internal-only", "jsonl");
+    require(!dataset.id.empty() &&
+                dataset.approval_status == masterai::DatasetApprovalStatus::pending &&
+                dataset.owner_id == "administrator-1",
+            "a newly created dataset must start pending with its owner "
+            "recorded");
+    require(datasets.list().size() == 1U,
+            "the created dataset was not visible in list()");
+
+    require(datasets.set_approval_status(
+                dataset.id, masterai::DatasetApprovalStatus::approved),
+            "set_approval_status() rejected a known dataset id");
+    require(datasets.find(dataset.id)->approval_status ==
+                masterai::DatasetApprovalStatus::approved,
+            "set_approval_status() did not persist the new status");
+    require(!datasets.set_approval_status(
+                "nonexistent-dataset", masterai::DatasetApprovalStatus::approved),
+            "set_approval_status() must no-op for an unknown dataset id, "
+            "not throw");
+
+    masterai::DatasetStore reloaded(records);
+    const auto reloaded_dataset = reloaded.find(dataset.id);
+    require(reloaded_dataset.has_value() &&
+                reloaded_dataset->name == "cpp-review-transcripts" &&
+                reloaded_dataset->approval_status ==
+                    masterai::DatasetApprovalStatus::approved,
+            "DatasetStore did not restore a persisted dataset after reload");
+
+    require(datasets.remove(dataset.id), "remove() rejected a known dataset id");
+    require(datasets.list().empty(), "remove() did not delete the dataset");
+    require(!datasets.remove(dataset.id),
+            "remove() must no-op for an already-removed dataset id, not "
+            "throw");
+
+    const auto json = masterai::dataset_json(dataset);
+    require(json.find("\"name\":\"cpp-review-transcripts\"") != std::string::npos &&
+                json.find("\"approvalStatus\":\"pending\"") != std::string::npos,
+            "dataset_json did not report the dataset's own fields");
+}
+
 }  // namespace
 
 int main() {
@@ -3643,6 +3915,14 @@ int main() {
             test_phase_twentysix_cancelled_warmup_releases_resources);
         run("use-prediction signals reporting",
             test_phase_twentysix_use_prediction_signals);
+        run("Machine Learning foundation dashboard",
+            test_machine_learning_foundation_dashboard);
+        run("Machine Learning projects lifecycle",
+            test_machine_learning_projects_lifecycle);
+        run("Machine Learning model registry lifecycle",
+            test_machine_learning_model_registry_lifecycle);
+        run("Machine Learning dataset manager lifecycle",
+            test_machine_learning_dataset_manager_lifecycle);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

@@ -306,6 +306,9 @@ public:
                 *users, *api_tokens, *projects, *mcp,
                 *mcp_outbound_registry, *mcp_outbound_gateway, *ide, audit);
         chats = std::make_unique<ChatStore>(records);
+        ml_projects = std::make_unique<MLProjectStore>(records);
+        ml_models = std::make_unique<ModelRegistryStore>(records);
+        ml_datasets = std::make_unique<DatasetStore>(records);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -816,6 +819,250 @@ public:
                         advanced_optimizations.features()) +
                     "}");
         }
+        // Machine Learning foundation phase: Dashboard is the only real
+        // interface behind this route so far -- see MachineLearningRegistry's
+        // class comment in masterai.hpp.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/dashboard") {
+            if (!role_allows(user->role, "ml.dashboard.view")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            return response(200, "OK",
+                            machine_learning_dashboard_json(
+                                machine_learning.dashboard(*ml_projects,
+                                                           *ml_models)));
+        }
+        // Phase 38: Machine Learning Projects (docs/PLAN.md "Machine
+        // Learning Abilities" section 5), scoped to identity/intent/status
+        // fields -- see MLProjectStore's class comment in masterai.hpp.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/projects") {
+            if (!role_allows(user->role, "ml.projects.view")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            return response(200, "OK",
+                            "{\"projects\":" +
+                                ml_projects_json(ml_projects->list()) + "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/projects") {
+            if (!role_allows(user->role, "ml.projects.create")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto description = text_field("description");
+                const auto objective = text_field("objective");
+                const auto subject_domain = text_field("subjectDomain");
+                const auto model_task = text_field("modelTask");
+                const auto project = ml_projects->create(
+                    user->id, name, description, objective, subject_domain,
+                    model_task);
+                audit.append("ml.project.create", user->id, "success",
+                             project.id);
+                return response(201, "Created", ml_project_json(project));
+            } catch (const std::exception& error) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_ml_project\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/projects/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (!role_allows(user->role, "ml.projects.delete")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto id = request.target.substr(
+                21U, request.target.size() - 21U - 7U);
+            if (!ml_projects->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_project_not_found\"}");
+            }
+            audit.append("ml.project.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 39: Model Registry (docs/PLAN.md "Machine Learning
+        // Abilities" section 7), scoped to identity/provenance/lifecycle
+        // fields -- see ModelRegistryStore's class comment in masterai.hpp.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/models") {
+            if (!role_allows(user->role, "ml.models.view")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            return response(200, "OK",
+                            "{\"models\":" +
+                                model_registry_entries_json(ml_models->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/models") {
+            if (!role_allows(user->role, "ml.models.import")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto entry = ml_models->create(
+                    user->id, name, text_field("displayName"),
+                    text_field("version"), text_field("family"),
+                    text_field("task"), text_field("format"),
+                    text_field("source"), text_field("license"));
+                audit.append("ml.model.import", user->id, "success", entry.id);
+                return response(201, "Created", model_registry_entry_json(entry));
+            } catch (const std::exception& error) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_ml_model\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/models/", 0U) == 0U &&
+            request.target.size() > 6U &&
+            request.target.compare(request.target.size() - 6U, 6U,
+                                   "/state") == 0) {
+            if (!role_allows(user->role, "ml.models.approve")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto id = request.target.substr(
+                19U, request.target.size() - 19U - 6U);
+            try {
+                auto root = parse_json(request.body);
+                const auto state =
+                    parse_model_registry_state(root.required("state").as_string());
+                if (!ml_models->set_state(id, state)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_model_not_found\"}");
+                }
+                audit.append("ml.model.state", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_ml_model_state\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/models/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (!role_allows(user->role, "ml.models.delete")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto id = request.target.substr(
+                19U, request.target.size() - 19U - 7U);
+            if (!ml_models->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_model_not_found\"}");
+            }
+            audit.append("ml.model.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 39: Dataset Manager (docs/PLAN.md "Machine Learning
+        // Abilities" section 10), scoped to identity/provenance/approval
+        // fields -- see DatasetStore's class comment in masterai.hpp.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/datasets") {
+            if (!role_allows(user->role, "ml.datasets.view")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            return response(200, "OK",
+                            "{\"datasets\":" +
+                                datasets_json(ml_datasets->list()) + "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/datasets") {
+            if (!role_allows(user->role, "ml.datasets.import")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto dataset = ml_datasets->create(
+                    user->id, name, text_field("description"),
+                    text_field("subjectArea"), text_field("source"),
+                    text_field("license"), text_field("dataFormat"));
+                audit.append("ml.dataset.import", user->id, "success",
+                             dataset.id);
+                return response(201, "Created", dataset_json(dataset));
+            } catch (const std::exception& error) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_ml_dataset\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/datasets/", 0U) == 0U &&
+            request.target.size() > 8U &&
+            request.target.compare(request.target.size() - 8U, 8U,
+                                   "/approve") == 0) {
+            if (!role_allows(user->role, "ml.datasets.approve")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto id = request.target.substr(
+                21U, request.target.size() - 21U - 8U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_dataset_approval_status(
+                    root.required("status").as_string());
+                if (!ml_datasets->set_approval_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_dataset_not_found\"}");
+                }
+                audit.append("ml.dataset.approve", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_dataset_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/datasets/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (!role_allows(user->role, "ml.datasets.delete")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto id = request.target.substr(
+                21U, request.target.size() - 21U - 7U);
+            if (!ml_datasets->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_dataset_not_found\"}");
+            }
+            audit.append("ml.dataset.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
         if (request.method == "GET" && request.target == "/models") {
             return workloads->model_inventory_page();
         }
@@ -860,6 +1107,26 @@ public:
             if (target == "/app/models/benchmarks") {
                 return can_manage_settings
                            ? application_page(*user, "models-benchmarks")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml") {
+                return is_administrator
+                           ? application_page(*user, "ml-dashboard")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/projects") {
+                return is_administrator
+                           ? application_page(*user, "ml-projects")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/models") {
+                return is_administrator
+                           ? application_page(*user, "ml-models")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/datasets") {
+                return is_administrator
+                           ? application_page(*user, "ml-datasets")
                            : response(302, "Found", "", {"Location: /app"});
             }
             if (target == "/app/admin/create") {
@@ -2047,6 +2314,9 @@ private:
     std::unique_ptr<McpOutboundGateway> mcp_outbound_gateway;
     std::unique_ptr<server_internal::IntegrationHttpController> integrations;
     std::unique_ptr<ChatStore> chats;
+    std::unique_ptr<MLProjectStore> ml_projects;
+    std::unique_ptr<ModelRegistryStore> ml_models;
+    std::unique_ptr<DatasetStore> ml_datasets;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
     std::unique_ptr<DownloadManager> downloads;
@@ -2071,6 +2341,10 @@ private:
     // Phase 20: framework-only registry, always constructible (no runner
     // dependency, no persistence) -- see docs/PLAN.md section 25.
     AdvancedOptimizationRegistry advanced_optimizations;
+    // Machine Learning foundation phase: same shape as
+    // advanced_optimizations above -- always constructible, no persistence,
+    // administrator-only. See docs/PLAN.md "Machine Learning Abilities".
+    MachineLearningRegistry machine_learning;
     QueryCoordinator queries;
     std::string setup_token;
     std::string setup_hash;
