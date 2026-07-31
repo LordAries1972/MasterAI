@@ -29,11 +29,32 @@
   },
   "liveActionFeedEnabled": true,
   "tokenCeilings": {
+    "classification": {
+      "maximumInputTokens": 4000,
+      "maximumOutputTokens": 2000
+    },
+    "errorExplanation": {
+      "maximumOutputTokens": 2000
+    },
+    "singleSymbolEdit": {
+      "maximumOutputTokens": 4000
+    },
+    "multiFilePlanning": {
+      "maximumInputTokens": 20000,
+      "maximumOutputTokens": 10000
+    },
+    "architectureAnalysisBounded": {
+      "maximumOutputTokens": 15000
+    },
+    "finalImplementationPatch": {
+      "maximumOutputTokens": 10000
+    },
     "finalImplementationPatchMultiFile": {
       "maximumOutputTokens": 14000
     },
     "adversarialReview": {
-      "maximumOutputTokens": 5000
+      "maximumInputTokens": 15000,
+      "maximumOutputTokens": 8000
     },
     "designDocument": {
       "maximumOutputTokens": 10000

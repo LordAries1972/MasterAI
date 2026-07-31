@@ -13,7 +13,8 @@ namespace {
 
 const std::set<std::string> allowed_categories{
     "general-programming", "code-completion", "code-review",
-    "debugging", "documentation", "embeddings-code-search"};
+    "debugging", "documentation", "embeddings-code-search",
+    "conversation"};
 const std::set<std::string> allowed_licenses{
     "Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause",
     "CC-BY-4.0", "Llama-3.1", "Llama-3.2", "Gemma"};
@@ -88,9 +89,11 @@ private:
     ModelManifest manifest_;
 };
 
-ModelManifest load_manifest(const std::filesystem::path& model_directory,
-                            const std::string& expected_category,
-                            const bool verify_hash) {
+ModelManifest load_manifest(
+    const std::filesystem::path& model_directory,
+    const std::string& expected_category, const bool verify_hash,
+    const std::function<void(std::uint64_t, std::uint64_t)>& hash_progress =
+        {}) {
     const JsonValue root = parse_json(read_bounded_file(model_directory / "manifest.json"));
     require_only(root, {"schemaVersion", "id", "displayName", "category",
                         "model", "requirements", "files", "backends",
@@ -175,7 +178,8 @@ ModelManifest load_manifest(const std::filesystem::path& model_directory,
          manifest.required_gpu_backend != "vulkan" &&
          manifest.required_gpu_backend != "hip") ||
         (manifest.source_url.rfind("https://huggingface.co/", 0U) != 0U &&
-         manifest.source_url.rfind("https://github.com/", 0U) != 0U) ||
+         manifest.source_url.rfind("https://github.com/", 0U) != 0U &&
+         manifest.source_url.rfind("https://modelscope.cn/", 0U) != 0U) ||
         allowed_licenses.find(manifest.license_id) == allowed_licenses.end() ||
         !manifest.license_accepted) {
         throw std::runtime_error("manifest identity, category, format, or backend is invalid");
@@ -207,7 +211,8 @@ ModelManifest load_manifest(const std::filesystem::path& model_directory,
     // cache). Only the `masterai verify-models` CLI path -- ModelRegistry::
     // verify() -- asks for the real hash here.
     if (verify_hash &&
-        !constant_time_equal(sha256_file_hex(model_file), manifest.model_sha256)) {
+        !constant_time_equal(sha256_file_hex(model_file, hash_progress),
+                             manifest.model_sha256)) {
         throw std::runtime_error("model file SHA-256 does not match its manifest");
     }
     return manifest;
@@ -422,9 +427,17 @@ std::vector<ModelRecord> ModelRegistry::scan() const {
                 }
                 const auto suitability =
                     assess_model(record.manifest, hardware_, memory_reserve_mib_);
+                // A RAM shortfall (memory_risk) is left selectable rather than
+                // hidden: it's an estimate against *current* available RAM,
+                // which can change (other apps closing, a reboot), and the
+                // chat UI shows the recommended RAM against the model's name
+                // so the user can judge it themselves instead of us deciding
+                // for them. Only genuine incompatibilities -- an unsupported
+                // backend/format or missing required CPU/GPU features --
+                // still block the model outright, since those can't be
+                // worked around by freeing memory.
                 if (!features_available ||
-                    suitability.rating == Suitability::unsupported ||
-                    suitability.rating == Suitability::memory_risk) {
+                    suitability.rating == Suitability::unsupported) {
                     record.state = ModelState::valid;
                     record.diagnostic =
                         features_available ? suitability.reason
@@ -432,8 +445,12 @@ std::vector<ModelRecord> ModelRegistry::scan() const {
                 } else {
                     record.state = ModelState::ready;
                     record.diagnostic =
-                        "Manifest, license, provenance, size, digest, and hardware "
-                        "suitability checks passed.";
+                        suitability.rating == Suitability::memory_risk
+                            ? "Warning: " + suitability.reason +
+                                  " It may load slowly or fail depending on "
+                                  "what else is running."
+                            : "Manifest, license, provenance, size, digest, "
+                              "and hardware suitability checks passed.";
                 }
             } catch (const ModelFileIncomplete& incomplete) {
                 record.manifest = incomplete.manifest();
@@ -451,7 +468,9 @@ std::vector<ModelRecord> ModelRegistry::scan() const {
 
 std::size_t ModelRegistry::verify(
     const std::function<void(const std::string&, bool, const std::string&)>&
-        progress) const {
+        progress,
+    const std::function<void(const std::string&, std::uint64_t,
+                             std::uint64_t)>& hash_progress) const {
     std::error_code root_error;
     const auto root = std::filesystem::weakly_canonical(model_root_, root_error);
     if (root_error || !std::filesystem::is_directory(root)) {
@@ -481,10 +500,30 @@ std::size_t ModelRegistry::verify(
             const auto directory = model_entry.path();
             const std::string id = directory.filename().string();
             try {
+                // Reported at each 10% step reached, and only for files
+                // large enough (256 MiB+) that hashing them takes long
+                // enough for interim progress to matter -- small manifests
+                // finish before a percentage would even be useful.
+                std::uint64_t last_reported_step = 0U;
+                const auto hash_progress_for_file =
+                    [&](const std::uint64_t bytes_hashed,
+                        const std::uint64_t total_bytes) {
+                        if (!hash_progress ||
+                            total_bytes < (256U * 1024U * 1024U)) {
+                            return;
+                        }
+                        const auto step = (bytes_hashed * 10U) / total_bytes;
+                        if (step <= last_reported_step && bytes_hashed != total_bytes) {
+                            return;
+                        }
+                        last_reported_step = step;
+                        hash_progress(id, bytes_hashed, total_bytes);
+                    };
                 // verify_hash=true: this is the one place a model file's
                 // SHA-256 actually gets computed.
-                const auto manifest =
-                    load_manifest(directory, category, /*verify_hash=*/true);
+                const auto manifest = load_manifest(
+                    directory, category, /*verify_hash=*/true,
+                    hash_progress_for_file);
                 cache[manifest.id] =
                     VerifiedEntry{manifest.model_sha256, manifest.model_size_bytes};
                 ++verified_count;
@@ -549,7 +588,9 @@ bool LlamaCppAdapter::available() const {
 
 LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
                                               const unsigned int context_length,
-                                              const unsigned int port) const {
+                                              const unsigned int port,
+                                              const unsigned int parallel_slots,
+                                              const LaunchTuning& tuning) const {
     if (!available()) {
         throw std::runtime_error("approved llama.cpp server executable is unavailable");
     }
@@ -560,6 +601,9 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
     if (context_length < 256U || context_length > 1048576U ||
         port < 1024U || port > 65535U) {
         throw std::invalid_argument("context length or local port is outside policy");
+    }
+    if (parallel_slots < 1U || parallel_slots > 64U) {
+        throw std::invalid_argument("parallel slot count is outside policy");
     }
     const auto model_file = model.directory / model.manifest.model_file;
     if (!is_path_within(model.directory, model_file)) {
@@ -572,11 +616,36 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
         throw std::runtime_error(
             "model changed after verification; unsafe load was blocked");
     }
-    return LaunchSpec{
-        approved_backend_,
-        {"--model", model_file.string(), "--host", "127.0.0.1",
-         "--port", std::to_string(port), "--ctx-size", std::to_string(context_length)},
-        model.directory};
+    std::vector<std::string> arguments{
+        "--model", model_file.string(), "--host", "127.0.0.1",
+        "--port", std::to_string(port), "--ctx-size", std::to_string(context_length),
+        "--parallel", std::to_string(parallel_slots)};
+    // Phase 19: calibrated launch tuning. Every branch below is skipped at
+    // its default value, so a caller passing the default LaunchTuning{}
+    // reproduces exactly the pre-Phase-19 argument list.
+    if (tuning.gpu_layers > 0U) {
+        arguments.emplace_back("--n-gpu-layers");
+        arguments.emplace_back(std::to_string(tuning.gpu_layers));
+    }
+    if (!tuning.allow_memory_map) {
+        arguments.emplace_back("--no-mmap");
+    }
+    if (tuning.allow_memory_lock) {
+        arguments.emplace_back("--mlock");
+    }
+    if (tuning.thread_count > 0U) {
+        arguments.emplace_back("--threads");
+        arguments.emplace_back(std::to_string(tuning.thread_count));
+    }
+    if (tuning.batch_tokens > 0U) {
+        arguments.emplace_back("--batch-size");
+        arguments.emplace_back(std::to_string(tuning.batch_tokens));
+    }
+    if (tuning.ubatch_tokens > 0U) {
+        arguments.emplace_back("--ubatch-size");
+        arguments.emplace_back(std::to_string(tuning.ubatch_tokens));
+    }
+    return LaunchSpec{approved_backend_, std::move(arguments), model.directory};
 }
 
 }  // namespace masterai

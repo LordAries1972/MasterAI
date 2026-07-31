@@ -158,7 +158,8 @@ AppConfig ConfigurationManager::load(
         const auto root = parse_json(read_file(settings));
         require_only(root, {"schemaVersion", "server", "tls", "auth",
                             "workspace", "models", "inference", "downloads",
-                            "memory", "indexing", "retrieval"}, "");
+                            "memory", "indexing", "retrieval", "cache",
+                            "session", "performance"}, "");
         config.schema_version =
             static_cast<int>(root.required("schemaVersion").as_integer());
 
@@ -205,8 +206,28 @@ AppConfig ConfigurationManager::load(
 
         const auto& workspace = root.required("workspace");
         require_only(workspace, {"runtimeRoot", "modelsRoot"}, "workspace.");
-        config.runtime_root = workspace.required("runtimeRoot").as_string();
-        config.models_root = workspace.required("modelsRoot").as_string();
+        // A relative runtimeRoot/modelsRoot resolves against the directory
+        // that holds this settings file, not the process's current working
+        // directory -- otherwise all of a server's saved state (chats,
+        // projects, downloaded models) lands wherever the process happened
+        // to be launched from (e.g. a shell's home directory on C:\) instead
+        // of consistently inside the workspace this settings file belongs
+        // to, regardless of how or from where masterai is started.
+        std::error_code anchor_error;
+        auto settings_directory =
+            std::filesystem::absolute(settings, anchor_error).parent_path();
+        if (anchor_error) settings_directory = std::filesystem::current_path();
+        const auto resolve_workspace_path =
+            [&settings_directory](const std::string& raw) {
+                const std::filesystem::path candidate(raw);
+                return candidate.is_absolute()
+                           ? candidate
+                           : (settings_directory / candidate).lexically_normal();
+            };
+        config.runtime_root =
+            resolve_workspace_path(workspace.required("runtimeRoot").as_string());
+        config.models_root =
+            resolve_workspace_path(workspace.required("modelsRoot").as_string());
 
         const auto& models = root.required("models");
         require_only(models, {"memoryReserveMiB"}, "models.");
@@ -227,12 +248,47 @@ AppConfig ConfigurationManager::load(
         }
 
         if (const auto* inference = root.optional("inference")) {
-            require_only(*inference, {"llamaServerExecutable", "runnerPort"},
+            require_only(*inference,
+                         {"llamaServerExecutable", "runnerPort",
+                          "chatMaxReplyTokens", "chatContextLength",
+                          "startupTimeoutSeconds"},
                          "inference.");
             config.llama_server_executable =
                 inference->required("llamaServerExecutable").as_string();
             config.runner_port = static_cast<std::uint16_t>(
                 positive(*inference, "runnerPort", 65535U));
+            if (inference->optional("chatMaxReplyTokens") != nullptr) {
+                config.chat_max_reply_tokens = static_cast<std::uint32_t>(
+                    positive(*inference, "chatMaxReplyTokens", 32768U));
+            }
+            if (inference->optional("chatContextLength") != nullptr) {
+                config.chat_context_length = static_cast<std::uint32_t>(
+                    positive(*inference, "chatContextLength", 1048576U));
+            }
+            if (inference->optional("startupTimeoutSeconds") != nullptr) {
+                config.runner_startup_timeout_seconds =
+                    static_cast<std::uint32_t>(
+                        positive(*inference, "startupTimeoutSeconds", 3600U));
+            }
+        }
+
+        if (const auto* session = root.optional("session")) {
+            require_only(
+                *session,
+                {"enabled", "maxSlots", "idleRetentionSeconds"}, "session.");
+            config.session_reuse_enabled =
+                session->required("enabled").as_boolean();
+            config.session_reuse_max_slots = static_cast<unsigned int>(
+                positive(*session, "maxSlots", 64U));
+            config.session_reuse_idle_retention_seconds =
+                static_cast<std::uint32_t>(
+                    positive(*session, "idleRetentionSeconds", 86400U));
+        }
+
+        if (const auto* performance = root.optional("performance")) {
+            require_only(*performance, {"autoTune"}, "performance.");
+            config.performance_auto_tune =
+                performance->required("autoTune").as_boolean();
         }
 
         if (const auto* downloads = root.optional("downloads")) {
@@ -264,6 +320,14 @@ AppConfig ConfigurationManager::load(
                     positive(*retrieval, "maximumChunksPerSource", 256U));
             config.retrieval_maximum_total_chunks = static_cast<std::uint32_t>(
                 positive(*retrieval, "maximumTotalChunks", 1024U));
+        }
+
+        if (const auto* cache = root.optional("cache")) {
+            require_only(*cache, {"enabled", "maximumBytesPerCategory"},
+                         "cache.");
+            config.cache_enabled = cache->required("enabled").as_boolean();
+            config.cache_maximum_bytes_per_category = positive(
+                *cache, "maximumBytesPerCategory", 4ULL * 1024ULL * 1024ULL * 1024ULL);
         }
     }
     apply_values(config, environment);
@@ -364,7 +428,12 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         ",\"profile\":" + quote(c.resource_profile) + "},\n"
         "  \"inference\":{\"llamaServerExecutable\":" +
         quote(c.llama_server_executable.string()) +
-        ",\"runnerPort\":" + std::to_string(c.runner_port) + "},\n"
+        ",\"runnerPort\":" + std::to_string(c.runner_port) +
+        ",\"chatMaxReplyTokens\":" + std::to_string(c.chat_max_reply_tokens) +
+        ",\"chatContextLength\":" + std::to_string(c.chat_context_length) +
+        ",\"startupTimeoutSeconds\":" +
+        std::to_string(c.runner_startup_timeout_seconds) +
+        "},\n"
         "  \"downloads\":{\"curlExecutable\":" +
         quote(c.curl_executable.string()) + "},\n"
         "  \"indexing\":{\"watchProjectFiles\":" +
@@ -378,7 +447,18 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         ",\"maximumChunksPerSource\":" +
         std::to_string(c.retrieval_maximum_chunks_per_source) +
         ",\"maximumTotalChunks\":" +
-        std::to_string(c.retrieval_maximum_total_chunks) + "}\n}\n";
+        std::to_string(c.retrieval_maximum_total_chunks) + "},\n"
+        "  \"cache\":{\"enabled\":" +
+        (c.cache_enabled ? "true" : "false") +
+        ",\"maximumBytesPerCategory\":" +
+        std::to_string(c.cache_maximum_bytes_per_category) + "},\n"
+        "  \"session\":{\"enabled\":" +
+        (c.session_reuse_enabled ? "true" : "false") +
+        ",\"maxSlots\":" + std::to_string(c.session_reuse_max_slots) +
+        ",\"idleRetentionSeconds\":" +
+        std::to_string(c.session_reuse_idle_retention_seconds) + "},\n"
+        "  \"performance\":{\"autoTune\":" +
+        (c.performance_auto_tune ? "true" : "false") + "}\n}\n";
 }
 
 void ConfigurationManager::save_atomic(const AppConfig& config,

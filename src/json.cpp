@@ -12,6 +12,8 @@ namespace masterai {
 
 JsonValue::JsonValue(const bool value) : type_(Type::boolean), boolean_(value) {}
 JsonValue::JsonValue(const std::int64_t value) : type_(Type::number), integer_(value) {}
+JsonValue::JsonValue(const double value)
+    : type_(Type::number), double_(value), is_float_(true) {}
 JsonValue::JsonValue(std::string value)
     : type_(Type::string), string_(std::move(value)) {}
 JsonValue::JsonValue(Array value) : type_(Type::array), array_(std::move(value)) {}
@@ -42,10 +44,17 @@ const std::string& JsonValue::as_string() const {
 }
 
 std::int64_t JsonValue::as_integer() const {
-    if (type_ != Type::number) {
+    if (type_ != Type::number || is_float_) {
         throw std::runtime_error("JSON value is not an integer");
     }
     return integer_;
+}
+
+double JsonValue::as_double() const {
+    if (type_ != Type::number) {
+        throw std::runtime_error("JSON value is not a number");
+    }
+    return is_float_ ? double_ : static_cast<double>(integer_);
 }
 
 bool JsonValue::as_boolean() const {
@@ -120,7 +129,7 @@ private:
             default:
                 if (input_[position_] == '-' ||
                     std::isdigit(static_cast<unsigned char>(input_[position_])) != 0) {
-                    return JsonValue(parse_integer());
+                    return parse_number();
                 }
                 fail("unexpected token");
         }
@@ -258,32 +267,67 @@ private:
         }
     }
 
-    std::int64_t parse_integer() {
+    void consume_digits() {
+        while (position_ < input_.size() &&
+               std::isdigit(static_cast<unsigned char>(input_[position_])) != 0) {
+            ++position_;
+        }
+    }
+
+    // Parses a JSON number. Upstream runner responses (e.g. llama.cpp
+    // timings) carry fields with fractions/exponents that our own code never
+    // reads via as_integer(); those are kept as doubles instead of aborting
+    // the whole parse, while plain integers keep their exact int64 value.
+    JsonValue parse_number() {
         const std::size_t start = position_;
         if (input_[position_] == '-') {
             ++position_;
         }
         if (position_ >= input_.size()) {
-            fail("incomplete integer");
+            fail("incomplete number");
         }
         if (input_[position_] == '0') {
             ++position_;
         } else {
             if (!std::isdigit(static_cast<unsigned char>(input_[position_]))) {
-                fail("invalid integer");
+                fail("invalid number");
             }
-            while (position_ < input_.size() &&
-                   std::isdigit(static_cast<unsigned char>(input_[position_])) != 0) {
-                ++position_;
+            consume_digits();
+        }
+        bool is_float = false;
+        if (position_ < input_.size() && input_[position_] == '.') {
+            is_float = true;
+            ++position_;
+            if (position_ >= input_.size() ||
+                !std::isdigit(static_cast<unsigned char>(input_[position_]))) {
+                fail("invalid fraction");
             }
+            consume_digits();
         }
         if (position_ < input_.size() &&
-            (input_[position_] == '.' || input_[position_] == 'e' ||
-             input_[position_] == 'E')) {
-            fail("floating-point numbers are not accepted in strict manifests");
+            (input_[position_] == 'e' || input_[position_] == 'E')) {
+            is_float = true;
+            ++position_;
+            if (position_ < input_.size() &&
+                (input_[position_] == '+' || input_[position_] == '-')) {
+                ++position_;
+            }
+            if (position_ >= input_.size() ||
+                !std::isdigit(static_cast<unsigned char>(input_[position_]))) {
+                fail("invalid exponent");
+            }
+            consume_digits();
+        }
+        const std::string literal = input_.substr(start, position_ - start);
+        if (is_float) {
+            try {
+                return JsonValue(std::stod(literal));
+            } catch (const std::exception&) {
+                fail("number is outside double range");
+            }
         }
         try {
-            return std::stoll(input_.substr(start, position_ - start));
+            return JsonValue(static_cast<std::int64_t>(std::stoll(literal)));
         } catch (const std::exception&) {
             fail("integer is outside 64-bit range");
         }

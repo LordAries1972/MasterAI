@@ -199,11 +199,12 @@ struct WorkloadHttpController::State final {
           AttachmentStore& attachment_store,
           RunnerSupervisor* inference_service,
           DownloadManager* download_service, BenchmarkStore& benchmark_store,
-          ProjectIndexService& index_service, AuditLog& audit_log)
+          ProjectIndexService& index_service, AuditLog& audit_log,
+          CacheManager& cache_manager)
         : configuration(app_configuration), projects(project_catalog),
           attachments(attachment_store), inference(inference_service),
           downloads(download_service), benchmarks(benchmark_store),
-          indexes(index_service), audit(audit_log) {}
+          indexes(index_service), audit(audit_log), cache(cache_manager) {}
 
     const AppConfig& configuration;
     ProjectCatalog& projects;
@@ -213,6 +214,7 @@ struct WorkloadHttpController::State final {
     BenchmarkStore& benchmarks;
     ProjectIndexService& indexes;
     AuditLog& audit;
+    CacheManager& cache;
 
     // Probes hardware once and applies the existing model registry policy.
     std::vector<ModelRecord> scan_models() const {
@@ -228,10 +230,10 @@ WorkloadHttpController::WorkloadHttpController(
     const AppConfig& configuration, ProjectCatalog& projects,
     AttachmentStore& attachments, RunnerSupervisor* inference,
     DownloadManager* downloads, BenchmarkStore& benchmarks,
-    ProjectIndexService& indexes, AuditLog& audit)
+    ProjectIndexService& indexes, AuditLog& audit, CacheManager& cache)
     : state_(std::make_unique<State>(
           configuration, projects, attachments, inference, downloads,
-          benchmarks, indexes, audit)) {}
+          benchmarks, indexes, audit, cache)) {}
 
 WorkloadHttpController::~WorkloadHttpController() = default;
 
@@ -315,6 +317,9 @@ std::string WorkloadHttpController::create_project(
         std::filesystem::create_directories(path);
         const auto project = state_->projects.add(
             id, root.required("displayName").as_string(), path);
+        // Phase 17: a new project changes what "authorized" means, so every
+        // cached entry -- however it was keyed -- must stop being reachable.
+        state_->cache.invalidate_policy();
         state_->audit.append("project.create", user.id, "success", project.id);
         return response(201, "Created",
                         "{\"id\":\"" + json_escape(project.id) + "\"}");
@@ -580,7 +585,8 @@ std::string WorkloadHttpController::create_download(
         const auto model_id = root.required("modelId").as_string();
         static const std::set<std::string> categories{
             "general-programming", "code-completion", "code-review",
-            "debugging", "documentation", "embeddings-code-search"};
+            "debugging", "documentation", "embeddings-code-search",
+            "conversation"};
         if (std::filesystem::path(filename).filename().string() != filename ||
             categories.find(category) == categories.end() ||
             std::filesystem::path(model_id).filename().string() != model_id ||
@@ -646,7 +652,8 @@ std::string WorkloadHttpController::create_download(
         const auto license_accepted = root.required("licenseAccepted").as_boolean();
         if (!is_safe_identifier(revision) ||
             (source_url.rfind("https://huggingface.co/", 0U) != 0U &&
-             source_url.rfind("https://github.com/", 0U) != 0U) ||
+             source_url.rfind("https://github.com/", 0U) != 0U &&
+             source_url.rfind("https://modelscope.cn/", 0U) != 0U) ||
             !license_accepted) {
             throw std::runtime_error("download provenance is invalid");
         }

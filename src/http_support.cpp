@@ -7,7 +7,8 @@
 namespace masterai::server_internal {
 namespace {
 
-// Replaces transport-unsafe controls consistently for JSON and HTML text.
+// Replaces transport-unsafe controls consistently for HTML text/attributes,
+// where a raw newline or tab in a value carries no meaning worth preserving.
 bool append_normalized_control(const char character, std::string& output) {
     if (character != '\r' && character != '\n' &&
         static_cast<unsigned char>(character) >= 0x20U) {
@@ -15,6 +16,26 @@ bool append_normalized_control(const char character, std::string& output) {
     }
     output.push_back(' ');
     return true;
+}
+
+// Escapes a control character for safe embedding in a JSON string, using the
+// short escapes JSON defines for the common ones and \u00XX for the rest.
+// Newlines and tabs must survive round-trips (chat message formatting, code
+// blocks) rather than being collapsed to a single space.
+void append_json_control_escape(const char character, std::string& output) {
+    switch (character) {
+        case '\n': output += "\\n"; return;
+        case '\r': output += "\\r"; return;
+        case '\t': output += "\\t"; return;
+        case '\b': output += "\\b"; return;
+        case '\f': output += "\\f"; return;
+        default: break;
+    }
+    static constexpr char digits[] = "0123456789abcdef";
+    const auto value = static_cast<unsigned char>(character);
+    output += "\\u00";
+    output.push_back(digits[(value >> 4U) & 0x0fU]);
+    output.push_back(digits[value & 0x0fU]);
 }
 
 }  // namespace
@@ -38,11 +59,16 @@ std::string response(const int status, const char* reason,
            "Referrer-Policy: no-referrer\r\n" + extra + "\r\n" + body;
 }
 
-// Escapes embedded JSON text and normalizes prohibited control characters.
+// Escapes embedded JSON text, preserving newlines/tabs via proper JSON
+// escapes instead of collapsing them to spaces -- required for chat message
+// content to round-trip with its original line breaks and indentation.
 std::string json_escape(const std::string& value) {
     std::string output;
     for (const char character : value) {
-        if (append_normalized_control(character, output)) continue;
+        if (static_cast<unsigned char>(character) < 0x20U) {
+            append_json_control_escape(character, output);
+            continue;
+        }
         if (character == '"' || character == '\\') {
             output.push_back('\\');
         }

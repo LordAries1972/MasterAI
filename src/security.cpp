@@ -163,9 +163,14 @@ std::string sha256_hex(const std::string& value) {
     return hex_encode(digest.data(), digest.size());
 }
 
-std::string sha256_file_hex(const std::filesystem::path& path) {
+std::string sha256_file_hex(
+    const std::filesystem::path& path,
+    const std::function<void(std::uint64_t, std::uint64_t)>& progress) {
     std::ifstream input(path, std::ios::binary);
     if (!input) throw std::runtime_error("file could not be opened for SHA-256");
+    std::error_code size_error;
+    const auto total_bytes = std::filesystem::file_size(path, size_error);
+    std::uint64_t bytes_hashed = 0U;
     std::array<std::uint8_t, 32> digest{};
     std::vector<char> buffer(1024U * 1024U);
 #if defined(_WIN32)
@@ -196,6 +201,10 @@ std::string sha256_file_hex(const std::filesystem::path& path) {
             BCryptCloseAlgorithmProvider(algorithm, 0);
             throw std::runtime_error("BCrypt file SHA-256 update failed");
         }
+        if (count > 0 && progress && !size_error) {
+            bytes_hashed += static_cast<std::uint64_t>(count);
+            progress(bytes_hashed, total_bytes);
+        }
     }
     if (!input.eof() ||
         BCryptFinishHash(hash, digest.data(),
@@ -223,6 +232,10 @@ std::string sha256_file_hex(const std::filesystem::path& path) {
             close(operation);
             close(algorithm_socket);
             throw std::runtime_error("AF_ALG file SHA-256 update failed");
+        }
+        if (count > 0 && progress && !size_error) {
+            bytes_hashed += static_cast<std::uint64_t>(count);
+            progress(bytes_hashed, total_bytes);
         }
     }
     if (!input.eof() ||

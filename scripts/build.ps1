@@ -10,7 +10,9 @@ param(
     # only place model files get hashed -- the server itself never re-hashes
     # a multi-gigabyte GGUF file on a page load or chat request.
     [switch]$VerifyModels,
-    [string]$ModelsRoot = ''
+    [string]$ModelsRoot = '',
+    # Forces a full reconfigure and rebuild; without this, builds are incremental.
+    [switch]$Clean
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,7 +73,6 @@ if (-not (Test-Path -LiteralPath $ninjaPath -PathType Leaf)) {
 }
 
 $configureArguments = @(
-    '--fresh',
     '-S', $PSScriptRoot,
     '-B', $buildRoot,
     '-G', 'Ninja',
@@ -79,10 +80,17 @@ $configureArguments = @(
     '-DCMAKE_CXX_COMPILER:FILEPATH=cl.exe',
     "-DCMAKE_BUILD_TYPE:STRING=$BuildType"
 )
+if ($Clean) {
+    $configureArguments = @('--fresh') + $configureArguments
+}
 & cmake @configureArguments
 if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed.' }
 
-cmake --build $buildRoot --config $BuildType --parallel
+$buildArguments = @('--build', $buildRoot, '--config', $BuildType, '--parallel')
+if ($Clean) {
+    $buildArguments += '--clean-first'
+}
+cmake @buildArguments
 if ($LASTEXITCODE -ne 0) { throw 'MasterAI build failed.' }
 
 if ($VerifyModels) {

@@ -109,6 +109,50 @@
       "appliedIntuitionRuleIds": [],
       "verified": false,
       "recordedAt": "2026-07-29T22:31:29.419Z"
+    },
+    {
+      "promptStrategyId": "verified-default",
+      "promptStrategyVersion": 1,
+      "requestId": "99b29db9-f8b6-44da-9c03-5e6135c93e03",
+      "taskType": "explain-symbol",
+      "providerId": "claude",
+      "modelId": "claude-sonnet-5",
+      "promptTokens": 1782,
+      "completionTokens": 1000,
+      "attempts": 1,
+      "responseSchemaValid": false,
+      "assumptionsRejected": 0,
+      "evidenceCoverage": 0,
+      "patchAccepted": false,
+      "userCorrectionRequired": false,
+      "rolledBack": false,
+      "finalOutcome": "partially_successful",
+      "verificationEvidence": [],
+      "appliedIntuitionRuleIds": [],
+      "verified": false,
+      "recordedAt": "2026-07-30T23:26:41.979Z"
+    },
+    {
+      "promptStrategyId": "verified-default",
+      "promptStrategyVersion": 1,
+      "requestId": "cc83521d-a350-4530-aa2f-a7c161cc2c94",
+      "taskType": "explain-symbol",
+      "providerId": "claude",
+      "modelId": "claude-sonnet-5",
+      "promptTokens": 1035,
+      "completionTokens": 1571,
+      "attempts": 1,
+      "responseSchemaValid": true,
+      "assumptionsRejected": 0,
+      "evidenceCoverage": 0,
+      "patchAccepted": false,
+      "userCorrectionRequired": false,
+      "rolledBack": false,
+      "finalOutcome": "partially_successful",
+      "verificationEvidence": [],
+      "appliedIntuitionRuleIds": [],
+      "verified": false,
+      "recordedAt": "2026-07-30T23:40:20.121Z"
     }
   ],
   "lessons": [],
@@ -153,6 +197,27 @@
       "timestamp": "2026-07-29T22:31:29.419Z",
       "action": "record-outcome",
       "targetId": "480a3b36-1b1f-4d36-b78f-2d1ff8c19a93",
+      "detail": "Outcome remains temporary and cannot influence ranking."
+    },
+    {
+      "id": "cc9e673e-488f-4693-9e78-df471e4b305a",
+      "timestamp": "2026-07-30T23:26:31.368Z",
+      "action": "record-outcome",
+      "targetId": "99b29db9-f8b6-44da-9c03-5e6135c93e03",
+      "detail": "Outcome remains temporary and cannot influence ranking."
+    },
+    {
+      "id": "42291988-e799-4e83-aa51-e49223c0c0ed",
+      "timestamp": "2026-07-30T23:26:41.979Z",
+      "action": "record-outcome",
+      "targetId": "99b29db9-f8b6-44da-9c03-5e6135c93e03",
+      "detail": "Outcome remains temporary and cannot influence ranking."
+    },
+    {
+      "id": "1dc0b877-29b2-481f-954b-6f27a425bec1",
+      "timestamp": "2026-07-30T23:40:20.121Z",
+      "action": "record-outcome",
+      "targetId": "cc83521d-a350-4530-aa2f-a7c161cc2c94",
       "detail": "Outcome remains temporary and cannot influence ranking."
     }
   ]

@@ -472,7 +472,9 @@ RunnerSupervisor::~RunnerSupervisor() { unload(); }
 void RunnerSupervisor::load(const ModelRecord& model,
                             const unsigned int context_length,
                             const unsigned int port,
-                            const std::uint32_t startup_timeout_seconds) {
+                            const std::uint32_t startup_timeout_seconds,
+                            const unsigned int parallel_slots,
+                            const LaunchTuning& tuning) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (metrics_.state != RunnerState::unloaded &&
         metrics_.state != RunnerState::failed) {
@@ -483,7 +485,8 @@ void RunnerSupervisor::load(const ModelRecord& model,
     metrics_.model_id = model.manifest.id;
     port_ = port;
     try {
-        process_->start(adapter_.build_launch_spec(model, context_length, port),
+        process_->start(adapter_.build_launch_spec(model, context_length, port,
+                                                    parallel_slots, tuning),
                         runtime_root_ / "logs" /
                             ("runner-" + model.manifest.id + ".log"));
         metrics_.process_id = process_->id();
@@ -571,12 +574,23 @@ GenerationResult RunnerSupervisor::generate(
             stops += "\"" + json_escape(options.stop_sequences[i]) + "\"";
         }
         stops += "]";
-        const std::string body =
+        // Phase 18: cache_prompt/id_slot are only ever set by
+        // PromptSessionManager after it has verified an exact compatibility
+        // fingerprint and a literal byte-prefix match against the slot's
+        // last prompt (see masterai.hpp); every other caller leaves them at
+        // their safe defaults (false / absent), which is ordinary
+        // from-scratch prompt evaluation, unchanged from before Phase 18.
+        std::string body =
             "{\"prompt\":\"" + json_escape(prompt) + "\",\"n_predict\":" +
             std::to_string(options.max_tokens) + ",\"temperature\":" +
             std::to_string(options.temperature) + ",\"seed\":" +
             std::to_string(options.seed) + ",\"stop\":" + stops +
-            ",\"stream\":true}";
+            ",\"cache_prompt\":" +
+            (options.cache_prompt ? "true" : "false");
+        if (options.slot_id.has_value()) {
+            body += ",\"id_slot\":" + std::to_string(*options.slot_id);
+        }
+        body += ",\"stream\":true}";
         const auto result = local_http(
             port, "POST", "/completion", body,
             [&](const std::string& line) {

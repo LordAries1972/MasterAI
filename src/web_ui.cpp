@@ -44,6 +44,15 @@ std::string application_script() {
     return
         "const q=s=>document.querySelector(s);let csrf='',generation=null,"
         "lastAppliedPreset=null;const downloadSizes={};"
+        // Files attached to the message currently being composed, and the
+        // project id they were (or will be) uploaded against -- an existing
+        // chat's project is fixed and known once openChat() loads it, but a
+        // brand-new chat only has one once the composer's own project picker
+        // has a value, so attachFiles() below re-reads that picker each time
+        // rather than caching it once.
+        "let attachedFiles=[],openedProjectId='';"
+        "function currentProjectId(){return openedProjectId||"
+        "(q('#chatProject')?q('#chatProject').value:'');}"
         // Tracks which download ids already have a pollDownloadProgress
         // interval running, keyed by id, so a job left in the 'transferring'
         // state across a page reload (or a second renderDownloads call from
@@ -88,13 +97,19 @@ std::string application_script() {
         "renderBenchmarks(b.benchmarks);renderDownloads(d.downloads);"
         "renderUsers(u.users);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
-        // Chat only ever offers models that are both downloaded and rated
-        // Ready for this machine's hardware (see classify_model_fit on the
-        // server) -- anything else can't actually be loaded, so it would
-        // just be a broken option here.
+        // Chat offers every downloaded, verified model whose backend/format
+        // and required CPU/GPU features this machine actually has (state
+        // 'ready' on the server -- see ModelRegistry::scan()) -- anything
+        // else genuinely can't be loaded, so it would just be a broken
+        // option here. A model that's merely short on RAM *right now* still
+        // counts as ready: that estimate is against current available RAM,
+        // which can change, so it's left selectable with its recommended RAM
+        // shown against its name (and a warning icon when the server's
+        // diagnostic flags it) so the user can judge it themselves.
         "const ready=m.models.filter(x=>x.state==='ready');"
         "fill('#chatModel',ready,x=>x.id,"
-        "x=>x.displayName+' ('+Math.round(x.recommendedRamMiB/1024)+' GB)');"
+        "x=>(x.diagnostic&&x.diagnostic.startsWith('Warning:')?'\\u26a0\\ufe0f ':'')+"
+        "x.displayName+' ('+Math.round(x.recommendedRamMiB/1024)+'GB)');"
         "renderChatList(c.chats);"
         // Landing directly on a chat's own URL (/app/chat/<id>) preloads its
         // id into this hidden field server-side; load its history now that
@@ -113,9 +128,44 @@ std::string application_script() {
         // moves into a collapsed History section so the sidebar stays a
         // fixed, scannable size regardless of how many chats exist.
         "const RECENT_CHAT_LIMIT=20;"
-        "function chatLink(c){const a=document.createElement('a');"
+        // Each sidebar row is now the chat link plus a bin icon that deletes
+        // it -- deletion is permanent (the server drops the chat and every
+        // one of its messages), so it's confirmed before the request fires.
+        // Deleting the chat currently open just navigates to a blank /app
+        // rather than trying to patch the now-gone chat out of the visible
+        // panel.
+        "function chatLink(c){const row=document.createElement('div');"
+        "row.className='chatListItem';"
+        "const a=document.createElement('a');"
         "a.className='navButton';a.href='/app/chat/'+encodeURIComponent(c.id);"
-        "a.textContent=c.title||c.id;a.title=c.title||c.id;return a;}"
+        "a.textContent=c.title||c.id;a.title=c.title||c.id;"
+        "const del=document.createElement('button');del.type='button';"
+        "del.className='chatDeleteBtn';del.title='Delete chat';"
+        // An emoji glyph's font metrics can render outside the button's own
+        // box (Windows in particular draws color emoji with extra vertical
+        // padding baked into the glyph), so the visible icon and the actual
+        // clickable rectangle can end up misaligned enough that a click on
+        // what looks like the icon lands outside it. A fixed-size inline SVG
+        // guarantees the drawn icon and the hit target are the same box.
+        "del.setAttribute('aria-label','Delete chat');"
+        "del.innerHTML='<svg viewBox=\"0 0 24 24\" width=\"15\" height=\"15\" "
+        "fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" "
+        "stroke-linecap=\"round\" stroke-linejoin=\"round\">"
+        "<path d=\"M4 7h16\"/><path d=\"M10 11v6\"/><path d=\"M14 11v6\"/>"
+        "<path d=\"M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13\"/>"
+        "<path d=\"M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3\"/></svg>';"
+        "del.addEventListener('click',async e=>{e.preventDefault();e.stopPropagation();"
+        // confirm() temporarily removed for diagnosis: Chrome silently
+        // no-ops window.confirm() with zero console output if the user
+        // previously ticked "Prevent this page from creating additional
+        // dialogs" on an earlier alert/confirm -- that reads identically to
+        // "the button does nothing," so ruling it out here.
+        "try{await api('/api/v1/chats/'+encodeURIComponent(c.id)+'/delete','POST');"
+        "if(q('#messageChat')&&q('#messageChat').value===c.id){location.href='/app';return;}"
+        "await load();}"
+        "catch(x){const s=q('#actionStatus');"
+        "if(s)s.textContent='Delete failed: '+x.message;}});"
+        "row.append(a,del);return row;}"
         "function renderChatList(chats){const list=q('#chatList');if(!list)return;"
         "list.replaceChildren();"
         "for(const c of chats.slice(0,RECENT_CHAT_LIMIT))list.append(chatLink(c));"
@@ -129,21 +179,102 @@ std::string application_script() {
         // /api/v1/chats/{id} route) into the chat panel.
         "async function openChat(id){const s=q('#actionStatus');"
         "try{const chat=await api('/api/v1/chats/'+encodeURIComponent(id));"
-        "q('#messageChat').value=id;"
+        "q('#messageChat').value=id;openedProjectId=chat.projectId;"
         "if(q('#chatEmpty'))q('#chatEmpty').hidden=true;"
+        // The model can still be switched after the first message (see
+        // changeChatModel()) -- only the project is fixed for the chat's
+        // lifetime, since it's tied to the attachments/retrieval already
+        // scoped against it.
         "const modelSelect=q('#chatModel');"
-        "if(modelSelect){modelSelect.value=chat.modelId;modelSelect.disabled=true;}"
+        // Setting .value to an id that isn't one of the picker's current
+        // options (the model this chat was created with may not be in the
+        // "ready" list right now -- unloaded, still downloading, etc.)
+        // silently no-ops in every browser, leaving whatever option was
+        // already first selected instead of the chat's actual model. Adding
+        // a placeholder option for it first guarantees the assignment always
+        // sticks, so restoring a chat always shows the model it really uses.
+        "if(modelSelect){"
+        "if(chat.modelId&&![...modelSelect.options].some(o=>o.value===chat.modelId)){"
+        "const placeholder=document.createElement('option');"
+        "placeholder.value=chat.modelId;"
+        "placeholder.textContent=chat.modelId+' (not currently loaded)';"
+        "modelSelect.append(placeholder);}"
+        "modelSelect.value=chat.modelId;}"
         "if(q('#chatProject'))q('#chatProject').disabled=true;"
         "const box=q('#chatMessages');box.replaceChildren();"
         "for(const message of chat.messages)appendMessage(box,message.role,message.content);"
         "box.scrollTop=box.scrollHeight;}"
         "catch(x){s.textContent='Failed to load chat: '+x.message;}}"
         // Bubble side and color already say who's speaking; only the system
-        // role (rendered plain, centered) still needs a label.
-        "function appendMessage(box,role,content){const p=document.createElement('p');"
+        // role (rendered plain, centered) still needs a label. User/assistant
+        // content renders through renderMarkdown() below (fenced code
+        // blocks, bullet/numbered lists, inline code, bold) instead of raw
+        // textContent, so multi-line replies read like a real chat client
+        // rather than one run-on paragraph. The raw source is kept on the
+        // element itself so streamed tokens can be re-rendered as they
+        // arrive (see streamMessage()).
+        "function appendMessage(box,role,content){const p=document.createElement('div');"
         "p.className='chatMsg chatMsg-'+role;"
-        "p.textContent=role==='system'?'system: '+content:content;box.append(p);"
-        "return p;}"
+        "if(role==='system'){p.textContent='system: '+content;}"
+        "else{p.dataset.raw=content;p.innerHTML=renderMarkdown(content);}"
+        "box.append(p);return p;}"
+        // Inline span-level formatting within a single line: backtick code
+        // spans and **bold**. Operates on already-HTML-escaped text so the
+        // replacement groups never need escaping themselves.
+        "function renderInline(text){let t=esc(text);"
+        "t=t.replace(/`([^`]+)`/g,(m,c)=>'<code>'+c+'</code>');"
+        "t=t.replace(/\\*\\*([^*]+)\\*\\*/g,(m,b)=>'<strong>'+b+'</strong>');"
+        "return t;}"
+        // Small block-level Markdown renderer covering what model replies
+        // actually use: fenced code blocks, bullet and numbered lists, and
+        // paragraphs with soft line breaks. Deliberately not a full Markdown
+        // parser -- just enough structure to read code and lists correctly
+        // instead of everything collapsing into a single run-on line.
+        "function renderMarkdown(raw){const lines=String(raw==null?'':raw)"
+        ".replace(/\\r\\n/g,'\\n').split('\\n');let html='',i=0;"
+        "while(i<lines.length){const line=lines[i];"
+        "const fence=/^```(\\w*)\\s*$/.exec(line);"
+        "if(fence){const lang=fence[1];i++;const code=[];"
+        "while(i<lines.length&&!/^```\\s*$/.test(lines[i])){code.push(lines[i]);i++;}"
+        "i++;const cls=lang?' class=\"language-'+esc(lang)+'\"':'';"
+        "html+='<pre><code'+cls+'>'+esc(code.join('\\n'))+'</code></pre>';continue;}"
+        // A single blank line between two list items (common in model
+        // output that puts a blank line after every bullet for readability)
+        // must not end the list -- otherwise each item becomes its own
+        // one-item <ol>/<ul>, which is what made every ordered item render
+        // as \"1.\" instead of counting up. Only a non-list line (or two
+        // blank lines in a row) actually ends the list.
+        "if(/^\\s*[-*]\\s+/.test(line)){const items=[];"
+        "while(i<lines.length){"
+        "if(/^\\s*[-*]\\s+/.test(lines[i])){"
+        "items.push(renderInline(lines[i].replace(/^\\s*[-*]\\s+/,'')));i++;}"
+        "else if(lines[i].trim()===''&&i+1<lines.length&&"
+        "/^\\s*[-*]\\s+/.test(lines[i+1])){i++;}"
+        "else break;}"
+        "html+='<ul>'+items.map(x=>'<li>'+x+'</li>').join('')+'</ul>';continue;}"
+        "if(/^\\s*\\d+[.)]\\s+/.test(line)){const items=[];"
+        "while(i<lines.length){"
+        "const m=/^\\s*(\\d+)[.)]\\s+/.exec(lines[i]);"
+        "if(m){items.push({n:parseInt(m[1],10),"
+        "text:renderInline(lines[i].replace(/^\\s*\\d+[.)]\\s+/,''))});i++;}"
+        "else if(lines[i].trim()===''&&i+1<lines.length&&"
+        "/^\\s*\\d+[.)]\\s+/.test(lines[i+1])){i++;}"
+        "else break;}"
+        // The model's own leading numbers are preserved instead of letting
+        // the browser silently renumber every list from 1 -- start=
+        // anchors the first item and a per-item value= carries the rest, so
+        // a list that begins mid-sequence (e.g. continuing after a code
+        // block) or skips a number still renders exactly as written.
+        "const start=items.length?items[0].n:1;"
+        "html+='<ol start=\"'+start+'\">'+items.map(x=>"
+        "'<li value=\"'+x.n+'\">'+x.text+'</li>').join('')+'</ol>';continue;}"
+        "if(line.trim()===''){i++;continue;}"
+        "const para=[];"
+        "while(i<lines.length&&lines[i].trim()!==''&&!/^```/.test(lines[i])&&"
+        "!/^\\s*[-*]\\s+/.test(lines[i])&&!/^\\s*\\d+[.)]\\s+/.test(lines[i])){"
+        "para.push(renderInline(lines[i]));i++;}"
+        "html+='<p>'+para.join('<br>')+'</p>';}"
+        "return html;}"
         // Escapes text for safe insertion as HTML content elsewhere in this
         // file (table cells built from trusted-looking but user-supplied
         // strings such as display names and diagnostics).
@@ -416,15 +547,141 @@ std::string application_script() {
         "sourceUrl:'https://huggingface.co/TheBloke/CodeLlama-34B-Instruct-GGUF/resolve/7b84402c234acb1c5be542b5ecfc820ea3b74422/codellama-34b-instruct.Q4_K_M.gguf',"
         "revision:'7b84402c234acb1c5be542b5ecfc820ea3b74422',"
         "sha256:'57290fe55636910ab11b935dbe675d19781d06bd8020594d9135e06477e3c2bf',"
-        "minRam:18432,recRam:24576,sizeBytes:20219900064}];"
+        "minRam:18432,recRam:24576,sizeBytes:20219900064},"
+        // OpenAI's gpt-oss line is its only line of downloadable, openly
+        // licensed weights (Apache-2.0) -- Claude and ChatGPT proper have no
+        // downloadable weights anywhere, so they cannot appear here. Commit
+        // hash and SHA-256 read directly from the Hugging Face API.
+        "{id:'gpt-oss-20b-q4km',tier:'16',label:'gpt-oss-20b Q4_K_M (~10.8 GiB)',"
+        "category:'general-programming',modelId:'gpt-oss-20b-q4km',"
+        "filename:'gpt-oss-20b-Q4_K_M.gguf',"
+        "sourceUrl:'https://huggingface.co/unsloth/gpt-oss-20b-GGUF/resolve/d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4/gpt-oss-20b-Q4_K_M.gguf',"
+        "revision:'d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4',"
+        "sha256:'c27536640e410032865dc68781d80a08b98f8db5e93575919af8ccc0568aeb4f',"
+        "minRam:11264,recRam:14336,sizeBytes:11624759488,"
+        "displayName:'gpt-oss-20b',architecture:'gpt-oss',"
+        "quantization:'Q4_K_M',licenseSpdx:'Apache-2.0'},"
+        "{id:'gpt-oss-20b-q8',tier:'16',label:'gpt-oss-20b Q8_0 (~11.3 GiB)',"
+        "category:'general-programming',modelId:'gpt-oss-20b-q8',"
+        "filename:'gpt-oss-20b-Q8_0.gguf',"
+        "sourceUrl:'https://huggingface.co/unsloth/gpt-oss-20b-GGUF/resolve/d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4/gpt-oss-20b-Q8_0.gguf',"
+        "revision:'d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4',"
+        "sha256:'bcd455d4034ec02f71a875b46cb17df44a97911d7258291973be4d21f98329f3',"
+        "minRam:12288,recRam:16384,sizeBytes:12109567168,"
+        "displayName:'gpt-oss-20b',architecture:'gpt-oss',"
+        "quantization:'Q8_0',licenseSpdx:'Apache-2.0'},"
+        // ModelScope mirrors, so a given RAM budget is never a one-host
+        // choice either. Every commit hash and SHA-256 below was read
+        // directly from the ModelScope repo-files API.
+        "{id:'starcoder2-3b-q4km-ms',tier:'3',"
+        "label:'StarCoder2-3B Q4_K_M via ModelScope (~1.7 GiB)',"
+        "category:'general-programming',modelId:'starcoder2-3b-q4km-ms',"
+        "filename:'starcoder2-3b-Q4_K_M.gguf',"
+        "sourceUrl:'https://modelscope.cn/models/second-state/StarCoder2-3B-GGUF/resolve/"
+        "ad0cce4b6ae76131a5077a21ac72eee64bdb1a45/starcoder2-3b-Q4_K_M.gguf',"
+        "revision:'ad0cce4b6ae76131a5077a21ac72eee64bdb1a45',"
+        "sha256:'d8fb39287a463549b80d97473b0a7595c3a5a6da3ae2604ca33906a1a43f7175',"
+        "minRam:2048,recRam:3072,sizeBytes:1848976448},"
+        "{id:'phi35-mini-q4km-ms',tier:'3',"
+        "label:'Phi-3.5-mini-Instruct Q4_K_M via ModelScope (~2.2 GiB)',"
+        "category:'general-programming',modelId:'phi35-mini-q4km-ms',"
+        "filename:'Phi-3.5-mini-instruct-Q4_K_M.gguf',"
+        "sourceUrl:'https://modelscope.cn/models/second-state/Phi-3.5-mini-instruct-GGUF/resolve/"
+        "6240e2431eb84b0b091b3e226b5c78ce2a1086bc/Phi-3.5-mini-instruct-Q4_K_M.gguf',"
+        "revision:'6240e2431eb84b0b091b3e226b5c78ce2a1086bc',"
+        "sha256:'c389ea28dc7f10dfbe30fc5e05452f832b1adf85989253ba590e3620b9584f06',"
+        "minRam:2048,recRam:3072,sizeBytes:2393232384,"
+        "displayName:'Phi-3.5-mini-Instruct',architecture:'phi3',"
+        "quantization:'Q4_K_M',licenseSpdx:'MIT'},"
+        "{id:'codegemma-7b-it-q4km-ms',tier:'7',"
+        "label:'CodeGemma-7B-it Q4_K_M via ModelScope (~5 GiB)',"
+        "category:'general-programming',modelId:'codegemma-7b-it-q4km-ms',"
+        "filename:'codegemma-7b-it-Q4_K_M.gguf',"
+        "sourceUrl:'https://modelscope.cn/models/second-state/CodeGemma-7b-it-GGUF/resolve/"
+        "5c22ebd36d051418d121946acd183d8b8d530e34/codegemma-7b-it-Q4_K_M.gguf',"
+        "revision:'5c22ebd36d051418d121946acd183d8b8d530e34',"
+        "sha256:'7447e29e28f01ef593a4b0758cfb759a414ac32bbd65084509107e7091683fdc',"
+        "minRam:5120,recRam:7168,sizeBytes:5329759232,"
+        "displayName:'CodeGemma-7B-it',architecture:'gemma',"
+        "quantization:'Q4_K_M',licenseSpdx:'Gemma'},"
+        "{id:'deepseek-v2-lite-q4km-ms',tier:'16',"
+        "label:'DeepSeek-Coder-V2-Lite-Instruct Q4_K_M via ModelScope (~9.7 GiB)',"
+        "category:'general-programming',modelId:'deepseek-v2-lite-q4km-ms',"
+        "filename:'DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf',"
+        "sourceUrl:'https://modelscope.cn/models/second-state/"
+        "DeepSeek-Coder-V2-Lite-Instruct-GGUF/resolve/"
+        "fea4380e9006b556991fd088706b6c7ea69977d1/"
+        "DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf',"
+        "revision:'fea4380e9006b556991fd088706b6c7ea69977d1',"
+        "sha256:'38bc76f3326b49b4d81d1027d092bf7ce5b4ed2de4136d1d2e7e6347c3ec8376',"
+        "minRam:8192,recRam:10240,sizeBytes:10364416480},"
+        "{id:'codellama-13b-q4km-ms',tier:'8',"
+        "label:'CodeLlama-13B-Instruct Q4_K_M via ModelScope (~7.3 GiB)',"
+        "category:'general-programming',modelId:'codellama-13b-q4km-ms',"
+        "filename:'CodeLlama-13b-Instruct-hf-Q4_K_M.gguf',"
+        "sourceUrl:'https://modelscope.cn/models/second-state/CodeLlama-13B-Instruct-GGUF/resolve/"
+        "c1e2967a2531788fbbf5e6969ebaac55fec7fcae/CodeLlama-13b-Instruct-hf-Q4_K_M.gguf',"
+        "revision:'c1e2967a2531788fbbf5e6969ebaac55fec7fcae',"
+        "sha256:'e2ad727d4893bc44add809e992c8f584e4fb1e986163a5b7510e2cc1f34b3c55',"
+        "minRam:6144,recRam:8192,sizeBytes:7866070080},"
+        // General-purpose conversation/chat models, as distinct from the
+        // coding-focused suggestions above -- same sourcing rule applies:
+        // every commit hash and SHA-256 here was read directly from the
+        // Hugging Face API, not computed locally.
+        "{id:'qwen25-1.5b-instruct-q4km',tier:'2',"
+        "label:'Qwen2.5-1.5B-Instruct Q4_K_M (~1.0 GiB)',"
+        "category:'conversation',modelId:'qwen25-1.5b-instruct-q4km',"
+        "filename:'qwen2.5-1.5b-instruct-q4_k_m.gguf',"
+        "sourceUrl:'https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/"
+        "91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf',"
+        "revision:'91cad51170dc346986eccefdc2dd33a9da36ead9',"
+        "sha256:'6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e',"
+        "minRam:1536,recRam:2048,sizeBytes:1117320736,"
+        "displayName:'Qwen2.5-1.5B-Instruct',architecture:'qwen2',"
+        "quantization:'Q4_K_M',licenseSpdx:'Apache-2.0'},"
+        "{id:'llama32-3b-instruct-q4km',tier:'4',"
+        "label:'Llama-3.2-3B-Instruct Q4_K_M (~1.9 GiB)',"
+        "category:'conversation',modelId:'llama32-3b-instruct-q4km',"
+        "filename:'Llama-3.2-3B-Instruct-Q4_K_M.gguf',"
+        "sourceUrl:'https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/"
+        "5ab33fa94d1d04e903623ae72c95d1696f09f9e8/Llama-3.2-3B-Instruct-Q4_K_M.gguf',"
+        "revision:'5ab33fa94d1d04e903623ae72c95d1696f09f9e8',"
+        "sha256:'6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff',"
+        "minRam:3072,recRam:4096,sizeBytes:2019377696,"
+        "displayName:'Llama-3.2-3B-Instruct',architecture:'llama',"
+        "quantization:'Q4_K_M',licenseSpdx:'Llama-3.2'},"
+        "{id:'llama31-8b-instruct-q4km',tier:'8',"
+        "label:'Meta-Llama-3.1-8B-Instruct Q4_K_M (~4.6 GiB)',"
+        "category:'conversation',modelId:'llama31-8b-instruct-q4km',"
+        "filename:'Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf',"
+        "sourceUrl:'https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/"
+        "bf5b95e96dac0462e2a09145ec66cae9a3f12067/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf',"
+        "revision:'bf5b95e96dac0462e2a09145ec66cae9a3f12067',"
+        "sha256:'7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c',"
+        "minRam:6144,recRam:8192,sizeBytes:4920739232,"
+        "displayName:'Meta-Llama-3.1-8B-Instruct',architecture:'llama',"
+        "quantization:'Q4_K_M',licenseSpdx:'Llama-3.1'}];"
         // Rebuilds the suggestion dropdown for the selected RAM tier and
         // immediately applies the first match. Auto-applying here (rather
         // than requiring a separate button click) is what prevents the
         // stale-form trap: switching tiers can no longer leave the form
         // holding a previous tier's model while looking like it was updated.
+        // Every preset's sourceUrl host says which of the Download source
+        // options (huggingface/github/modelscope) it actually came from --
+        // used below so the suggestion list only ever offers models that
+        // match the source currently selected, instead of mixing in
+        // suggestions whose URL wouldn't even match the visible source
+        // fields. 'custom' matches nothing, since a hand-typed source has no
+        // curated suggestions.
+        "function presetSource(p){"
+        "if(p.sourceUrl.includes('huggingface.co'))return 'huggingface';"
+        "if(p.sourceUrl.includes('modelscope.cn'))return 'modelscope';"
+        "if(p.sourceUrl.includes('github.com'))return 'github';"
+        "return 'custom';}"
         "function refreshPresets(){const sel=q('#downloadPreset');if(!sel)return;"
         "sel.replaceChildren();const tier=q('#downloadTier').value;"
-        "for(const p of PRESETS.filter(x=>x.tier===tier)){"
+        "const type=q('#downloadSourceType').value;"
+        "for(const p of PRESETS.filter(x=>x.tier===tier&&presetSource(x)===type)){"
         "const o=document.createElement('option');o.value=p.id;o.textContent=p.label;"
         "sel.append(o);}"
         "if(sel.options.length)applyPreset();}"
@@ -564,6 +821,37 @@ std::string application_script() {
         "async function submit(e,path,body){e.preventDefault();const s=q('#actionStatus');"
         "try{const r=await api(path,'POST',body());s.textContent='Completed: '+JSON.stringify(r);"
         "await load();}catch(x){s.textContent='Action failed: '+x.message;}}"
+        // Uploads one picked file as a project attachment (text only, per
+        // AttachmentStore::add_text) and adds it to the pending list for the
+        // message currently being composed; attachmentIds are read off that
+        // list at send time in streamMessage() rather than a hidden field.
+        "async function attachFile(file){const s=q('#actionStatus');"
+        "try{const content=await file.text();"
+        "const record=await api('/api/v1/attachments','POST',"
+        "{projectId:currentProjectId(),filename:file.name,content});"
+        "attachedFiles.push({id:record.id,filename:file.name});renderAttachChips();}"
+        "catch(x){s.textContent='Attach \\''+file.name+'\\' failed: '+x.message;}}"
+        "function renderAttachChips(){const box=q('#attachChips');if(!box)return;"
+        "box.replaceChildren();"
+        "attachedFiles.forEach((f,i)=>{const chip=document.createElement('span');"
+        "chip.className='attachChip';"
+        "const label=document.createElement('span');label.textContent=f.filename;"
+        "const remove=document.createElement('button');remove.type='button';"
+        "remove.textContent='\\u00d7';remove.title='Remove attachment';"
+        "remove.addEventListener('click',()=>{attachedFiles.splice(i,1);"
+        "renderAttachChips();});"
+        "chip.append(label,remove);box.append(chip);});}"
+        // Composer support commands: typed as the whole message (leading/
+        // trailing whitespace ignored, case-insensitive) instead of being
+        // sent to the model. /app is a full navigation -- the same URL the
+        // "+ New chat" sidebar link already uses -- so it resets every piece
+        // of client state (messages, attachments, pickers) the same way a
+        // fresh page load does, rather than this list having to duplicate
+        // that reset by hand.
+        "const SLASH_COMMANDS={'/clear':()=>location.href='/app',"
+        "'/new':()=>location.href='/app',"
+        "'/help':()=>{q('#actionStatus').textContent="
+        "'Commands: /clear or /new starts a fresh chat. /help shows this message.';}};"
         // A brand-new chat (no project/model form of its own any more) is
         // created lazily on the first message: the composer's own project
         // and model pickers supply what /api/v1/chats needs, and the URL
@@ -574,20 +862,30 @@ std::string application_script() {
         "async function streamMessage(e){e.preventDefault();const s=q('#actionStatus');"
         "const box=q('#chatMessages');const content=q('#messageContent').value;"
         "if(!content.trim())return;"
+        "const command=SLASH_COMMANDS[content.trim().toLowerCase()];"
+        "if(command){q('#messageContent').value='';command();return;}"
+        "let assistantEl=null;"
         "try{let chatId=q('#messageChat').value;"
         "if(!chatId){const projectId=q('#chatProject').value,modelId=q('#chatModel').value;"
         "if(!projectId||!modelId){"
         "s.textContent='Choose a project and a downloaded model first.';return;}"
         "const created=await api('/api/v1/chats','POST',{projectId,modelId});"
-        "chatId=created.id;"
+        "chatId=created.id;openedProjectId=projectId;"
+        // Sync the hidden chat-id field before reloading so load() takes the
+        // openChat() branch (hides the empty-state greeting, clears/repopulates
+        // #chatMessages, disables the now-fixed project/model pickers) instead
+        // of re-running the brand-new-chat branch, which would leave the
+        // greeting visible at the same time as the message about to be
+        // appended below.
+        "q('#messageChat').value=chatId;"
         "history.pushState(null,'','/app/chat/'+encodeURIComponent(chatId));"
         "await load();}"
         "q('#messageContent').value='';"
+        "const attachmentIds=attachedFiles.map(x=>x.id);"
+        "attachedFiles=[];renderAttachChips();"
         "appendMessage(box,'user',content);box.scrollTop=box.scrollHeight;"
         "generation=new AbortController();"
-        "const assistantEl=appendMessage(box,'assistant','');"
-        "const attachmentIds=q('#messageAttachments').value.split(',')"
-        ".map(x=>x.trim()).filter(Boolean);"
+        "assistantEl=appendMessage(box,'assistant','');"
         "const r=await fetch('/api/v1/chats/'+encodeURIComponent(chatId)+'/messages',"
         "{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},"
         "body:JSON.stringify({content,attachmentIds}),signal:generation.signal});"
@@ -598,10 +896,39 @@ std::string application_script() {
         "while((n=pending.indexOf('\\n'))>=0){const line=pending.slice(0,n);"
         "pending=pending.slice(n+1);"
         "if(line){const event=JSON.parse(line);"
-        "if(event.type==='token'){assistantEl.textContent+=event.content;"
+        "if(event.type==='token'){assistantEl.dataset.raw="
+        "(assistantEl.dataset.raw||'')+event.content;"
+        "assistantEl.innerHTML=renderMarkdown(assistantEl.dataset.raw);"
         "box.scrollTop=box.scrollHeight;}"
-        "if(event.type==='error')throw new Error(event.error);}}}}"
-        "catch(x){s.textContent=x.name==='AbortError'?'Cancelled.':'Action failed: '+x.message;}"
+        "if(event.type==='error')throw new Error(event.error,"
+        "{cause:event.detail});}}}}"
+        "catch(x){const cancelled=x.name==='AbortError';"
+        // The server used to fold every generation-time exception (model not
+        // loaded, runner crash, degraded model producing an empty reply,
+        // etc.) into the single opaque 'generation_failed' code with no way
+        // to tell them apart. It now also sends the real exception text as
+        // `detail` (carried here via Error's `cause`) -- show that when
+        // present instead of guessing, and fall back to the old generic
+        // wording only if an older server/response omitted it.
+        "if(x.message==='generation_failed')x.message=x.cause||"
+        "'The model failed to generate a reply. It may still be loading, "
+        "downloading, or unable to run on this machine -- check Model "
+        "inventory and try again.';"
+        "s.textContent=cancelled?'Cancelled.':'Action failed: '+x.message;"
+        // A cancelled turn already left whatever partial reply the user saw
+        // in assistantEl (the server persists it too, see streamed_text in
+        // send_chat_message) -- overwriting it here would erase text the
+        // user already read. A real failure, though, previously left an
+        // empty bubble with the only explanation in the easy-to-miss status
+        // line above the composer; showing it inside the reply's own bubble
+        // (or as a new one, if the failure happened before any bubble
+        // existed -- e.g. no project/model chosen yet) puts it where the
+        // reply itself would have appeared.
+        "if(!cancelled){const msg='\\u26a0\\ufe0f '+x.message;"
+        "const el=assistantEl||appendMessage(box,'assistant','');"
+        "el.className='chatMsg chatMsg-assistant chatMsg-error';"
+        "el.dataset.raw=msg;el.innerHTML=renderMarkdown(msg);"
+        "box.scrollTop=box.scrollHeight;}}"
         "finally{generation=null;}}"
         // Fills the raw source fields from the Hugging Face helper inputs;
         // the operator still supplies model ID, RAM figures, SHA-256, and
@@ -622,9 +949,42 @@ std::string application_script() {
         "q('#downloadRevision').value=tag;q('#downloadFilename').value=asset;"
         "q('#actionStatus').textContent='Filled the source URL from GitHub release fields. "
         "Still set model ID, RAM, SHA-256, and review the license before queueing.';}"
+        // ModelScope serves immutable-revision files at the same
+        // /resolve/<revision>/<file> path shape as Hugging Face, so this
+        // mirrors applyHfSource() rather than introducing a different shape.
+        "function applyMsSource(){const repo=q('#msRepo').value.trim(),"
+        "revision=q('#msRevision').value.trim(),filename=q('#msFilename').value.trim();"
+        "if(!repo||!revision||!filename)return;"
+        "q('#downloadSourceUrl').value='https://modelscope.cn/models/'+repo+'/resolve/'+"
+        "revision+'/'+filename;"
+        "q('#downloadRevision').value=revision;q('#downloadFilename').value=filename;"
+        "q('#actionStatus').textContent='Filled the source URL from ModelScope fields. "
+        "Still set model ID, RAM, SHA-256, and review the license before queueing.';}"
+        // Fires when the composer's model picker changes while a chat is
+        // already open -- persists the new model against the chat so it's
+        // still selected (and used) on the next message and after a reload.
+        // A brand-new chat (no id yet) has nothing to persist against, so
+        // it's left alone; the chosen model just gets used when the chat is
+        // created on first send, as before.
+        "async function changeChatModel(){const chatId=q('#messageChat').value;"
+        "if(!chatId)return;const s=q('#actionStatus');const select=q('#chatModel');"
+        "const modelId=select.value;"
+        "try{await api('/api/v1/chats/'+encodeURIComponent(chatId)+'/model','POST',"
+        "{modelId});"
+        // Confirms the switch inline, in the transcript itself, rather than
+        // only in the easy-to-miss status line -- so it's obvious which
+        // replies below this point came from the new model.
+        "const box=q('#chatMessages');"
+        "if(box){const opt=select.options[select.selectedIndex];"
+        "const card=document.createElement('div');"
+        "card.className='chatMsg chatMsg-modelChange';"
+        "card.textContent='Model switched to '+(opt?opt.textContent:modelId);"
+        "box.append(card);box.scrollTop=box.scrollHeight;}}"
+        "catch(x){s.textContent='Failed to switch model: '+x.message;}}"
         "function toggleSourceFields(){const type=q('#downloadSourceType').value;"
         "q('#hfFields').hidden=type!=='huggingface';"
-        "q('#githubFields').hidden=type!=='github';}"
+        "q('#githubFields').hidden=type!=='github';"
+        "q('#msFields').hidden=type!=='modelscope';}"
         "addEventListener('DOMContentLoaded',()=>{const f=q('#login');"
         "if(f){f.addEventListener('submit',login);initLogin();"
         "q('#setupForm').addEventListener('submit',setupLocalAdmin);}"
@@ -634,12 +994,15 @@ std::string application_script() {
         "if(q('#newProject'))q('#newProject').addEventListener('submit',e=>submit(e,'/api/v1/projects',"
         "()=>({id:q('#projectId').value,displayName:q('#projectName').value})));"
         "if(q('#attachToggle'))q('#attachToggle').addEventListener('click',()=>{"
-        "const p=q('#attachPanel');p.hidden=!p.hidden;});"
-        "if(q('#newAttachment'))q('#newAttachment').addEventListener('submit',"
-        "e=>submit(e,'/api/v1/attachments',"
-        "()=>({projectId:q('#attachmentProject').value,filename:q('#attachmentName').value,"
-        "content:q('#attachmentContent').value})));"
+        "const s=q('#actionStatus');"
+        "if(!currentProjectId()){s.textContent="
+        "'Choose a project first -- attachments are stored against it.';return;}"
+        "q('#attachFileInput').click();});"
+        "if(q('#attachFileInput'))q('#attachFileInput').addEventListener('change',"
+        "async e=>{const files=[...e.target.files];e.target.value='';"
+        "for(const file of files)await attachFile(file);});"
         "if(q('#newMessage'))q('#newMessage').addEventListener('submit',streamMessage);"
+        "if(q('#chatModel'))q('#chatModel').addEventListener('change',changeChatModel);"
         // Enter sends the message, mirroring every mainstream chat client;
         // Shift+Enter still inserts a newline (the textarea's own default),
         // so multi-line prompts remain possible.
@@ -648,14 +1011,23 @@ std::string application_script() {
         "q('#newMessage').requestSubmit();}});"
         "if(q('#cancelMessage'))q('#cancelMessage').addEventListener('click',"
         "()=>{if(generation)generation.abort();});"
+        // Escape stops an in-flight reply immediately, mirroring the cancel
+        // button -- listens on the document (not just the textarea) so it
+        // works even while focus is elsewhere on the chat page, but only
+        // while a generation is actually running so it doesn't swallow
+        // Escape for anything else (closing a picker, blurring a field).
+        "if(q('#newMessage'))document.addEventListener('keydown',"
+        "e=>{if(e.key==='Escape'&&generation){generation.abort();}});"
         "if(q('#downloadTier')){q('#downloadTier').addEventListener('change',refreshPresets);"
         "q('#downloadPreset').addEventListener('change',applyPreset);"
         "refreshPresets();q('#applyPreset').addEventListener('click',applyPreset);"
         "q('#newDownload').addEventListener('submit',queueDownload);"
-        "q('#downloadSourceType').addEventListener('change',toggleSourceFields);"
+        "q('#downloadSourceType').addEventListener('change',"
+        "()=>{toggleSourceFields();refreshPresets();});"
         "toggleSourceFields();"
         "q('#applyHfSource').addEventListener('click',applyHfSource);"
-        "q('#applyGithubSource').addEventListener('click',applyGithubSource);}"
+        "q('#applyGithubSource').addEventListener('click',applyGithubSource);"
+        "q('#applyMsSource').addEventListener('click',applyMsSource);}"
         "if(q('#newUser'))q('#newUser').addEventListener('submit',createUser);}});";
 }
 
@@ -739,23 +1111,23 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<div id=\"chatEmpty\"" + std::string(is_new_chat ? "" : " hidden") +
             "><h1>What's on the agenda today?</h1></div>"
             "<div id=\"chatMessages\"></div>"
-            "<details id=\"attachPanel\" hidden><summary>Attachments</summary>"
-            "<form id=\"newAttachment\">"
-            "<label>Project<select id=\"attachmentProject\"></select></label>"
-            "<label>Filename<input id=\"attachmentName\" required></label>"
-            "<label>UTF-8 text<textarea id=\"attachmentContent\" required></textarea></label>"
-            "<button>Store attachment</button></form></details>"
+            "<div id=\"attachChips\" class=\"attachChips\"></div>"
             "<form id=\"newMessage\" class=\"composer\">"
             "<input type=\"hidden\" id=\"messageChat\" value=\"" +
             html_escape(chat_id) +
             "\">"
-            "<input type=\"hidden\" id=\"messageAttachments\" value=\"\">"
+            // Text files only, matching AttachmentStore::add_text -- there is
+            // no server-side path for binary content, so the picker doesn't
+            // offer to select any.
+            "<input type=\"file\" id=\"attachFileInput\" class=\"visuallyHidden\" "
+            "multiple accept=\".txt,.md,.markdown,.c,.h,.cc,.cpp,.hpp,.hh,.py,.js,"
+            ".jsx,.ts,.tsx,.json,.yaml,.yml,.toml,.ini,.cfg,.conf,.csv,.log,.rs,.go,"
+            ".java,.rb,.sh,.sql,text/plain\">"
             "<button type=\"button\" id=\"attachToggle\" class=\"composerIconBtn\" "
-            "title=\"Attachments\">+</button>"
+            "title=\"Attach files\">+</button>"
             "<textarea id=\"messageContent\" class=\"composerInput\" rows=\"1\" "
             "placeholder=\"Message MasterAI...\" required></textarea>"
-            "<select id=\"chatModel\" class=\"composerModelPicker\"" +
-            std::string(is_new_chat ? "" : " disabled") + "></select>"
+            "<select id=\"chatModel\" class=\"composerModelPicker\"></select>"
             "<button type=\"submit\" class=\"composerSendBtn\" title=\"Send\">"
             "&#8593;</button>"
             "<button id=\"cancelMessage\" type=\"button\" class=\"composerIconBtn\" "
@@ -788,6 +1160,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Download source<select id=\"downloadSourceType\">"
             "<option value=\"huggingface\">Hugging Face</option>"
             "<option value=\"github\">GitHub Releases</option>"
+            "<option value=\"modelscope\">ModelScope</option>"
             "<option value=\"custom\">Custom URL</option>"
             "</select></label>"
             "<div id=\"hfFields\">"
@@ -802,6 +1175,13 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Release tag<input id=\"ghTag\"></label>"
             "<label>Asset filename<input id=\"ghAsset\"></label>"
             "<button type=\"button\" id=\"applyGithubSource\">Fill source from "
+            "these fields</button></div>"
+            "<div id=\"msFields\" hidden>"
+            "<label>Org/repo (e.g. second-state/StarCoder2-3B-GGUF)"
+            "<input id=\"msRepo\"></label>"
+            "<label>Commit/revision<input id=\"msRevision\"></label>"
+            "<label>Filename<input id=\"msFilename\"></label>"
+            "<button type=\"button\" id=\"applyMsSource\">Fill source from "
             "these fields</button></div>"
             // Suggestion picker: fills the raw form below from a verified,
             // hard-coded preset so the operator never has to hand-type a
@@ -830,12 +1210,13 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<option value=\"debugging\">debugging</option>"
             "<option value=\"documentation\">documentation</option>"
             "<option value=\"embeddings-code-search\">embeddings-code-search"
-            "</option></select></label>"
+            "</option><option value=\"conversation\">conversation</option>"
+            "</select></label>"
             "<label>Model ID<input id=\"downloadModelId\" required "
             "pattern=\"[A-Za-z0-9_.-]+\"></label>"
             "<label>Filename<input id=\"downloadFilename\" required "
             "pattern=\"[A-Za-z0-9_.-]+\"></label>"
-            "<label>Source URL (Hugging Face resolve URL or GitHub release URL)"
+            "<label>Source URL (Hugging Face, GitHub release, or ModelScope resolve URL)"
             "<input id=\"downloadSourceUrl\" type=\"url\" required></label>"
             "<label>Immutable revision (commit hash or release tag)"
             "<input id=\"downloadRevision\" required></label>"
@@ -941,19 +1322,42 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>MasterAI Workspace</title><style>" DARK_THEME_CSS
         "body{max-width:none;padding:0}"
-        "#shell{display:flex;min-height:100vh}"
+        // #shell is pinned to exactly one viewport height (not just a
+        // min-height) so #content's flex children -- #actionStatus plus
+        // whichever section body follows it -- have a real bounded box to
+        // divide up. Without this, #chatShell's own flex:1 below has no
+        // fixed ancestor height to size against, and the composer ends up
+        // pushed below the fold instead of pinned to the bottom of the
+        // visible window.
+        "#shell{display:flex;height:100vh}"
         "#sidebar{width:16rem;flex:none;padding:1.25rem 1rem;"
         "border-right:1px solid var(--panel-border);"
         "display:flex;flex-direction:column;gap:.5rem;overflow-y:auto}"
         "#sidebar h1{font-size:1.3rem}"
         "#sidebar h3{margin-top:1rem}"
-        "#content{flex:1;padding:1.5rem;overflow-y:auto;max-width:1200px}"
-        "#actionStatus{margin-bottom:1rem}"
+        "#content{flex:1;padding:1.5rem;overflow-y:auto;max-width:1200px;"
+        "display:flex;flex-direction:column;min-height:0}"
+        "#actionStatus{margin-bottom:1rem;flex:none}"
+        // An empty status line still reserved a full line of height (see the
+        // global #actionStatus,#status min-height rule) even though it had
+        // nothing to show -- on the chat page that shrank the message area
+        // for no visible reason, so give the space back when there's no
+        // status text.
+        "#actionStatus:empty{margin-bottom:0;min-height:0}"
         ".navButton{display:block;background:transparent;color:var(--text);"
         "border:1px solid transparent;text-align:left;margin-top:.15rem;"
         "padding:.5rem .6rem;text-decoration:none}"
         ".navButton:hover{background:var(--panel)}"
         ".navButton.active{background:var(--panel);border-color:var(--panel-border)}"
+        ".chatListItem{display:flex;align-items:center;gap:.15rem}"
+        ".chatListItem .navButton{flex:1;min-width:0;margin-top:0;overflow:hidden;"
+        "text-overflow:ellipsis;white-space:nowrap}"
+        ".chatDeleteBtn{flex:none;width:1.8rem;height:1.8rem;padding:0;"
+        "display:flex;align-items:center;justify-content:center;"
+        "background:transparent;border:1px solid transparent;border-radius:.4rem;"
+        "color:var(--muted);line-height:1;cursor:pointer}"
+        ".chatDeleteBtn:hover{background:var(--panel);border-color:var(--panel-border);"
+        "color:#e5657a}"
         "#chatList{display:flex;flex-direction:column;gap:.15rem;max-height:14rem;"
         "overflow-y:auto}"
         "#chatHistorySection{margin-top:1rem}"
@@ -967,28 +1371,66 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // greeting, growing history, a pill composer pinned to the bottom)
         // instead of the generic multi-card grid every settings page uses,
         // so it reads like a normal chat client rather than a forms screen.
-        "#chatShell{display:flex;flex-direction:column;"
-        "height:calc(100vh - 3rem);max-width:48rem;margin:0 auto;width:100%}"
+        "#chatShell{display:flex;flex-direction:column;flex:1;min-height:0;"
+        "max-width:64rem;margin:0 auto;width:100%}"
         "#chatTopBar{margin-bottom:.5rem}"
         "#chatTopBar label{display:inline-flex;align-items:center;gap:.5rem;"
         "margin:0;color:var(--muted);font-size:.8rem;width:auto}"
         "#chatTopBar select{width:auto;padding:.3rem .5rem}"
-        "#chatEmpty{flex:1;display:flex;align-items:center;justify-content:center;"
-        "text-align:center}"
+        // The [hidden] attribute alone can't win here: this ID selector's own
+        // display:flex outranks the UA stylesheet's [hidden]{display:none},
+        // so the greeting stayed visible even after openChat() hid it. The
+        // explicit :not([hidden]) rule below is what actually applies the
+        // flex layout, leaving [hidden] free to hide it as normal.
+        "#chatEmpty:not([hidden]){display:flex;align-items:center;"
+        "justify-content:center;text-align:center}"
+        "#chatEmpty{flex:1}"
         "#chatEmpty h1{font-size:1.8rem}"
-        "#chatMessages{flex:1;overflow-y:auto;padding:.25rem 0}"
+        "#chatMessages{flex:1;overflow-y:auto;padding:.25rem 0;"
+        "display:flex;flex-direction:column;gap:.35rem}"
         "#chatMessages:empty{flex:0}"
-        ".chatMsg{max-width:80%;margin:0 0 .75rem;padding:.6rem .9rem;"
-        "border-radius:.9rem;white-space:pre-wrap;overflow-wrap:anywhere}"
+        ".chatMsg{max-width:80%;margin:0;padding:.45rem .8rem;line-height:1.45;"
+        "border-radius:.9rem;overflow-wrap:anywhere}"
         ".chatMsg-user{margin-left:auto;background:var(--accent);color:#fff}"
         ".chatMsg-assistant{margin-right:auto;background:var(--panel);"
         "border:1px solid var(--panel-border);color:#8fe6c9}"
         ".chatMsg-system{margin:0 auto;color:var(--muted);font-style:italic;"
-        "background:none}"
+        "background:none;white-space:pre-wrap}"
+        ".chatMsg-error{background:rgba(220,53,69,.12);"
+        "border:1px solid rgba(220,53,69,.5);color:#e5657a}"
+        ".chatMsg-modelChange{margin:0 auto;background:rgba(40,167,69,.12);"
+        "border:1px solid rgba(40,167,69,.5);color:#4ade80;font-size:.82rem;"
+        "text-align:center}"
+        // Rendered Markdown structure inside a bubble: paragraphs/lists need
+        // their own spacing since the bubble itself no longer relies on
+        // white-space:pre-wrap for line breaks (renderMarkdown() emits real
+        // <p>/<br>/<ul> elements instead).
+        ".chatMsg p{margin:0 0 .5rem}.chatMsg>*:last-child{margin-bottom:0}"
+        ".chatMsg ul,.chatMsg ol{margin:0 0 .5rem;padding-left:1.3rem}"
+        ".chatMsg li{margin:.15rem 0}"
+        ".chatMsg code{background:rgba(0,0,0,.25);border-radius:.25rem;"
+        "padding:.1rem .3rem;font-size:.85em;font-family:ui-monospace,"
+        "SFMono-Regular,Consolas,monospace}"
+        // overflow-x/overflow-y are both set explicitly (rather than relying
+        // on the shorthand from the generic pre{} rule above cascading in
+        // for the axis this rule doesn't mention) so a long reply's code
+        // block is unambiguously scrollable on both axes instead of being
+        // clipped. overscroll-behavior stops the scroll from chaining into
+        // the outer #chatMessages once the block's own scroll hits its end,
+        // which otherwise makes it feel like the block itself won't scroll.
+        ".chatMsg pre{margin:0 0 .5rem;background:#0e0e11;"
+        "border:1px solid var(--panel-border);border-radius:.5rem;"
+        "padding:.6rem .75rem;overflow-x:auto;overflow-y:auto;max-height:24rem;"
+        "overscroll-behavior:contain;scrollbar-width:thin}"
+        ".chatMsg pre::-webkit-scrollbar{width:.5rem;height:.5rem}"
+        ".chatMsg pre::-webkit-scrollbar-thumb{background:var(--panel-border);"
+        "border-radius:.5rem}"
+        ".chatMsg pre code{background:none;padding:0;color:#c8c8d4;"
+        "white-space:pre}"
         // The composer: a single rounded pill carrying the attach toggle,
         // the message box, the model picker, and send/cancel -- no separate
         // "start chat" form above it.
-        ".composer{display:flex;align-items:flex-end;gap:.4rem;"
+        ".composer{display:flex;align-items:center;gap:.4rem;"
         "background:var(--panel);border:1px solid var(--panel-border);"
         "border-radius:1.5rem;padding:.4rem .5rem .4rem 1rem}"
         ".composerInput{flex:1;border:none;background:transparent;resize:none;"
@@ -1002,7 +1444,25 @@ std::string application_page(const UserRecord& user, const std::string& section,
         ".composerIconBtn{background:transparent;color:var(--muted);"
         "border:1px solid var(--panel-border)}"
         ".composerIconBtn:hover{background:var(--bg)}"
-        "#attachPanel{margin-bottom:.5rem}"
+        ".visuallyHidden{position:absolute;width:1px;height:1px;padding:0;"
+        "margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}"
+        // Pending attachments render as removable chips between the message
+        // history and the composer, mirroring the mainstream chat clients
+        // this is meant to match -- the file itself has already been
+        // uploaded by the time its chip appears (see attachFile()), so
+        // removing a chip only drops it from this message, not the store.
+        ".attachChips{display:flex;flex-wrap:wrap;gap:.4rem}"
+        ".attachChips:empty{display:none}"
+        ".attachChip{display:inline-flex;align-items:center;gap:.4rem;"
+        "background:var(--panel);border:1px solid var(--panel-border);"
+        "border-radius:1rem;padding:.25rem .4rem .25rem .75rem;"
+        "font-size:.8rem;max-width:16rem}"
+        ".attachChip span{overflow:hidden;text-overflow:ellipsis;"
+        "white-space:nowrap}"
+        ".attachChip button{width:1.3rem;height:1.3rem;flex:none;padding:0;"
+        "margin:0;border-radius:50%;border:none;background:transparent;"
+        "color:var(--muted);line-height:1;font-size:1rem}"
+        ".attachChip button:hover{background:var(--bg)}"
         // Tables replace the raw JSON dumps every list page used to show --
         // this is a user-facing screen, not a debugging console.
         "table{width:100%;border-collapse:collapse;font-size:.85rem}"

@@ -35,7 +35,8 @@ bool recognizes(const char* command) noexcept {
     return value == "backup" || value == "restore-backup" ||
            value == "rotate-secret" || value == "rotate-logs" ||
            value == "recover" || value == "upgrade" ||
-           value == "rollback" || value == "runtime-root";
+           value == "rollback" || value == "runtime-root" ||
+           value == "models-root";
 }
 
 // Dispatches one exact offline operation and returns success after its report.
@@ -44,6 +45,16 @@ int run(const int argc, char* argv[]) {
     if (command == "runtime-root") {
         require_arguments(argc, 3, "masterai runtime-root <settings>");
         std::cout << load_settings(argv[2]).runtime_root.string() << "\n";
+        return 0;
+    }
+    // Mirrors runtime-root above -- scripts (rehash.ps1 in particular) need
+    // workspace.modelsRoot resolved the same way the server itself resolves
+    // it (relative to the settings file's own directory, see
+    // ConfigurationManager::load's resolve_workspace_path), not relative to
+    // whatever directory a script assumes the project lives in.
+    if (command == "models-root") {
+        require_arguments(argc, 3, "masterai models-root <settings>");
+        std::cout << load_settings(argv[2]).models_root.string() << "\n";
         return 0;
     }
     if (command == "backup") {

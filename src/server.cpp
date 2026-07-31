@@ -171,10 +171,17 @@ std::string cookie_token(const Request& request) {
 // Phase 16: renders one RetrievalOutcome's disclosure list as the raw JSON
 // array embedded into a QueryTrace so /api/v1/queries/{id} lets callers
 // inspect exactly which project sources were supplied to the model.
-std::string retrieval_disclosure_json(const RetrievalOutcome& outcome) {
+// Phase 17: `cache_hit` is a truthful indicator -- true only when this
+// request's evidence came from CacheManager::get() rather than a fresh
+// RetrievalPlanner::retrieve() call -- surfaced to the caller through the
+// same disclosure object ordinary users already see via
+// /api/v1/queries/{id}.
+std::string retrieval_disclosure_json(const RetrievalOutcome& outcome,
+                                      bool cache_hit) {
     std::string body = "{\"strategy\":" + json_string(outcome.strategy) +
                        ",\"partial\":" +
                        (outcome.partial ? "true" : "false") +
+                       ",\"cacheHit\":" + (cache_hit ? "true" : "false") +
                        ",\"diagnostic\":" + json_string(outcome.diagnostic) +
                        ",\"entries\":[";
     bool first = true;
@@ -191,6 +198,22 @@ std::string retrieval_disclosure_json(const RetrievalOutcome& outcome) {
                 ",\"reason\":" + json_string(entry.reason) + "}";
     }
     return body + "]}";
+}
+
+// Phase 17: parses the optional {"category":"..."} body accepted by
+// POST /api/v1/system/cache/clear. Throws on an unrecognized category name;
+// returns no value (clear every category) for an empty body.
+std::optional<CacheCategory> parse_cache_clear_category(
+    const std::string& body) {
+    if (body.empty()) return std::nullopt;
+    const auto root = parse_json(body);
+    const auto* field = root.optional("category");
+    if (field == nullptr) return std::nullopt;
+    CacheCategory parsed{};
+    if (!cache_category_from_string(field->as_string(), parsed)) {
+        throw std::runtime_error("unknown cache category");
+    }
+    return parsed;
 }
 
 }  // namespace
@@ -248,6 +271,11 @@ public:
         if (!value.llama_server_executable.empty()) {
             inference = std::make_unique<RunnerSupervisor>(
                 value.llama_server_executable, value.runtime_root);
+            tuning_profiles = std::make_unique<TuningProfileStore>(records);
+            calibration = std::make_unique<CalibrationService>(
+                *inference, *tuning_profiles, hardware,
+                sha256_file_hex(value.llama_server_executable),
+                "masterai-0.1.0");
         }
         if (!value.curl_executable.empty()) {
             downloads = std::make_unique<DownloadManager>(
@@ -259,10 +287,22 @@ public:
             watcher =
                 std::make_unique<ProjectWatcher>(*projects, *indexes);
         }
+        CachePolicy cache_policy;
+        cache_policy.maximum_bytes_per_category =
+            value.cache_maximum_bytes_per_category;
+        cache = std::make_unique<CacheManager>(
+            value.runtime_root / "cache", *memory, cache_policy);
+        // Phase 18: always constructed (cheap, in-memory, no disk/network
+        // I/O) even when session_reuse_enabled is off -- send_chat_message()
+        // is the single gate that decides whether to ever consult it, so
+        // flipping the config flag needs no restart-time branching here.
+        prompt_sessions = std::make_unique<PromptSessionManager>(
+            value.session_reuse_max_slots,
+            value.session_reuse_idle_retention_seconds);
         workloads = std::make_unique<
             server_internal::WorkloadHttpController>(
             configuration, *projects, *attachments, inference.get(),
-            downloads.get(), *benchmarks, *indexes, audit);
+            downloads.get(), *benchmarks, *indexes, audit, *cache);
         if (users->setup_required()) {
             const auto bytes = secure_random(24U);
             static constexpr char digits[] = "0123456789abcdef";
@@ -526,6 +566,44 @@ public:
             return response(200, "OK",
                             MemoryBudgetManager::to_json(memory->sample()));
         }
+        // Phase 17: administrators see bounded cache use and can trim/clear
+        // it; ordinary users see only the per-request cacheHit indicator
+        // already carried in retrievalDisclosure (see
+        // retrieve_with_cache()/retrieval_disclosure_json()).
+        if (request.method == "GET" &&
+            request.target == "/api/v1/system/cache") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            return response(200, "OK",
+                            CacheManager::to_json(cache->status()));
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/system/cache/trim") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            cache->trim();
+            return response(200, "OK",
+                            CacheManager::to_json(cache->status()));
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/system/cache/clear") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                cache->clear(parse_cache_clear_category(request.body));
+                return response(200, "OK",
+                                CacheManager::to_json(cache->status()));
+            } catch (const std::exception&) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_cache_clear_request\"}");
+            }
+        }
         if (request.method == "GET" &&
             request.target.rfind("/api/v1/requests/", 0U) == 0U &&
             request.target.size() > 17U) {
@@ -576,6 +654,107 @@ public:
                     400, "Bad Request",
                     "{\"error\":\"invalid_baseline_request\"}");
             }
+        }
+        // Phase 19: adaptive hardware/model calibration routes. Distinct
+        // from the Phase 13 /api/v1/performance/baseline route above (a
+        // reproducibility baseline for one query trace) -- these read and
+        // produce TuningProfile evidence instead.
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/performance/profile/", 0U) == 0U) {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            if (calibration == nullptr) {
+                return response(503, "Service Unavailable",
+                                "{\"error\":\"inference_not_configured\"}");
+            }
+            static const std::string prefix = "/api/v1/performance/profile/";
+            const auto remainder = request.target.substr(prefix.size());
+            const auto slash = remainder.find('/');
+            if (slash == std::string::npos || slash == 0U) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_profile_request\"}");
+            }
+            const auto model = find_model(remainder.substr(0U, slash));
+            if (!model) {
+                return response(404, "Not Found",
+                                "{\"error\":\"model_not_found\"}");
+            }
+            try {
+                const auto profile = calibration->resolve(
+                    model->manifest.model_sha256, remainder.substr(slash + 1U));
+                return response(200, "OK", tuning_profile_json(profile));
+            } catch (const std::exception&) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_profile_request\"}");
+            }
+        }
+        if (request.method == "GET" &&
+            request.target == "/api/v1/performance/recommendations") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            std::string body = "{\"profiles\":[";
+            bool first = true;
+            if (tuning_profiles != nullptr) {
+                for (const auto& profile : tuning_profiles->all()) {
+                    if (!first) body += ",";
+                    first = false;
+                    body += tuning_profile_json(profile);
+                }
+            }
+            return response(200, "OK", body + "]}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/performance/calibrate") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            if (calibration == nullptr) {
+                return response(503, "Service Unavailable",
+                                "{\"error\":\"inference_not_configured\"}");
+            }
+            try {
+                const auto root = parse_json(request.body);
+                if (root.as_object().size() != 2U) {
+                    throw std::runtime_error("unexpected calibration field");
+                }
+                const auto model =
+                    find_model(root.required("modelId").as_string());
+                if (!model) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"model_not_found\"}");
+                }
+                std::atomic_bool cancellation{false};
+                const auto profile = calibration->calibrate(
+                    *model, root.required("profile").as_string(),
+                    configuration.runner_port, cancellation);
+                audit.append("performance.calibrate", user->id, "success",
+                            model->manifest.id);
+                return response(201, "Created", tuning_profile_json(profile));
+            } catch (const std::exception&) {
+                return response(409, "Conflict",
+                                "{\"error\":\"calibration_failed\"}");
+            }
+        }
+        // Phase 20: framework-only listing -- every feature reports
+        // enabled=false; see docs/PLAN.md section 25 and
+        // AdvancedOptimizationRegistry.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/performance/advanced-optimizations") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            return response(
+                200, "OK",
+                "{\"features\":" +
+                    advanced_optimization_registry_json(
+                        advanced_optimizations.features()) +
+                    "}");
         }
         if (request.method == "GET" && request.target == "/models") {
             return workloads->model_inventory_page();
@@ -706,6 +885,35 @@ public:
             request.target.compare(request.target.size() - 9U, 9U,
                                    "/messages") == 0) {
             return send_chat_message(request, *user, stream_socket);
+        }
+        // Lets the composer's model picker stay usable after the first
+        // message instead of locking to whatever model the chat started
+        // with -- only future messages use the new model; past history is
+        // unaffected.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/chats/", 0U) == 0U &&
+            request.target.size() > 20U &&
+            request.target.compare(request.target.size() - 6U, 6U,
+                                   "/model") == 0) {
+            if (!role_allows(user->role, "chats.write")) {
+                return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+            }
+            return set_chat_model(request, *user);
+        }
+        // Deletes a chat and its full message history. A POST-with-suffix
+        // action (matching /model, /messages above) rather than the DELETE
+        // verb, so it falls under the same "/api/v1/chats" POST scope check
+        // above without adding a new HTTP method this server has never had
+        // to support anywhere else.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/chats/", 0U) == 0U &&
+            request.target.size() > 21U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (!role_allows(user->role, "chats.write")) {
+                return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+            }
+            return delete_chat(request, *user);
         }
         if (request.method == "POST" &&
             request.target == "/api/v1/attachments") {
@@ -1008,6 +1216,10 @@ private:
             }
             const auto hash = hash_password(password);
             const auto created = users->add(username, display_name, requested_role, hash);
+            // Phase 17: a new user changes what "authorized" means, so every
+            // cached entry -- however it was keyed -- must stop being
+            // reachable.
+            cache->invalidate_policy();
             audit.append("users.create", admin.id, "success", created.id);
             return response(201, "Created", "{\"id\":\"" + created.id + "\"}");
         } catch (const std::exception&) {
@@ -1108,6 +1320,77 @@ private:
         }
     }
 
+    // Switches the model a chat's future messages generate against. Kept
+    // separate from create_chat() -- this route can't create a new chat, and
+    // it looks the target chat up by ownership (chats->set_model()) rather
+    // than trusting a client-supplied id blindly.
+    std::string set_chat_model(Request& request, const UserRecord& user) {
+        const std::string prefix{"/api/v1/chats/"};
+        const auto chat_id = request.target.substr(
+            prefix.size(), request.target.size() - prefix.size() - 6U);
+        try {
+            const auto root = parse_json(request.body);
+            const auto model_id = root.required("modelId").as_string();
+            const auto chat = chats->find_for_owner(chat_id, user.id);
+            if (!chat) {
+                return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
+            }
+            bool model_ready = false;
+            const auto hardware = probe_hardware(configuration.models_root);
+            for (const auto& model :
+                 ModelRegistry(configuration.models_root, hardware,
+                               configuration.memory_reserve_mib).scan()) {
+                if (model.manifest.id == model_id &&
+                    model.state == ModelState::ready) {
+                    model_ready = true;
+                    break;
+                }
+            }
+            if (!model_ready) {
+                return response(409, "Conflict",
+                                "{\"error\":\"model_not_ready\"}");
+            }
+            if (!chats->set_model(chat_id, user.id, model_id)) {
+                return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
+            }
+            audit.append("chat.model_change", user.id, "success", chat_id);
+            return response(200, "OK", "{\"modelId\":\"" + json_escape(model_id) + "\"}");
+        } catch (const std::exception&) {
+            return response(400, "Bad Request",
+                            "{\"error\":\"invalid_chat_request\"}");
+        }
+    }
+
+    // Deletes a chat and its full message history. Ownership is re-checked
+    // by chats->remove() itself (not just trusted from the URL), matching
+    // find_for_owner()'s pattern everywhere else in this file.
+    std::string delete_chat(Request& request, const UserRecord& user) {
+        const std::string prefix{"/api/v1/chats/"};
+        const auto chat_id = request.target.substr(
+            prefix.size(), request.target.size() - prefix.size() - 7U);
+        if (!chats->remove(chat_id, user.id)) {
+            return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
+        }
+        prompt_sessions->release(chat_id);
+        audit.append("chat.delete", user.id, "success", chat_id);
+        return response(200, "OK", "{\"id\":\"" + json_escape(chat_id) + "\"}");
+    }
+
+    // Scans the model registry once for a single manifest id -- shared by
+    // ensure_model_loaded() (which needs the full record to launch the
+    // runner) and the chat-template lookup below (which only needs the
+    // architecture string), so both stay consistent about what "the chat's
+    // model" resolves to.
+    std::optional<ModelRecord> find_model(const std::string& model_id) const {
+        const auto hardware = probe_hardware(configuration.models_root);
+        for (auto& model :
+             ModelRegistry(configuration.models_root, hardware,
+                           configuration.memory_reserve_mib).scan()) {
+            if (model.manifest.id == model_id) return model;
+        }
+        return std::nullopt;
+    }
+
     void ensure_model_loaded(const std::string& model_id) {
         const auto current = inference->metrics();
         if (current.state == RunnerState::ready &&
@@ -1122,17 +1405,107 @@ private:
         if (current.state == RunnerState::ready ||
             current.state == RunnerState::failed) {
             inference->unload();
+            // Every slot's KV cache lives inside the runner process that
+            // just went away, so any session state referencing it is
+            // meaningless (and its slot ids may now collide with a
+            // differently-loaded model's slots).
+            prompt_sessions->reset();
         }
-        const auto hardware = probe_hardware(configuration.models_root);
-        for (const auto& model :
-             ModelRegistry(configuration.models_root, hardware,
-                           configuration.memory_reserve_mib).scan()) {
-            if (model.manifest.id == model_id) {
-                inference->load(model, 4096U, configuration.runner_port);
-                return;
-            }
+        if (const auto model = find_model(model_id)) {
+            inference->load(*model, configuration.chat_context_length,
+                            configuration.runner_port,
+                            configuration.runner_startup_timeout_seconds,
+                            configuration.session_reuse_enabled
+                                ? configuration.session_reuse_max_slots
+                                : 1U);
+            return;
         }
         throw std::runtime_error("selected chat model was not found");
+    }
+
+    // Instruction-tuned models expect their own turn-delimiting markup
+    // around each role's text; feeding them a bare user string with no
+    // wrapper (as the /completion endpoint would otherwise receive it)
+    // leaves them free-completing a document instead of answering, which
+    // reads as the model ignoring or misunderstanding the message. Each
+    // entry here mirrors the turn format the corresponding architecture
+    // was instruction-tuned with; `stop_sequence` is where that format
+    // marks the end of a turn, so generation halts there instead of
+    // running on into a hallucinated next turn.
+    struct ChatTemplate {
+        std::string system_prefix, system_suffix;
+        std::string user_prefix, user_suffix;
+        std::string assistant_prefix, assistant_suffix;
+        std::string generation_prompt;
+        std::string stop_sequence;
+    };
+
+    ChatTemplate chat_template_for_architecture(
+        const std::string& architecture) const {
+        if (architecture == "phi3") {
+            return {"<|system|>\n", "<|end|>\n", "<|user|>\n", "<|end|>\n",
+                    "<|assistant|>\n", "<|end|>\n", "<|assistant|>\n",
+                    "<|end|>"};
+        }
+        if (architecture == "llama") {
+            return {"<|start_header_id|>system<|end_header_id|>\n\n",
+                    "<|eot_id|>", "<|start_header_id|>user<|end_header_id|>\n\n",
+                    "<|eot_id|>",
+                    "<|start_header_id|>assistant<|end_header_id|>\n\n",
+                    "<|eot_id|>",
+                    "<|start_header_id|>assistant<|end_header_id|>\n\n",
+                    "<|eot_id|>"};
+        }
+        if (architecture == "gemma") {
+            // Gemma has no separate system role; a system message is folded
+            // into the following user turn instead of dropped. This branch
+            // also covers CodeGemma (registered under the same "gemma"
+            // architecture), whose extra fill-in-the-middle /
+            // document-boundary tokens (e.g. <|file_separator|>) are stopped
+            // on separately -- see extra_stop_sequences below.
+            return {"", "\n\n", "<start_of_turn>user\n", "<end_of_turn>\n",
+                    "<start_of_turn>model\n", "<end_of_turn>\n",
+                    "<start_of_turn>model\n", "<end_of_turn>"};
+        }
+        // ChatML, used as-is by qwen2/yi and as a reasonable default for any
+        // other or unrecognized architecture (including gpt-oss, whose full
+        // Harmony format this does not attempt to reproduce).
+        return {"<|im_start|>system\n", "<|im_end|>\n", "<|im_start|>user\n",
+                "<|im_end|>\n", "<|im_start|>assistant\n", "<|im_end|>\n",
+                "<|im_start|>assistant\n", "<|im_end|>"};
+    }
+
+    // Wraps the chat's prior turns plus the latest user message (already
+    // carrying any attachment/retrieval text -- see assemble_inference_prompt
+    // and retrieve_with_cache) in the target model's own instruction format,
+    // and reports the stop sequence that format uses to end a turn so the
+    // caller can bound generation with it.
+    std::string assemble_chat_prompt(const std::string& architecture,
+                                     const std::vector<ChatMessage>& history,
+                                     const std::string& latest_user_content,
+                                     std::string& stop_sequence) const {
+        const auto tmpl = chat_template_for_architecture(architecture);
+        stop_sequence = tmpl.stop_sequence;
+        std::string prompt;
+        for (const auto& message : history) {
+            switch (message.role) {
+                case ChatRole::system:
+                    prompt += tmpl.system_prefix + message.content +
+                              tmpl.system_suffix;
+                    break;
+                case ChatRole::user:
+                    prompt += tmpl.user_prefix + message.content +
+                              tmpl.user_suffix;
+                    break;
+                case ChatRole::assistant:
+                    prompt += tmpl.assistant_prefix + message.content +
+                              tmpl.assistant_suffix;
+                    break;
+            }
+        }
+        prompt += tmpl.user_prefix + latest_user_content + tmpl.user_suffix;
+        prompt += tmpl.generation_prompt;
+        return prompt;
     }
 
     // Builds bounded chat context from attachments owned by the same user and
@@ -1168,6 +1541,52 @@ private:
         return result;
     }
 
+    // Phase 17: serves a cached RetrievalOutcome when one is reachable under
+    // the current policy/index generation, otherwise runs RetrievalPlanner
+    // and stores the result (skipped for partial outcomes, which are not
+    // representative of a settled generation). Sets `cache_hit` truthfully
+    // for the caller's disclosure.
+    RetrievalOutcome retrieve_with_cache(const ProjectRecord& project,
+                                         const UserRecord& user,
+                                         const std::string& inference_prompt,
+                                         bool& cache_hit) {
+        const auto index_status = indexes->status(project.id);
+        CacheKey cache_key;
+        cache_key.user_id = user.id;
+        cache_key.project_id = project.id;
+        cache_key.policy_generation = cache->current_policy_generation();
+        cache_key.canonical_identity = inference_prompt;
+        cache_key.version_tag = "retrieval-v1";
+        cache_key.index_generation =
+            index_status ? index_status->index.generation : 0U;
+        cache_hit = false;
+        if (configuration.cache_enabled) {
+            if (const auto cached =
+                    cache->get(CacheCategory::retrieval_result, cache_key)) {
+                cache_hit = true;
+                return deserialize_retrieval_outcome(*cached);
+            }
+        }
+        RetrievalPlanner planner(*indexes);
+        RetrievalRequest retrieval_request;
+        retrieval_request.project = project;
+        retrieval_request.query_text = inference_prompt;
+        retrieval_request.deadline = std::chrono::milliseconds(
+            configuration.retrieval_deadline_milliseconds);
+        retrieval_request.maximum_context_bytes =
+            configuration.retrieval_maximum_context_bytes;
+        retrieval_request.maximum_chunks_per_source =
+            configuration.retrieval_maximum_chunks_per_source;
+        retrieval_request.maximum_total_chunks =
+            configuration.retrieval_maximum_total_chunks;
+        auto retrieved = planner.retrieve(retrieval_request);
+        if (configuration.cache_enabled && !retrieved.partial) {
+            cache->put(CacheCategory::retrieval_result, cache_key,
+                      serialize_retrieval_outcome(retrieved));
+        }
+        return retrieved;
+    }
+
     std::string send_chat_message(Request& request, const UserRecord& user,
                                   const NativeSocket stream_socket) {
         if (inference == nullptr) {
@@ -1184,6 +1603,13 @@ private:
         bool stream_started = false;
         std::string query_id;
         std::string memory_lease_id;
+        // Tokens are streamed to the client as they arrive, so a client
+        // watching the reply has already seen this text by the time
+        // anything below can fail (a dropped runner connection, a policy
+        // limit, etc.) -- the catch block below persists whatever made it
+        // this far rather than silently discarding a reply the user already
+        // read on screen.
+        std::string streamed_text;
         try {
             query_id = queries.begin(user.id, chat->project_id, chat->model_id);
             queries.transition(query_id, QueryStage::authentication,
@@ -1209,19 +1635,16 @@ private:
             auto inference_prompt = assemble_inference_prompt(root, *chat, user);
             if (configuration.retrieval_enabled && !chat->project_id.empty()) {
                 if (const auto project = projects->find(chat->project_id)) {
-                    RetrievalPlanner planner(*indexes);
-                    RetrievalRequest retrieval_request;
-                    retrieval_request.project = *project;
-                    retrieval_request.query_text = inference_prompt;
-                    retrieval_request.deadline = std::chrono::milliseconds(
-                        configuration.retrieval_deadline_milliseconds);
-                    retrieval_request.maximum_context_bytes =
-                        configuration.retrieval_maximum_context_bytes;
-                    retrieval_request.maximum_chunks_per_source =
-                        configuration.retrieval_maximum_chunks_per_source;
-                    retrieval_request.maximum_total_chunks =
-                        configuration.retrieval_maximum_total_chunks;
-                    const auto retrieved = planner.retrieve(retrieval_request);
+                    // Phase 17: a repeated question against an unchanged
+                    // index generation and policy state is served from
+                    // CacheManager instead of rerunning RetrievalPlanner --
+                    // see retrieve_with_cache(). A file change or a
+                    // membership/policy change makes the previous entry
+                    // unreachable automatically because the cache key embeds
+                    // the current index/policy generation.
+                    bool cache_hit = false;
+                    const auto retrieved = retrieve_with_cache(
+                        *project, user, inference_prompt, cache_hit);
                     inference_prompt += retrieved.context_text;
                     if (inference_prompt.size() > configuration.max_request_bytes) {
                         throw std::runtime_error(
@@ -1229,22 +1652,106 @@ private:
                     }
                     queries.record_retrieval(
                         query_id, retrieved.partial,
-                        retrieval_disclosure_json(retrieved));
+                        retrieval_disclosure_json(retrieved, cache_hit));
                 }
             }
             queries.transition(query_id, QueryStage::ranking,
                                QueryStatus::retrieving);
             queries.transition(query_id, QueryStage::prompt_assembly,
                                QueryStatus::retrieving);
+            // The chat record was looked up before this turn's user message
+            // was appended below, so chat->messages here is exactly the
+            // prior history -- wrapping it plus this turn's content in the
+            // model's own instruction format is what keeps an instruct model
+            // (see chat_template_for_architecture()) from free-completing an
+            // unrelated document instead of answering.
+            const auto model = find_model(chat->model_id);
+            std::string stop_sequence;
+            const auto generation_prompt = assemble_chat_prompt(
+                model ? model->manifest.architecture : std::string(),
+                chat->messages, inference_prompt, stop_sequence);
             chats->append(chat_id, ChatRole::user, prompt);
             std::atomic_bool cancellation{false};
             GenerationOptions options;
+            options.max_tokens = configuration.chat_max_reply_tokens;
+            if (!stop_sequence.empty()) {
+                options.stop_sequences.push_back(stop_sequence);
+            }
+            // Phase 18: every field here must still match exactly, and the
+            // new prompt must literally extend the slot's last prompt,
+            // before PromptSessionManager will ever grant reuse -- a model
+            // switch, a project reindex, or an edited/resubmitted earlier
+            // turn each change one of these and correctly force a fresh,
+            // uncached request instead of feeding the runner a stale KV
+            // cache. Disabled entirely (session_reuse_enabled defaults to
+            // false) until a same-host repeated-turn benchmark records the
+            // Phase 18 exit-criterion evidence.
+            SessionFingerprint fingerprint;
+            SessionDecision session_decision;
+            if (configuration.session_reuse_enabled) {
+                if (model) fingerprint.model_sha256 = model->manifest.model_sha256;
+                fingerprint.backend_executable =
+                    configuration.llama_server_executable.string();
+                fingerprint.architecture =
+                    model ? model->manifest.architecture : std::string();
+                fingerprint.context_length = configuration.chat_context_length;
+                // Phase 19: bind reuse to the calibration profile name so a
+                // profile switch (which can change GPU-layer/batch/mmap
+                // launch tuning) invalidates any cached KV slot instead of
+                // reusing one loaded under different settings.
+                fingerprint.settings_fingerprint =
+                    configuration.resource_profile;
+                if (!chat->project_id.empty()) {
+                    if (const auto index_status =
+                            indexes->status(chat->project_id)) {
+                        fingerprint.project_index_generation =
+                            index_status->index.generation;
+                    }
+                }
+                session_decision = prompt_sessions->try_reuse(
+                    chat_id, fingerprint, generation_prompt);
+                options.cache_prompt = session_decision.reuse;
+                if (session_decision.reuse) {
+                    options.slot_id = session_decision.slot_id;
+                }
+            }
+            if (model && model->manifest.architecture == "gemma") {
+                // CodeGemma checkpoints share the "gemma" architecture tag
+                // but were trained with extra code-infill / document
+                // boundary special tokens that the base Gemma chat template
+                // doesn't know about. Left unstopped, the model can emit
+                // these as literal text in a chat reply (e.g.
+                // "<|file_separator|>"), so they're stopped on here too.
+                options.stop_sequences.push_back("<|file_separator|>");
+                options.stop_sequences.push_back("<|fim_prefix|>");
+                options.stop_sequences.push_back("<|fim_suffix|>");
+                options.stop_sequences.push_back("<|fim_middle|>");
+                // Defense against a degraded/mismatched tokenizer: if the
+                // model's own "<end_of_turn>" special token isn't being
+                // produced as a real stop token (seen with GGUF conversions
+                // llama.cpp logs "control-looking token ... was not
+                // control-type" for), it can instead free-run past the end
+                // of its own reply and hallucinate a fake next turn as
+                // literal text, e.g. "<start_of_turn>model\n...", repeating
+                // until max_tokens. Stopping the instant that literal header
+                // text appears bounds the damage to one hallucinated turn
+                // instead of an unbounded loop.
+                options.stop_sequences.push_back("<start_of_turn>");
+            }
             MemoryEstimate memory_estimate;
             memory_estimate.runtime_buffer_bytes = 64ULL * 1024ULL * 1024ULL;
+            // Phase 18: llama.cpp reserves KV cache for every --parallel
+            // slot at model-load time (see ensure_model_loaded()), not just
+            // for slots currently tracked as reusable, so admission must
+            // account for the full configured slot count whenever session
+            // reuse is enabled -- one sequence's worth otherwise.
             memory_estimate.kv_bytes_per_sequence =
-                128ULL * 1024ULL * 1024ULL;
+                128ULL * 1024ULL * 1024ULL *
+                static_cast<std::uint64_t>(configuration.session_reuse_enabled
+                                               ? configuration.session_reuse_max_slots
+                                               : 1U);
             memory_estimate.transient_bytes =
-                static_cast<std::uint64_t>(inference_prompt.size()) * 3U;
+                static_cast<std::uint64_t>(generation_prompt.size()) * 3U;
             memory_estimate.safety_margin_bytes = 32ULL * 1024ULL * 1024ULL;
             const auto admission = memory->reserve(
                 MemoryCategory::compute_buffers, memory_estimate, true);
@@ -1290,7 +1797,7 @@ private:
             bool first_token = true;
             std::uint64_t time_to_first_token = 0U;
             const auto generated = inference->generate(
-                inference_prompt, options,
+                generation_prompt, options,
                 [&](const std::string& chunk) {
                     if (first_token) {
                         first_token = false;
@@ -1307,6 +1814,7 @@ private:
                                 "{\"type\":\"status\",\"status\":\"generating\"}\n");
                         }
                     }
+                    streamed_text += chunk;
                     if (streaming &&
                         !send_chunk(stream_socket,
                                     "{\"type\":\"token\",\"content\":\"" +
@@ -1323,8 +1831,38 @@ private:
                                      time_to_first_token);
             queries.observe_resources(
                 query_id, inference->metrics().resident_memory_bytes);
+            if (configuration.session_reuse_enabled) {
+                // A cancelled turn leaves the runner's KV state for that
+                // slot describing an incomplete reply -- never record it as
+                // reusable. A completed turn becomes the new prefix the
+                // *next* turn is checked against.
+                if (generated.cancelled) {
+                    prompt_sessions->release(chat_id);
+                } else {
+                    prompt_sessions->record(
+                        chat_id, fingerprint, generation_prompt,
+                        session_decision.reuse
+                            ? std::optional<unsigned int>(session_decision.slot_id)
+                            : std::nullopt);
+                }
+            }
             queries.transition(query_id, QueryStage::persistence,
                                QueryStatus::generating);
+            if (!generated.cancelled && generated.text.empty()) {
+                // The runner reported success and streamed zero content --
+                // seen with models whose GGUF conversion is missing/broken
+                // tokenizer metadata (llama.cpp logs "missing pre-tokenizer
+                // type" / "control-looking token ... was not control-type"
+                // for these), where every generated token decodes to an
+                // empty piece. ChatStore::append would reject this with an
+                // opaque "outside policy" error; name the real cause instead
+                // so it doesn't read as a generic crash.
+                throw std::runtime_error(
+                    "the model produced an empty reply -- its GGUF file's "
+                    "tokenizer metadata may be broken/incomplete (check the "
+                    "runner log for a pre-tokenizer warning); try a "
+                    "different quantization or source for this model");
+            }
             chats->append(chat_id, ChatRole::assistant, generated.text);
             queries.transition(query_id, QueryStage::release,
                                QueryStatus::generating);
@@ -1360,26 +1898,51 @@ private:
                     ",\"elapsedMicroseconds\":" +
                     std::to_string(generated.elapsed_microseconds) +
                     ",\"requestId\":\"" + json_escape(query_id) + "\"}");
-        } catch (const std::exception&) {
+        } catch (const std::exception& generation_exception) {
             if (!memory_lease_id.empty()) {
                 memory->release(memory_lease_id);
             }
+            if (configuration.session_reuse_enabled) {
+                prompt_sessions->release(chat_id);
+            }
+            // Keep the real failure reason (e.what()) instead of discarding
+            // it: this is what previously made every failure -- a genuine
+            // runner crash, a degraded/garbled model producing zero-length
+            // completions that trip ChatStore::append's non-empty policy,
+            // cancellation races, etc. -- show the same generic message,
+            // making the actual cause undiagnosable from the UI alone.
+            const std::string failure_reason = generation_exception.what();
             if (!query_id.empty()) {
                 try {
                     queries.finish(query_id, QueryStatus::failed,
-                                   "generation failed");
+                                   failure_reason);
                 } catch (const std::exception&) {
                 }
             }
-            audit.append("chat.generate", user.id, "failed", chat_id);
+            // The generate() call throwing loses its own copy of whatever it
+            // had produced so far, but the client already rendered every
+            // token this callback saw -- save that copy so the reply
+            // surviving in the transcript matches what the user read, rather
+            // than reopening the chat to find it silently gone.
+            if (!streamed_text.empty()) {
+                try {
+                    chats->append(chat_id, ChatRole::assistant, streamed_text);
+                } catch (const std::exception&) {
+                }
+            }
+            audit.append("chat.generate", user.id,
+                         "failed: " + failure_reason, chat_id);
             if (stream_started) {
                 send_chunk(stream_socket,
-                           "{\"type\":\"error\",\"error\":\"generation_failed\"}\n");
+                           "{\"type\":\"error\",\"error\":\"generation_failed\","
+                           "\"detail\":\"" + json_escape(failure_reason) +
+                           "\"}\n");
                 send_all(stream_socket, "0\r\n\r\n");
                 return {};
             }
             return response(400, "Bad Request",
-                            "{\"error\":\"generation_failed\"}");
+                            "{\"error\":\"generation_failed\",\"detail\":\"" +
+                                json_escape(failure_reason) + "\"}");
         }
     }
 
@@ -1408,6 +1971,16 @@ private:
     // must stop calling indexes->request_update() before indexes itself is
     // torn down.
     std::unique_ptr<ProjectWatcher> watcher;
+    std::unique_ptr<CacheManager> cache;
+    std::unique_ptr<PromptSessionManager> prompt_sessions;
+    // Phase 19: nullable exactly like `inference`/`downloads` above --
+    // calibration requires a real RunnerSupervisor to load a model against,
+    // so it only exists when inference.llamaServerExecutable is configured.
+    std::unique_ptr<TuningProfileStore> tuning_profiles;
+    std::unique_ptr<CalibrationService> calibration;
+    // Phase 20: framework-only registry, always constructible (no runner
+    // dependency, no persistence) -- see docs/PLAN.md section 25.
+    AdvancedOptimizationRegistry advanced_optimizations;
     QueryCoordinator queries;
     std::string setup_token;
     std::string setup_hash;

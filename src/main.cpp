@@ -82,11 +82,14 @@ void show_usage() {
            "<retained-files>\n"
         << "  masterai recover <settings>\n"
         << "  masterai runtime-root <settings>\n"
+        << "  masterai models-root <settings>\n"
         << "  masterai upgrade <settings> <active> <candidate> "
            "<rollback-root>\n"
         << "  masterai rollback <settings> <active> <receipt>\n"
         << "  masterai performance-probe [iterations]\n"
         << "  masterai index-probe <project-root> [index-root]\n"
+        << "  masterai calibrate <settings> <model-id> "
+           "<auto|minimal|balanced|performance>\n"
         << "  masterai security-status [runtime-root]\n";
 }
 
@@ -113,6 +116,14 @@ std::string prompt(const std::string& label, const std::string& fallback) {
 
 void configure(const std::filesystem::path& settings) {
     auto configuration = masterai::ConfigurationManager::safe_defaults();
+    // A relative runtimeRoot/modelsRoot resolves against this settings
+    // file's own directory (see ConfigurationManager::load), not whatever
+    // directory `masterai configure` happens to be run from -- these two
+    // levels up keep a fresh config's data siblings of `settings`'s parent
+    // directory (e.g. config/settings.json -> ../runtime, ../models) instead
+    // of nesting it inside that directory.
+    configuration.runtime_root = "../runtime";
+    configuration.models_root = "../models";
     if (std::filesystem::exists(settings)) {
         configuration = masterai::ConfigurationManager::load(settings);
         const auto choice = prompt(
@@ -342,18 +353,40 @@ int main(int argc, char* argv[]) {
             const auto hardware = masterai::probe_hardware(root);
             std::size_t total = 0U;
             std::size_t failed = 0U;
+            // Tracks which model's hash progress was last printed so a
+            // model's first progress line can announce it's starting
+            // (nothing else prints between models otherwise, which reads as
+            // the command having hung on a large file).
+            std::string hashing_id;
             const auto verified_count = masterai::ModelRegistry(root, hardware, 2048U)
-                .verify([&](const std::string& id, const bool ok,
-                            const std::string& message) {
-                    ++total;
-                    if (ok) {
-                        std::cout << "[" << total << "] " << id << " ... OK\n";
-                    } else {
-                        ++failed;
-                        std::cout << "[" << total << "] " << id
-                                  << " ... FAILED: " << message << '\n';
-                    }
-                });
+                .verify(
+                    [&](const std::string& id, const bool ok,
+                        const std::string& message) {
+                        ++total;
+                        if (ok) {
+                            std::cout << "[" << total << "] " << id << " ... OK\n";
+                        } else {
+                            ++failed;
+                            std::cout << "[" << total << "] " << id
+                                      << " ... FAILED: " << message << '\n';
+                        }
+                    },
+                    [&](const std::string& id, const std::uint64_t bytes_hashed,
+                        const std::uint64_t total_bytes) {
+                        if (id != hashing_id) {
+                            hashing_id = id;
+                            std::cout << "    hashing " << id << " ("
+                                      << (total_bytes / (1024U * 1024U))
+                                      << " MB)...\n";
+                        }
+                        const auto percent = total_bytes == 0U
+                            ? 100U
+                            : static_cast<unsigned int>(
+                                  (bytes_hashed * 100U) / total_bytes);
+                        std::cout << "    " << id << ": " << percent << "% ("
+                                  << (bytes_hashed / (1024U * 1024U)) << " / "
+                                  << (total_bytes / (1024U * 1024U)) << " MB)\n";
+                    });
             std::cout << "Verified " << verified_count << " model(s), "
                       << failed << " failed, out of " << total
                       << " checked.\n";
@@ -480,7 +513,8 @@ int main(int argc, char* argv[]) {
             const std::string license_spdx(argv[12]);
             static const std::set<std::string> categories{
                 "general-programming", "code-completion", "code-review",
-                "debugging", "documentation", "embeddings-code-search"};
+                "debugging", "documentation", "embeddings-code-search",
+                "conversation"};
             static const std::set<std::string> licenses{
                 "Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause",
                 "CC-BY-4.0", "Llama-3.1", "Llama-3.2", "Gemma"};
@@ -609,6 +643,68 @@ int main(int argc, char* argv[]) {
                       << record.total_cases << "\nGenerated tokens: "
                       << record.generated_tokens << "\nElapsed microseconds: "
                       << record.elapsed_microseconds << "\n";
+            return 0;
+        }
+        if (command == "calibrate") {
+            // Phase 19: real cold-load/prompt-evaluation/generation
+            // measurement against a Ready model, mirroring benchmark-model
+            // and index-probe's own real-fixture measurement pattern.
+            // Persists a TuningProfile keyed by host/model/backend/build
+            // identity so a later request for the same identity reuses it
+            // instead of re-measuring.
+            if (argc != 5) {
+                throw std::runtime_error(
+                    "calibrate requires settings, model ID, and a profile "
+                    "(auto, minimal, balanced, or performance)");
+            }
+            const auto configuration =
+                masterai::ConfigurationManager::load(argv[2]);
+            if (configuration.llama_server_executable.empty()) {
+                throw std::runtime_error(
+                    "inference.llamaServerExecutable is not configured");
+            }
+            const auto hardware =
+                masterai::probe_hardware(configuration.models_root);
+            const auto models =
+                masterai::ModelRegistry(configuration.models_root, hardware,
+                                        configuration.memory_reserve_mib)
+                    .scan();
+            const auto found = std::find_if(
+                models.begin(), models.end(), [&](const auto& model) {
+                    return model.manifest.id == argv[3];
+                });
+            if (found == models.end()) {
+                throw std::runtime_error("calibration model was not found");
+            }
+            masterai::RunnerSupervisor inference(
+                configuration.llama_server_executable,
+                configuration.runtime_root);
+            masterai::RecordStore records(configuration.runtime_root / "database");
+            records.open();
+            masterai::TuningProfileStore store(records);
+            const auto backend_hash =
+                masterai::sha256_file_hex(configuration.llama_server_executable);
+            masterai::CalibrationService calibration(
+                inference, store, hardware, backend_hash, "masterai-0.1.0");
+            const auto profile = calibration.calibrate(
+                *found, argv[4], configuration.runner_port, stop_requested);
+            std::cout << std::fixed << std::setprecision(2);
+            std::cout << "hostHash\t" << profile.host_hash << '\n'
+                      << "profileName\t" << profile.profile_name << '\n'
+                      << "coldLoadMicroseconds\t"
+                      << profile.cold_load_microseconds << '\n'
+                      << "promptEvaluationMicroseconds\t"
+                      << profile.prompt_evaluation_microseconds << '\n'
+                      << "generationMicroseconds\t"
+                      << profile.generation_microseconds << '\n'
+                      << "peakResidentMemoryBytes\t"
+                      << profile.peak_resident_memory_bytes << '\n'
+                      << "peakCommitBytes\t" << profile.peak_commit_bytes << '\n'
+                      << "pageFaults\t" << profile.page_faults << '\n'
+                      << "averageCpuPercent\t" << profile.average_cpu_percent
+                      << '\n'
+                      << "diskReadBytes\t" << profile.disk_read_bytes << '\n'
+                      << "diskWriteBytes\t" << profile.disk_write_bytes << '\n';
             return 0;
         }
         if (command == "security-status") {

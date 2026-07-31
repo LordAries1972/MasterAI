@@ -1,6 +1,7 @@
 #include "masterai.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <fstream>
@@ -349,6 +350,94 @@ ProcessResourceSample probe_process_resources() {
         sample.page_faults =
             static_cast<std::uint64_t>(usage.ru_minflt + usage.ru_majflt);
     }
+#endif
+    return sample;
+}
+
+// Phase 19 calibration evidence: system-wide CPU utilization plus this
+// process's own cumulative disk read/write bytes, sampled twice across
+// interval_milliseconds and reduced to one delta-based reading. Never used
+// for memory admission or suitability decisions -- those remain governed by
+// probe_hardware()/probe_process_resources() and MemoryBudgetManager.
+SystemUtilizationSample probe_system_utilization(
+    const std::uint32_t interval_milliseconds) {
+    SystemUtilizationSample sample;
+#if defined(_WIN32)
+    const auto filetime_to_u64 = [](const FILETIME& time) {
+        return (static_cast<std::uint64_t>(time.dwHighDateTime) << 32U) |
+               static_cast<std::uint64_t>(time.dwLowDateTime);
+    };
+    FILETIME idle_before{}, kernel_before{}, user_before{};
+    GetSystemTimes(&idle_before, &kernel_before, &user_before);
+    IO_COUNTERS io_before{};
+    GetProcessIoCounters(GetCurrentProcess(), &io_before);
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(interval_milliseconds));
+    FILETIME idle_after{}, kernel_after{}, user_after{};
+    GetSystemTimes(&idle_after, &kernel_after, &user_after);
+    IO_COUNTERS io_after{};
+    GetProcessIoCounters(GetCurrentProcess(), &io_after);
+    const std::uint64_t idle_delta =
+        filetime_to_u64(idle_after) - filetime_to_u64(idle_before);
+    const std::uint64_t total_delta =
+        (filetime_to_u64(kernel_after) - filetime_to_u64(kernel_before)) +
+        (filetime_to_u64(user_after) - filetime_to_u64(user_before));
+    sample.cpu_percent =
+        total_delta > 0U
+            ? 100.0 * static_cast<double>(total_delta - idle_delta) /
+                  static_cast<double>(total_delta)
+            : 0.0;
+    sample.disk_read_bytes = static_cast<std::uint64_t>(
+        io_after.ReadTransferCount - io_before.ReadTransferCount);
+    sample.disk_write_bytes = static_cast<std::uint64_t>(
+        io_after.WriteTransferCount - io_before.WriteTransferCount);
+#elif defined(__linux__)
+    const auto read_cpu_totals = []() {
+        std::array<std::uint64_t, 8> fields{};
+        std::ifstream input("/proc/stat");
+        std::string label;
+        input >> label >> fields[0] >> fields[1] >> fields[2] >> fields[3] >>
+            fields[4] >> fields[5] >> fields[6] >> fields[7];
+        return fields;
+    };
+    const auto read_process_io = []() {
+        std::uint64_t read_bytes = 0U;
+        std::uint64_t write_bytes = 0U;
+        std::ifstream input("/proc/self/io");
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.rfind("read_bytes:", 0U) == 0U) {
+                read_bytes = std::stoull(line.substr(11U));
+            } else if (line.rfind("write_bytes:", 0U) == 0U) {
+                write_bytes = std::stoull(line.substr(12U));
+            }
+        }
+        return std::make_pair(read_bytes, write_bytes);
+    };
+    const auto cpu_before = read_cpu_totals();
+    const auto io_before = read_process_io();
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(interval_milliseconds));
+    const auto cpu_after = read_cpu_totals();
+    const auto io_after = read_process_io();
+    std::uint64_t total_before = 0U;
+    std::uint64_t total_after = 0U;
+    for (const auto value : cpu_before) total_before += value;
+    for (const auto value : cpu_after) total_after += value;
+    const std::uint64_t idle_before = cpu_before[3] + cpu_before[4];
+    const std::uint64_t idle_after = cpu_after[3] + cpu_after[4];
+    const std::uint64_t total_delta = total_after - total_before;
+    const std::uint64_t idle_delta = idle_after - idle_before;
+    sample.cpu_percent =
+        total_delta > 0U
+            ? 100.0 * static_cast<double>(total_delta - idle_delta) /
+                  static_cast<double>(total_delta)
+            : 0.0;
+    sample.disk_read_bytes =
+        io_after.first >= io_before.first ? io_after.first - io_before.first : 0U;
+    sample.disk_write_bytes = io_after.second >= io_before.second
+                                  ? io_after.second - io_before.second
+                                  : 0U;
 #endif
     return sample;
 }

@@ -168,6 +168,29 @@ The current source includes native implementations for:
   routes, plus a native `ProjectWatcher` file-watcher/branch-switch adapter
   (`indexing.watchProjectFiles`, on by default) that drives the same service
   automatically without any external editor or version-control hook.
+- Deadline-bound hybrid retrieval (`RetrievalPlanner`/`ContextBudgeter`) that
+  chooses the least expensive sufficient index-backed strategy, runs bounded
+  parallel strategy steps, fuses results on canonical chunk identity, and
+  discloses every included and omitted candidate on the query trace.
+- A security-partitioned, byte-bounded cache (`CacheManager`) in front of
+  retrieval results, with segmented LRU eviction, versioned keys that make
+  file, index, and policy changes an automatic miss, atomic
+  checksum-verified disk entries, and authenticated status/trim/clear
+  administration.
+- Compatible runner prompt-prefix/KV-session reuse (`PromptSessionManager`)
+  that resumes a chat's previous llama.cpp KV-cache slot only on an exact
+  fingerprint match and a literal byte-prefix-extending prompt, refusing
+  reuse on any model switch, reindex, or edited earlier turn.
+- Adaptive hardware/model calibration (`CalibrationService`): a real
+  cold-load-plus-generation measurement persisted as a host/model/backend/
+  build-keyed `TuningProfile`, with automatic invalidation and a safe-default
+  fallback on any identity change, plus optional GPU-layer/mmap/mlock/
+  thread/batch launch tuning and CPU%/disk-byte calibration evidence.
+- A framework-only registry for optional advanced-throughput candidates
+  (continuous batching, speculative decoding, NUMA affinity, storage
+  prefetch, multiple warm runners, GPU/CPU KV placement), every one
+  disabled by default with no code path able to enable it until its own
+  evidence is produced.
 
 Implementation does not automatically mean operational certification. The next
 section records the distinction.
@@ -175,7 +198,7 @@ section records the distinction.
 ## Project status
 
 Status below reflects the evidence recorded in
-[docs/PLAN.md](docs/PLAN.md) on **29 July 2026**.
+[docs/PLAN.md](docs/PLAN.md) on **1 August 2026**.
 
 | Phase | Area | Status |
 |---:|---|---|
@@ -194,12 +217,12 @@ Status below reflects the evidence recorded in
 | 12 | Measured control-plane optimization | Complete for measured native scope |
 | 13 | Query measurement and resource baseline | Complete |
 | 14 | Bounded-memory foundation | Complete |
-| 15 | Incremental disk-backed indexing | Exit criteria evidence recorded; Release validation pending |
-| 16 | Deadline-bound hybrid retrieval | Planned |
-| 17 | Security-partitioned cache hierarchy | Planned |
-| 18 | Prompt-prefix and KV/session reuse | Planned |
-| 19 | Hardware/model calibration | Planned |
-| 20 | Optional advanced throughput | Planned and evidence-gated |
+| 15 | Incremental disk-backed indexing | Exit criteria evidence recorded; deeper symbol extraction pending |
+| 16 | Deadline-bound hybrid retrieval | Implemented; authored retrieval-quality evaluation set pending |
+| 17 | Security-partitioned cache hierarchy | Implemented; representative-query latency benchmark pending |
+| 18 | Prompt-prefix and KV/session reuse | Implemented; same-host repeated-turn benchmark pending |
+| 19 | Hardware/model calibration | Implemented; real-hardware-class benchmark pending |
+| 20 | Optional advanced throughput | Scaffolding only; every candidate remains disabled and unimplemented |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -212,9 +235,21 @@ typed/coalesced trigger admission, disk-generation recovery tests, a native
 service automatically (no external editor or VCS hook required), a
 representative large-project ceiling measurement (`masterai index-probe`),
 and a recorded platform-I/O backend decision. Both of its exit criteria now
-have current evidence on Windows Debug; Windows Release build/test validation
-for this change set, and deeper language-aware symbol extraction, remain
-outstanding.
+have current evidence on Windows Debug and Release; deeper language-aware
+symbol extraction remains a forward enhancement, not an exit-criterion
+blocker.
+
+Phase 16 adds a `RetrievalPlanner` that reads a project's Phase 15 index
+directly (exact symbol, exact text, and per-token lexical strategies),
+runs bounded parallel strategy steps under a hard request deadline, fuses
+and deduplicates results on canonical chunk identity, and discloses exactly
+which evidence was used through `/api/v1/queries/{id}`. Phase 17 adds a
+byte-bounded, security-partitioned `CacheManager` in front of Phase 16
+retrieval results, keyed so that a file change, an index republish, or a
+membership/policy change makes a stale entry unreachable automatically,
+with authenticated `GET/POST /api/v1/system/cache*` administrative routes.
+Both are Windows Debug- and Release-validated; each still has one
+evidence-gathering exit criterion outstanding (see the status table above).
 
 No release may be called production-ready until the functional, security,
 migration, recovery, MCP conformance, performance, resource-ceiling, retrieval,
@@ -329,45 +364,151 @@ not remove source, configuration, runtime data, or model artifacts.
 
 ## First run
 
-MasterAI uses `config/settings.json` by default. The interactive configuration
-wizard writes validated settings and preserves recoverable state when settings
-are reset.
+This walks through everything needed between "I just built MasterAI" and "I
+sent a chat message and got a reply." Skipping a step is the most common
+cause of the two errors new installs hit first:
+`inference_backend_not_configured` (no runner executable configured) and
+`model_not_ready` (no model has passed verification yet). Do the steps in
+order.
 
-### Windows
+### 1. Build the binary
+
+See [Building from source](#building-from-source) above if you have not
+already. The rest of this section assumes
+`.\build\Windows-x64\Release\masterai.exe` (or the Linux equivalent) exists.
+
+### 2. Get an inference backend and a model onto the machine
+
+Chat needs two things this repository does not provide: a `llama.cpp`
+server executable and at least one GGUF model with a valid manifest.
+
+- Build or download a version-pinned `llama.cpp` server executable
+  (`llama-server` / `llama-server.exe`) and note its full path. MasterAI
+  supervises it as a separate process; it does not vendor or build it. A
+  convenient (not required) place to keep it is `tools/llama.cpp/` at the
+  repository root — already covered by `.gitignore`'s `*.exe`/`*.dll`
+  patterns, so it never gets committed.
+- Place a GGUF model file under `models/<category>/<model-id>/` (see
+  [Models](#models) below for the category list) with a
+  `manifest.json` next to it that validates against
+  [models/manifest.schema.json](models/manifest.schema.json). The manifest
+  must declare the model's exact size, SHA-256 digest, license, and
+  approved source (Hugging Face, GitHub releases, or ModelScope).
+- Optional: an approved `curl` executable, only if you want MasterAI to
+  manage model downloads itself (`masterai download-model`) instead of
+  placing files manually.
+
+### 3. Run the configuration wizard
 
 ```powershell
 .\scripts\configure.ps1 -BuildType Release
+```
+
+```sh
+sh ./scripts/configure.sh ./config/settings.json Release
+```
+
+The wizard writes `config/settings.json` and asks for, in order: the
+loopback port, the runtime data directory, the model directory, the
+**approved `llama.cpp` server executable path from step 2** (leaving this
+blank disables inference and every chat request will fail with
+`inference_backend_not_configured`), an approved `curl` executable (blank
+disables downloads), and whether to allow locally stored password accounts
+and/or OS-integrated sign-in. Re-running the wizard against an existing
+file offers **U**pdate, **R**eset, or **C**ancel.
+
+### 4. Verify the model
+
+MasterAI never hashes multi-gigabyte model files on a page load or chat
+request — it only trusts a persisted verification cache. Build that cache
+(or refresh it any time you add, replace, or remove a file under
+`models-root`) before a model can reach `Ready` state:
+
+```powershell
+.\build\Windows-x64\Release\masterai.exe verify-models .\models
+# or: .\scripts\rehash.ps1 -BuildType Release
+```
+
+```sh
+./build/Linux-x86_64/Release/masterai verify-models ./models
+```
+
+Large model files print `NN%` progress lines while they hash (every 10%, for
+files 256 MB or larger) instead of leaving the command silent until the whole
+file finishes — helpful when verifying several multi-gigabyte GGUF files back
+to back.
+
+If this step is skipped, chat creation fails with `model_not_ready` even
+though the model file is present.
+
+### 5. Start the service
+
+```powershell
 .\scripts\start.ps1 -BuildType Release -Foreground
 ```
 
-To run in the background instead:
+```sh
+sh ./scripts/start.sh ./config/settings.json Release --foreground
+```
+
+To run in the background instead, drop `-Foreground` / `--foreground`:
 
 ```powershell
 .\scripts\start.ps1 -BuildType Release
 ```
 
-### Linux
-
 ```sh
-sh ./scripts/configure.sh ./config/settings.json Release
-sh ./scripts/start.sh ./config/settings.json Release --foreground
+sh ./scripts/start.sh ./config/settings.json Release
 ```
 
-When running, the default local endpoint is:
+`start` runs the configuration wizard automatically (interactively only) if
+`config/settings.json` does not exist yet, so steps 3 and 5 can be combined
+on a first run if you prefer.
+
+On startup, before any administrator account exists, MasterAI logs a
+one-time setup token at warning level, e.g.:
+
+```text
+One-time first-administrator token: 3f9c1a...
+```
+
+Keep this token; you need it in the next step and it is not shown again
+(it is not persisted anywhere the process can hand back out).
+
+### 6. Create the first administrator and sign in
+
+Open the default local endpoint in a browser:
 
 ```text
 http://127.0.0.1:7070
 ```
 
-Useful health checks:
+The page detects that no administrator exists yet and shows a setup form
+instead of a login form. Paste the setup token from step 5, choose a
+username and password (or complete OS-identity setup if
+`allow_os_identity_accounts` was enabled), and submit. You are then signed
+in as the first administrator.
+
+### 7. Create a project (optional) and chat
+
+From `/app/projects`, register a project pointing at a local source
+directory if you want project-aware context; this is optional — chat also
+works with no project attached. From `/app/chat`, pick the verified model
+from step 4 and send a message.
+
+### Health checks
 
 ```text
 GET /health/live
 GET /health/ready
 ```
 
-`live` indicates that the process is running. `ready` can remain unavailable
-until required setup and security prerequisites are satisfied.
+`live` indicates that the process is running. `ready` stays unavailable
+until the first administrator exists and the configured sign-in path
+(local password and/or OS identity) is usable — it does not mean a model
+is loaded or verified.
+
+### Stopping and diagnostics
 
 Stop a background service:
 
@@ -576,16 +717,47 @@ masterai rotate-secret <settings> <secret-alias>
 masterai rotate-logs <settings> <maximum-bytes> <retained-files>
 masterai recover <settings>
 masterai runtime-root <settings>
+masterai models-root <settings>
 masterai upgrade <settings> <active> <candidate> <rollback-root>
 masterai rollback <settings> <active> <receipt>
 masterai performance-probe [iterations]
 masterai index-probe <project-root> [index-root]
+masterai calibrate <settings> <model-id> <auto|minimal|balanced|performance>
 masterai security-status [runtime-root]
 ```
 
 Download sources require approved immutable HTTPS URLs, explicit license
 acceptance, an immutable revision, exact size policy, and SHA-256 verification.
 Failed integrity checks are quarantined rather than promoted.
+
+`runtime-root <settings>` and `models-root <settings>` print the workspace's
+resolved, absolute `runtimeRoot`/`modelsRoot` directories. A relative path in
+`settings.json` resolves against **the directory holding that settings file**,
+not the process's current working directory or the project root — every
+lifecycle script (`start.ps1`, `stop.ps1`, `diagnose.ps1`, `rehash.ps1`) asks
+the binary for these instead of re-deriving the path itself, so they always
+agree with what the running server actually uses.
+
+## Scripts reference
+
+Every `scripts/*.ps1` (Windows) has a matching `scripts/*.sh` (Linux) with the
+same behavior and argument order unless noted. Run them from the repository
+root. `[settings-file]` always defaults to `config/settings.json` when
+omitted; `[BuildType]` always defaults to `Release` except where noted.
+
+| Script | Arguments | Purpose |
+|---|---|---|
+| `build.ps1` / `build.sh` | `-BuildType <Debug\|Release>` `-Platform <Windows-x64>` `-VerifyModels` `-ModelsRoot <path>` &nbsp;/&nbsp; `<BuildType> <Platform>` | Configures CMake (Ninja) and builds `masterai`, `masterai_core`, and the test binaries. Default `BuildType` is **Debug**. `-VerifyModels`/`-Platform Linux-x86_64\|Linux-arm64` runs `verify-models` after a successful build. |
+| `configure.ps1` / `configure.sh` | `[settings-file] [BuildType]` (`.ps1` takes `-Settings`/`-BuildType` named params) | Runs the interactive first-run/update/reset configuration wizard (`masterai configure`) and writes validated settings. Requires the binary from `build` to already exist. |
+| `start.ps1` / `start.sh` | `[settings-file] [BuildType] [-Foreground\|--foreground]` | Starts `masterai serve`. Runs `configure` automatically first if settings are missing (interactive terminals only). Without `-Foreground`/`--foreground`, launches detached and records the PID under `<runtime-root>/run/masterai.pid`. |
+| `stop.ps1` / `stop.sh` | `[settings-file] [BuildType]` | Requests graceful shutdown of the PID recorded by `start` and waits for exit. |
+| `test.ps1` / `test.sh` | `-BuildType <Debug\|Release> -Platform <Windows-x64>` &nbsp;/&nbsp; `<BuildType> <Platform>` | Runs `ctest` (the full native suite, `masterai_core_tests`) against an already-built tree. Default `BuildType` is **Debug**. |
+| `diagnose.ps1` / `diagnose.sh` | `[settings-file] [BuildType]` | Runs `masterai security-status` against the settings' configured runtime root. |
+| `rehash.ps1` (Windows only; Linux: run `masterai verify-models` directly) | `-Settings <path> -BuildType <Debug\|Release> -ModelsRoot <path>` | Hashes every file under `models-root` against its manifest and refreshes the verification cache (`models_root/.verified-cache.json`). Run after adding, replacing, or removing model files. When `-ModelsRoot` is omitted it resolves `workspace.modelsRoot` via `masterai models-root <settings>` (see above) rather than re-implementing the path resolution in PowerShell, so it always finds the same directory the server uses. Prints live `NN%` progress lines while hashing any file 256 MB or larger, instead of going silent until the whole model finishes. |
+| `clean.ps1` / `clean.sh` | `-WhatIf` &nbsp;/&nbsp; `--dry-run` | Deletes only the generated `build/` tree. Source, configuration, runtime data, and models are untouched. |
+| `verify-objectives.ps1` / `verify-objectives.sh` | none | Fails if `docs/objectives.md` has changed without a corresponding reassessed and re-cached hash in `docs/objectives.sha256`. |
+| `install-systemd.sh` (Linux only) | `<binary> <settings> <runtime-root> <models-root> <service-user>` | Installs and enables a hardened `masterai.service` systemd unit from fixed absolute paths. Does not build, download, create users, or modify settings. |
+| `uninstall-systemd.sh` (Linux only, run as root) | none | Disables and removes the installed systemd unit. Runtime data, settings, models, backups, and credentials are preserved. |
 
 ## Persistence, operations, and recovery
 
@@ -600,6 +772,7 @@ runtime/
 ├── projects/
 ├── attachments/
 ├── indexes/
+├── cache/
 ├── downloads/
 ├── benchmarks/
 ├── logs/
@@ -674,10 +847,15 @@ The completed bounded-memory foundation provides:
 - Inference admission and actionable rejection
 - Resource and request telemetry
 
-Planned performance phases add deadline-bound hybrid retrieval,
-security-partitioned caches, compatible prompt/KV reuse, host-specific
-calibration, and optional throughput features. None may bypass authorization,
-integrity, auditing, cancellation, quality checks, or memory ceilings.
+Deadline-bound hybrid retrieval, a security-partitioned cache hierarchy,
+compatible prompt/KV reuse, and host-specific calibration are now
+implemented on top of that foundation (Phases 16–19 in the status table
+above); each still has a real-model or real-hardware benchmark outstanding
+before its exit criterion is satisfied. Optional advanced-throughput
+features (Phase 20) exist only as a disabled-by-default registry scaffold —
+no candidate's optimization logic is implemented. None may bypass
+authorization, integrity, auditing, cancellation, quality checks, or memory
+ceilings.
 
 ## Repository layout
 
@@ -733,16 +911,19 @@ sh ./scripts/verify-objectives.sh
 
 Near-term work is:
 
-1. Validate Phase 15 on Windows Release (Debug already validated) and, longer
-   term, evaluate deeper language-aware symbol extraction.
-2. Implement Phase 16 deadline-bound hybrid retrieval with disclosed,
-   authorized context.
-3. Add Phase 17 byte-bounded, security-partitioned caches with precise
-   invalidation.
-4. Validate Phase 18 compatible runner prompt-prefix and KV/session reuse.
-5. Add Phase 19 evidence-backed host/model/backend calibration.
-6. Evaluate Phase 20 throughput options independently and only after all
-   prerequisite gates pass.
+1. Author the Phase 16 retrieval-quality evaluation set demonstrating
+   improvement over full-text-only retrieval.
+2. Author the Phase 17 representative-query latency benchmark comparing
+   cached against uncached retrieval preparation time.
+3. Record the Phase 18 same-host repeated-turn prompt-prefix/KV-session
+   reuse benchmark on a real pinned model/backend.
+4. Record the Phase 19 real-hardware-class calibration benchmark; add GPU
+   utilization/thermal-trend probing if an approved vendor SDK is adopted.
+5. Evaluate Phase 20 throughput options independently, each with its own
+   baseline and evidence, and only after all prerequisite gates pass — the
+   registry scaffold does not pre-approve any candidate.
+6. Longer term: evaluate deeper language-aware symbol extraction for
+   Phase 15.
 
 Outstanding operational certification also includes:
 
@@ -754,6 +935,8 @@ Outstanding operational certification also includes:
 - Live IDE-host validation
 - Ubuntu 24.04 and Debian 13 packaging-host certification
 - Optional pinned `whisper.cpp` integration, if enabled
+- Phase 18 same-host repeated-turn prompt-prefix/KV-session reuse benchmark
+- Phase 19 real-hardware-class calibration benchmark
 
 The detailed roadmap, deliverables, dependencies, installation outcomes, and
 exit criteria are maintained in [docs/PLAN.md](docs/PLAN.md).

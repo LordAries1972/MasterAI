@@ -21,6 +21,7 @@ public:
     JsonValue() = default;
     explicit JsonValue(bool value);
     explicit JsonValue(std::int64_t value);
+    explicit JsonValue(double value);
     explicit JsonValue(std::string value);
     explicit JsonValue(Array value);
     explicit JsonValue(Object value);
@@ -30,7 +31,11 @@ public:
     const Object& as_object() const;
     const Array& as_array() const;
     const std::string& as_string() const;
+    // Throws if this number was written with a fraction/exponent (see
+    // as_double()); manifests and our own request bodies never emit those,
+    // but upstream runner responses (e.g. llama.cpp timings) do.
     std::int64_t as_integer() const;
+    double as_double() const;
     bool as_boolean() const;
     const JsonValue& required(const std::string& key) const;
     JsonValue& required_mutable(const std::string& key);
@@ -41,6 +46,8 @@ private:
     Type type_{Type::null_value};
     bool boolean_{false};
     std::int64_t integer_{0};
+    double double_{0.0};
+    bool is_float_{false};
     std::string string_;
     Array array_;
     Object object_;

@@ -106,5 +106,41 @@
     "failed": true,
     "id": "20c491c1-d539-414f-baad-f46a33d39f61",
     "recordedAt": "2026-07-30T12:47:09.113Z"
+  },
+  {
+    "requestId": "99b29db9-f8b6-44da-9c03-5e6135c93e03",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "taskShape": "errorExplanation",
+    "latencyMs": 16014,
+    "inputTokens": 1090,
+    "outputTokens": 1000,
+    "failed": false,
+    "id": "856945d6-43a3-4fe3-87d2-b427a7ce62f7",
+    "recordedAt": "2026-07-30T23:26:31.357Z"
+  },
+  {
+    "requestId": "99b29db9-f8b6-44da-9c03-5e6135c93e03:schema-retry",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "taskShape": "errorExplanation",
+    "latencyMs": 10562,
+    "inputTokens": 1782,
+    "outputTokens": 1000,
+    "failed": false,
+    "id": "6000ad9e-e293-45aa-a7ac-77c62a25fd38",
+    "recordedAt": "2026-07-30T23:26:41.970Z"
+  },
+  {
+    "requestId": "cc83521d-a350-4530-aa2f-a7c161cc2c94",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "taskShape": "errorExplanation",
+    "latencyMs": 19930,
+    "inputTokens": 1035,
+    "outputTokens": 1571,
+    "failed": false,
+    "id": "802e71c1-395f-4108-9dda-1236d9fa994e",
+    "recordedAt": "2026-07-30T23:40:20.111Z"
   }
 ]

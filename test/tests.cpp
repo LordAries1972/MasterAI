@@ -9,6 +9,7 @@
 #include "server_internal.hpp"
 #include "test_support.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -82,11 +83,14 @@ void test_configuration_and_intranet_policy() {
     auto configuration = masterai::ConfigurationManager::safe_defaults();
     configuration.runtime_root = temporary.path() / "runtime";
     configuration.models_root = temporary.path() / "models";
+    configuration.runner_startup_timeout_seconds = 245U;
     masterai::ConfigurationManager::save_atomic(configuration, settings);
     const auto loaded = masterai::ConfigurationManager::load(
         settings, {{"MASTERAI_PORT", "7171"}}, {{"port", "7272"}});
     require(loaded.port == 7272U,
             "configuration precedence did not apply CLI after environment");
+    require(loaded.runner_startup_timeout_seconds == 245U,
+            "runner startup timeout did not round-trip through save/load");
 
     write_text(settings, "{\"unexpected\":true}");
     bool unknown_rejected = false;
@@ -342,11 +346,24 @@ void test_phase_five_chat_and_projects() {
     masterai::ChatStore chats(records);
     const auto chat = chats.create("operator", project.id, "coder-model");
     chats.append(chat.id, masterai::ChatRole::user, "Review this function.");
+    chats.append(chat.id, masterai::ChatRole::assistant,
+                "Line one.\nLine two.\n\tIndented.");
     const auto visible = chats.find_for_owner(chat.id, "operator");
-    require(visible.has_value() && visible->messages.size() == 1U,
+    require(visible.has_value() && visible->messages.size() == 2U,
             "owned chat history was not retained");
+    require(visible->messages[1].role == masterai::ChatRole::assistant &&
+                visible->messages[1].content ==
+                    "Line one.\nLine two.\n\tIndented.",
+            "assistant message was not retained verbatim");
     require(!chats.find_for_owner(chat.id, "another-user").has_value(),
             "chat ownership boundary was bypassed");
+    require(!chats.set_model(chat.id, "another-user", "other-model"),
+            "set_model bypassed the chat ownership boundary");
+    require(chats.set_model(chat.id, "operator", "other-model"),
+            "set_model failed for the chat's own owner");
+    require(chats.find_for_owner(chat.id, "operator")->model_id ==
+                "other-model",
+            "set_model did not persist the new model in memory");
 
     masterai::AttachmentStore attachments(temporary.path() / "attachments",
                                           records);
@@ -365,6 +382,61 @@ void test_phase_five_chat_and_projects() {
                 restored_attachments.find_for_owner(attachment.id, "operator")
                     .has_value(),
             "phase five records did not survive service reconstruction");
+    const auto restored_chat = restored_chats.find_for_owner(chat.id, "operator");
+    require(restored_chat->messages.size() == 2U &&
+                restored_chat->messages[0].content == "Review this function." &&
+                restored_chat->messages[1].content ==
+                    "Line one.\nLine two.\n\tIndented." &&
+                restored_chat->model_id == "other-model",
+            "chat messages/model did not survive the split header/message "
+            "persistence scheme across service reconstruction");
+}
+
+// Chat records written before the split header/message-per-key scheme
+// packed the whole chat -- header fields followed by every message inline --
+// into one "chats" value. ChatStore::restore() must still recognize and
+// migrate that shape (both the original 4-field header and the later
+// 6-field one) onto the current scheme without losing any message. This
+// hand-builds a legacy-format record the same way the old ChatStore::persist
+// once did, since nothing in the current code produces that shape anymore.
+void test_phase_five_chat_legacy_migration() {
+    const auto pack = [](const std::vector<std::string>& fields) {
+        std::string result;
+        for (const auto& field : fields) {
+            result += std::to_string(field.size()) + ":" + field;
+        }
+        return result;
+    };
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    const std::string chat_id(32U, 'a');
+    // Legacy 6-field header: owner, project, model, title, createdAt, count,
+    // followed by 3 fields per message (role, content, createdAt).
+    records.put("chats", chat_id,
+               pack({"operator", "proj", "coder-model", "Old chat", "1000", "2",
+                     "user", "First message.", "1000", "assistant",
+                     "Second message.\nWith a newline.", "1001"}));
+
+    masterai::ChatStore chats(records);
+    const auto restored = chats.find_for_owner(chat_id, "operator");
+    require(restored.has_value() && restored->messages.size() == 2U &&
+                restored->messages[0].content == "First message." &&
+                restored->messages[1].content ==
+                    "Second message.\nWith a newline." &&
+                restored->title == "Old chat",
+            "legacy inline-message chat record was not migrated correctly");
+
+    // The migration should have rewritten this chat onto the split scheme --
+    // reopening the store must not need to re-migrate, and the messages must
+    // still come back in order from "chat_messages".
+    masterai::ChatStore reopened(records);
+    const auto reopened_chat = reopened.find_for_owner(chat_id, "operator");
+    require(reopened_chat.has_value() && reopened_chat->messages.size() == 2U &&
+                reopened_chat->messages[0].content == "First message." &&
+                reopened_chat->messages[1].content ==
+                    "Second message.\nWith a newline.",
+            "migrated chat record did not survive a second reload");
 }
 
 void test_phase_six_download_policy() {
@@ -1276,9 +1348,11 @@ void test_phase_fifteen_disk_backed_indexing() {
     auto configuration = masterai::ConfigurationManager::safe_defaults();
     configuration.runtime_root = temporary.path();
     configuration.models_root = temporary.path() / "models";
+    masterai::CacheManager workload_cache(temporary.path() / "http-cache",
+                                          memory, masterai::CachePolicy{});
     masterai::server_internal::WorkloadHttpController workloads(
         configuration, projects, attachments, nullptr, nullptr, benchmarks,
-        service, audit);
+        service, audit, workload_cache);
     const masterai::UserRecord administrator{
         "admin", "TEST\\operator", "Operator",
         masterai::UserRole::administrator, true};
@@ -1597,6 +1671,442 @@ void test_phase_sixteen_deadline_bound_retrieval() {
             "query trace JSON omitted the retrieval disclosure");
 }
 
+void test_phase_seventeen_security_partitioned_cache() {
+    TemporaryDirectory temporary;
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware,
+        512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+
+    const auto cache_root = temporary.path() / "cache";
+    masterai::CachePolicy cache_policy;
+    cache_policy.maximum_bytes_per_category = 1024ULL * 1024ULL;
+
+    masterai::CacheKey base_key;
+    base_key.user_id = "user-a";
+    base_key.project_id = "project-a";
+    base_key.canonical_identity = "please look at retrieval_marker_symbol";
+    base_key.version_tag = "retrieval-v1";
+    base_key.index_generation = 1U;
+
+    // Repeated identical retrieval query: a miss, then a hit with the exact
+    // value that was stored, without ever touching RetrievalPlanner again.
+    {
+        masterai::CacheManager cache(cache_root, memory, cache_policy);
+        require(!cache.get(masterai::CacheCategory::retrieval_result, base_key)
+                     .has_value(),
+                "cache served a value before anything was ever put");
+        cache.put(masterai::CacheCategory::retrieval_result, base_key,
+                 "cached-context-text");
+        const auto hit =
+            cache.get(masterai::CacheCategory::retrieval_result, base_key);
+        require(hit.has_value() && *hit == "cached-context-text",
+                "cache did not return the exact value it was given");
+        const auto status = cache.status();
+        const auto found =
+            status.categories.find(masterai::CacheCategory::retrieval_result);
+        require(found != status.categories.end() && found->second.hits == 1U &&
+                    found->second.misses == 1U && found->second.entries == 1U,
+                "cache status did not reflect the recorded hit/miss/entry");
+    }
+
+    // Restart: a fresh CacheManager over the same cache_root can still read
+    // the previously-put entry, and status() reflects it immediately.
+    {
+        masterai::CacheManager cache(cache_root, memory, cache_policy);
+        const auto hit =
+            cache.get(masterai::CacheCategory::retrieval_result, base_key);
+        require(hit.has_value() && *hit == "cached-context-text",
+                "cache entry did not survive a simulated restart");
+    }
+
+    // A republished index generation makes the previous entry unreachable
+    // (structural staleness, not an active purge).
+    {
+        masterai::CacheManager cache(cache_root, memory, cache_policy);
+        auto newer_generation_key = base_key;
+        newer_generation_key.index_generation = 2U;
+        require(!cache
+                     .get(masterai::CacheCategory::retrieval_result,
+                         newer_generation_key)
+                     .has_value(),
+                "a stale index generation was still reachable after republish");
+    }
+
+    // invalidate_policy() makes a previously-cached key for the same
+    // identity unreachable.
+    {
+        masterai::CacheManager cache(cache_root, memory, cache_policy);
+        require(cache.get(masterai::CacheCategory::retrieval_result, base_key)
+                    .has_value(),
+                "setup for the policy-invalidation case lost its seed entry");
+        cache.invalidate_policy();
+        auto bumped_key = base_key;
+        bumped_key.policy_generation = cache.current_policy_generation();
+        require(!cache.get(masterai::CacheCategory::retrieval_result, bumped_key)
+                     .has_value(),
+                "invalidate_policy() left a prior-generation entry reachable "
+                "under the new generation");
+    }
+
+    // Cross-project and cross-user isolation: otherwise-identical identities
+    // never collide.
+    {
+        masterai::CacheManager cache(cache_root, memory, cache_policy);
+        cache.put(masterai::CacheCategory::retrieval_result, base_key,
+                 "project-a-value");
+        auto other_project_key = base_key;
+        other_project_key.project_id = "project-b";
+        require(!cache
+                     .get(masterai::CacheCategory::retrieval_result,
+                         other_project_key)
+                     .has_value(),
+                "a different project reused another project's cache entry");
+        auto other_user_key = base_key;
+        other_user_key.user_id = "user-b";
+        require(!cache
+                     .get(masterai::CacheCategory::retrieval_result,
+                         other_user_key)
+                     .has_value(),
+                "a different user reused another user's cache entry");
+    }
+
+    // Corruption: a tampered checksum on disk is a miss, not a throw or bad
+    // data, and the corrupt entry is removed (quarantine-by-deletion).
+    {
+        masterai::CacheManager cache(cache_root, memory, cache_policy);
+        masterai::CacheKey corrupt_key = base_key;
+        corrupt_key.canonical_identity = "corruption-fixture";
+        cache.put(masterai::CacheCategory::retrieval_result, corrupt_key,
+                 "original-value");
+        const auto entry_path = cache_root / "retrieval_result" /
+                                (corrupt_key.to_cache_id() + ".entry");
+        require(std::filesystem::is_regular_file(entry_path),
+                "cache entry was not written to the expected disk path");
+        {
+            std::ofstream corrupt(entry_path,
+                                  std::ios::binary | std::ios::trunc);
+            corrupt << "MASTERAI-CACHE-1 5 0000000000000000000000000000000000"
+                       "000000000000000000000000000000 - -\nWRONG";
+        }
+        require(!cache
+                     .get(masterai::CacheCategory::retrieval_result,
+                         corrupt_key)
+                     .has_value(),
+                "a checksum-corrupted cache entry was still served");
+        require(!std::filesystem::is_regular_file(entry_path),
+                "a corrupted cache entry was not quarantined by deletion");
+    }
+
+    // Segmented LRU capacity: filling a category past its byte cap evicts
+    // the oldest entry first and the category never exceeds its cap.
+    {
+        masterai::CachePolicy small_policy;
+        small_policy.maximum_bytes_per_category = 300U;
+        masterai::CacheManager cache(temporary.path() / "small-cache", memory,
+                                     small_policy);
+        std::vector<masterai::CacheKey> keys;
+        for (unsigned int index = 0U; index < 5U; ++index) {
+            masterai::CacheKey key = base_key;
+            key.canonical_identity = "lru-fixture-" + std::to_string(index);
+            keys.push_back(key);
+            cache.put(masterai::CacheCategory::retrieval_result, key,
+                     std::string(100U, 'x'));
+        }
+        require(!cache
+                     .get(masterai::CacheCategory::retrieval_result, keys.front())
+                     .has_value(),
+                "the oldest entry was not evicted once the category exceeded "
+                "its byte cap");
+        require(cache.get(masterai::CacheCategory::retrieval_result, keys.back())
+                    .has_value(),
+                "the most recently inserted entry was evicted before the "
+                "oldest");
+        const auto status = cache.status();
+        const auto found =
+            status.categories.find(masterai::CacheCategory::retrieval_result);
+        require(found != status.categories.end() &&
+                    found->second.used_bytes <=
+                        small_policy.maximum_bytes_per_category &&
+                    found->second.evictions > 0U,
+                "the cache category exceeded its configured byte cap");
+    }
+}
+
+// Phase 18: PromptSessionManager is process-lifetime, in-memory state with
+// no disk/network dependency, so it is exercised directly rather than
+// through a full HttpServer/fake-runner round trip -- the compatibility and
+// eviction rules it enforces are independent of how the runner itself is
+// launched (that part is covered separately by the --parallel launch-spec
+// check below).
+void test_phase_eighteen_prompt_session_reuse() {
+    masterai::SessionFingerprint fingerprint;
+    fingerprint.model_sha256 = "model-a-digest";
+    fingerprint.backend_executable = "/opt/llama-server";
+    fingerprint.architecture = "llama";
+    fingerprint.context_length = 4096U;
+    fingerprint.project_index_generation = 1U;
+
+    // No prior turn for this chat: reuse must be refused, never guessed.
+    {
+        masterai::PromptSessionManager sessions(4U, 300U);
+        const auto decision =
+            sessions.try_reuse("chat-a", fingerprint, "turn one prompt");
+        require(!decision.reuse,
+                "a chat with no recorded session was offered reuse");
+    }
+
+    // Identical fingerprint and a literal-prefix-extending second turn: the
+    // slot recorded after the first turn is offered back for the second.
+    {
+        masterai::PromptSessionManager sessions(4U, 300U);
+        const std::string turn_one = "system+turn-one";
+        const auto first_slot =
+            sessions.record("chat-a", fingerprint, turn_one, std::nullopt);
+        const std::string turn_two = turn_one + "+turn-two";
+        const auto decision =
+            sessions.try_reuse("chat-a", fingerprint, turn_two);
+        require(decision.reuse && decision.slot_id == first_slot,
+                "an identical-fingerprint, prefix-extending turn was not "
+                "offered its chat's own warm slot");
+    }
+
+    // A fingerprint mismatch (e.g. the chat's model or project index
+    // changed between turns) forces a fresh, uncached session.
+    {
+        masterai::PromptSessionManager sessions(4U, 300U);
+        const std::string turn_one = "system+turn-one";
+        sessions.record("chat-a", fingerprint, turn_one, std::nullopt);
+        auto changed = fingerprint;
+        changed.project_index_generation = 2U;
+        const auto decision = sessions.try_reuse(
+            "chat-a", changed, turn_one + "+turn-two");
+        require(!decision.reuse,
+                "a fingerprint mismatch (project reindex) was still offered "
+                "reuse");
+    }
+
+    // A non-prefix edit -- simulating an edited/resubmitted earlier turn --
+    // also forces a fresh session even though the fingerprint still
+    // matches.
+    {
+        masterai::PromptSessionManager sessions(4U, 300U);
+        sessions.record("chat-a", fingerprint, "system+original-turn-one",
+                        std::nullopt);
+        const auto decision = sessions.try_reuse(
+            "chat-a", fingerprint, "system+edited-turn-one+turn-two");
+        require(!decision.reuse,
+                "an edited earlier turn (non-prefix) was still offered "
+                "reuse");
+    }
+
+    // Slot-pool exhaustion evicts the least-recently-used chat rather than
+    // blocking or crashing, and the evicted chat's own next lookup then
+    // correctly misses.
+    {
+        masterai::PromptSessionManager sessions(2U, 300U);
+        sessions.record("chat-1", fingerprint, "p1", std::nullopt);
+        sessions.record("chat-2", fingerprint, "p2", std::nullopt);
+        sessions.record("chat-3", fingerprint, "p3", std::nullopt);
+        require(sessions.active_sessions() == 2U,
+                "the session pool grew past its configured slot count");
+        require(!sessions.try_reuse("chat-1", fingerprint, "p1x").reuse,
+                "the least-recently-used chat was not evicted when the slot "
+                "pool filled up");
+        require(sessions.try_reuse("chat-3", fingerprint, "p3x").reuse,
+                "the most recently recorded chat was evicted before the "
+                "least-recently-used one");
+    }
+
+    // A cancelled/failed turn must never be recorded as reusable state: the
+    // caller releases the chat's entry instead of calling record().
+    {
+        masterai::PromptSessionManager sessions(4U, 300U);
+        sessions.record("chat-a", fingerprint, "system+turn-one", std::nullopt);
+        sessions.release("chat-a");
+        require(!sessions.try_reuse("chat-a", fingerprint, "system+turn-one"
+                                                            "+turn-two")
+                     .reuse,
+                "a released (cancelled-turn) session was still offered "
+                "reuse");
+    }
+
+    // reset() drops every entry at once (runner unload/restart -- every
+    // slot's KV cache is gone with it).
+    {
+        masterai::PromptSessionManager sessions(4U, 300U);
+        sessions.record("chat-a", fingerprint, "p", std::nullopt);
+        sessions.reset();
+        require(sessions.active_sessions() == 0U,
+                "reset() did not clear every tracked session");
+    }
+
+    // The launch spec exposes as many llama.cpp server slots as
+    // PromptSessionManager's own pool, so slot ids it hands out are always
+    // addressable via id_slot.
+    {
+        TemporaryDirectory temporary;
+        const auto model_directory = temporary.path() / "model";
+        const auto model_file = model_directory / "model.gguf";
+        write_text(model_file, "GGUF-phase18-fixture");
+        masterai::ModelRecord model;
+        model.directory = model_directory;
+        model.state = masterai::ModelState::ready;
+        model.manifest.id = "phase18-fixture";
+        model.manifest.model_file = "model.gguf";
+        model.manifest.model_size_bytes =
+            std::filesystem::file_size(model_file);
+        model.manifest.model_sha256 = masterai::sha256_file_hex(model_file);
+        masterai::LlamaCppAdapter adapter(test_executable());
+        const auto spec = adapter.build_launch_spec(model, 4096U, 8080U, 4U);
+        const auto found =
+            std::find(spec.arguments.begin(), spec.arguments.end(), "--parallel");
+        require(found != spec.arguments.end() &&
+                    std::next(found) != spec.arguments.end() &&
+                    *std::next(found) == "4",
+                "the launch spec did not expose the configured slot count "
+                "via --parallel");
+    }
+}
+
+void test_phase_nineteen_calibration() {
+    // System-utilization sampling never throws and returns a plausible
+    // percentage regardless of host load.
+    const auto utilization = masterai::probe_system_utilization(20U);
+    require(utilization.cpu_percent >= 0.0 && utilization.cpu_percent <= 100.0,
+            "system CPU utilization sample was out of range");
+
+    TemporaryDirectory temporary;
+    const auto model_directory = temporary.path() / "model";
+    const auto model_file = model_directory / "model.gguf";
+    write_text(model_file, "GGUF-phase19-fixture");
+    masterai::ModelRecord model;
+    model.directory = model_directory;
+    model.state = masterai::ModelState::ready;
+    model.manifest.id = "phase19-fixture";
+    model.manifest.model_file = "model.gguf";
+    model.manifest.model_size_bytes = std::filesystem::file_size(model_file);
+    model.manifest.model_sha256 = masterai::sha256_file_hex(model_file);
+
+    const auto backend = fake_llama_executable();
+    require(std::filesystem::is_regular_file(backend),
+            "fake llama runner fixture is unavailable");
+    masterai::HardwareInfo hardware;
+    hardware.platform = "test-platform";
+    hardware.architecture = "x86_64";
+    hardware.logical_cpu_count = 4U;
+
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::TuningProfileStore store(records);
+
+    masterai::RunnerSupervisor supervisor(backend, temporary.path() / "runtime");
+    masterai::CalibrationService calibration(supervisor, store, hardware,
+                                             "backend-hash-one", "build-one");
+    std::atomic_bool cancellation{false};
+    const auto profile = calibration.calibrate(model, "balanced", 18090U,
+                                               cancellation);
+    require(profile.profile_name == "balanced" &&
+                profile.model_sha256 == model.manifest.model_sha256 &&
+                profile.backend_hash == "backend-hash-one" &&
+                profile.build_id == "build-one",
+            "calibration did not record its own host/model/backend/build "
+            "identity");
+    require(supervisor.metrics().state == masterai::RunnerState::unloaded,
+            "calibration left the runner loaded instead of unloading it");
+
+    // Re-resolving the same identity returns the just-persisted profile
+    // rather than a fabricated safe default.
+    const auto resolved =
+        calibration.resolve(model.manifest.model_sha256, "balanced");
+    require(resolved.cold_load_microseconds == profile.cold_load_microseconds &&
+                resolved.calibrated_at_epoch_seconds ==
+                    profile.calibrated_at_epoch_seconds,
+            "resolve() did not return the persisted calibration for a "
+            "matching identity");
+
+    // A restart-surviving TuningProfileStore over the same RecordStore still
+    // finds the persisted profile.
+    masterai::TuningProfileStore restored_store(records);
+    require(restored_store
+                .find(profile.host_hash, model.manifest.model_sha256,
+                     "backend-hash-one", "build-one")
+                .has_value(),
+            "persisted tuning profile was not restored across a simulated "
+            "restart");
+
+    // A backend change invalidates the profile: resolve() falls back to a
+    // safe default instead of returning stale evidence.
+    masterai::CalibrationService other_backend(supervisor, store, hardware,
+                                               "backend-hash-two", "build-one");
+    const auto fallback =
+        other_backend.resolve(model.manifest.model_sha256, "minimal");
+    require(fallback.backend_hash.empty() && fallback.profile_name == "minimal" &&
+                fallback.cold_load_microseconds == 0U,
+            "a backend-hash change did not invalidate the stale profile and "
+            "fall back to a safe default");
+
+    // safe_default_profile never fabricates a measurement and rejects an
+    // unknown profile name rather than silently defaulting.
+    const auto minimal_default = masterai::safe_default_profile("minimal");
+    require(minimal_default.recommended_context_length == 2048U &&
+                minimal_default.cold_load_microseconds == 0U,
+            "minimal safe-default profile did not match its documented "
+            "starting point");
+    bool unknown_rejected = false;
+    try {
+        static_cast<void>(masterai::safe_default_profile("nonexistent"));
+    } catch (const std::exception&) {
+        unknown_rejected = true;
+    }
+    require(unknown_rejected, "an unknown calibration profile name was accepted");
+}
+
+void test_phase_twenty_advanced_optimizations_disabled() {
+    masterai::AdvancedOptimizationRegistry registry;
+    const auto features = registry.features();
+    require(!features.empty(), "the advanced-optimization registry was empty");
+    for (const auto& feature : features) {
+        require(!feature.enabled,
+                "an advanced-optimization feature defaulted to enabled");
+        require(!feature.evidence.has_value(),
+                "an advanced-optimization feature had evidence before any "
+                "was recorded");
+    }
+    require(!registry.has_evidence("speculative_decoding"),
+            "has_evidence() reported evidence before any was recorded");
+
+    masterai::AdvancedOptimizationEvidence evidence;
+    evidence.feature_name = "speculative_decoding";
+    evidence.baseline_description = "single-model decoding";
+    evidence.changed_setting = "draft-model speculative decoding enabled";
+    evidence.host_hash = std::string(64U, 'a');
+    evidence.model_sha256 = std::string(64U, 'b');
+    evidence.backend_hash = "backend-hash";
+    registry.record_evidence("speculative_decoding", evidence);
+    require(registry.has_evidence("speculative_decoding"),
+            "recorded evidence was not retained");
+    const auto after = registry.features();
+    const auto found = std::find_if(
+        after.begin(), after.end(), [](const auto& feature) {
+            return feature.name == "speculative_decoding";
+        });
+    require(found != after.end() && !found->enabled,
+            "recording evidence enabled a Phase 20 feature; admission must "
+            "remain a separate, later decision");
+
+    bool unknown_rejected = false;
+    try {
+        registry.record_evidence("nonexistent_feature", evidence);
+    } catch (const std::exception&) {
+        unknown_rejected = true;
+    }
+    require(unknown_rejected,
+            "recording evidence for an unknown feature name was accepted");
+}
+
 }  // namespace
 
 int main() {
@@ -1617,6 +2127,7 @@ int main() {
         run("path containment", test_path_containment);
         run("runner supervisor", test_phase_four_runner_supervisor);
         run("chat and projects", test_phase_five_chat_and_projects);
+        run("chat legacy migration", test_phase_five_chat_legacy_migration);
         run("download policy", test_phase_six_download_policy);
         run("concurrent downloads", test_phase_sixteen_concurrent_downloads);
         run("benchmarks", test_phase_seven_benchmarks);
@@ -1630,6 +2141,13 @@ int main() {
         run("disk-backed indexing", test_phase_fifteen_disk_backed_indexing);
         run("live project watcher", test_phase_fifteen_project_watcher);
         run("deadline-bound retrieval", test_phase_sixteen_deadline_bound_retrieval);
+        run("security-partitioned cache",
+            test_phase_seventeen_security_partitioned_cache);
+        run("prompt-prefix session reuse",
+            test_phase_eighteen_prompt_session_reuse);
+        run("adaptive calibration", test_phase_nineteen_calibration);
+        run("advanced optimizations gated",
+            test_phase_twenty_advanced_optimizations_disabled);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

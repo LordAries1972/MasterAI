@@ -92,7 +92,8 @@ public:
                            RunnerSupervisor* inference,
                            DownloadManager* downloads,
                            BenchmarkStore& benchmarks,
-                           ProjectIndexService& indexes, AuditLog& audit);
+                           ProjectIndexService& indexes, AuditLog& audit,
+                           CacheManager& cache);
     ~WorkloadHttpController();
 
     WorkloadHttpController(const WorkloadHttpController&) = delete;

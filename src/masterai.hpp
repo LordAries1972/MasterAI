@@ -31,7 +31,12 @@ void log(LogLevel level, const std::string& event, const std::string& detail);
 bool constant_time_equal(const std::string& left, const std::string& right) noexcept;
 std::vector<std::uint8_t> secure_random(std::size_t size);
 std::string sha256_hex(const std::string& value);
-std::string sha256_file_hex(const std::filesystem::path& path);
+// progress, when set, is called after every chunk read with
+// (bytes_hashed_so_far, total_file_bytes) so a caller hashing a large file
+// can report live progress instead of blocking silently until it finishes.
+std::string sha256_file_hex(
+    const std::filesystem::path& path,
+    const std::function<void(std::uint64_t, std::uint64_t)>& progress = {});
 // PBKDF2-HMAC-SHA256 password hashing for locally stored accounts (never
 // used for OS-mapped accounts, which are always verified by LogonUserW/PAM).
 // Both functions consume and zero their `password` argument.
@@ -75,6 +80,10 @@ struct AppConfig {
     std::filesystem::path llama_server_executable;
     std::filesystem::path curl_executable;
     std::uint16_t runner_port{7081};
+    // Previously hardcoded to 30 seconds at the RunnerSupervisor::load() call
+    // site, which was too short for large models (e.g. DeepSeek-class) to
+    // finish cold-loading before readiness was declared timed out.
+    std::uint32_t runner_startup_timeout_seconds{120U};
     // On by default: a native ProjectWatcher observes every catalog project's
     // root for file saves and `.git/HEAD` branch switches and forwards them
     // into ProjectIndexService::request_update automatically. Off disables
@@ -89,6 +98,34 @@ struct AppConfig {
     std::uint64_t retrieval_maximum_context_bytes{16U * 1024U};
     std::uint32_t retrieval_maximum_chunks_per_source{6U};
     std::uint32_t retrieval_maximum_total_chunks{20U};
+    // Phase 17: security-partitioned cache hierarchy. Disabling it leaves
+    // every request path exactly as it behaves without Phase 17 (always a
+    // fresh RetrievalPlanner run, no reuse).
+    bool cache_enabled{true};
+    std::uint64_t cache_maximum_bytes_per_category{64ULL * 1024ULL * 1024ULL};
+    // Chat reply length policy: the previous unconfigurable
+    // GenerationOptions::max_tokens default (512) cut replies off well
+    // before the model's own end-of-turn token instead of letting them run
+    // until EOS/stop-sequence, which is what "max_tokens" is meant to be --
+    // a safety ceiling, not a target length. Bounded by the runner's own
+    // hard policy ceiling (32768, RunnerSupervisor::generate()).
+    std::uint32_t chat_max_reply_tokens{8192U};
+    std::uint32_t chat_context_length{4096U};
+    // Phase 18: runner prompt-prefix / KV-session reuse. Off by default --
+    // see docs/PLAN.md Phase 18 -- until a same-host repeated-turn benchmark
+    // records the exit-criterion evidence, matching how other real-model
+    // exit criteria in this project (Phases 4-7) remain outstanding until a
+    // pinned backend/model is exercised.
+    bool session_reuse_enabled{false};
+    unsigned int session_reuse_max_slots{4U};
+    std::uint32_t session_reuse_idle_retention_seconds{300U};
+    // Phase 19: whether POST /api/v1/performance/calibrate is permitted to
+    // run at all. The named profile calibration runs against is the
+    // existing memory.profile (resource_profile above, minimal/balanced/
+    // performance) plus an "auto" option accepted only at calibrate-request
+    // time -- Phase 19 deliberately does not add a second, competing
+    // persisted profile selector.
+    bool performance_auto_tune{true};
 };
 
 class ConfigurationManager final {
@@ -171,6 +208,22 @@ struct ProcessResourceSample {
 };
 
 ProcessResourceSample probe_process_resources();
+
+// Phase 19: a short blocking system-wide CPU-utilization and process-scoped
+// disk-byte sample used only for calibration evidence, never for admission
+// decisions. disk_read_bytes/disk_write_bytes are this process's own
+// cumulative I/O (simpler and sufficient for calibration, which measures the
+// runner it just launched, not whole-system I/O). Blocks for approximately
+// interval_milliseconds while it takes two spaced readings.
+struct SystemUtilizationSample {
+    double cpu_percent{0.0};
+    std::uint64_t disk_read_bytes{0};
+    std::uint64_t disk_write_bytes{0};
+};
+
+SystemUtilizationSample probe_system_utilization(
+    std::uint32_t interval_milliseconds = 100U);
+
 bool is_path_within(const std::filesystem::path& root,
                     const std::filesystem::path& candidate);
 bool valid_utf8_text(const std::string& value) noexcept;
@@ -376,9 +429,19 @@ public:
     // persists the results to the verification cache so subsequent scan()
     // calls recognize them as verified without re-hashing. Returns the
     // number of models newly confirmed verified.
+    // hash_progress, when set, is called periodically while a single model
+    // file is being hashed -- (model_id, bytes_hashed, total_bytes) -- so a
+    // large model doesn't leave the caller with no output at all until it
+    // finishes. Distinct from `progress` above (which only ever reports a
+    // model's final verified/failed outcome) so interim updates can never be
+    // mistaken for one more completed model.
     std::size_t verify(
         const std::function<void(const std::string& model_id, bool verified,
-                                 const std::string& message)>& progress) const;
+                                 const std::string& message)>& progress,
+        const std::function<void(const std::string& model_id,
+                                 std::uint64_t bytes_hashed,
+                                 std::uint64_t total_bytes)>& hash_progress =
+            {}) const;
 
 private:
     std::filesystem::path model_root_;
@@ -427,13 +490,34 @@ struct LaunchSpec {
     std::filesystem::path working_directory;
 };
 
+// Phase 19: optional backend-launch tuning a calibration profile can
+// recommend. Every field's default reproduces exactly what
+// build_launch_spec() emitted before Phase 19 (no GPU-layer flag, mmap left
+// on, no mlock, no explicit thread/batch override), so a caller that never
+// consults CalibrationService is unaffected.
+struct LaunchTuning {
+    unsigned int gpu_layers{0};
+    bool allow_memory_map{true};
+    bool allow_memory_lock{false};
+    unsigned int thread_count{0};
+    unsigned int batch_tokens{0};
+    unsigned int ubatch_tokens{0};
+};
+
 class LlamaCppAdapter final {
 public:
     explicit LlamaCppAdapter(std::filesystem::path approved_backend);
     bool available() const;
+    // Phase 18: parallel_slots exposes that many independent llama.cpp
+    // server KV-cache slots via --parallel so PromptSessionManager has slot
+    // ids to address with cache_prompt/id_slot requests. Defaulted to 1
+    // (today's pre-Phase-18 behavior) so existing callers that don't pass it
+    // are unaffected.
     LaunchSpec build_launch_spec(const ModelRecord& model,
                                  unsigned int context_length,
-                                 unsigned int port) const;
+                                 unsigned int port,
+                                 unsigned int parallel_slots = 1U,
+                                 const LaunchTuning& tuning = {}) const;
 
 private:
     std::filesystem::path approved_backend_;
@@ -453,6 +537,14 @@ struct GenerationOptions {
     double temperature{0.2};
     std::uint64_t seed{1};
     std::vector<std::string> stop_sequences;
+    // Phase 18: when cache_prompt is true, slot_id selects the llama.cpp
+    // server's own internal KV-cache slot to reuse instead of always
+    // re-evaluating the whole prompt from token zero. Left at their safe
+    // defaults (false / empty) for any caller that never consults
+    // PromptSessionManager, which is the only intended source of these
+    // values.
+    bool cache_prompt{false};
+    std::optional<unsigned int> slot_id;
 };
 
 struct GenerationResult {
@@ -482,7 +574,9 @@ public:
     RunnerSupervisor& operator=(const RunnerSupervisor&) = delete;
 
     void load(const ModelRecord& model, unsigned int context_length,
-              unsigned int port, std::uint32_t startup_timeout_seconds = 30);
+              unsigned int port, std::uint32_t startup_timeout_seconds = 30,
+              unsigned int parallel_slots = 1U,
+              const LaunchTuning& tuning = {});
     void unload(std::uint32_t grace_seconds = 10) noexcept;
     std::uint64_t tokenize(const std::string& text);
     GenerationResult generate(
@@ -566,15 +660,37 @@ public:
                       const std::string& model_id);
     void append(const std::string& chat_id, ChatRole role,
                 const std::string& content);
+    // Switches which model future messages in this chat are generated with;
+    // past messages/history are untouched. Returns false (no-op) if the chat
+    // doesn't exist or isn't owned by owner_id, so the caller can turn that
+    // into the same 404 find_for_owner()'s callers already return.
+    bool set_model(const std::string& chat_id, const std::string& owner_id,
+                   const std::string& model_id);
     std::optional<ChatRecord> find_for_owner(const std::string& chat_id,
                                              const std::string& owner_id) const;
     // Newest first, so callers can split "recent" from "history" by index
     // without re-sorting.
     std::vector<ChatRecord> list_for_owner(const std::string& owner_id) const;
+    // Deletes a chat and every one of its persisted messages. Returns false
+    // (no-op) if the chat doesn't exist or isn't owned by owner_id, so the
+    // caller can turn that into the same 404 find_for_owner()'s callers
+    // already return.
+    bool remove(const std::string& chat_id, const std::string& owner_id);
 
 private:
     void restore();
-    void persist(const ChatRecord& chat);
+    // Writes only the chat's own metadata (owner/project/model/title/
+    // createdAt) to the "chats" collection -- never the message list, so
+    // renaming a chat or switching its model stays a small, constant-size
+    // write regardless of how long the conversation already is.
+    void persist_header(const ChatRecord& chat);
+    // Writes exactly one message to the "chat_messages" collection under its
+    // own key (see message_key()), so append() costs one small write instead
+    // of re-serializing every prior message -- the previous scheme rewrote
+    // the whole chat on every append, which made the on-disk journal grow
+    // O(n^2) with conversation length.
+    void persist_message(const std::string& chat_id, std::size_t index,
+                         const ChatMessage& message);
     std::map<std::string, ChatRecord> chats_;
     RecordStore* records_{nullptr};
     // Guards chats_ against concurrent create/append/find/list calls.
@@ -784,6 +900,156 @@ private:
     RunnerSupervisor& inference_;
     BenchmarkStore& store_;
 };
+
+// Phase 19: adaptive hardware/model calibration. A TuningProfile records
+// exactly what CalibrationService measured for one host/model/backend/build
+// identity, plus the recommendations derived from that measurement.
+// Recalibration triggers are identity-based (Phase 17 CacheManager's own
+// "structural invalidation by key mismatch" idea): any change to host_hash,
+// model_sha256, backend_hash, or build_id makes TuningProfileStore::find()
+// return nothing, so callers fall back to safe_default_profile() rather than
+// silently reusing a stale measurement.
+struct TuningProfile {
+    std::string host_hash;
+    std::string model_sha256;
+    std::string backend_hash;
+    std::string build_id;
+    std::string profile_name{"balanced"};
+    unsigned int recommended_context_length{4096U};
+    unsigned int recommended_parallel_slots{1U};
+    unsigned int recommended_batch_tokens{0};
+    unsigned int recommended_gpu_layers{0};
+    bool recommended_allow_memory_map{true};
+    bool recommended_allow_memory_lock{false};
+    std::uint32_t recommended_idle_unload_seconds{600U};
+    std::uint64_t cold_load_microseconds{0};
+    std::uint64_t prompt_evaluation_microseconds{0};
+    std::uint64_t generation_microseconds{0};
+    std::uint64_t prompt_tokens_measured{0};
+    std::uint64_t generated_tokens_measured{0};
+    std::uint64_t peak_resident_memory_bytes{0};
+    std::uint64_t peak_commit_bytes{0};
+    std::uint64_t page_faults{0};
+    double average_cpu_percent{0.0};
+    std::uint64_t disk_read_bytes{0};
+    std::uint64_t disk_write_bytes{0};
+    std::uint64_t calibrated_at_epoch_seconds{0};
+};
+
+// A profile-name-keyed set of safe starting points (docs/PLAN.md section
+// 31.2) used whenever no matching persisted TuningProfile exists yet, or an
+// existing one was invalidated by a host/model/backend/build change. Never
+// throws and never depends on a real measurement.
+TuningProfile safe_default_profile(const std::string& profile_name);
+
+class TuningProfileStore final {
+public:
+    TuningProfileStore() = default;
+    explicit TuningProfileStore(RecordStore& records);
+    void save(const TuningProfile& profile);
+    std::optional<TuningProfile> find(const std::string& host_hash,
+                                      const std::string& model_sha256,
+                                      const std::string& backend_hash,
+                                      const std::string& build_id) const;
+    std::vector<TuningProfile> all() const;
+
+private:
+    void restore();
+    RecordStore* record_store_{nullptr};
+    std::vector<TuningProfile> profiles_;
+};
+
+// Runs a short, real measurement (cold load, one small and one medium prompt
+// through tokenize()/generate(), peak resident/commit/page-fault and
+// CPU%/disk-byte sampling) against an already-constructed RunnerSupervisor,
+// mirroring the Phase 7 BenchmarkRunner / Phase 15 index-probe pattern. It
+// never applies its own recommendation automatically -- callers decide
+// whether/when to load a model with the resulting LaunchTuning.
+class CalibrationService final {
+public:
+    CalibrationService(RunnerSupervisor& inference, TuningProfileStore& store,
+                       HardwareInfo hardware, std::string backend_hash,
+                       std::string build_id);
+
+    TuningProfile calibrate(const ModelRecord& model,
+                            const std::string& requested_profile,
+                            unsigned int port,
+                            const std::atomic_bool& cancellation);
+
+    // Returns the persisted profile matching the current host/model/
+    // backend/build identity, or a safe default for requested_profile if
+    // none matches (never fabricates a measurement).
+    TuningProfile resolve(const std::string& model_sha256,
+                         const std::string& requested_profile) const;
+
+    std::string host_hash() const;
+
+private:
+    RunnerSupervisor& inference_;
+    TuningProfileStore& store_;
+    HardwareInfo hardware_;
+    std::string backend_hash_;
+    std::string build_id_;
+};
+
+// Derives a LaunchTuning from a TuningProfile's recommendations so a caller
+// can pass it straight to RunnerSupervisor::load().
+LaunchTuning launch_tuning_from_profile(const TuningProfile& profile);
+
+std::string tuning_profile_json(const TuningProfile& profile);
+
+// Phase 20: optional advanced throughput, explicitly gated (docs/PLAN.md
+// section 25 -- "no feature in this phase is pre-approved for implementation
+// merely by appearing in the plan"). AdvancedOptimizationRegistry is a
+// structural placeholder: every candidate feature defaults to disabled and
+// stays disabled regardless of configuration, because nothing in this
+// codebase yet produces the evidence PLAN.md section 31.11 requires before a
+// feature may be admitted. This is scaffolding for a later phase, not an
+// implementation of any of the candidate optimizations themselves.
+struct AdvancedOptimizationEvidence {
+    std::string feature_name;
+    std::string baseline_description;
+    std::string changed_setting;
+    std::string host_hash;
+    std::string model_sha256;
+    std::string backend_hash;
+    double time_to_first_token_ms{0.0};
+    double prompt_throughput_tokens_per_second{0.0};
+    double generation_throughput_tokens_per_second{0.0};
+    std::uint64_t peak_resident_memory_bytes{0};
+    std::string quality_notes;
+    std::string power_thermal_notes;
+    bool regression_detected{false};
+    bool fallback_verified{false};
+};
+
+struct AdvancedOptimizationFeature {
+    std::string name;
+    std::string description;
+    // Always false. Recording evidence never flips this: whether a feature
+    // is ever admitted is a separate, later decision explicitly gated by
+    // docs/PLAN.md section 25, not something this registry can grant.
+    bool enabled{false};
+    bool requires_evidence{true};
+    std::optional<AdvancedOptimizationEvidence> evidence;
+};
+
+class AdvancedOptimizationRegistry final {
+public:
+    AdvancedOptimizationRegistry();
+    std::vector<AdvancedOptimizationFeature> features() const;
+    bool has_evidence(const std::string& feature_name) const;
+    // Stores an evidence record for later review. Cannot enable the
+    // feature; see AdvancedOptimizationFeature::enabled.
+    void record_evidence(const std::string& feature_name,
+                         const AdvancedOptimizationEvidence& evidence);
+
+private:
+    std::vector<AdvancedOptimizationFeature> features_;
+};
+
+std::string advanced_optimization_registry_json(
+    const std::vector<AdvancedOptimizationFeature>& features);
 
 struct PerformanceSample {
     std::string name;
@@ -1226,6 +1492,179 @@ public:
                                   std::uint64_t maximum_chunks_per_source,
                                   std::uint64_t maximum_total_chunks);
 };
+
+// Phase 17: one segment per kind of repeated work worth avoiding. Embedding,
+// tokenization, and prompt segments are declared now (matching the phases
+// that will produce them: 18-19) even though nothing writes into them yet --
+// the same "declared but no producer" shape Phase 16 used for retrieval
+// strategies its dependencies could not yet serve.
+enum class CacheCategory {
+    file_content,
+    parsed_chunk,
+    embedding,
+    retrieval_result,
+    tokenization,
+    prompt
+};
+
+std::string to_string(CacheCategory category);
+bool cache_category_from_string(const std::string& text, CacheCategory& out);
+
+// Every field that must match for a cached value to still be valid for a
+// caller. `policy_generation` and `index_generation` make membership/policy
+// changes and index republication an automatic miss rather than something a
+// cache must actively chase down and purge; `version_tag` folds in
+// parser/chunker/embedding/tokenizer/model/backend/prompt-template identity
+// so any of those changing is also an automatic miss.
+struct CacheKey {
+    std::string user_id;
+    std::string project_id;
+    std::uint64_t policy_generation{0};
+    std::string canonical_identity;
+    std::string content_digest;
+    std::string version_tag;
+    std::uint64_t index_generation{0};
+
+    std::string to_cache_id() const;
+};
+
+struct CacheCategoryStatus {
+    std::uint64_t capacity_bytes{0};
+    std::uint64_t used_bytes{0};
+    std::uint64_t entries{0};
+    std::uint64_t hits{0};
+    std::uint64_t misses{0};
+    std::uint64_t evictions{0};
+    std::uint64_t oldest_entry_age_seconds{0};
+};
+
+struct CacheStatus {
+    std::map<CacheCategory, CacheCategoryStatus> categories;
+};
+
+struct CachePolicy {
+    std::uint64_t maximum_bytes_per_category{64ULL * 1024ULL * 1024ULL};
+};
+
+// Byte-bounded, security-partitioned cache over disk-backed entries. Every
+// entry is addressed by a versioned CacheKey (see above), so a value is only
+// ever returned to a caller that presents the exact tenant/user/project,
+// policy generation, content identity/digest, component-version, and index
+// generation it was written under -- cross-project or cross-user reuse is
+// structurally impossible rather than policy-enforced. A cached lookup or
+// store is never itself an authorization decision: callers must already have
+// authorized the caller for the project before calling get()/put(), the same
+// discipline RetrievalPlanner (Phase 16) already follows.
+class CacheManager final {
+public:
+    CacheManager(std::filesystem::path cache_root, MemoryBudgetManager& memory,
+                CachePolicy policy);
+    ~CacheManager();
+    CacheManager(const CacheManager&) = delete;
+    CacheManager& operator=(const CacheManager&) = delete;
+
+    std::optional<std::string> get(CacheCategory category, const CacheKey& key);
+    void put(CacheCategory category, const CacheKey& key, std::string value);
+    // Drops every entry for one project (e.g. on project deletion). Not
+    // required for staleness -- generation-versioned keys already make a
+    // republished index or a policy change an automatic miss -- but keeps
+    // disk/RAM bytes from lingering for a project that no longer exists.
+    void invalidate_project(const std::string& project_id);
+    // Bumps the process-lifetime policy generation counter. Every CacheKey
+    // built after this call embeds the new generation, so every entry
+    // written under a prior generation becomes unreachable immediately.
+    void invalidate_policy();
+    std::uint64_t current_policy_generation() const;
+    CacheStatus status() const;
+    // Administrative forced eviction down to each category's configured
+    // capacity (a no-op for categories already within budget).
+    void trim();
+    void clear(std::optional<CacheCategory> category = std::nullopt);
+    static std::string to_json(const CacheStatus& status);
+
+private:
+    class State;
+    std::unique_ptr<State> state_;
+};
+
+// Phase 18: in-process registry of llama.cpp server "slot" reuse eligibility
+// for prompt-prefix / KV-session reuse across chat turns. Unlike CacheManager
+// (Phase 17) this never persists to disk -- the state being tracked (a live
+// KV cache inside the runner process) does not survive a runner restart
+// either, so an in-memory map that is naturally empty after a restart has
+// exactly the right lifetime. Every entry is keyed by chat id, which the
+// caller has already authorized for the requesting user/project before ever
+// reaching here (see HttpServer::State::send_chat_message /
+// ChatStore::find_for_owner), so reuse can never cross a chat/user/project
+// boundary.
+struct SessionFingerprint {
+    std::string model_sha256;
+    std::string backend_executable;
+    std::string architecture;
+    unsigned int context_length{0};
+    std::uint64_t project_index_generation{0};
+    // Phase 19: a calibration profile can change launch-affecting settings
+    // (GPU layers, batch size, mmap/mlock, thread count) that context_length
+    // alone does not capture. Callers that apply calibrated launch tuning
+    // set this to a hash of the tuning actually in effect so a recalibration
+    // that changes those settings invalidates any cached KV slot instead of
+    // falsely reusing it; callers that never apply calibration leave it
+    // empty, which still compares equal turn-to-turn and changes nothing
+    // for them.
+    std::string settings_fingerprint;
+
+    bool operator==(const SessionFingerprint& other) const;
+};
+
+struct SessionDecision {
+    bool reuse{false};
+    unsigned int slot_id{0};
+};
+
+class PromptSessionManager final {
+public:
+    PromptSessionManager(unsigned int max_slots,
+                         std::uint32_t idle_retention_seconds);
+    ~PromptSessionManager();
+    PromptSessionManager(const PromptSessionManager&) = delete;
+    PromptSessionManager& operator=(const PromptSessionManager&) = delete;
+
+    // Looks up whether `chat_id`'s previous turn can be resumed on its
+    // already-warm slot: the fingerprint must match exactly and
+    // `generation_prompt` must extend the prior turn's prompt as a literal
+    // byte-prefix (docs/PLAN.md Phase 18 "stable-prefix detection"). Reuse
+    // is refused -- never guessed -- on any mismatch, missing entry, or
+    // idle-expired entry.
+    SessionDecision try_reuse(const std::string& chat_id,
+                              const SessionFingerprint& fingerprint,
+                              const std::string& generation_prompt) const;
+    // Records a successful (non-cancelled) generation as the new reusable
+    // state for `chat_id`. When `reused_slot` is unset, allocates a fresh
+    // slot, evicting the least-recently-used entry first if the pool is
+    // full.
+    unsigned int record(const std::string& chat_id,
+                        const SessionFingerprint& fingerprint,
+                        const std::string& generation_prompt,
+                        std::optional<unsigned int> reused_slot);
+    // Drops any session state for `chat_id` (model unload, chat deletion, or
+    // a cancelled/failed generation that must not be reused next turn).
+    void release(const std::string& chat_id);
+    // Drops every entry (runner unloaded/restarted -- every slot's KV cache
+    // is gone with it).
+    void reset();
+    std::size_t active_sessions() const;
+
+private:
+    class State;
+    std::unique_ptr<State> state_;
+};
+
+// Internal (not a public API contract) length-prefixed serialization of a
+// RetrievalOutcome for storage in the retrieval-result cache segment. Not
+// JSON: RetrievalDisclosureEntry::score is a double and this codebase's JSON
+// parser deliberately rejects floating-point numbers (json.cpp).
+std::string serialize_retrieval_outcome(const RetrievalOutcome& outcome);
+RetrievalOutcome deserialize_retrieval_outcome(const std::string& encoded);
 
 struct McpInboundTool {
     std::string name;

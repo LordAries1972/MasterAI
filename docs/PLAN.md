@@ -124,14 +124,106 @@ Current phase status:
   improvement over full-text-only retrieval has not been produced and remains
   outstanding; the membership/policy invalidation exit criterion is satisfied
   by construction (see above) and by targeted tests.
-- Phase 17: Planned — introduce a security-partitioned, byte-bounded cache
-  hierarchy with precise invalidation and administrative trimming.
-- Phase 18: Planned — integrate compatible prompt-prefix and runner
-  KV/session reuse under hard memory and authorization boundaries.
-- Phase 19: Planned — calibrate each hardware/model/backend combination and
-  persist evidence-backed low-memory, balanced, or performance tuning.
-- Phase 20: Planned — evaluate advanced throughput features only after Phases
-  13–19 pass their gates; every feature remains independently disableable.
+- Phase 17: Implemented, exit validation pending — a `CacheManager` caches
+  Phase 16 retrieval results (the only Phase 17 segment with a real producer
+  today) behind versioned keys that embed user/project identity, a policy
+  generation, and the current index generation, so file, membership, and
+  policy changes invalidate reachability structurally rather than through
+  active purging; disk entries are atomic and checksum-quarantined, and
+  administrator-only status/trim/clear routes exist alongside
+  `GET /api/v1/system/memory`. A formal representative-query latency
+  benchmark remains outstanding.
+- Phase 18: Implemented, exit validation pending — a `PromptSessionManager`
+  (`src/session_cache.cpp`) tracks, per chat, whether the llama.cpp runner's
+  own internal KV-cache slot from the previous turn can be resumed for the
+  next one. Reuse requires an exact `SessionFingerprint` match (model
+  SHA-256, backend executable, chat-template architecture, context length,
+  and the chat's project index generation) and a literal byte-prefix match
+  between the new fully-templated prompt and the slot's last prompt;
+  anything else — a model switch, a project reindex, an edited/resubmitted
+  earlier turn — is refused rather than guessed. `RunnerSupervisor::generate()`
+  now sends `cache_prompt`/`id_slot` to the runner's `/completion` endpoint
+  only when a reuse decision grants them, and `LlamaCppAdapter::build_launch_spec()`
+  launches the runner with `--parallel <maxSlots>` so that many independent
+  slots exist to address. The session pool is bounded (`session.maxSlots`)
+  with least-recently-used eviction per chat, idle entries expire
+  (`session.idleRetentionSeconds`), a cancelled or failed turn releases its
+  chat's entry instead of ever recording it as reusable, and reuse never
+  crosses a chat/user/project boundary because entries are keyed by chat id,
+  which is already ownership-checked before `send_chat_message()` ever
+  consults the manager. Memory admission
+  (`HttpServer::State::send_chat_message`) now reserves KV bytes for the full
+  configured slot count, matching how llama.cpp itself preallocates KV cache
+  for every `--parallel` slot at load time. The whole feature defaults off
+  (`session.enabled=false`) until real-model validation is recorded, matching
+  how other real-model exit criteria in this project (Phases 4-7) remain
+  outstanding until a pinned backend/model is exercised. New
+  `test_phase_eighteen_prompt_session_reuse` covers: no fabricated reuse for
+  a chat with no prior turn; reuse granted for an identical-fingerprint,
+  prefix-extending turn; reuse refused on fingerprint mismatch; reuse refused
+  on a non-prefix (edited-turn) change; least-recently-used eviction once the
+  slot pool is full; a released (cancelled-turn) session never being offered
+  back; `reset()` clearing every entry; and the launch spec actually exposing
+  the configured slot count via `--parallel`. The exit criterion — a
+  same-host repeated-turn benchmark on a real pinned model/backend showing
+  reduced prompt-evaluation time and TTFT without incorrect output, stale
+  policy, memory-cap violation, or cross-boundary reuse — still requires that
+  real backend/model and remains outstanding, consistent with how Phases 4-7
+  already record that limitation. Chat reply length and context length also
+  moved off hardcoded constants in this change: the previous unconfigurable
+  512-token reply cap (well below the runner's own 32768-token policy
+  ceiling) cut long replies off before the model's own end-of-turn token;
+  `inference.chatMaxReplyTokens` (default 8192) and
+  `inference.chatContextLength` (default 4096, matching the prior constant)
+  are now configurable.
+- Phase 19: Implemented, exit validation pending — a `CalibrationService`
+  (`src/calibration.cpp`) drives a real `RunnerSupervisor` through a cold
+  load and two `generate()` calls (near-zero-token for prompt-evaluation
+  timing, a short generation for generation timing) and persists the result
+  as a `TuningProfile` in a new `TuningProfileStore`, keyed by host hash
+  (`sha256_hex(hardware_info_json(...))`, matching the Phase 13 baseline
+  hashing convention), model SHA-256, backend executable digest, and build
+  id. Any change to that identity makes the stored profile unreachable, so
+  `CalibrationService::resolve()` falls back to `safe_default_profile()`
+  (the minimal/balanced/performance starting points from section 31.2)
+  instead of ever reusing stale evidence — the same structural-invalidation
+  approach Phase 17's `CacheManager` already uses. `LlamaCppAdapter::build_launch_spec`
+  gained an optional `LaunchTuning` (GPU layers, mmap/mlock, thread count,
+  batch/ubatch tokens) so a calibrated recommendation has concrete launch
+  arguments to land in; every field defaults to today's pre-Phase-19
+  behavior, so existing callers are unaffected. `probe_system_utilization()`
+  (`src/platform.cpp`) adds real system-wide CPU% (Windows `GetSystemTimes`
+  deltas / Linux `/proc/stat` deltas) and this-process disk read/write bytes
+  (`GetProcessIoCounters` / `/proc/self/io`) as calibration-only evidence,
+  never used for memory admission. `SessionFingerprint` (Phase 18) gained a
+  `settings_fingerprint` field bound to the active resource profile so a
+  profile switch that changes launch tuning can never be mistaken for a
+  reusable KV slot. A new `calibrate` CLI command and authenticated
+  administrator-only `GET /api/v1/performance/profile/{modelId}/{profile}`,
+  `GET /api/v1/performance/recommendations`, and
+  `POST /api/v1/performance/calibrate` routes expose it, distinct from the
+  pre-existing Phase 13 `/api/v1/performance/baseline` route under the same
+  prefix. GPU utilization and thermal-trend probing are not implemented —
+  no vendor SDK (NVML/ADL) is an approved dependency per ADR-0003 — and
+  remain forward work, as does the exit criterion itself: a real-hardware-
+  class benchmark showing the selected profile outperforms safe defaults or
+  reduces peak memory without unacceptable quality regression, consistent
+  with how Phases 4–7 already leave their own real-model exit criteria
+  outstanding until a pinned backend/model is exercised on real hardware.
+- Phase 20: Planned and gated, scaffolding only — an
+  `AdvancedOptimizationRegistry` (`src/optimization_registry.cpp`) declares
+  the six candidate features from section 25 (continuous batching,
+  speculative decoding, NUMA affinity, storage prefetch, multiple warm
+  runners, GPU/CPU KV placement) and an `AdvancedOptimizationEvidence`
+  schema matching section 31.11's required fields, exposed read-only via
+  `GET /api/v1/performance/advanced-optimizations`. Every feature defaults
+  to `enabled=false`, and no code path — including `record_evidence()` —
+  can ever set it to `true`: recording evidence is structurally separate
+  from admission, matching the plan's explicit statement that "no feature
+  in this phase is pre-approved for implementation merely by appearing in
+  the plan." No optimization logic is implemented for any candidate; this
+  is a place for a later phase's real, evidence-backed work to attach, not
+  an implementation of that work.
 
 Status policy:
 
@@ -147,6 +239,49 @@ as explicitly deferred. Phase 4–7 implementation tests do not substitute for
 the real backend/model, interrupted external transfer, and same-host benchmark
 exit checks listed above. Phase 8 still requires its external-client
 operational check.
+
+Validation evidence recorded on 2026-08-01:
+
+- `inference.startupTimeoutSeconds` (`AppConfig::runner_startup_timeout_seconds`,
+  default raised from a previously hardcoded, non-configurable 30 seconds to
+  120 seconds) replaces the literal `30U` `RunnerSupervisor::load()` was
+  called with at `server.cpp`'s `ensure_model_loaded()`, fixing a real
+  `"runner readiness timed out"` failure observed cold-loading a
+  DeepSeek-class model. Windows x64 Debug and Release builds completed and
+  `masterai_core_tests` passed, including a new save/reload round-trip
+  assertion for the field in `test_configuration_and_intranet_policy`.
+- Phase 19 implemented: `CalibrationService`/`TuningProfileStore`
+  (`src/calibration.cpp`), `probe_system_utilization()`
+  (CPU%/disk-byte evidence, `src/platform.cpp`), `LaunchTuning` on
+  `LlamaCppAdapter::build_launch_spec`/`RunnerSupervisor::load()`
+  (`src/models.cpp`, `src/inference.cpp`), a `settings_fingerprint` field on
+  `SessionFingerprint` (`src/session_cache.cpp`), the `performance.autoTune`
+  configuration section, a `calibrate` CLI command, and administrator-only
+  `GET /api/v1/performance/profile/{modelId}/{profile}`,
+  `GET /api/v1/performance/recommendations`, and
+  `POST /api/v1/performance/calibrate` routes. New
+  `test_phase_nineteen_calibration` covers: a real `fake_llama_executable()`-backed
+  calibration run recording its own host/model/backend/build identity;
+  `resolve()` returning the persisted profile for a matching identity and
+  restoring it across a simulated restart; a backend-hash change correctly
+  invalidating the profile and falling back to `safe_default_profile()`;
+  and an unknown profile name being rejected rather than silently
+  defaulted. Windows x64 Debug and Release builds completed and
+  `masterai_core_tests` passed. GPU utilization/thermal-trend probing and
+  the real-hardware-class exit benchmark remain outstanding (no approved
+  GPU vendor SDK per ADR-0003).
+- Phase 20 implemented as scaffolding only:
+  `AdvancedOptimizationRegistry`/`AdvancedOptimizationEvidence`
+  (`src/optimization_registry.cpp`) declare the six candidate features from
+  section 25, every one defaulting to `enabled=false` with no code path able
+  to change that, exposed read-only via
+  `GET /api/v1/performance/advanced-optimizations`. New
+  `test_phase_twenty_advanced_optimizations_disabled` covers: every
+  registry entry defaulting to disabled with no evidence; `record_evidence()`
+  retaining evidence without ever enabling the feature; and an unknown
+  feature name being rejected. No candidate optimization's actual logic is
+  implemented. Windows x64 Debug and Release builds completed and
+  `masterai_core_tests` passed.
 
 Validation evidence recorded on 2026-07-31:
 
@@ -224,6 +359,65 @@ Validation evidence recorded on 2026-07-31:
   highest-ranked evidence and disclosing the rest as omitted under a byte
   cap; and a recorded retrieval disclosure surviving a later successful
   `QueryCoordinator::finish()` call.
+- A second Windows Debug and Release build/test pass (same day) validates
+  Phase 17: a new `CacheManager` (`src/cache.cpp`), the `cache.*`
+  configuration section (`enabled`, `maximumBytesPerCategory`), wiring a
+  cache lookup/store around the existing `RetrievalPlanner::retrieve` call
+  in `send_chat_message` (new `HttpServer::State::retrieve_with_cache`), a
+  `cacheHit` field added to the existing `retrievalDisclosure` JSON, three
+  new administrator-only `/api/v1/system/cache`,
+  `/api/v1/system/cache/trim`, and `/api/v1/system/cache/clear` routes, and
+  `invalidate_policy()` calls from user creation and project creation. The
+  new `test_phase_seventeen_security_partitioned_cache` case passed in both
+  build types, covering repeated-query hit/miss, entry survival across a
+  simulated restart (a second `CacheManager` over the same cache root),
+  unreachability after a republished index generation and after
+  `invalidate_policy()`, checksum-corrupted-entry quarantine-by-deletion,
+  segmented-LRU eviction never exceeding a category's configured byte cap,
+  and cross-project/cross-user isolation. Fixing this test surfaced and
+  corrected a real use-after-free in `CacheManager::State::evict_locked`
+  (it took the entry iterator by reference from callers that passed a
+  reference living inside the eviction index's own map storage, then erased
+  that same map entry before finishing with the now-dangling reference;
+  fixed by taking the iterator by value and reading out every field needed
+  before erasing anything) that was reliably reproducible as a
+  nondeterministic crash before the fix and is now covered by the
+  overwrite-existing-key and corruption paths the new test exercises.
+- A third Windows Debug and Release build/test pass (same day) validates
+  Phase 18: the new `PromptSessionManager` (`src/session_cache.cpp`),
+  `GenerationOptions::cache_prompt`/`slot_id` plumbed into
+  `RunnerSupervisor::generate()`'s `/completion` request body, `--parallel`
+  added to `LlamaCppAdapter::build_launch_spec()` and threaded through
+  `RunnerSupervisor::load()`, the new `session.*` configuration section
+  (`enabled`, `maxSlots`, `idleRetentionSeconds`), and `send_chat_message()`
+  consulting `PromptSessionManager::try_reuse()`/`record()`/`release()`
+  around generation, with KV memory admission scaled by the configured slot
+  count. Also in this pass: `inference.chatMaxReplyTokens` (default 8192,
+  replacing an unconfigurable 512-token cap that cut long replies off before
+  the model's own end-of-turn token) and `inference.chatContextLength`
+  (default 4096, the prior hardcoded constant, now configurable). The new
+  `test_phase_eighteen_prompt_session_reuse` case passed in both build
+  types, covering: no reuse for a chat with no prior turn; reuse granted for
+  a matching-fingerprint, prefix-extending turn; reuse refused on a
+  fingerprint mismatch and on a non-prefix (edited-turn) change;
+  least-recently-used slot-pool eviction; a released (cancelled-turn)
+  session never being offered back; `reset()` clearing every entry; and the
+  launch spec exposing the configured slot count via `--parallel`. Fixing
+  this required adding `session` to the top-level configuration schema
+  allow-list (`ConfigurationManager::load`'s `require_only(root, ...)`
+  call), which `ConfigurationManager::serialize()` had started emitting a
+  `session` section for but the loader did not yet accept -- caught by
+  `test_configuration_and_intranet_policy`'s existing save/reload
+  round-trip. Also in this pass: `src/web_ui.cpp`'s Markdown renderer now
+  preserves a numbered list's own leading numbers (`<ol start="N">` plus a
+  per-item `<li value="M">`) instead of letting the browser silently
+  renumber every list from 1; fenced code blocks keep their language tag as
+  a `language-xxx` class on the emitted `<code>` element; and a failed chat
+  turn (network drop, backend error) now renders inside the reply's own
+  chat bubble (styled distinctly via a new `.chatMsg-error` class) instead
+  of only appearing in the easy-to-miss status line above the composer,
+  while a genuinely cancelled turn still leaves its partial reply
+  untouched.
 
 Validation evidence recorded on 2026-07-30:
 
@@ -352,15 +546,26 @@ These objective groups are not yet implemented or not yet validated:
   comparison, optional whisper.cpp integration, and MCP transports.
 - Ubuntu 24.04 and Debian 13 packaging certification (deferred by operator)
   plus later-phase conformance and performance suites.
-- Remaining Phase 17–20 performance expansion: bounded cache layers, safe
-  prompt reuse, host calibration, and optional advanced throughput work.
+- Remaining Phase 18–20 real-model exit validation: Phase 18's same-host
+  repeated-turn prompt-prefix/KV-session reuse benchmark, Phase 19's
+  real-hardware-class calibration benchmark (GPU utilization and
+  thermal-trend probing also remain forward work — no approved vendor SDK
+  exists), and every Phase 20 candidate optimization, which stays
+  unimplemented behind `AdvancedOptimizationRegistry`'s structural
+  disabled-by-default gate until its own evidence is produced.
   Phase 15 (representative indexing ceiling evidence, live change-source
-  adapters, portable-versus-native I/O benchmark decision) and Phase 16
+  adapters, portable-versus-native I/O benchmark decision), Phase 16
   (deadline-bound hybrid retrieval over the strategies Phase 15's index can
-  serve today) are implemented and validated as described above; Phase 16's
-  authored retrieval-quality evaluation set remains outstanding, and
-  semantic/dependency/conversation-memory/MCP-resource retrieval strategies
-  remain deferred forward work pending their own supporting infrastructure.
+  serve today), and Phase 17 (security-partitioned caching of Phase 16
+  retrieval results, versioned-key isolation, atomic checksum-quarantined
+  disk entries, and administrative status/trim/clear) are implemented and
+  validated as described above; Phase 16's authored retrieval-quality
+  evaluation set and Phase 17's representative-query latency benchmark
+  remain outstanding, semantic/dependency/conversation-memory/MCP-resource
+  retrieval strategies remain deferred forward work pending their own
+  supporting infrastructure, and Phase 17's file_content/parsed_chunk/
+  embedding/tokenization/prompt cache segments remain declared without a
+  real producer until the phases that generate that content exist.
 
 ## 1. Executive Design
 
@@ -2205,7 +2410,46 @@ Exit criteria:
 
 ### Phase 17 — Security-partitioned cache hierarchy
 
-Status: Planned.
+Status: Implemented, exit validation pending. `CacheManager`
+(`src/cache.cpp`) is wired into `send_chat_message`'s existing retrieval
+step, replacing nothing (a cache miss falls through to exactly the Phase 16
+`RetrievalPlanner::retrieve` call that already existed): a repeated chat
+message against an unchanged index generation and policy generation is
+served from the cache instead of rerunning retrieval, and the disclosure
+already surfaced through `/api/v1/queries/{id}` (Phase 16) now carries a
+truthful `cacheHit` field. Six segments exist (`file_content`,
+`parsed_chunk`, `embedding`, `retrieval_result`, `tokenization`, `prompt`)
+with independent byte caps, segmented LRU eviction, and hit/miss/eviction/age
+metrics; only `retrieval_result` has a real producer today, since no
+parsing/embedding/tokenization pipeline exists yet to populate the other
+five -- the same "declared but no producer" shape Phase 16 used for
+retrieval strategies its own dependencies could not yet serve. Versioned
+`CacheKey`s fold in user/project identity, a process-lifetime policy
+generation (bumped on user and project creation), canonical
+identity/digest, a component-version tag, and index generation, so a file
+change, a membership/permission change, or a stale index generation makes
+the previous entry unreachable structurally rather than through active
+invalidation -- consistent with how `RetrievalPlanner` itself already
+re-reads the index generation on every call instead of caching it. Disk
+entries are written atomically (temp file, then platform-native atomic
+rename) with a checksum verified on every read; a checksum mismatch is
+quarantined by deletion and reported as a miss rather than ever served, and
+a scan at construction makes disk entries and `status()` immediately
+correct after a restart. Authenticated `GET /api/v1/system/cache`,
+`POST /api/v1/system/cache/trim`, and `POST /api/v1/system/cache/clear`
+(administrator-only, alongside the existing `GET /api/v1/system/memory`)
+give visibility and forced eviction without needing to restart the server.
+`test_phase_seventeen_security_partitioned_cache` in `test/tests.cpp`
+covers repeated-query hit/miss, restart persistence, stale-generation and
+policy-generation invalidation, corrupted-checksum quarantine, segmented-LRU
+capacity enforcement, and cross-project/cross-user isolation, and the full
+suite is Windows Debug/Release validated (2026-07-31). Per-project/per-user
+quotas beyond each category's shared byte cap, cache bytes participating in
+live `MemoryBudgetManager` pressure-driven trimming (today `trim()` is only
+administrator- or caller-invoked, not triggered automatically by a pressure
+transition), and a formal representative-query latency benchmark comparing
+cached against uncached preparation time remain outstanding -- the first
+exit criterion below is not yet demonstrated with recorded evidence.
 
 Purpose:
 
@@ -2295,7 +2539,9 @@ Exit criteria:
 
 ### Phase 19 — Adaptive hardware and model calibration
 
-Status: Planned.
+Status: Implemented, exit validation pending (see the dated validation
+evidence entry above for what shipped and what real-hardware-class
+measurement remains outstanding).
 
 Purpose:
 
@@ -2340,7 +2586,10 @@ Exit criteria:
 ### Phase 20 — Optional advanced throughput
 
 Status: Planned and gated; no feature in this phase is pre-approved for
-implementation merely by appearing in the plan.
+implementation merely by appearing in the plan. An `AdvancedOptimizationRegistry`
+scaffold (see the dated validation evidence entry above) declares every
+candidate feature disabled-by-default with a ready-made evidence schema; no
+candidate's actual optimization logic is implemented.
 
 Purpose:
 

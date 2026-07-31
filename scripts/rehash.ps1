@@ -23,14 +23,19 @@ if (-not $ModelsRoot) {
     if (-not (Test-Path -LiteralPath $Settings -PathType Leaf)) {
         throw "MasterAI settings file not found: $Settings"
     }
-    $config = Get-Content -LiteralPath $Settings -Raw | ConvertFrom-Json
-    $ModelsRoot = $config.workspace.modelsRoot
-    if (-not $ModelsRoot) {
-        throw 'workspace.modelsRoot is missing from settings.'
+    # Asks the binary to resolve workspace.modelsRoot instead of parsing the
+    # JSON and resolving the relative path ourselves: a relative modelsRoot
+    # resolves against the directory holding settings.json (see
+    # ConfigurationManager::load's resolve_workspace_path in config.cpp), not
+    # against the project root -- resolving it here against $projectRoot
+    # previously pointed at the wrong directory whenever settings.json lived
+    # somewhere other than "<project root>/config". start.ps1/stop.ps1 already
+    # get runtimeRoot the same way, via the runtime-root command.
+    $ModelsRoot = (& $binary models-root $Settings).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $ModelsRoot) {
+        throw "Failed to resolve workspace.modelsRoot from $Settings"
     }
     if (-not [IO.Path]::IsPathRooted($ModelsRoot)) {
-        # Settings store this relative to the project root, the same way
-        # start/stop resolve runtimeRoot.
         $ModelsRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot $ModelsRoot))
     }
 }
