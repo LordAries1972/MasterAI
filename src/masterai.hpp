@@ -6,20 +6,24 @@
 // depend on stable interfaces rather than platform-specific details.
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <iosfwd>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -223,6 +227,635 @@ struct SystemUtilizationSample {
 
 SystemUtilizationSample probe_system_utilization(
     std::uint32_t interval_milliseconds = 100U);
+
+// Phase 21: native asynchronous storage and prefetch engine.
+//
+// Scope note: this is a deliberately scoped-down implementation of
+// docs/PLAN.md's Phase 21 deliverable (see the approved implementation plan
+// for the full rationale). It provides a real Windows IOCP/overlapped
+// backend and a real bounded pread worker-pool backend (the plan's
+// explicitly-allowed fallback, used unconditionally on POSIX), a read
+// coalescer, an adaptive queue-depth policy, and per-request cancellation.
+// It does not implement Linux io_uring or memory-mapped file regions --
+// those remain follow-on work, honestly out of scope for this pass.
+
+// Measured storage latency classification. Extends platform.cpp's
+// probe_storage_class() (device-type only, e.g. "fixed"/"removable"/
+// "network") with a timed random-read sample so callers can tell a slow
+// spinning disk apart from a fast NVMe SSD even though the OS reports both
+// as "fixed".
+struct StorageLatencyProfile {
+    std::string storage_class{"unknown"};   // from probe_storage_class()
+    double measured_read_latency_us{0.0};   // mean 4KB random-read latency
+    bool sequential{true};                  // true => caller should not fan out reads
+};
+
+// Times a small number of 4KB random reads against a scratch file created
+// under `scratch_directory` (removed again afterward) to produce a
+// StorageLatencyProfile for `storage_class`. Never throws: any probing
+// failure (directory not writable, etc.) yields a conservative
+// sequential-only profile so callers gating fan-out on `sequential` fail
+// safe toward the pre-Phase-21 serialized behavior rather than guessing.
+StorageLatencyProfile probe_storage_latency(
+    const std::filesystem::path& scratch_directory,
+    const std::string& storage_class);
+
+// Adaptive queue-depth policy keyed to a measured storage profile: how many
+// concurrent reads an async reader backend may have in flight at once.
+// HDD-shaped latency and non-local media (network/removable/optical) stay
+// serialized (depth 1) so fan-out cannot thrash a disk head or saturate a
+// slow link; fast local media gets a small bounded parallel depth. This is
+// intentionally conservative rather than throughput-maximizing.
+std::size_t adaptive_queue_depth(const StorageLatencyProfile& profile);
+
+// Result of one async read. `buffer` is only meaningful when `succeeded` is
+// true -- a cancelled or failed request always leaves it empty so no
+// partial or unverified data is ever observable by a caller.
+struct AsyncReadResult {
+    std::string buffer;
+    bool succeeded{false};
+    bool cancelled{false};
+    std::string diagnostic;
+};
+
+// Per-request cancellation token. cancel() is safe to call from any thread,
+// any number of times, before or after the read completes. A request
+// cancelled before or during flight releases its buffer and reports
+// cancelled=true instead of publishing partial bytes -- see AsyncReadResult.
+class AsyncReadCancellationToken final {
+public:
+    void cancel() noexcept { cancelled_.store(true, std::memory_order_release); }
+    bool is_cancelled() const noexcept {
+        return cancelled_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::atomic_bool cancelled_{false};
+};
+
+// Replaceable backend interface. One instance owns a bounded worker/
+// completion-port resource and may serve many read_range() calls, up to its
+// configured queue depth, from possibly-concurrent caller threads.
+class IAsyncFileReader {
+public:
+    virtual ~IAsyncFileReader() = default;
+    // Reads [offset, offset+length) from `path`. Blocks the calling thread
+    // until the read settles (completes, fails, or `token` is cancelled) --
+    // callers wanting overlap issue reads from multiple threads; the
+    // backend's internal queue-depth bound still caps real I/O concurrency.
+    virtual AsyncReadResult read_range(const std::filesystem::path& path,
+                                       std::uint64_t offset,
+                                       std::uint64_t length,
+                                       AsyncReadCancellationToken& token) = 0;
+};
+
+#ifdef _WIN32
+// Real Windows backend: CreateFile with FILE_FLAG_OVERLAPPED, reads
+// completed via an IOCP completion port serviced by a small bounded
+// worker-thread pool (pimpl'd so windows.h stays out of this header, same
+// convention as ProjectIndexer/ProjectIndexService below).
+class Win32OverlappedFileReader final : public IAsyncFileReader {
+public:
+    explicit Win32OverlappedFileReader(std::size_t queue_depth);
+    ~Win32OverlappedFileReader() override;
+    Win32OverlappedFileReader(const Win32OverlappedFileReader&) = delete;
+    Win32OverlappedFileReader& operator=(const Win32OverlappedFileReader&) = delete;
+
+    AsyncReadResult read_range(const std::filesystem::path& path,
+                               std::uint64_t offset, std::uint64_t length,
+                               AsyncReadCancellationToken& token) override;
+
+private:
+    class State;
+    std::unique_ptr<State> state_;
+};
+#else
+// POSIX fallback backend: a bounded std::thread worker pool issuing
+// blocking pread() off the calling thread -- same shape as retrieval.cpp's
+// DeadlineTaskPool. This is the plan's explicitly-allowed fallback, used
+// unconditionally on Linux rather than a hardware-specific io_uring
+// adapter (out of scope for a Windows-primary build target).
+class PosixPreadPoolReader final : public IAsyncFileReader {
+public:
+    explicit PosixPreadPoolReader(std::size_t queue_depth);
+    ~PosixPreadPoolReader() override;
+    PosixPreadPoolReader(const PosixPreadPoolReader&) = delete;
+    PosixPreadPoolReader& operator=(const PosixPreadPoolReader&) = delete;
+
+    AsyncReadResult read_range(const std::filesystem::path& path,
+                               std::uint64_t offset, std::uint64_t length,
+                               AsyncReadCancellationToken& token) override;
+
+private:
+    class State;
+    std::unique_ptr<State> state_;
+};
+#endif
+
+// Constructs the best available backend for this platform, sized by
+// `profile`'s adaptive queue depth. Returns nullptr if backend construction
+// fails (e.g. IOCP creation error) -- callers MUST treat nullptr as "async
+// unavailable" and keep using the existing blocking path; this is the
+// fallback contract Phase 21 requires (see read_file_bytes() below).
+std::unique_ptr<IAsyncFileReader> make_async_file_reader(
+    const StorageLatencyProfile& profile);
+
+// Lazily constructs (once per distinct filesystem root, process lifetime)
+// and returns the shared async reader for the drive/root containing
+// `storage_root`, or nullptr if construction failed or has not been
+// attempted successfully. Construction failure is cached -- callers are not
+// expected to retry probing on every read.
+IAsyncFileReader* global_async_file_reader(
+    const std::filesystem::path& storage_root);
+
+// One requested byte range for the read coalescer, paired with the file it
+// targets -- ranges are only ever merged with other ranges on the same
+// path, never across files.
+struct CoalescedReadRequest {
+    std::filesystem::path path;
+    std::uint64_t offset{0};
+    std::uint64_t length{0};
+};
+
+// One physical read the coalescer decided to actually issue, plus which
+// original request indices it satisfies and where each one's data starts
+// within the merged buffer.
+struct CoalescedReadPlan {
+    struct Member {
+        std::size_t request_index{0};
+        std::uint64_t buffer_offset{0};
+    };
+    std::filesystem::path path;
+    std::uint64_t offset{0};
+    std::uint64_t length{0};
+    std::vector<Member> members;
+};
+
+// Merges same-file requests whose byte ranges are adjacent or overlapping
+// (gap <= max_gap_bytes) into the smallest number of physical reads -- e.g.
+// two back-to-back 4KB manifest reads become one 8KB read. Requests on
+// different files never merge. Pure and deterministic (no I/O), so it is
+// unit-testable without touching a real reader backend.
+std::vector<CoalescedReadPlan> coalesce_read_requests(
+    const std::vector<CoalescedReadRequest>& requests,
+    std::uint64_t max_gap_bytes = 0U);
+
+// Reads [offset, offset+length) of `path` using `reader` if non-null and
+// the read completes without cancellation or failure; otherwise
+// transparently falls back to a direct blocking ifstream read of the same
+// bytes. This is the opt-in Phase 21 integration point models.cpp and
+// indexing.cpp call instead of open-coding std::ifstream, guaranteeing
+// pre-Phase-21 blocking behavior whenever the async path isn't available
+// (reader is nullptr) or fails for this particular call.
+std::string read_file_bytes(IAsyncFileReader* reader,
+                            const std::filesystem::path& path,
+                            std::uint64_t offset, std::uint64_t length);
+
+// ---------------------------------------------------------------------
+// Phase 30 (foundational types only): immutable shared-data buffers,
+// views, a request-scoped arena, and fixed-size pools.
+// ---------------------------------------------------------------------
+//
+// Scope note: this pass builds only the buffer/arena/pool primitives from
+// docs/PLAN.md's Phase 30 deliverable list (see the approved implementation
+// plan). It does NOT yet wire these into retrieval.cpp's
+// RetrievalCandidate/IndexChunk (Phase 24 will adopt ChunkReference there),
+// server.cpp/inference.cpp's streaming copy chain (separate later task), or
+// MemoryBudgetManager's live accounting (deferred to whichever phase adds
+// FixedSizePool's actual consumers). Those integrations are honestly
+// out of scope here -- this is the primitive layer they will build on.
+
+// Reference-counted immutable byte buffer. Once constructed its contents
+// never change; sharing is via cheap reference-counted copies (BufferView
+// keeps its owning SharedBuffer alive) rather than duplicating bytes. The
+// backing storage is freed only once the last owner is destroyed.
+//
+// HARD RULE (per docs/PLAN.md Phase 30 spec): copy-on-write / shared
+// immutable-buffer semantics are restricted to this family of types
+// (SharedBuffer, BufferView, MappedBufferView, ChunkReference, TokenSpan,
+// PromptSegment) and to large, mostly-immutable, clearly-controlled data.
+// They must NEVER be used for credentials or other secret material (see
+// storage.cpp's SecretStore), mutable network buffers, audit records, or
+// any data crossing a process trust boundary -- those categories need
+// exclusive ownership and explicit copying so one holder can never observe
+// another holder's in-place mutation, extend a secret's lifetime past its
+// intended scope, or share memory across a trust boundary.
+class SharedBuffer final {
+public:
+    SharedBuffer() = default;
+    // Takes ownership of `bytes` (moved) as the immutable backing storage.
+    explicit SharedBuffer(std::vector<std::uint8_t> bytes);
+    // Copies size bytes starting at data into a new immutable backing
+    // storage -- the explicit "yes, this copies" entry point, used when the
+    // caller does not already own a movable buffer.
+    static SharedBuffer copy_from(const void* data, std::size_t size);
+
+    const std::uint8_t* data() const noexcept;
+    std::size_t size() const noexcept;
+    bool empty() const noexcept { return size() == 0U; }
+    // Number of live SharedBuffer owners of this storage. Diagnostic only
+    // (e.g. for tests confirming a buffer outlives its original owner) --
+    // never use this for synchronization decisions.
+    long use_count() const noexcept;
+
+private:
+    std::shared_ptr<const std::vector<std::uint8_t>> storage_;
+};
+
+// Offset+length window into a SharedBuffer's bytes, plus optional encoding
+// metadata (e.g. "utf-8", "json"; empty means raw/unspecified). Holds a
+// SharedBuffer copy internally so the owning storage stays alive for as
+// long as the view exists, but never copies the underlying bytes.
+class BufferView final {
+public:
+    BufferView() = default;
+    // offset/length must fit within owner's bytes; a view that does not fit
+    // is clamped to the empty view rather than reading out of bounds.
+    BufferView(SharedBuffer owner, std::size_t offset, std::size_t length,
+              std::string encoding = {});
+
+    const std::uint8_t* data() const noexcept;
+    std::size_t size() const noexcept { return length_; }
+    std::size_t offset() const noexcept { return offset_; }
+    const std::string& encoding() const noexcept { return encoding_; }
+    const SharedBuffer& owner() const noexcept { return owner_; }
+    bool empty() const noexcept { return length_ == 0U; }
+    // Materializes an independent std::string copy of this view's bytes --
+    // the one place this family intentionally leaves the zero-copy world,
+    // meant only for hand-off points (e.g. to a backend API expecting an
+    // owned std::string), not for routine use.
+    std::string to_string() const;
+
+private:
+    SharedBuffer owner_;
+    std::size_t offset_{0};
+    std::size_t length_{0};
+    std::string encoding_;
+};
+
+// A read-only memory-mapped file region exposed as a byte view with the
+// same offset/length/encoding shape as BufferView. Backed by a real OS
+// mapping (Win32 CreateFileMappingW/MapViewOfFile, POSIX mmap as the
+// fallback) rather than a full read into a SharedBuffer -- useful for
+// large, read-mostly assets (model weight files, large index segments)
+// where paging beats a full up-front copy. Pimpl'd so platform mapping
+// headers stay out of this shared header, matching the
+// Win32OverlappedFileReader convention above.
+class MappedBufferView final {
+public:
+    // Maps [offset, offset+length) of `path` read-only. length == 0 maps to
+    // end of file. Throws std::runtime_error if the mapping cannot be
+    // established (missing file, offset beyond EOF, OS mapping failure) --
+    // callers wanting a graceful fallback should catch and fall back to
+    // SharedBuffer::copy_from over a plain read, mirroring Phase 21's
+    // reader-unavailable fallback contract.
+    explicit MappedBufferView(const std::filesystem::path& path,
+                              std::uint64_t offset = 0U, std::uint64_t length = 0U,
+                              std::string encoding = {});
+    ~MappedBufferView();
+    MappedBufferView(const MappedBufferView&) = delete;
+    MappedBufferView& operator=(const MappedBufferView&) = delete;
+    MappedBufferView(MappedBufferView&&) noexcept;
+    MappedBufferView& operator=(MappedBufferView&&) noexcept;
+
+    const std::uint8_t* data() const noexcept;
+    std::size_t size() const noexcept;
+    const std::string& encoding() const noexcept { return encoding_; }
+
+private:
+    class State;
+    std::unique_ptr<State> state_;
+    std::string encoding_;
+};
+
+// Generic offset+length reference into an owning buffer/segment identified
+// by an opaque string key (e.g. an index segment path or cache key) --
+// deliberately decoupled from any concrete storage type so Phase 24's
+// RetrievalCandidate/IndexChunk can adopt this as their text-field
+// replacement without this header depending on retrieval.cpp. Copying a
+// ChunkReference is cheap (two integers and a short string); the referenced
+// bytes are copied out only by materialize(), and only when the caller
+// supplies the BufferView that actually owns the segment.
+struct ChunkReference {
+    std::string segment_key;
+    std::uint64_t offset{0};
+    std::uint64_t length{0};
+
+    // Copies out this chunk's bytes from `segment`, which must be the view
+    // over the buffer/segment that segment_key identifies. Returns an empty
+    // string if [offset, offset+length) does not fit within `segment` --
+    // fails safe rather than reading out of bounds.
+    std::string materialize(const BufferView& segment) const;
+};
+
+// A span of token-stream data within an owning SharedBuffer -- reused by
+// Phase 23's tokenization cache and Phase 30's future zero-copy streaming
+// path. `token_count` is caller-defined granularity (raw bytes vs. token
+// ids vs. UTF-8 codepoints); this type does not fix a tokenizer
+// representation, only the ownership/view shape.
+struct TokenSpan {
+    SharedBuffer owner;
+    std::size_t offset{0};
+    std::size_t length{0};
+    std::size_t token_count{0};
+
+    const std::uint8_t* data() const noexcept;
+};
+
+// One segment of an assembled prompt (literal template text or a
+// substituted variable) as a view over a shared immutable fragment buffer.
+// Meant to let Phase 23's assemble_chat_prompt() build a vector of
+// PromptSegments instead of repeated std::string += copies, materializing
+// one contiguous string only at the point RunnerSupervisor::generate()
+// needs to hand text to the backend.
+struct PromptSegment {
+    BufferView view;
+    bool is_literal{true};  // false => substituted variable content
+};
+
+// Thrown by RequestArena::allocate_or_throw() when the arena is exhausted.
+// This implementation's chosen allocation-failure policy (the plan requires
+// a defined one): allocate() returns nullptr on exhaustion for call sites
+// that can degrade gracefully; allocate_or_throw() throws this for call
+// sites that treat exhaustion as a bug.
+class ArenaExhaustedError final : public std::runtime_error {
+public:
+    ArenaExhaustedError() : std::runtime_error("RequestArena exhausted") {}
+};
+
+// Bounded bump allocator for request-scoped scratch (retrieval-candidate
+// metadata, ranking scratch, JSON parse scratch -- per the Phase 30 spec).
+// Fixed byte size given at construction; never grows, never frees
+// individual allocations -- only reset() or destruction reclaims the whole
+// arena at once. This is the simplest allocator shape that satisfies "no
+// view/handle may outlive the arena": callers must not retain a raw
+// pointer or ArenaHandle past the arena's lifetime or a reset() call.
+//
+// Debug-build poisoning: in builds without NDEBUG, the arena maintains a
+// generation counter in a small heap block kept alive independently of the
+// arena itself (via shared_ptr) so an ArenaHandle issued before a reset()
+// or destroy can detect staleness safely -- it checks the independent
+// counter, never arena memory that might already be freed/reused. In
+// release (NDEBUG) builds this tracking compiles out entirely (no
+// runtime cost); see ArenaHandle below.
+class RequestArena final {
+public:
+    explicit RequestArena(std::size_t capacity_bytes);
+    ~RequestArena();
+    RequestArena(const RequestArena&) = delete;
+    RequestArena& operator=(const RequestArena&) = delete;
+
+    // Bumps the arena pointer by `size` bytes (aligned to `alignment`,
+    // which must be a power of two) and returns the new region, or nullptr
+    // if it does not fit within the remaining capacity.
+    void* allocate(std::size_t size,
+                   std::size_t alignment = alignof(std::max_align_t)) noexcept;
+    // Same as allocate(), but throws ArenaExhaustedError instead of
+    // returning nullptr on exhaustion.
+    void* allocate_or_throw(std::size_t size,
+                            std::size_t alignment = alignof(std::max_align_t));
+
+    // Rewinds the bump pointer to the start and, in debug builds, bumps the
+    // generation counter so any ArenaHandle issued before this call becomes
+    // detectably stale.
+    void reset() noexcept;
+
+    std::size_t capacity_bytes() const noexcept { return capacity_bytes_; }
+    std::size_t used_bytes() const noexcept { return used_bytes_; }
+
+#ifndef NDEBUG
+    // Debug-only: the independent generation token described above, plus
+    // its current value. Used by allocate_handle() below to stamp an
+    // ArenaHandle at issue time.
+    std::shared_ptr<const std::atomic<std::uint64_t>> debug_generation_token() const noexcept {
+        return generation_;
+    }
+    std::uint64_t debug_generation() const noexcept { return generation_->load(); }
+#endif
+
+private:
+    std::unique_ptr<std::uint8_t[]> storage_;
+    std::size_t capacity_bytes_{0};
+    std::size_t used_bytes_{0};
+#ifndef NDEBUG
+    std::shared_ptr<std::atomic<std::uint64_t>> generation_;
+#endif
+};
+
+// Debug-build poison check wrapper around a pointer obtained from a
+// RequestArena. In debug builds, valid()/get() confirm the arena's
+// generation has not advanced (via reset()) or died (via destruction)
+// since this handle was issued -- see RequestArena's class comment for why
+// this check never touches (possibly freed) arena memory directly. In
+// release (NDEBUG) builds this collapses to a plain pointer wrapper with an
+// always-true (pointer != nullptr) valid() check -- no runtime cost, and
+// this is deliberately a debug-only safety net, not a substitute for
+// correct scoping by callers.
+template <typename T>
+class ArenaHandle final {
+public:
+    ArenaHandle() = default;
+#ifndef NDEBUG
+    ArenaHandle(T* pointer,
+               std::shared_ptr<const std::atomic<std::uint64_t>> generation_token,
+               std::uint64_t generation_at_issue)
+        : pointer_(pointer), generation_token_(std::move(generation_token)),
+          generation_at_issue_(generation_at_issue) {}
+#else
+    explicit ArenaHandle(T* pointer) : pointer_(pointer) {}
+#endif
+
+    bool valid() const noexcept {
+#ifndef NDEBUG
+        return pointer_ != nullptr && generation_token_ != nullptr &&
+               generation_token_->load() == generation_at_issue_;
+#else
+        return pointer_ != nullptr;
+#endif
+    }
+    T* get() const noexcept { return valid() ? pointer_ : nullptr; }
+    T& operator*() const { return *get(); }
+    T* operator->() const { return get(); }
+
+private:
+    T* pointer_{nullptr};
+#ifndef NDEBUG
+    std::shared_ptr<const std::atomic<std::uint64_t>> generation_token_;
+    std::uint64_t generation_at_issue_{0};
+#endif
+};
+
+// Allocates room for `count` T objects from `arena` and returns an
+// ArenaHandle<T> stamped with the arena's current generation (debug builds
+// only -- release builds just wrap the pointer). Does not construct T; the
+// caller is responsible for placement-new if T is non-trivial. Returns an
+// invalid (null) handle if the arena cannot satisfy the request.
+template <typename T>
+ArenaHandle<T> allocate_handle(RequestArena& arena, std::size_t count = 1U) {
+    void* raw = arena.allocate(sizeof(T) * count, alignof(T));
+    T* pointer = static_cast<T*>(raw);
+#ifndef NDEBUG
+    return ArenaHandle<T>(pointer, arena.debug_generation_token(), arena.debug_generation());
+#else
+    return ArenaHandle<T>(pointer);
+#endif
+}
+
+// Fixed-size pool of block-recycled T instances for frequently allocated
+// small objects (queue nodes, request-state records, retrieval-result
+// descriptors, token-stream chunks -- per the Phase 30 spec). Grows by
+// whole blocks of `block_capacity` slots (never one object at a time) and
+// recycles freed slots via a free list; once a block is allocated its
+// storage never moves, so pointers returned by acquire() stay valid until
+// release()d or the pool itself shrink()s away that block. bytes_reserved()
+// reports the pool's current footprint so a future caller can register it
+// against MemoryBudgetManager's existing category budgets (masterai.hpp's
+// MemoryCategory) -- that live-accounting wiring is deferred to whichever
+// phase adds this pool's actual consumers. Header-only (templated), so it
+// lives entirely here rather than in shared_buffer.cpp.
+template <typename T>
+class FixedSizePool final {
+public:
+    explicit FixedSizePool(std::size_t block_capacity = 64U)
+        : block_capacity_(block_capacity == 0U ? 1U : block_capacity) {}
+
+    ~FixedSizePool() {
+        for (auto& block : blocks_) {
+            for (std::size_t i = 0; i < block_capacity_; ++i) {
+                if (block.live[i]) {
+                    reinterpret_cast<T*>(&block.storage[i])->~T();
+                }
+            }
+        }
+    }
+
+    FixedSizePool(const FixedSizePool&) = delete;
+    FixedSizePool& operator=(const FixedSizePool&) = delete;
+
+    // Phase 30: fired only when bytes_reserved() actually changes -- i.e.
+    // on a real block grow (never on an ordinary acquire() that recycles an
+    // existing free slot) or a shrink() that released at least one block --
+    // with the pool's new total reserved-byte footprint. This is the hook
+    // BudgetTrackedPool (below) uses to keep MemoryBudgetManager's live
+    // accounting synchronized with this pool's real footprint instead of a
+    // one-time estimate. Left unset (empty std::function) by default, so
+    // every pool that does not opt in pays nothing for this.
+    std::function<void(std::size_t)> on_reserved_bytes_changed;
+
+    // Constructs a new T (forwarding args) in a recycled or freshly grown
+    // slot and returns a pointer to it. Never invalidates pointers issued
+    // for other live slots.
+    template <typename... Args>
+    T* acquire(Args&&... args) {
+        if (free_list_.empty()) grow_block();
+        const Slot slot = free_list_.back();
+        free_list_.pop_back();
+        Block& block = blocks_[slot.block_index];
+        T* pointer = reinterpret_cast<T*>(&block.storage[slot.slot_index]);
+        new (pointer) T(std::forward<Args>(args)...);
+        block.live[slot.slot_index] = true;
+        ++block.live_count;
+        return pointer;
+    }
+
+    // Destroys `*pointer` and returns its slot to the free list for reuse.
+    // `pointer` must have come from this pool's acquire() and not already
+    // be released; no-op (does not double-free) if it is not currently a
+    // live slot from this pool.
+    void release(T* pointer) noexcept {
+        for (std::size_t bi = 0; bi < blocks_.size(); ++bi) {
+            Block& block = blocks_[bi];
+            auto* base = reinterpret_cast<T*>(block.storage.data());
+            if (pointer >= base && pointer < base + block_capacity_) {
+                const std::size_t index = static_cast<std::size_t>(pointer - base);
+                if (block.live[index]) {
+                    pointer->~T();
+                    block.live[index] = false;
+                    --block.live_count;
+                    free_list_.push_back(Slot{bi, index});
+                }
+                return;
+            }
+        }
+    }
+
+    // Total bytes currently reserved across all grown blocks (live and free
+    // slots alike) -- what a future MemoryBudgetManager registration would
+    // report, not just bytes presently in use.
+    std::size_t bytes_reserved() const noexcept {
+        return blocks_.size() * block_capacity_ * sizeof(T);
+    }
+    std::size_t live_count() const noexcept {
+        std::size_t total = 0U;
+        for (const auto& block : blocks_) total += block.live_count;
+        return total;
+    }
+
+    // Releases every block that currently has zero live objects back to the
+    // pool's own storage (erased from blocks_), shrinking bytes_reserved()
+    // accordingly -- the "shrink or release reserved blocks under memory
+    // pressure" deliverable. Blocks with any live object are kept; shrink()
+    // never invalidates a pointer still in use. Returns the number of
+    // blocks released.
+    std::size_t shrink() {
+        std::size_t released = 0U;
+        for (std::size_t bi = 0; bi < blocks_.size();) {
+            if (blocks_[bi].live_count == 0U) {
+                free_list_.erase(
+                    std::remove_if(free_list_.begin(), free_list_.end(),
+                                   [bi](const Slot& s) { return s.block_index == bi; }),
+                    free_list_.end());
+                blocks_.erase(blocks_.begin() + static_cast<std::ptrdiff_t>(bi));
+                // Remaining free-list entries referencing later blocks must
+                // shift down by one to track the erase() above.
+                for (auto& slot : free_list_) {
+                    if (slot.block_index > bi) --slot.block_index;
+                }
+                ++released;
+            } else {
+                ++bi;
+            }
+        }
+        // Phase 30: same live-accounting hook as grow_block() above, fired
+        // only when at least one block was actually released (bytes_reserved()
+        // genuinely dropped) -- a no-op shrink() (nothing to release) must
+        // not cause a spurious re-reservation of the unchanged footprint.
+        if (released > 0U && on_reserved_bytes_changed) {
+            on_reserved_bytes_changed(bytes_reserved());
+        }
+        return released;
+    }
+
+private:
+    struct Block {
+        std::vector<typename std::aligned_storage<sizeof(T), alignof(T)>::type> storage;
+        std::vector<bool> live;
+        std::size_t live_count{0};
+        explicit Block(std::size_t capacity) : storage(capacity), live(capacity, false) {}
+    };
+    struct Slot {
+        std::size_t block_index{0};
+        std::size_t slot_index{0};
+    };
+
+    void grow_block() {
+        blocks_.emplace_back(block_capacity_);
+        const std::size_t block_index = blocks_.size() - 1U;
+        for (std::size_t i = 0; i < block_capacity_; ++i) {
+            free_list_.push_back(Slot{block_index, i});
+        }
+        // Phase 30: a real block was just added, so bytes_reserved() just
+        // grew -- tell anyone watching (e.g. BudgetTrackedPool) the new
+        // total. Not fired from acquire() itself, only from here, so
+        // ordinary free-slot recycling never triggers a MemoryBudgetManager
+        // round trip.
+        if (on_reserved_bytes_changed) on_reserved_bytes_changed(bytes_reserved());
+    }
+
+    std::size_t block_capacity_;
+    std::vector<Block> blocks_;
+    std::vector<Slot> free_list_;
+};
 
 bool is_path_within(const std::filesystem::path& root,
                     const std::filesystem::path& candidate);
@@ -449,6 +1082,46 @@ private:
     std::uint64_t memory_reserve_mib_{2048};
 };
 
+// Phase 26: use-prediction evidence for one model, recorded as it happens
+// (recency, an administrator/user pin, how often a project selects this
+// model, and how many requests are currently waiting on it) rather than
+// computed into an opaque ranking. Deliberately plain data -- callers decide
+// what to do with it; nothing here evicts, prioritizes, or reorders on its
+// own.
+struct ModelUsageSignals {
+    std::string model_id;
+    std::uint64_t last_used_epoch_seconds{0};
+    bool pinned{false};
+    // Recency-weighted count of times a project selected this model --
+    // incremented on every record_use(), never decayed automatically (a
+    // caller wanting decay applies it when reading the snapshot).
+    std::uint64_t project_preference_score{0};
+    std::uint32_t waiting_request_count{0};
+};
+
+// Phase 26: in-memory recorder for ModelUsageSignals, administrator-
+// inspectable via model_usage_signals_json() below -- the same "small
+// struct + _json() free function" reporting convention TuningProfile/
+// tuning_profile_json already established, rather than a new reporting
+// surface. Not persisted across a restart (matches BoundedWorkQueue's
+// in-memory-only scope above): use-prediction is a live signal about the
+// current process's traffic, not a durable record.
+class ModelUsagePredictor final {
+public:
+    void record_use(const std::string& model_id,
+                    std::uint64_t now_epoch_seconds);
+    void set_pinned(const std::string& model_id, bool pinned);
+    void set_waiting_request_count(const std::string& model_id,
+                                   std::uint32_t count);
+    std::vector<ModelUsageSignals> snapshot() const;
+
+private:
+    mutable std::mutex mutex_;
+    std::map<std::string, ModelUsageSignals> signals_;
+};
+
+std::string model_usage_signals_json(const std::vector<ModelUsageSignals>& signals);
+
 // Writes model_directory/manifest.json in the one shape ModelRegistry::scan()
 // (via load_manifest in models.cpp) accepts, from fields the caller has
 // already validated. Shared by the download HTTP route and the
@@ -490,11 +1163,66 @@ struct LaunchSpec {
     std::filesystem::path working_directory;
 };
 
+// Phase 26: explicit model-weight load mode. "direct" (raw unbuffered I/O)
+// is deliberately omitted -- no backend this codebase launches has validated
+// support for it yet, and faking the distinction would be dishonest. Every
+// concrete mode's *effect* on the actual llama-server launch is already
+// fully expressed through LaunchTuning::allow_memory_map/allow_memory_lock
+// below (see CalibrationService::resolve() and select_load_mode()), so
+// build_launch_spec() needs no separate argument branch for this field --
+// it is carried alongside the two booleans as explicit, inspectable intent
+// rather than leaving a caller to reverse-engineer "resident" from two
+// booleans.
+enum class ModelLoadMode {
+    streamed,     // no mmap: read weights on demand, minimize resident/commit
+    mapped,       // mmap, demand-paged (this codebase's pre-Phase-26 default)
+    resident,     // mmap + mlock: pin every page resident up front
+    auto_select   // caller wants CalibrationService to choose from evidence
+};
+
+std::string to_string(ModelLoadMode mode);
+
+// Phase 26: selective pre-touch policy for a model's weight pages. Only
+// "none" (do nothing extra) and "full" (via the existing --mlock flag,
+// already wired through LaunchTuning::allow_memory_lock) are backend-
+// actionable against llama-server today. "metadata"/"first_use"/
+// "layer_window" are accepted policy values -- a calibration profile or an
+// administrator may request them -- but this build has no llama-server flag
+// that pre-touches only a model's metadata, only first-use layers, or a
+// sliding layer window, so they currently behave exactly like "none" until
+// such a flag/adapter exists. See pretouch_gap_reason() below: callers that
+// want to surface this gap (e.g. an admin diagnostic) get an explicit
+// explanation instead of a silently faked finer granularity.
+enum class PreTouchLevel { none, metadata, first_use, layer_window, full };
+
+std::string to_string(PreTouchLevel level);
+// True only for none/full -- the two levels that actually change what gets
+// launched. See the PreTouchLevel comment above for why the other three
+// are accepted-but-inert today.
+bool pre_touch_level_backend_actionable(PreTouchLevel level) noexcept;
+// Returns an explanation when `level` is accepted policy but not yet
+// backend-actionable; std::nullopt for none/full, which really do behave as
+// documented.
+std::optional<std::string> pretouch_gap_reason(PreTouchLevel level);
+
+// Phase 26: chooses a concrete ModelLoadMode from real evidence --
+// StorageLatencyProfile (Phase 21) and the RAM headroom MemoryBudgetManager
+// already tracks -- rather than guessing. Never throws; a model_size_bytes
+// of 0 (unknown) always yields the safe pre-Phase-26 default (`mapped`).
+// See CalibrationService::resolve() for how this feeds a TuningProfile.
+ModelLoadMode select_load_mode(const StorageLatencyProfile& storage,
+                               std::uint64_t available_ram_bytes,
+                               std::uint64_t model_size_bytes) noexcept;
+
 // Phase 19: optional backend-launch tuning a calibration profile can
 // recommend. Every field's default reproduces exactly what
 // build_launch_spec() emitted before Phase 19 (no GPU-layer flag, mmap left
 // on, no mlock, no explicit thread/batch override), so a caller that never
-// consults CalibrationService is unaffected.
+// consults CalibrationService is unaffected. Phase 26 adds load_mode/
+// pre_touch as advisory metadata riding alongside allow_memory_map/
+// allow_memory_lock (see ModelLoadMode/PreTouchLevel above for why they
+// don't need their own build_launch_spec() argument branch); their defaults
+// (`mapped`/`none`) also reproduce pre-Phase-26 behavior exactly.
 struct LaunchTuning {
     unsigned int gpu_layers{0};
     bool allow_memory_map{true};
@@ -502,7 +1230,15 @@ struct LaunchTuning {
     unsigned int thread_count{0};
     unsigned int batch_tokens{0};
     unsigned int ubatch_tokens{0};
+    ModelLoadMode load_mode{ModelLoadMode::mapped};
+    PreTouchLevel pre_touch{PreTouchLevel::none};
 };
+
+// Forward declaration only: RunnerSupervisor below stores an optional
+// CacheManager* (Phase 23 tokenization cache) but must not depend on
+// CacheManager's full definition, which is declared later in this header
+// and itself depends on types not yet available at this point in the file.
+class CacheManager;
 
 class LlamaCppAdapter final {
 public:
@@ -530,6 +1266,78 @@ enum class RunnerState {
     busy,
     stopping,
     failed
+};
+
+// Phase 26: warm-model state machine layered ON TOP of RunnerState above --
+// it is never a replacement. Every existing consumer of RunnerState (e.g.
+// server.cpp's ensure_model_loaded(), the tests below, RunnerSupervisor's
+// own ready_port()) keeps reading RunnerState exactly as before; this enum
+// only ever adds detail RunnerState's six values cannot express on their
+// own (sub-phases of "starting"/"stopping", and an idle/busy distinction
+// within "ready").
+enum class WarmModelState {
+    Cold,                 // never loaded in this process's lifetime
+    LoadingMetadata,       // manifest re-verified, launch spec being built
+    MappingWeights,        // backend process spawned, weights not yet mapped
+    InitialisingBackend,   // process running, waiting on its readiness probe
+    Warming,               // backend reported ready; not yet observed serving
+    Ready,                 // idle and available to serve a request immediately
+    Busy,                  // actively serving a generation/tokenize request
+    Idle,                  // ready but unused past the configured idle threshold
+    Draining,               // graceful unload requested, process still running
+    Evicting,               // graceful shutdown timed out; forced termination
+    Unloaded,               // process stopped, resources released
+    Failed                  // load or generation failed; process may be gone
+};
+
+std::string to_string(WarmModelState state);
+
+// The regression-safe baseline the plan requires: every RunnerState value
+// maps to exactly one WarmModelState so anything derived purely from
+// RunnerState never changes meaning. WarmModelTracker::observe_runner_state
+// applies this table; finer detail (LoadingMetadata/MappingWeights/
+// InitialisingBackend/Warming sub-phases of "starting", Idle/Draining/
+// Evicting) is layered on afterward via WarmModelTracker::enter(), which is
+// still checked against warm_state_transition_allowed() below.
+WarmModelState translate_runner_state(RunnerState state) noexcept;
+
+// The legal state graph for WarmModelState. Returns true when transitioning
+// directly from `from` to `to` is permitted; a self-transition (from == to)
+// is always legal (a no-op re-observation of the same state).
+bool warm_state_transition_allowed(WarmModelState from,
+                                   WarmModelState to) noexcept;
+
+// Small stateful tracker: one WarmModelState value plus a last-activity
+// timestamp, guarded by its own mutex so it can be composed into
+// RunnerSupervisor (which already holds its own mutex for RunnerMetrics)
+// without risking lock-ordering mistakes, and used standalone in tests.
+class WarmModelTracker final {
+public:
+    // Applies translate_runner_state(state) as the next state. Throws
+    // std::logic_error if that baseline transition is illegal from the
+    // tracker's current state -- which should never happen for any
+    // sequence RunnerSupervisor itself produces; if it throws, the
+    // translation table and RunnerSupervisor's state machine have drifted
+    // out of sync with each other.
+    void observe_runner_state(RunnerState state);
+    // Applies an explicit finer-grained transition. Throws
+    // std::logic_error if `next` is not reachable from the current state.
+    void enter(WarmModelState next);
+    WarmModelState current() const noexcept;
+    void record_activity(std::uint64_t now_epoch_seconds) noexcept;
+    std::uint64_t last_activity_epoch_seconds() const noexcept;
+    // If the tracker is currently Ready and has been idle for at least
+    // idle_unload_seconds as of now_epoch_seconds, transitions to Idle and
+    // returns true; otherwise leaves the state untouched and returns false.
+    // A no-op (returns false) unless the current state is exactly Ready, so
+    // calling this repeatedly from a background sweep is always safe.
+    bool apply_idle_timeout(std::uint64_t now_epoch_seconds,
+                            std::uint32_t idle_unload_seconds);
+
+private:
+    mutable std::mutex mutex_;
+    WarmModelState state_{WarmModelState::Cold};
+    std::uint64_t last_activity_epoch_seconds_{0};
 };
 
 struct GenerationOptions {
@@ -563,6 +1371,10 @@ struct RunnerMetrics {
     std::uint64_t requests_completed{0};
     std::uint64_t requests_cancelled{0};
     std::string diagnostic;
+    // Phase 26: the finer-grained warm-state view layered on top of `state`
+    // above (see WarmModelTracker). Every pre-Phase-26 caller reading only
+    // `state` is unaffected -- this field is purely additive.
+    WarmModelState warm_state{WarmModelState::Cold};
 };
 
 class RunnerSupervisor final {
@@ -579,11 +1391,28 @@ public:
               const LaunchTuning& tuning = {});
     void unload(std::uint32_t grace_seconds = 10) noexcept;
     std::uint64_t tokenize(const std::string& text);
+    // Phase 23: opt-in tokenization cache. When set, tokenize() first looks
+    // up (content hash, model vocabulary fingerprint, special-token policy)
+    // in `cache` under CacheCategory::tokenization and only falls back to
+    // the runner's own /tokenize HTTP round trip on a miss. Left unset
+    // (the default, and what every pre-Phase-23 caller/test still gets),
+    // tokenize() behaves exactly as before -- always calls the runner.
+    // `special_token_policy` should change whenever the caller changes how
+    // special tokens are requested/handled so a policy change cannot be
+    // served a token count computed under the old policy.
+    void set_tokenization_cache(CacheManager* cache,
+                                std::string special_token_policy = "default");
     GenerationResult generate(
         const std::string& prompt, const GenerationOptions& options,
         const std::function<void(const std::string&)>& on_chunk,
         const std::atomic_bool& cancellation);
     RunnerMetrics metrics() const;
+    // Phase 26: applies WarmModelTracker::apply_idle_timeout() against this
+    // supervisor's own tracker -- see that method's contract. Intended to be
+    // called periodically (e.g. from a background sweep alongside
+    // MemoryBudgetManager pressure sampling) rather than on every request.
+    bool apply_idle_timeout(std::uint64_t now_epoch_seconds,
+                            std::uint32_t idle_unload_seconds);
 
 private:
     class Process;
@@ -594,6 +1423,19 @@ private:
     mutable std::mutex mutex_;
     RunnerMetrics metrics_;
     unsigned int port_{0};
+    // Phase 26: layered warm-model state (see WarmModelTracker/WarmModelState
+    // above). Owns its own mutex, so it is updated independently of mutex_
+    // above rather than trying to fold it into RunnerMetrics's own locking.
+    WarmModelTracker warm_tracker_;
+    // Phase 23 tokenization cache wiring (see set_tokenization_cache()).
+    // model_sha256_ is captured from the loaded model's manifest digest at
+    // load() time and doubles as the tokenizer/vocabulary fingerprint the
+    // plan requires -- the same model file always tokenizes text the same
+    // way, so its already-verified content digest is exactly the right
+    // fingerprint, with no separate vocabulary hash to compute or store.
+    CacheManager* tokenization_cache_{nullptr};
+    std::string model_sha256_;
+    std::string special_token_policy_{"default"};
 };
 
 struct ProjectRecord {
@@ -934,6 +1776,12 @@ struct TuningProfile {
     std::uint64_t disk_read_bytes{0};
     std::uint64_t disk_write_bytes{0};
     std::uint64_t calibrated_at_epoch_seconds{0};
+    // Phase 26: defaults reproduce the pre-Phase-26 implied behavior
+    // (demand-paged mmap, no extra pre-touch), so a profile persisted before
+    // Phase 26 (restored with these at their defaults) still behaves exactly
+    // as it did before.
+    ModelLoadMode recommended_load_mode{ModelLoadMode::mapped};
+    PreTouchLevel recommended_pre_touch{PreTouchLevel::none};
 };
 
 // A profile-name-keyed set of safe starting points (docs/PLAN.md section
@@ -979,8 +1827,21 @@ public:
     // Returns the persisted profile matching the current host/model/
     // backend/build identity, or a safe default for requested_profile if
     // none matches (never fabricates a measurement).
+    //
+    // Phase 26: when no persisted profile exists yet, `storage` (a Phase 21
+    // StorageLatencyProfile) and `available_ram_bytes`/`model_size_bytes`
+    // let the safe default's recommended_load_mode/recommended_pre_touch be
+    // chosen from real evidence (see select_load_mode()) instead of always
+    // being the generic `mapped`/`none` default. `storage` left null (every
+    // pre-Phase-26 call site, and any caller that hasn't got a profile yet)
+    // reproduces exactly the old, evidence-free behavior -- a *persisted*
+    // profile is always returned as-is, never overridden by this evidence,
+    // since it already reflects a real measurement.
     TuningProfile resolve(const std::string& model_sha256,
-                         const std::string& requested_profile) const;
+                         const std::string& requested_profile,
+                         const StorageLatencyProfile* storage = nullptr,
+                         std::uint64_t available_ram_bytes = 0U,
+                         std::uint64_t model_size_bytes = 0U) const;
 
     std::string host_hash() const;
 
@@ -1126,6 +1987,16 @@ struct QueryTrace {
     // each was included or omitted by the context budget). Empty when
     // retrieval never ran for this query.
     std::string retrieval_disclosure;
+    // Phase 24: the deterministic request classification (see
+    // RetrievalRequestClassification), recorded as its string form so
+    // QueryTrace does not need to depend on retrieval's enum. Empty when no
+    // classification was ever recorded for this query.
+    std::string request_classification;
+    // Phase 24: "no adapter" skip reasons for every declared-but-disabled
+    // retrieval strategy this query considered, so a caller inspecting the
+    // trace can see exactly why (e.g.) semantic search never ran, instead of
+    // it silently appearing to have found nothing.
+    std::vector<std::string> disabled_retrieval_strategies;
 };
 
 // Owns bounded, monotonic query traces. Callers explicitly transition through
@@ -1152,6 +2023,12 @@ public:
     // does not erase what was actually retrieved.
     void record_retrieval(const std::string& id, bool partial,
                           std::string disclosure_json);
+    // Phase 24: records the deterministic request classification.
+    void record_classification(const std::string& id, std::string classification);
+    // Phase 24: records "no adapter" skip reasons for declared-but-disabled
+    // retrieval strategies considered for this query.
+    void record_retrieval_strategy_skips(const std::string& id,
+                                         std::vector<std::string> reasons);
     void finish(const std::string& id, QueryStatus status,
                 std::string diagnostic = {});
     std::optional<QueryTrace> find(const std::string& id) const;
@@ -1269,6 +2146,102 @@ private:
     std::unique_ptr<State> state_;
 };
 
+// Phase 30: bridges a FixedSizePool<T>'s bytes_reserved() to
+// MemoryBudgetManager's live category accounting, closing the gap the
+// foundational Phase 30 pass left open (FixedSizePool's own class comment
+// notes bytes_reserved() reporting is real but that "live-accounting wiring
+// is deferred to whichever phase adds this pool's actual consumers"). Every
+// time the wrapped pool actually grows or shrinks a block (never on an
+// ordinary acquire()/release() that only recycles an existing slot), this
+// releases whatever lease it currently holds and requests a fresh one sized
+// to the pool's new footprint via FixedSizePool::on_reserved_bytes_changed,
+// so MemoryStatus::category_bytes always reflects real reserved bytes
+// instead of a one-time estimate taken at construction. A declined
+// admission (budget pressure) is intentionally non-fatal here: pool memory
+// for small descriptor objects is tiny relative to model weights/KV cache,
+// so this is best-effort visibility, not admission control -- the pool
+// keeps working either way, it just goes unregistered until the next
+// growth/shrink event succeeds in reserving.
+template <typename T>
+class BudgetTrackedPool final {
+public:
+    BudgetTrackedPool(MemoryBudgetManager& memory, MemoryCategory category,
+                      bool interactive, std::size_t block_capacity = 64U)
+        : memory_(memory), category_(category), interactive_(interactive),
+          pool_(block_capacity) {
+        pool_.on_reserved_bytes_changed = [this](std::size_t total_bytes) {
+            update_lease(total_bytes);
+        };
+    }
+    ~BudgetTrackedPool() {
+        if (!lease_id_.empty()) memory_.release(lease_id_);
+    }
+    BudgetTrackedPool(const BudgetTrackedPool&) = delete;
+    BudgetTrackedPool& operator=(const BudgetTrackedPool&) = delete;
+
+    FixedSizePool<T>& pool() noexcept { return pool_; }
+    // Diagnostic/test-only: the lease id currently registered against
+    // MemoryBudgetManager, empty when nothing is currently reserved
+    // (freshly constructed, fully shrunk, or the last reserve() attempt was
+    // declined).
+    const std::string& lease_id() const noexcept { return lease_id_; }
+
+private:
+    void update_lease(const std::size_t total_bytes) {
+        if (!lease_id_.empty()) {
+            memory_.release(lease_id_);
+            lease_id_.clear();
+        }
+        if (total_bytes == 0U) return;
+        MemoryEstimate estimate;
+        estimate.transient_bytes = total_bytes;
+        const auto admission = memory_.reserve(category_, estimate, interactive_);
+        if (admission.admitted) lease_id_ = admission.lease_id;
+    }
+
+    MemoryBudgetManager& memory_;
+    MemoryCategory category_;
+    bool interactive_;
+    FixedSizePool<T> pool_;
+    std::string lease_id_;
+};
+
+// Phase 26: cooperative cancellation token for background model warm-up,
+// matching the shape already established by AsyncReadCancellationToken
+// (Phase 21) and RetrievalPlanner's DeadlineTaskPool (Phase 24) rather than
+// introducing a third cancellation idiom.
+class WarmupCancellationToken final {
+public:
+    void cancel() noexcept { cancelled_.store(true, std::memory_order_release); }
+    bool is_cancelled() const noexcept {
+        return cancelled_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::atomic_bool cancelled_{false};
+};
+
+enum class WarmupOutcome { completed, cancelled, skipped_low_memory };
+
+// Phase 26: runs `step` (one bounded unit of warm-up work -- e.g. a short
+// generate() call that faults model weights and primes the runner's
+// KV-cache machinery) repeatedly until `step` returns true (warm-up is
+// done), `token` is cancelled, MemoryBudgetManager reports the process
+// should not be doing background work right now (permits_background_work()
+// -- the same signal Phase 14's pressure model already exposes), or
+// `maximum_steps` is exhausted. Checked *between* steps only, never
+// mid-step -- the same cooperative-cancellation shape as DeadlineTaskPool
+// in retrieval.cpp, deliberately not a second worker-pool implementation
+// since Phase 26 only ever needs one cancellable task per model at a time.
+// Runs synchronously on the calling thread; a caller wanting this "in the
+// background" wraps the call in its own std::thread and calls token.cancel()
+// from elsewhere (this keeps the primitive itself deterministically
+// testable without racing a background thread).
+WarmupOutcome run_cancellable_warmup(const std::function<bool()>& step,
+                                     WarmupCancellationToken& token,
+                                     const MemoryBudgetManager& memory,
+                                     std::size_t maximum_steps = 64U);
+
 class BoundedWorkQueue final {
 public:
     BoundedWorkQueue(std::size_t maximum_items,
@@ -1337,6 +2310,11 @@ public:
                                         std::size_t maximum_results) const;
     std::vector<IndexChunk> search_symbol(
         const std::string& symbol, std::size_t maximum_results) const;
+    // Phase 24: filename/path-match adapter -- reuses the relative_path
+    // metadata every chunk already carries (no new index data required),
+    // matching chunks whose path contains `path_fragment` as a substring.
+    std::vector<IndexChunk> search_path(const std::string& path_fragment,
+                                        std::size_t maximum_results) const;
     IndexStatus status() const;
 
 private:
@@ -1396,6 +2374,11 @@ public:
     IndexSearchResult search_symbol(const std::string& project_id,
                                     const std::string& symbol,
                                     std::size_t maximum_results) const;
+    // Phase 24: read-only filename/path-match lookup, same generation/
+    // availability contract as search_text/search_symbol above.
+    IndexSearchResult search_path(const std::string& project_id,
+                                  const std::string& path_fragment,
+                                  std::size_t maximum_results) const;
 
 private:
     class State;
@@ -1423,14 +2406,82 @@ private:
     std::unique_ptr<State> state_;
 };
 
+// Phase 24: every retrieval strategy the planner knows about. The first
+// group has a working adapter today (either since Phase 16, or added by
+// Phase 24 against index metadata already tracked by indexing.cpp); the
+// second group is intentionally declared but has no adapter wired to it
+// yet (no embedding model, no MCP resource plumbing, no call-graph/type
+// index, no git integration, no cross-session memory store exist in this
+// codebase) -- retrieval_strategy_has_adapter() is the single source of
+// truth callers use to decide whether a strategy can ever run, and
+// RetrievalPlanner records a "no adapter" skip reason on every disabled
+// entry rather than silently ignoring it or faking results for it.
+enum class RetrievalStrategy {
+    exact_symbol,
+    exact_text,
+    lexical,
+    filename_path,
+    recent_change,
+    // Declared but disabled: no adapter exists in-repo yet.
+    semantic_embedding,
+    mcp_resource,
+    call_graph,
+    type_reference,
+    git_diff,
+    dependency_neighbour,
+    conversation_memory
+};
+
+std::string to_string(RetrievalStrategy strategy);
+// True only for strategies this build can actually execute.
+bool retrieval_strategy_has_adapter(RetrievalStrategy strategy) noexcept;
+// Every strategy that retrieval_strategy_has_adapter() returns false for,
+// paired with a human-readable "no adapter" reason -- used to populate
+// RetrievalOutcome::disabled_strategy_reasons without duplicating the list
+// at each call site.
+std::vector<std::pair<RetrievalStrategy, std::string>>
+disabled_retrieval_strategy_reasons();
+
+// Phase 24: coarse worker-budget tag for a retrieval request/stage.
+// Interactive (a user is actively waiting on this chat turn) gets the full
+// bounded worker count; background (speculative/prefetch) requests get a
+// reduced worker count so they cannot starve an interactive request that
+// shares DeadlineTaskPool's small thread budget.
+enum class RetrievalPriority { interactive, background };
+
+// Phase 24: deterministic, keyword/shape-based classification of a query's
+// retrieval intent -- no ML, no embeddings, just cheap textual signals
+// (presence of a path-looking token, a diagnostic-looking string, or an
+// identifier-shaped token) mapped to the categories that are meaningful
+// given the strategies this planner can actually run.
+enum class RetrievalRequestClassification {
+    completion,
+    symbol_explanation,
+    navigation,
+    documentation,
+    generic_lexical
+};
+
+std::string to_string(RetrievalRequestClassification classification);
+RetrievalRequestClassification classify_retrieval_request(
+    const std::string& query_text);
+
 // Phase 16: deadline-bound hybrid retrieval over Phase 15 project indexes.
 struct RetrievalRequest {
     ProjectRecord project;
+    // Phase 24: identity/policy-generation pair used (together with project
+    // and the settings fields below) as the in-flight join key -- two
+    // requests only ever share one in-flight computation when every one of
+    // these fields matches, so joining can never cross an authorization or
+    // project boundary.
+    std::string requester_id;
+    std::uint64_t policy_generation{0};
     std::string query_text;
     std::chrono::milliseconds deadline{1500};
     std::uint64_t maximum_context_bytes{16U * 1024U};
     std::uint64_t maximum_chunks_per_source{6U};
     std::uint64_t maximum_total_chunks{20U};
+    RetrievalPriority priority{RetrievalPriority::interactive};
 };
 
 // One disclosed piece of evidence: which file/offset it came from, which
@@ -1446,8 +2497,16 @@ struct RetrievalDisclosureEntry {
     std::string reason;
 };
 
+// Phase 24: `chunk` carries only metadata (id/path/language/offset/digest)
+// once fused -- its `text` field is cleared and the actual bytes live once
+// in the retrieval call's shared arena buffer, addressed by `reference`.
+// materialize() is only ever called for candidates ContextBudgeter::apply
+// admits, and only once per unique chunk id (fusion already dedups by id
+// before this struct is even constructed), so duplicate evidence surfaced
+// by more than one strategy never pays for a second copy of its bytes.
 struct RetrievalCandidate {
     IndexChunk chunk;
+    ChunkReference reference;
     RetrievalDisclosureEntry disclosure;
 };
 
@@ -1457,35 +2516,76 @@ struct RetrievalOutcome {
     std::string strategy;
     bool partial{false};
     std::string diagnostic;
+    // Phase 24: the deterministic classification this request received, and
+    // the "no adapter" reasons for every declared-but-disabled strategy --
+    // callers push both onto QueryTrace without RetrievalPlanner depending
+    // on QueryCoordinator.
+    std::string classification;
+    std::vector<std::string> disabled_strategy_reasons;
 };
 
-// Chooses the least expensive sufficient index-backed strategy (exact
-// symbol match, then exact literal text, then per-token lexical union),
-// running independent strategy steps across bounded parallel workers with a
-// hard wall-clock deadline. On expiry it stops launching further steps and
-// returns whatever evidence bounded workers already produced rather than
-// blocking; it never performs a security or membership decision itself --
-// callers must have already authorized the caller against `project` before
-// calling retrieve(). Semantic/embedding, dependency-neighbour, and MCP
-// resource strategies remain forward work (no embedding adapter or MCP
-// resource plumbing is wired to retrieval yet); this planner covers every
-// strategy that Phase 15's disk-backed index can actually serve today.
+// Chooses the least expensive sufficient index-backed strategy across an
+// explicit staged list (cheap-exact symbol/exact-text first, lexical/path
+// second, remaining enabled strategies -- currently just the recent-change
+// recency boost -- last), running independent strategy steps across bounded
+// parallel workers with a hard wall-clock deadline and sticky sufficiency
+// (once any stage finds evidence, later, more expensive stages are skipped
+// entirely). On expiry it stops launching further steps and returns
+// whatever evidence bounded workers already produced rather than blocking;
+// it never performs a security or membership decision itself -- callers
+// must have already authorized the caller against `project` before calling
+// retrieve(). Semantic/embedding, MCP-resource, call-graph, type-reference,
+// git-diff, dependency-neighbour, and conversation-memory strategies remain
+// forward work (see RetrievalStrategy) -- this planner covers every
+// strategy that Phase 15's disk-backed index can actually serve today, plus
+// Phase 24's own in-flight de-duplication of identical concurrent requests.
 class RetrievalPlanner final {
 public:
-    explicit RetrievalPlanner(ProjectIndexService& indexes);
+    // Phase 30: `memory` is optional (nullable) so every existing test
+    // fixture and call site that predates this pass keeps compiling and
+    // behaving exactly as before -- pass nullptr to opt out of the
+    // fusion-candidate pool's MemoryBudgetManager accounting entirely (the
+    // pool itself still works identically either way, since bytes_reserved()
+    // registration is a diagnostic side effect of BudgetTrackedPool, not a
+    // correctness dependency of RetrievalCandidate fusion).
+    explicit RetrievalPlanner(ProjectIndexService& indexes,
+                              MemoryBudgetManager* memory = nullptr);
     RetrievalOutcome retrieve(const RetrievalRequest& request) const;
+    // Diagnostic only (mirrors SharedBuffer::use_count()'s convention):
+    // counts how many times retrieve_uncached() actually ran, so tests can
+    // assert the in-flight join table actually joined concurrent duplicate
+    // work rather than only comparing outcomes (which a deterministic
+    // planner would produce identically either way). Never use this for
+    // synchronization decisions.
+    std::uint64_t uncached_invocation_count() const noexcept;
 
 private:
+    RetrievalOutcome retrieve_uncached(const RetrievalRequest& request) const;
+
     ProjectIndexService& indexes_;
+    MemoryBudgetManager* memory_{nullptr};
+    mutable std::atomic<std::uint64_t> uncached_invocations_{0};
+    // Phase 24: request-key -> shared_future join table. The leader (first
+    // caller to observe a given key with nothing in flight) actually runs
+    // retrieve_uncached() and publishes its result to every follower that
+    // arrived while it was running; the entry is removed before the leader
+    // returns, so this is a join for genuinely concurrent duplicate work,
+    // never a standing cache (repeated sequential calls always re-run).
+    mutable std::mutex inflight_mutex_;
+    mutable std::map<std::string, std::shared_future<RetrievalOutcome>>
+        inflight_;
 };
 
 // Applies per-source and total chunk/byte caps to already-ranked candidates.
 // Candidates must arrive sorted by descending score; the budgeter accepts
 // the highest-ranked evidence first and never truncates a chunk's text to
-// fit more chunks in.
+// fit more chunks in. `segment` is the shared arena BufferView every
+// admitted candidate's `reference` is relative to -- materialize() is
+// called exactly once per admitted candidate, here, and nowhere else.
 class ContextBudgeter final {
 public:
     static RetrievalOutcome apply(std::vector<RetrievalCandidate> ranked,
+                                  const BufferView& segment,
                                   const std::string& strategy, bool partial,
                                   std::string diagnostic,
                                   std::uint64_t maximum_context_bytes,
@@ -1616,15 +2716,67 @@ struct SessionFingerprint {
     bool operator==(const SessionFingerprint& other) const;
 };
 
+// Phase 23: why try_reuse() did or didn't grant reuse -- an explicit,
+// inspectable reason instead of a bare bool, per the plan's requirement
+// for "explicit invalidation reason". `none` is the only reason paired
+// with `reuse == true`.
+enum class SessionInvalidationReason {
+    none,                     // reuse granted
+    no_prior_session,         // no entry recorded for this chat yet
+    idle_expired,              // entry existed but exceeded idle retention
+    fingerprint_mismatch,      // model/backend/architecture/settings changed
+    prefix_diverged,           // generation_prompt is not a byte-prefix
+                               // extension of the recorded prompt (e.g. an
+                               // earlier turn was edited/resubmitted)
+    prefix_ceiling_exceeded,   // a literal prefix match exists but exceeds
+                               // the configured maximum retained prefix
+                               // byte ceiling
+};
+
 struct SessionDecision {
     bool reuse{false};
     unsigned int slot_id{0};
+    // Phase 23: length, in bytes, of the longest prefix generation_prompt
+    // shares with the chat's previously recorded prompt. This is a byte
+    // count rather than a token count deliberately: PromptSessionManager
+    // works on raw prompt strings before tokenization (that's precisely
+    // what lets try_reuse() stay a cheap in-memory comparison instead of a
+    // runner round trip), so it has no tokenizer available to it here. A
+    // caller that needs an actual token count can run this many bytes
+    // through the now-cached RunnerSupervisor::tokenize() (Phase 23
+    // tokenization cache) itself.
+    std::size_t reusable_prefix_bytes{0};
+    // Byte offset into generation_prompt where it stops matching the
+    // recorded prior prompt -- 0 when there is no prior session at all,
+    // equal to reusable_prefix_bytes on both a clean prefix-extension
+    // match and a rejected match (the longest common prefix is reported
+    // either way, since it is useful diagnostic information even on a
+    // miss).
+    std::size_t divergence_offset{0};
+    SessionInvalidationReason invalidation_reason{
+        SessionInvalidationReason::no_prior_session};
+    // The configured ceiling this decision was evaluated against, so a
+    // caller can log/report why reuse was capped even when it succeeded.
+    std::size_t prefix_byte_ceiling{0};
 };
 
 class PromptSessionManager final {
 public:
-    PromptSessionManager(unsigned int max_slots,
-                         std::uint32_t idle_retention_seconds);
+    // `max_retained_prefix_bytes` bounds how large a recorded prompt's
+    // reusable byte-prefix is allowed to be before try_reuse() refuses
+    // reuse outright (SessionInvalidationReason::prefix_ceiling_exceeded)
+    // even though it is a literal, otherwise-valid prefix match. Without
+    // this, one pathologically long-running chat could pin an
+    // ever-growing KV cache in the runner indefinitely. Default chosen as
+    // a generous multiple of typical multi-turn chat prompt sizes while
+    // staying well under configuration.max_request_bytes's 16 MiB default
+    // (masterai.hpp), so ordinary chats are never affected.
+    static constexpr std::size_t kDefaultMaxRetainedPrefixBytes =
+        4ULL * 1024ULL * 1024ULL;
+
+    PromptSessionManager(
+        unsigned int max_slots, std::uint32_t idle_retention_seconds,
+        std::size_t max_retained_prefix_bytes = kDefaultMaxRetainedPrefixBytes);
     ~PromptSessionManager();
     PromptSessionManager(const PromptSessionManager&) = delete;
     PromptSessionManager& operator=(const PromptSessionManager&) = delete;
@@ -1632,9 +2784,13 @@ public:
     // Looks up whether `chat_id`'s previous turn can be resumed on its
     // already-warm slot: the fingerprint must match exactly and
     // `generation_prompt` must extend the prior turn's prompt as a literal
-    // byte-prefix (docs/PLAN.md Phase 18 "stable-prefix detection"). Reuse
-    // is refused -- never guessed -- on any mismatch, missing entry, or
-    // idle-expired entry.
+    // byte-prefix (docs/PLAN.md Phase 18 "stable-prefix detection"), and
+    // that prefix must fit within the configured byte ceiling. Reuse is
+    // refused -- never guessed -- on any mismatch, missing entry,
+    // idle-expired entry, non-prefix divergence, or ceiling overrun; see
+    // SessionDecision::invalidation_reason for exactly which. No fuzzy
+    // prefix matching is performed anywhere in this decision (explicit
+    // Phase 23 requirement).
     SessionDecision try_reuse(const std::string& chat_id,
                               const SessionFingerprint& fingerprint,
                               const std::string& generation_prompt) const;
@@ -1658,6 +2814,80 @@ private:
     class State;
     std::unique_ptr<State> state_;
 };
+
+// Phase 23: compiled per-architecture chat-wrap template plus segmented
+// prompt assembly built over shared immutable literal buffers, instead of
+// server.cpp's previous repeated std::string += concatenation. Implemented
+// in src/prompt_assembly.cpp, independent of HttpServer::State so it can
+// be exercised directly by tests without a full server harness.
+
+// Mirrors server.cpp's private ChatTemplate (system/user/assistant
+// prefix+suffix literals, the trailing generation-prompt marker, and the
+// architecture's stop sequence) but lives here so prompt_assembly.cpp and
+// tests can use it without depending on server.cpp internals.
+struct ChatWrapTemplate {
+    std::string system_prefix, system_suffix;
+    std::string user_prefix, user_suffix;
+    std::string assistant_prefix, assistant_suffix;
+    std::string generation_prompt;
+    std::string stop_sequence;
+};
+
+// A ChatWrapTemplate's 8 literal fields, each parsed into a shared
+// immutable BufferView exactly once. compiled_chat_template() caches one
+// of these per distinct architecture name for the life of the process --
+// the architecture set is small and static, so a full CacheManager entry
+// would be pure overhead (see docs/PLAN.md Phase 23).
+struct ChatTemplatePlan {
+    BufferView system_prefix, system_suffix;
+    BufferView user_prefix, user_suffix;
+    BufferView assistant_prefix, assistant_suffix;
+    BufferView generation_prompt;
+    std::string stop_sequence;
+};
+
+// Returns the process-lifetime-cached compiled plan for `architecture`,
+// building and caching it from `tmpl` on first use. Thread-safe. Callers
+// must pass the same `tmpl` content for a given `architecture` on every
+// call (true for every current caller, which derives both from the same
+// static per-architecture table) -- a first-writer-wins race on a brand
+// new architecture is otherwise harmless since the content is identical.
+const ChatTemplatePlan& compiled_chat_template(const std::string& architecture,
+                                               const ChatWrapTemplate& tmpl);
+
+// Builds an ordered list of PromptSegments for one chat's full wrapped
+// prompt (prior history, then the latest user turn, then the format's
+// generation-prompt marker) over `plan`'s cached literal buffers,
+// without concatenating any bytes. Each message's own content is copied
+// once into its own SharedBuffer (necessary: PromptSegment/BufferView
+// must own or share ownership of the bytes they view, and message content
+// does not otherwise outlive this call) -- the win over the old
+// concatenation approach is that the literal delimiters are never
+// recopied, and the whole prompt is never repeatedly reallocated as one
+// growing std::string while it is built.
+std::vector<PromptSegment> assemble_chat_prompt_segments(
+    const ChatTemplatePlan& plan, const std::vector<ChatMessage>& history,
+    const std::string& latest_user_content);
+
+// Materializes a vector<PromptSegment> into one contiguous std::string --
+// the single point where segmented assembly rejoins the "backend needs one
+// buffer" world (RunnerSupervisor::generate() takes a plain std::string).
+// Reserves the exact total size up front so this is one allocation plus
+// one copy pass, not the repeated-reallocation pattern the old
+// std::string += approach had.
+std::string materialize_prompt(const std::vector<PromptSegment>& segments);
+
+// Phase 23: process-lifetime intern table restricted, by construction, to
+// short (<= kMaxInternedLength byte) identifiers -- role names, route
+// names, repeated JSON keys -- never arbitrary user messages or file
+// content (explicit exclusion per docs/PLAN.md Phase 23 spec). Interning
+// something longer throws std::invalid_argument rather than silently
+// growing an unbounded cache of arbitrary strings; this is the structural
+// enforcement of "ONLY high-repetition immutable identifiers" rather than
+// a comment callers could ignore. Returns a reference into the table's own
+// storage that stays valid for the rest of the process's lifetime.
+constexpr std::size_t kMaxInternedLength = 128U;
+const std::string& intern_identifier(const std::string& text);
 
 // Internal (not a public API contract) length-prefixed serialization of a
 // RetrievalOutcome for storage in the retrieval-result cache segment. Not

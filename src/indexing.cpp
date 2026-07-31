@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <deque>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -43,10 +44,11 @@ std::string read_bounded(const std::filesystem::path& path,
                          const std::uint64_t maximum) {
     const auto size = std::filesystem::file_size(path);
     if (size == 0U || size > maximum) return {};
-    std::string text(static_cast<std::size_t>(size), '\0');
-    std::ifstream input(path, std::ios::binary);
-    input.read(&text[0], static_cast<std::streamsize>(text.size()));
-    if (!input || !valid_utf8_text(text)) return {};
+    // Phase 21: opt-in async read with automatic blocking fallback (see
+    // async_storage.cpp's read_file_bytes()) -- identical bytes either way.
+    auto* reader = global_async_file_reader(path.parent_path());
+    std::string text = read_file_bytes(reader, path, 0U, size);
+    if (text.size() != size || !valid_utf8_text(text)) return {};
     return text;
 }
 
@@ -122,7 +124,26 @@ public:
             break;
         }
         if (active_segment.empty()) return;
-        std::ifstream data(active_segment, std::ios::binary);
+        // Phase 21: try an async whole-file read of the (potentially large)
+        // index segment into memory and parse it via istringstream, using
+        // the exact same header/record parsing logic below either way.
+        // Falls back to a direct ifstream stream read if async isn't
+        // available or the whole-file read comes back short.
+        std::unique_ptr<std::istream> data_stream;
+        std::error_code segment_size_error;
+        const auto segment_size =
+            std::filesystem::file_size(active_segment, segment_size_error);
+        if (!segment_size_error && segment_size > 0U) {
+            auto* reader = global_async_file_reader(active_segment.parent_path());
+            std::string buffer = read_file_bytes(reader, active_segment, 0U, segment_size);
+            if (buffer.size() == segment_size) {
+                data_stream = std::make_unique<std::istringstream>(std::move(buffer));
+            }
+        }
+        if (!data_stream) {
+            data_stream = std::make_unique<std::ifstream>(active_segment, std::ios::binary);
+        }
+        std::istream& data = *data_stream;
         std::string line;
         std::getline(data, line);
         if (line != "MASTERAI-INDEX-1") {
@@ -438,6 +459,27 @@ std::vector<IndexChunk> ProjectIndexer::search_symbol(
     return result;
 }
 
+// Phase 24: filename/path-match adapter -- reuses relative_path, metadata
+// every chunk already carries, so this needs no new index data. A plain
+// substring match (case-sensitive, matching search_text's convention) keeps
+// this cheap and dependency-free.
+std::vector<IndexChunk> ProjectIndexer::search_path(
+    const std::string& path_fragment, const std::size_t maximum_results) const {
+    if (path_fragment.empty() || maximum_results == 0U ||
+        maximum_results > 1024U) {
+        return {};
+    }
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    std::vector<IndexChunk> result;
+    for (const auto& chunk : state_->chunks) {
+        if (chunk.relative_path.find(path_fragment) != std::string::npos) {
+            result.push_back(chunk);
+            if (result.size() == maximum_results) break;
+        }
+    }
+    return result;
+}
+
 IndexStatus ProjectIndexer::status() const {
     std::lock_guard<std::mutex> lock(state_->mutex);
     return state_->current;
@@ -675,6 +717,16 @@ IndexSearchResult ProjectIndexService::search_symbol(
     const auto found = state_->indexes.find(project_id);
     if (found == state_->indexes.end()) return {};
     return {found->second->search_symbol(symbol, maximum_results),
+            found->second->status().generation, true};
+}
+
+IndexSearchResult ProjectIndexService::search_path(
+    const std::string& project_id, const std::string& path_fragment,
+    const std::size_t maximum_results) const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    const auto found = state_->indexes.find(project_id);
+    if (found == state_->indexes.end()) return {};
+    return {found->second->search_path(path_fragment, maximum_results),
             found->second->status().generation, true};
 }
 

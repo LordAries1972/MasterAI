@@ -16,6 +16,8 @@ add_library(masterai_core STATIC
     ../src/json.cpp
     ../src/config.cpp
     ../src/platform.cpp
+    ../src/async_storage.cpp
+    ../src/shared_buffer.cpp
     ../src/security.cpp
     ../src/storage.cpp
     ../src/identity.cpp
@@ -38,6 +40,7 @@ add_library(masterai_core STATIC
     ../src/retrieval.cpp
     ../src/cache.cpp
     ../src/session_cache.cpp
+    ../src/prompt_assembly.cpp
     ../src/calibration.cpp
     ../src/optimization_registry.cpp
     ../src/performance_cli.cpp

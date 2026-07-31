@@ -224,6 +224,94 @@ Current phase status:
   the plan." No optimization logic is implemented for any candidate; this
   is a place for a later phase's real, evidence-backed work to attach, not
   an implementation of that work.
+- Phase 21: Implemented at a scoped-down level (2026-08-01) — native
+  asynchronous storage and prefetch engine. `Win32OverlappedFileReader`
+  (IOCP) on Windows and a bounded `PosixPreadPoolReader` fallback on POSIX
+  (no Linux `io_uring` adapter), read coalescing, adaptive queue depth keyed
+  to a measured `StorageLatencyProfile`, and per-request cancellation are
+  implemented and wired into model manifest and index segment reads, with
+  automatic fallback to the prior blocking path. Priority A.
+- Phase 22: Planned — hierarchical content and model-data caching (L0–L5
+  layers, per-category bounded caches, segmented admission/eviction).
+  Priority A/B split; see the phase entry for which categories land first.
+- Phase 23: Implemented at a scoped-down level (2026-08-01) — tokenization,
+  prompt-template, and prompt-fragment caching. A `CacheCategory::tokenization`
+  producer/consumer around `RunnerSupervisor::tokenize()`, compiled
+  process-lifetime chat-template plans, `PromptSegment`-based segmented
+  prompt assembly, a restricted role/route/key intern table, and an extended
+  `PromptSessionManager::try_reuse()` reporting exact byte-level reusable
+  prefix length, divergence offset, invalidation reason, and a configurable
+  prefix byte ceiling are implemented. Priority A.
+- Phase 24: Implemented at a scoped-down level (2026-08-01) — staged
+  adaptive retrieval fan-out. Filename/path and recent-change strategies,
+  a deterministic request classifier, sticky-sufficiency staged fan-out
+  over the existing bounded worker pool with priority tagging, a mutex-
+  guarded in-flight-request join table (authorization/project-scoped, never
+  cross-boundary), and reference-first (`ChunkReference`) candidate
+  materialization gated on `ContextBudgeter` admission are implemented.
+  Semantic-embedding, MCP-resource, call-graph, type-reference, git-diff,
+  dependency-neighbour, and conversation-memory strategies remain declared
+  but disabled pending their adapters, with skip reasons disclosed on
+  `QueryTrace`. Priority B.
+- Phase 25: Planned — weighted-fair inference scheduling and continuous
+  batching across compatible requests. Priority C; superset of the Phase 20
+  continuous-batching candidate.
+- Phase 26: Implemented at a scoped-down level (2026-08-01) — model loading/
+  mapping modes, selective pre-touch, cancellable background warm-up, and a
+  warm-model state machine. `ModelLoadMode`/`PreTouchLevel` are selected
+  using Phase 21's `StorageLatencyProfile` plus RAM-ceiling evidence; a
+  `WarmModelState` machine is layered onto (not a replacement for) the
+  existing `RunnerState`/`ModelState` pair via an explicit, regression-tested
+  translation table; background warm-up is cancellable and yields under
+  memory pressure. Only `none`/`full` pre-touch levels are backend-actionable
+  today (`metadata`/`first-use`/`layer-window` are accepted policy that
+  currently behaves like `none`). Priority A (mapping and storage-aware
+  placement) with Priority B warm-up refinements.
+- Phase 27: Planned — KV-cache accounting, backend-validated
+  reduced-precision placement, context-aware reservation, and gated
+  prefix-tree reuse. Priority B/C.
+- Phase 28: Planned — NUMA, processor-group, and hybrid-core topology
+  awareness. Priority C; superset of the Phase 20 NUMA candidate.
+- Phase 29: Planned — model tiering, routing, and cascade inference with
+  disclosed signals and user override. Priority B.
+- Phase 30: Implemented at a scoped-down level (2026-08-01) — immutable
+  shared buffers, request-scoped arenas, and zero-copy streaming.
+  `SharedBuffer`/`BufferView`/`MappedBufferView`/`ChunkReference`/
+  `TokenSpan`/`PromptSegment`, a debug-poison-checked `RequestArena`, and a
+  `FixedSizePool<T>` bridged live into `MemoryBudgetManager` accounting
+  (demonstrated via `RetrievalPlanner`'s candidate pool) are implemented; the
+  chat-streaming token-send path now writes through a `BufferView` instead of
+  concatenating a throwaway JSON string, removing at least one copy from the
+  identified runner-buffer-to-socket chain (not every copy in that chain is
+  eliminated). Priority A.
+- Phase 31: Planned — storage tiering, `ScratchVolumeManager`, and
+  storage-aware model/index placement (no RAM-drive placement for durable
+  data). Priority A/B.
+- Phase 32: Planned — speculative decoding with draft/target compatibility
+  checks and automatic fallback. Priority C; deliberately deferred behind
+  the Priority A/B work above given its added complexity and hardware
+  dependency.
+- Phase 33: Planned — distributed local runners and optional mutually
+  authenticated intranet worker nodes. Priority C; deliberately deferred for
+  the same reason as Phase 32.
+- Phase 34: Planned — adaptive performance controller with bounded,
+  hysteresis-guarded automatic tuning within administrator ceilings.
+  Priority B, gated on Phase 21–31 evidence existing to tune against.
+- Phase 35: Planned — performance administration sidebar (overview, memory,
+  caches, storage, worker pools, scheduling, advanced optimizations) with no
+  single opaque "turbo" switch.
+- Phase 36: Planned — full performance benchmark matrix, regression
+  thresholds per optimization, and automated build-to-build comparison
+  gating releases.
+
+Priority note: segmented prompt assembly (Phase 23), tokenization caching
+(Phase 23), lazy retrieval-content materialization (Phase 24), immutable
+shared buffers (Phase 30), native asynchronous index reads (Phase 21), and
+storage-aware model mapping (Phase 26) are the immediate near-term targets —
+they improve latency and memory without the hardware-dependent complexity of
+speculative decoding (Phase 32) or distributed runners (Phase 33), which
+remain explicitly deferred until the Priority A/B phases have measured
+evidence.
 
 Status policy:
 
@@ -2626,6 +2714,2938 @@ Exit criteria:
   memory, quality, power/thermal notes, regression decision, and fallback test.
 - Interactive work remains responsive under background indexing, download,
   cancellation, disconnect, and queue-saturation tests.
+
+### Phase 21 — Native asynchronous storage and prefetch engine
+
+Status: Implemented at a scoped-down level (2026-08-01). `src/async_storage.cpp`
+provides a real `IAsyncFileReader` interface, a Windows IOCP/overlapped
+`Win32OverlappedFileReader` backend, a POSIX `PosixPreadPoolReader` bounded
+worker-pool backend, a measured `StorageLatencyProfile` probe, an adaptive
+queue-depth policy, a pure read coalescer, and per-request cancellation
+tokens. Wired into `models.cpp` manifest reads and `indexing.cpp` segment
+reads as an opt-in path with the pre-existing blocking path retained as an
+automatic fallback (`read_file_bytes()`). Deliberately out of scope for this
+pass, and left as follow-on work: a Linux `io_uring` adapter (the POSIX
+`pread` worker pool is used unconditionally on Linux instead, matching this
+plan's own explicitly-allowed fallback), and memory-mapped file regions.
+Windows is the validated build/test target per project convention.
+
+Purpose:
+
+- Remove blocking storage operations from model startup, project indexing,
+  retrieval, attachment parsing, cache loading, and model verification.
+
+Dependencies:
+
+- Phase 15 disk-backed index generations; Phase 16 retrieval reads them.
+
+Deliverables:
+
+- A replaceable `IAsyncFileReader` interface with a Windows IOCP/overlapped
+  `ReadFile` adapter, a Linux `io_uring` adapter with a bounded `pread`
+  worker-pool fallback, memory-mapped file regions, and a
+  `StorageCapabilityProbe`/`StorageLatencyProfile` pair that classifies the
+  underlying device (HDD/SATA SSD/NVMe/network/removable).
+- A read coalescer that merges adjacent independent requests into one
+  physical read, and an adaptive queue-depth policy keyed to the measured
+  storage class (low/sequential-biased on HDD, bounded parallel segments on
+  NVMe, denied-by-default for active model weights on network/removable
+  storage).
+- Cancellable reads: an abandoned request releases its buffer, never
+  publishes a partially verified object, and never blocks shutdown.
+- Parallel reads are restricted to genuinely independent data (separate
+  index segments, model shards, cache objects, project files); one thread
+  per file and unbounded speculative read-ahead are explicitly disallowed.
+
+Exit criteria:
+
+- Retrieval latency improves for mapped/uncached indexes with no regression
+  to model cold-load time.
+- Queue saturation stays bounded; HDD sequential throughput is not degraded
+  by SSD-oriented random fan-out.
+- Cancellation and shutdown complete safely under load; peak temporary read
+  memory stays within the configured limit.
+
+### Phase 22 — Hierarchical content and model-data caching
+
+Status: Planned. Priority A/B — file-metadata, file-content, and
+model-manifest/verification caches land first (Priority A); embedding,
+reranking, and MCP-resource caches follow once their producers exist
+(Priority B).
+
+Purpose:
+
+- Replace the single general-purpose cache with layered, independently
+  bounded caches matched to each object's real cost and lifetime.
+
+Dependencies:
+
+- Phase 17 `CacheManager` identity/invalidation keys and security
+  partitioning; Phase 21 async reads for persistent-cache I/O.
+
+Deliverables:
+
+- An L0–L5 layering model (request-local references through OS file cache
+  and reconstructable source storage) and independently bounded categories:
+  file metadata, file content, parsed document, source-chunk, symbol,
+  retrieval-result, reranking, embedding, tokenization, prompt-template,
+  prompt-fragment, model-manifest/verification/metadata, download metadata,
+  hardware-probe, tuning-profile, MCP-resource, and static web-asset.
+- A TinyLFU-style (or equivalent) bounded admission estimator so one large
+  scan cannot evict the hot working set, plus segmented eviction
+  (probationary/protected/pinned/streaming).
+- Immutable, reference-counted, content-addressed cache objects with
+  checksums for persistent entries, atomic publication, and corruption
+  quarantine (never silent corruption).
+- Cache keys that include user/project identity, authorization-policy and
+  membership generation, content digest, index generation, and every
+  relevant parser/chunker/tokenizer/embedding/generation-model/backend/
+  template/settings fingerprint already required by Phase 17/18.
+- Short-lived, version-bound negative caching that can never hide newly
+  granted access, new content, completed downloads, or security-policy
+  changes.
+- Compression restricted to cold persistent entries where measured
+  decompression cost is lower than the avoided storage I/O; never applied to
+  hot token arrays or active prompt fragments.
+
+Exit criteria:
+
+- Representative repeated requests show lower retrieval latency.
+- One-time scans cannot evict the entire hot working set.
+- Persistent-cache corruption falls back to safe uncached operation.
+- Cross-user and cross-project isolation tests pass; cache memory never
+  exceeds category or process-wide limits.
+
+### Phase 23 — Tokenization, template, and prompt-fragment caching
+
+Status: Implemented at a scoped-down level (2026-08-01). `RunnerSupervisor::tokenize()`
+(src/inference.cpp) now supports an opt-in `CacheManager`-backed tokenization
+cache (`set_tokenization_cache()`), keyed by content SHA-256 plus the loaded
+model's own verified digest (doubling as the tokenizer/vocabulary
+fingerprint) and a special-token policy string, under the already-declared
+`CacheCategory::tokenization`; wired in at server construction
+(src/server.cpp). New `src/prompt_assembly.cpp` adds a process-lifetime,
+mutex-guarded compiled-template cache (`compiled_chat_template()`) keyed by
+architecture name, and segmented prompt assembly
+(`assemble_chat_prompt_segments()`/`materialize_prompt()`) over Phase 30's
+`PromptSegment`/`BufferView`/`SharedBuffer` types, replacing
+`assemble_chat_prompt()`'s repeated `std::string +=` concatenation while
+remaining byte-for-byte identical to the old output (see
+`test_phase_twentythree_segmented_assembly_byte_identical`). A restricted
+`intern_identifier()` table caps interned entries at 128 bytes, throwing
+rather than silently caching longer (i.e. plausibly arbitrary
+user/file-content) strings. `PromptSessionManager::try_reuse()`
+(src/session_cache.cpp) now returns `SessionDecision` with
+`reusable_prefix_bytes`, `divergence_offset`, an explicit
+`SessionInvalidationReason` enum, and the configured
+`prefix_byte_ceiling` (default 4 MiB, constructor-configurable), still using
+exact-byte-prefix matching only (no fuzzy matching). Scope trim: reported
+prefix size is a byte count, not a token count -- PromptSessionManager
+compares raw prompt strings without tokenizer access, and adding one would
+reintroduce the per-turn runner round trip Phase 18 exists to avoid; a
+caller wanting an actual token count can pass the reused byte range through
+the now-cached `tokenize()` itself.
+
+Purpose:
+
+- Remove repeated CPU work performed before inference begins.
+
+Dependencies:
+
+- Phase 18 `PromptSessionManager` prefix/session reuse; Phase 22 cache
+  admission and key requirements.
+
+Deliverables:
+
+- A tokenization cache for immutable prompt fragments (system instructions,
+  chat wrappers, project policies, static tool descriptions, repeated file
+  chunks/conversation prefixes) keyed by content hash plus tokenizer/model
+  vocabulary fingerprint and special-token policy.
+- Compiled, cached chat-template execution plans (parse/validate once,
+  apply variables without reparsing).
+- Segmented prompt assembly (`PromptSegment` views into shared buffers)
+  instead of repeated large-string concatenation; a contiguous buffer is
+  produced only when the backend requires one.
+- Interning restricted to high-repetition immutable strings (role names,
+  model IDs, route names, repeated JSON keys) — never arbitrary user
+  messages or whole source files.
+- Extension of Phase 18's prefix reuse with exact reusable token count,
+  divergence location, explicit invalidation reason, and a maximum retained
+  prefix byte ceiling. No fuzzy prefix matching for KV reuse.
+
+Exit criteria:
+
+- Repeated prompts show lower prompt-preparation time.
+- Tokenization cache entries never cross tokenizer or model boundaries.
+- Cached prompt output remains byte-for-byte equivalent to uncached
+  assembly; edited earlier messages correctly invalidate the affected
+  prefix.
+- Peak prompt-assembly memory decreases against the Phase 18 baseline.
+
+### Phase 24 — Advanced retrieval fan-out and adaptive query planning
+
+Status: Implemented at a scoped-down level (2026-08-01). `src/retrieval.cpp`
+adds a `RetrievalStrategy` enum covering every strategy the spec lists;
+`filename_path` (via each chunk's already-tracked `relative_path`, see the
+new `ProjectIndexer::search_path`/`ProjectIndexService::search_path`) and
+`recent_change` (a post-fusion score boost from each candidate's real
+filesystem mtime, no git integration) are real, working adapters alongside
+Phase 16's exact_symbol/exact_text/lexical; every strategy without a
+same-repo adapter (semantic_embedding, mcp_resource, call_graph,
+type_reference, git_diff, dependency_neighbour, conversation_memory) is
+declared but disabled, and `retrieve()` stamps a "no adapter" reason for
+every one of them onto its `RetrievalOutcome`, pushed onto `QueryTrace` via
+new `QueryCoordinator::record_retrieval_strategy_skips()`. A deterministic
+keyword/shape classifier (`classify_retrieval_request()`, no ML) maps a
+query to completion/symbol_explanation/navigation/documentation/
+generic_lexical and is likewise recorded on `QueryTrace`
+(`record_classification()`). `RetrievalPlanner::retrieve()` now runs an
+explicit staged list (symbol/exact-text first, filename/path second,
+lexical last) with sticky sufficiency, reusing `DeadlineTaskPool` with an
+interactive/background worker-count parametrization rather than a second
+pool implementation. A request-key → `std::shared_future` join table
+(guarded by a mutex, keyed on project + requester identity + policy
+generation + settings) joins genuinely concurrent identical requests;
+`HttpServer` now holds one long-lived `RetrievalPlanner` instead of one per
+request so this is reachable in practice. `RetrievalCandidate` adopts
+Phase 30's `ChunkReference` (offset+length into a per-call shared arena
+buffer built during fusion) instead of a per-candidate full-text copy;
+`ContextBudgeter::apply()` calls `.materialize()` exactly once per admitted
+candidate. Scope trims, stated honestly: `IndexChunk`'s own on-disk/
+in-memory text representation in `indexing.cpp` is unchanged (it is
+serialized to disk and consumed well beyond retrieval, so reference-first
+adoption is scoped to `RetrievalCandidate`, the type Phase 16 already
+introduced for retrieval's own ranking/budgeting path); "open-file" boost
+collapses into the recent-change mtime boost since no editor/LSP session
+exists in this codebase to know what is actually open; the request
+classifier's category set is the reduced one the plan itself allows
+("meaningful given existing strategies") rather than the full ten-category
+list, since diagnosis/review/architecture/historical-conversation/
+model-only/MCP-resource have no corresponding strategy to route to yet.
+`test/tests.cpp` adds `test_phase_twentyfour_*` covering classification
+shape rules, disabled-strategy skip reasons reaching `QueryTrace`, staged
+fan-out skipping later stages once an earlier one is sufficient, duplicate
+evidence fusing into one materialized candidate, concurrent identical
+requests joining into exactly one in-flight computation
+(`RetrievalPlanner::uncached_invocation_count()`, a diagnostic-only counter
+mirroring `SharedBuffer::use_count()`'s convention), and mismatched-identity
+concurrent requests provably NOT joining. Not attempted: an authored
+retrieval evaluation set with measured latency improvement over a Phase 16
+baseline (needs a benchmark corpus this session does not have) and the
+still-outstanding Phase 16 evaluation-set exit criterion it was meant to
+also satisfy.
+
+Purpose:
+
+- Retrieve the strongest useful evidence faster without loading whole
+  projects into memory, extending the Phase 16 `RetrievalPlanner`.
+
+Dependencies:
+
+- Phase 16 strategy set and deadline-bound execution; Phase 22 shared cache
+  keys for in-flight de-duplication.
+
+Deliverables:
+
+- Additional independently selectable strategies beyond Phase 16's
+  exact-identifier/exact-phrase/lexical set: filename/path, open-file,
+  recent-change, diagnostic/build-log, dependency-neighbour, call-graph,
+  type-reference, git-diff, conversation-memory, semantic-embedding, and
+  authorized MCP-resource lookup (each gated on its own adapter existing).
+- A request classifier (completion, symbol explanation, diagnosis, review,
+  architecture question, navigation, documentation, historical-conversation,
+  model-only, MCP-resource) that the planner uses to skip expensive
+  strategies when they are not required.
+- Staged fan-out groups (exact/cheap first, lexical/diagnostics second,
+  semantic/dependency/conversation last) with sticky sufficiency — later
+  stages run only when confidence is below threshold, evidence conflicts,
+  required source types are missing, or the user requested exhaustive
+  analysis.
+- A small bounded retrieval worker pool with interactive/background/
+  maintenance priority classes, and shared in-flight futures so concurrent
+  compatible requests join one retrieval operation instead of duplicating it
+  (joining only when authorization, project, policy generation, and
+  settings match).
+- Reference-first result representation (chunk identity, offset, length,
+  score, strategy, generation, digest); full text materializes only for
+  candidates admitted by the Phase 16 `ContextBudgeter`.
+
+Exit criteria:
+
+- Median and high-percentile retrieval latency improve over Phase 16 alone.
+- Expensive semantic retrieval is skipped when exact matches already
+  suffice; no unbounded fan-out occurs.
+- Retrieval remains authorized and fully disclosed on the `QueryTrace`.
+- Duplicate chunks are materialized once even under concurrent joins.
+- An authored retrieval evaluation set demonstrates measured improvement
+  over the Phase 16 baseline (this also satisfies the still-outstanding
+  Phase 16 evaluation-set exit criterion).
+
+### Phase 25 — Continuous inference batching and request scheduling
+
+Status: Planned. Priority C — depends on multiple concurrent compatible
+requests being common enough to benefit measurably; superset of the Phase 20
+continuous-batching candidate.
+
+Purpose:
+
+- Increase throughput when multiple compatible inference requests are
+  active, without harming single-request interactive latency.
+
+Dependencies:
+
+- Phase 14 bounded admission/priority work; Phase 20's disabled-by-default
+  `AdvancedOptimizationRegistry` entry for continuous batching.
+
+Deliverables:
+
+- A weighted-fair priority scheduler (cancellation/shutdown, IDE completion,
+  interactive chat, interactive analysis, user background jobs, benchmarks,
+  indexing/embeddings, maintenance), each class with weight, max queue
+  depth/residence time, concurrency allowance, memory allowance, and
+  cancellation policy.
+- Continuous batching of compatible token-generation steps (same model,
+  backend, context configuration, sampling implementation, available KV
+  slots/compute memory, no exclusive low-latency requirement), gated by a
+  calibrated per-class maximum batch-collection delay.
+- Backpressure that rejects low-priority background work first, reserves
+  memory before admission, reports queue status to clients, and allows
+  cancellation while queued.
+
+Exit criteria:
+
+- Compatible concurrent throughput improves; single-request TTFT does not
+  exceed the configured regression limit.
+- Queue fairness prevents starvation; memory use remains predictable.
+- Cancellation removes queued work immediately.
+
+### Phase 26 — Model loading, mapping, pre-touch, and warm-state management
+
+Status: Implemented at a scoped-down level (2026-08-01). `masterai.hpp`/
+`calibration.cpp` add an explicit `ModelLoadMode` (streamed/mapped/resident/
+auto) selected by `CalibrationService::resolve()` from a Phase 21
+`StorageLatencyProfile` plus available-RAM evidence via `select_load_mode()`,
+realized through the existing `--no-mmap`/`--mlock` launch arguments rather
+than new backend flags. A `PreTouchLevel` enum (none/metadata/first-use/
+layer-window/full) is accepted policy end-to-end, but only none/full are
+backend-actionable today (via the same `--mlock`); `pretouch_gap_reason()`
+documents that gap explicitly rather than faking finer granularity.
+`inference.cpp` adds a `WarmModelState` state machine (Cold/LoadingMetadata/
+MappingWeights/InitialisingBackend/Warming/Ready/Busy/Idle/Draining/
+Evicting/Unloaded/Failed) layered onto `RunnerSupervisor`'s existing
+`RunnerState`/`ModelState` via `WarmModelTracker`, an explicit legal-
+transition graph, and a `translate_runner_state()` baseline table so every
+pre-existing `RunnerState` consumer is unaffected (see the Phase 26
+regression test). `run_cancellable_warmup()` provides cooperative-
+cancellation background warm-up that yields on `MemoryBudgetManager`
+pressure or a `WarmupCancellationToken`. `ModelUsagePredictor` records
+recency/pin/project-preference/waiting-request signals, reported via
+`model_usage_signals_json()` following the existing `tuning_profile_json()`
+convention. Deliberately out of scope for this pass: `direct` I/O (no
+validated backend support), and full CLI/HTTP route wiring for the
+use-prediction reporting surface (the recording/reporting API itself is
+implemented and tested, but not yet exposed through a dedicated admin route
+or CLI command). Windows is the validated build/test target per project
+convention.
+
+Purpose:
+
+- Reduce large-GGUF-model startup delay while avoiding destructive paging,
+  extending Phase 19 calibration with explicit load-mode control.
+
+Dependencies:
+
+- Phase 3 manifest/integrity verification; Phase 14 hard RAM ceiling;
+  Phase 19 `CalibrationService`/`LaunchTuning`; Phase 21 async storage.
+
+Deliverables:
+
+- Explicit load modes (streamed, mapped, resident, direct where validated,
+  auto) selected from measured storage and memory evidence; read-only
+  memory mapping for compatible GGUF backends with reported resident/
+  committed/mapped bytes and rejection of models predicted to cause
+  sustained destructive paging.
+- Selective pre-touch (none/metadata/first-use/layer-window/full) instead of
+  unconditionally touching every model page; full pre-touch remains
+  disabled by default on constrained hosts.
+- Cancellable, low-priority background warm-up that yields to interactive
+  work, low free RAM, thermal pressure, rising storage latency, or
+  shutdown.
+- A warm-model state machine (Cold/LoadingMetadata/MappingWeights/
+  InitialisingBackend/Warming/Ready/Busy/Idle/Draining/Evicting/Unloaded/
+  Failed) and bounded, administrator-inspectable use-prediction signals
+  (recency, pinning, project preference, waiting-request count) — no opaque
+  model may permanently block unloading.
+
+Exit criteria:
+
+- Cold-load and warm-load times are measured separately and both improve or
+  hold versus the Phase 19 baseline.
+- Selective warm-up improves TTFT where enabled; full pre-touch stays
+  disabled on constrained hosts.
+- Idle models unload predictably; load cancellation releases all resources.
+
+### Phase 27 — KV-cache compression, placement, and lifecycle management
+
+Status: Planned. Priority B for accounting and placement modes; Priority C
+for reduced-precision KV and prefix-tree sharing given their quality-parity
+and cross-boundary-isolation risk.
+
+Purpose:
+
+- Reduce the largest context-dependent memory consumer while preserving
+  correctness and isolation.
+
+Dependencies:
+
+- Phase 14 bounded memory; Phase 18 `PromptSessionManager` session/KV reuse;
+  Phase 27 requires backend-validated support before any precision change
+  is admitted.
+
+Deliverables:
+
+- Per-model/runner/slot/layer KV accounting by context length, token count,
+  data type, CPU/GPU placement, and owning user/chat/project.
+- Backend-validated reduced-precision KV policies (half/quantized K or V,
+  mixed policy) admitted only after quality and stability testing; CPU/GPU/
+  split placement modes recorded in the session fingerprint.
+- Context-aware reservation with bounded growth steps and a hard maximum,
+  used only where the backend supports safe growth (never optimistic
+  allocation against a backend that preallocates full slot capacity).
+- An optional prefix tree for compatible immutable prefixes (public system
+  template, identical administrator-approved policy for same-authorization
+  users) that never exposes private conversation KV state across
+  unauthorized boundaries; private prefixes stay chat-bound.
+- Deterministic eviction order: failed/cancelled slots, expired idle
+  prefixes, lowest-reuse private slots, large low-value reusable prefixes,
+  idle non-pinned sessions, reduced new-request context, then safe
+  rejection.
+
+Exit criteria:
+
+- KV usage is visible per runner and slot.
+- Reduced-precision KV passes quality-parity requirements before enablement.
+- No reuse crosses identity or policy boundaries; eviction cannot detach an
+  active slot.
+- Context growth never exceeds the hard memory ceiling.
+
+### Phase 28 — NUMA, processor-group, and topology-aware execution
+
+Status: Planned. Priority C; superset of the Phase 20 NUMA candidate, and
+only relevant on multi-socket/high-core-count hosts.
+
+Purpose:
+
+- Improve performance on multi-node and processor-group systems without
+  regressing single-node hosts.
+
+Dependencies:
+
+- Phase 20 disabled-by-default NUMA-affinity candidate; Phase 36 benchmark
+  matrix to prove per-host benefit.
+
+Deliverables:
+
+- Hardware topology probing (packages, NUMA nodes, physical/logical cores,
+  efficiency/performance core classes, Windows processor groups, cache
+  hierarchy, GPU locality where discoverable).
+- Thread-class separation (inference compute, HTTP/streaming, retrieval,
+  indexing, storage completion, download, background maintenance) with
+  affinity applied only where measurement shows benefit — not pinned by
+  default.
+- NUMA-local placement of model memory and inference threads on multi-node
+  hosts, administrator-disableable, with automatic fallback to normal OS
+  scheduling on single-node systems.
+- Hybrid-core policy preferring latency-sensitive work on performance cores
+  and indexing/downloads/maintenance on efficiency cores, re-evaluated on
+  battery power.
+
+Exit criteria:
+
+- NUMA policy improves measured throughput or latency on applicable hosts
+  with no regression on single-node hosts.
+- Affinity can be disabled without restart where practical; Windows
+  processor-group handling uses all authorized cores correctly.
+
+### Phase 29 — Model tiering, routing, and cascade inference
+
+Status: Planned. Priority B.
+
+Purpose:
+
+- Avoid using the largest resident model for every request.
+
+Dependencies:
+
+- Phase 3 model registry/manifest; Phase 19 calibration profiles; Phase 26
+  warm-state management for controlling how many tiers stay resident.
+
+Deliverables:
+
+- Explicit model tiers (deterministic non-model processing, compact
+  router/classifier, small fast model, medium general model, large
+  specialist) and disclosed routing signals (task category, language,
+  context size, requested quality, latency requirement, capability,
+  available RAM/VRAM, queue depth, benchmark evidence, user pin).
+- Cascade processing that only escalates to a larger tier on low
+  confidence, unsupported syntax, conflicting retrieval evidence, failed
+  deterministic validation, security sensitivity, explicit user request, or
+  context that cannot fit safely.
+- Resident-model profiles (Minimal: one model; Balanced: one generation
+  model plus optional compact embedding/router model; Performance: multiple
+  warm models only with memory and benchmark evidence) so tiered routing
+  cannot leave several full models resident on constrained hosts.
+
+Exit criteria:
+
+- Simple requests complete faster; large-model invocation frequency
+  decreases.
+- Quality regression stays below the configured threshold; routing
+  decisions are disclosed and user-overridable.
+
+### Phase 30 — Memory deduplication and immutable shared-data architecture
+
+Status: Implemented at a scoped-down level (2026-08-01). `src/shared_buffer.cpp`
+and `src/masterai.hpp` provide the full foundational type family
+(`SharedBuffer`, `BufferView`, `MappedBufferView` with a Win32 file-mapping/
+POSIX mmap backend, `ChunkReference`, `TokenSpan`, `PromptSegment`,
+`RequestArena` with debug-build generation-counter poisoning, and
+`FixedSizePool<T>`), already adopted by Phase 24's `RetrievalCandidate`/
+`IndexChunk` (`reference` addresses a per-call shared arena instead of
+carrying its own text copy) and Phase 23's segmented prompt assembly. This
+pass closes the two gaps that were still open: (1) `FixedSizePool`'s
+`bytes_reserved()` is now live-registered against `MemoryBudgetManager`
+(`masterai.hpp`'s `MemoryCategory`) via a new `on_reserved_bytes_changed`
+growth/shrink hook on `FixedSizePool` and a generic `BudgetTrackedPool<T>`
+wrapper, wired to one real consumer: `RetrievalPlanner`'s (`retrieval.cpp`)
+fusion-candidate pool, which now pool-allocates `RetrievalCandidate` objects
+during `retrieve_uncached()` instead of storing them directly as
+`std::map` values, and reserves/releases a call-scoped lease against
+`MemoryCategory::retrieval_index_cache` on every real pool growth/shrink
+(best-effort accounting, not admission control -- `RetrievalPlanner`'s
+`MemoryBudgetManager*` is optional and defaults to `nullptr` so every
+pre-Phase-30 call site keeps working unchanged). (2) the streaming
+copy chain in `server.cpp`'s `send_chat_message()` token path is reworked:
+`json_escape_bytes()` (`http_support.cpp`, sharing its escaping rules with
+`json_escape()` via one internal template) escapes directly into a
+`std::vector<std::uint8_t>` that moves (no copy) into a `SharedBuffer`, and
+`send_chunk_parts()` writes the JSON envelope prefix, the `BufferView` over
+that buffer, and the suffix straight to the socket via separate `send_all()`
+calls instead of concatenating them (and the outer chunked-encoding framing)
+into one throwaway `std::string` first -- removing the three full-payload
+copies the pre-Phase-30 code paid on every streamed token, while bounded
+partial-output retention (`streamed_text`, persisted on both success and
+failure) is untouched. Deliberately out of scope for this pass: a
+full request-scoped-arena integration across the whole retrieval/prompt/
+JSON-parse path (the plan's `RequestArena` primitive exists and is tested,
+but only the one `FixedSizePool` consumer above is wired end-to-end this
+session); the upstream runner-line -> JSON-tree -> `generated.text`/
+`streamed_text` accumulation copies remain (required for parsing safety and
+durable accumulation) -- zero-copy streaming reduces, but does not
+eliminate, every copy in the identified chain. Windows is the validated
+build/test target per project convention.
+
+Purpose:
+
+- Eliminate unnecessary copies across retrieval, prompt assembly, caching,
+  and streaming.
+
+Dependencies:
+
+- Phase 16 chunk-reference results; Phase 23 segmented prompt assembly;
+  Phase 22 cache object representation.
+
+Deliverables:
+
+- Immutable shared buffers and views (`SharedBuffer`, `BufferView`,
+  `MappedBufferView`, `ChunkReference`, `TokenSpan`, `PromptSegment`) holding
+  only an owner reference, offset, length, and optional encoding metadata.
+- Copy-on-write restricted to large, mostly immutable, clearly controlled
+  data — never for credentials, mutable network buffers, audit records, or
+  data crossing a process trust boundary.
+- Request-scoped arenas (bounded byte size, defined allocation-failure
+  handling, no references surviving the arena, debug poisoning in test
+  builds) for retrieval-candidate metadata, ranking scratch, prompt-segment
+  descriptors, and JSON parsing scratch.
+- Fixed-size pools for frequently allocated small objects (queue nodes,
+  request-state records, retrieval-result descriptors, token-stream chunks)
+  that shrink or release reserved blocks under memory pressure.
+- Zero-copy streaming from the runner IPC buffer through to the socket
+  send, avoiding the runner-buffer → temporary-string → response-string →
+  JSON-string → network-string copy chain; any retained partial output
+  stays bounded and persisted incrementally.
+
+Exit criteria:
+
+- Peak memory during large-context requests decreases.
+- Prompt assembly performs fewer full-buffer copies.
+- No dangling views or use-after-free defects occur under sanitizer/debug
+  testing; pool memory is included in the central memory budget.
+
+### Phase 31 — Storage tiering, virtual drives, and scratch-volume management
+
+Status: Planned. Priority A/B — the `ScratchVolumeManager` and storage-aware
+placement recommendations are Priority A; full tier migration tooling is
+Priority B.
+
+Purpose:
+
+- Use each storage type for the workload it actually handles best, and keep
+  ephemeral scratch data from competing with model/KV memory or filling the
+  system drive.
+
+Dependencies:
+
+- Phase 21 storage capability probing; Phase 14 hard RAM ceiling (RAM-backed
+  scratch competes directly with model weights, KV cache, and OS file
+  cache).
+
+Deliverables:
+
+- Storage tiers (A: fast local NVMe for active models/indexes/hot cache/
+  runner scratch; B: local SATA SSD; C: local HDD for archives/backups; D:
+  removable/network, import-export only by default; R: RAM-backed, small
+  reconstructable temporary artifacts only).
+- A `ScratchVolumeManager` with per-job directory and byte quota, a global
+  byte quota, preferred-tier selection, atomic publication, shutdown
+  cleanup, a crash-recovery journal, orphan cleanup, and a free-space
+  reserve.
+- A hard prohibition on placing full GGUF models, durable chats, audit
+  records, user databases, resumable downloads, backups, security records,
+  or the only copy of an index generation on RAM-backed storage.
+- Separate reporting of physical/available RAM, committed virtual memory,
+  commit limit, pagefile/swap usage, hard page-fault rate, and model
+  mapped/resident bytes; a model is rejected or downgraded when projected
+  active pages exceed safe physical capacity even if commit capacity
+  remains.
+- Detection (not assumption) of filesystem compression, encryption,
+  deduplication, virtual disks, or network redirection under active model/
+  index storage, calibrated by measurement.
+
+Exit criteria:
+
+- Scratch files cannot fill the system drive.
+- RAM-drive use is included in physical-memory accounting.
+- Model placement recommendations reflect measured storage, not assumption.
+- Durable data is never silently redirected to ephemeral storage; storage
+  migration preserves integrity and atomicity.
+
+### Phase 32 — Speculative decoding and draft-model acceleration
+
+Status: Planned. Priority C — deliberately deferred behind the Priority A/B
+phases above; enabled only per-request after backend/tokenizer/template
+compatibility and quality-parity checks pass.
+
+Purpose:
+
+- Increase token-generation throughput using a smaller draft model whose
+  proposed tokens the target model verifies.
+
+Dependencies:
+
+- Phase 26 warm-state management for the draft runner; Phase 27 KV
+  accounting for the combined memory cost; Phase 20's disabled-by-default
+  speculative-decoding candidate.
+
+Deliverables:
+
+- Enablement gated on explicit backend support, exact draft/target
+  tokenizer and chat-template compatibility, exact vocabulary mapping,
+  combined memory fit, equivalent output quality, immediate fallback, and
+  cross-model cancellation.
+- Draft-model selection by target family, tokenizer identity, architecture
+  compatibility, measured acceptance rate, additional memory cost, and
+  relative draft/target speed.
+- Dynamic per-request disablement on low acceptance rate, overhead exceeding
+  savings, short requests, memory pressure, queued draft runner,
+  incompatible sampling settings, or thermal throttling.
+
+Exit criteria:
+
+- Generation throughput improves on representative prompts.
+- Output remains identical in deterministic parity tests where required.
+- Combined memory is fully accounted; poor acceptance falls back
+  automatically; single-model operation remains available at all times.
+
+### Phase 33 — Distributed local runners and multi-device orchestration
+
+Status: Planned. Priority C — deliberately deferred behind the Priority A/B
+phases above; local single-runner mode remains the default and is never
+required to change.
+
+Purpose:
+
+- Allow one control plane to use multiple local runner processes, or
+  optionally approved intranet worker machines, without mixing security
+  authority.
+
+Dependencies:
+
+- Phase 2 authorization model (worker authorization stays project-bound);
+  Phase 29 device-aware routing signals; Phase 9's existing outbound
+  registry pattern for pinned, verified external processes.
+
+Deliverables:
+
+- Local multi-runner configurations (per-GPU runner, CPU+GPU split,
+  dedicated embedding/router/benchmark runners) routed by resident model,
+  available VRAM/RAM, queue depth, expected TTFT, capability, power/thermal
+  state, priority, and authorization.
+- Optional intranet worker nodes using mutual TLS, pinned/approved private
+  PKI, signed worker registration, model-digest verification, explicit
+  per-project authorization, encrypted transport, request-size limits,
+  cancellation, audit correlation — no shared user passwords, no direct
+  unrestricted filesystem access.
+- Compact retrieval-context transfer to runners instead of whole project
+  files; worker identity recorded on the query trace.
+
+Exit criteria:
+
+- Runner failure does not crash the control plane; retries occur only when
+  semantically safe and never duplicate a persisted response.
+- Worker authorization remains project-bound; local single-runner mode
+  remains fully functional as the default.
+
+### Phase 34 — Adaptive performance controller
+
+Status: Planned. Priority B, gated on Phase 21–31 producing real measured
+evidence to tune against — an empty or synthetic evidence base must not
+drive automatic changes.
+
+Purpose:
+
+- Automatically select safe operating parameters from real-time conditions
+  and stored calibration evidence, extending Phase 19's calibration service
+  from advisory profiles to a live bounded controller.
+
+Dependencies:
+
+- Phase 13 query-trace/resource instrumentation; Phase 14 pressure actions;
+  Phase 19 `CalibrationService`/`TuningProfileStore`.
+
+Deliverables:
+
+- Live inputs (RAM/commit/page-fault/CPU/GPU/disk/queue-depth/TTFT/
+  throughput/cache-hit/thermal/power/active-user signals) feeding bounded
+  adjustments to retrieval/index worker counts, read queue depth, prefetch
+  distance, cache quotas, retrieval chunk/context targets, inference
+  concurrency and batch size, idle-unload time, warm-up policy, thread
+  count, NUMA policy, GPU offload, KV placement, and background-job rate —
+  every output constrained to administrator-configured ceilings.
+- Stability controls (minimum dwell time, hysteresis, bounded step size,
+  cooldown, rolling measurement, confidence requirement, safe rollback,
+  max changes per interval) to prevent oscillation.
+- Named performance modes (Minimal Memory, Balanced, Lowest Latency,
+  Maximum Throughput, Battery Saver, Quiet/Thermal Conservative,
+  Administrator Custom, Automatic).
+
+Exit criteria:
+
+- Automatic tuning never exceeds administrator ceilings; oscillation tests
+  remain stable.
+- Every settings change is auditable; failed recommendations revert to the
+  last safe profile; manual mode fully disables automatic changes.
+
+### Phase 35 — Performance administration interfaces
+
+Status: Planned.
+
+Purpose:
+
+- Give administrators full visibility and manual override over every
+  optimization from Phase 21–34, extending the existing Phase 19/20
+  performance routes into a dedicated sidebar.
+
+Dependencies:
+
+- Phase 13 metrics routes; Phase 19/20 performance API surface; Phase 22–31
+  producing the memory/cache/storage/worker-pool data to display.
+
+Deliverables:
+
+- A Performance sidebar (Overview, Live Requests, Models and Runners,
+  Memory, Caches, Retrieval, Storage, Worker Pools, Scheduling, Calibration,
+  Advanced Optimizations, Benchmarks, Regression History, Recommendations)
+  behind existing administrator authorization.
+- Per-category memory, cache, storage, and worker-pool detail views with
+  explicit actions (trim/clear/disable/rebuild cache; unload idle model;
+  reduce context/runner slots; change profile).
+- An advanced-optimization view showing, per feature: support status,
+  enabled state, required backend capability, memory cost, measured
+  benefit/regression, hardware/model/backend fingerprint, last validation
+  date, and fallback status — never a single opaque "turbo" toggle.
+
+Exit criteria:
+
+- Every figure shown is backed by the same instrumentation used for
+  automated benchmarking, not a separately maintained display-only value.
+- Every destructive or resource-reducing action is authorized, audited, and
+  reversible or clearly explained.
+
+### Phase 36 — Full performance certification and regression gates
+
+Status: Planned.
+
+Purpose:
+
+- Prevent a performance-oriented change from shipping without evidence that
+  it helps its intended metric and does not silently regress another.
+
+Dependencies:
+
+- Phase 12/19 existing baseline/calibration measurement; Phase 21–34 as the
+  features under test.
+
+Deliverables:
+
+- A benchmark matrix spanning cold/warm OS cache, cold/warm runner, cache
+  hit/miss, KV-prefix reuse/no-reuse, context sizes from 512 tokens to the
+  safe host limit, single/multiple compatible/incompatible concurrent
+  requests, active indexing/download, cache/memory pressure, cancellation,
+  disconnect, queue saturation, HDD/SATA SSD/NVMe, CPU-only/GPU-offloaded,
+  and each resident profile.
+- Recorded metrics per run: cold/warm load time, TTFT, queue wait,
+  retrieval/prompt-assembly/tokenization latency, prompt and generation
+  throughput, total request time, peak resident/commit memory, mapped
+  bytes, hard page faults, storage bytes read/operation count, cache hit
+  rate, CPU/GPU utilization, power/thermal notes, output quality,
+  cancellation and shutdown latency.
+- Per-optimization regression thresholds (max TTFT regression, max memory
+  increase, min throughput benefit, max quality regression, max queue-wait
+  increase, max storage amplification, max CPU increase, required fallback
+  result) and automated current-vs-previous-accepted-build comparison using
+  matched host/model/backend/settings/prompt-suite/index-generation/power
+  fingerprints — mismatched environments are never presented as a direct
+  comparison.
+
+Exit criteria:
+
+- A release is rejected when any memory ceiling is exceeded, cache
+  isolation fails, retrieval authorization fails, quality regression
+  exceeds its threshold, cancellation becomes unreliable, background work
+  starves interactive requests, model startup regresses without justified
+  benefit, page-fault rates indicate destructive paging, an advanced
+  optimization's fallback fails, or benchmark identity is incomplete.
+
+## Machine Learning Abilities
+
+This section extends the plan with an administrator-only Machine Learning
+administration and model-development module, covering the full lifecycle
+from dataset ingestion through training, evaluation, deployment, and
+governance. It follows the same authorization, isolation, versioning,
+audit, and evidence-based-optimization principles established elsewhere
+in this plan and does not relax any existing security or resource
+control.
+
+
+### 1. Purpose
+
+Extend the Master AI system with an administrator-only **Machine Learning** module that allows authorized administrators to:
+
+* Create, import, configure, train, fine-tune, evaluate, version, deploy, and retire machine-learning models.
+* Teach models specialized subjects using approved datasets and knowledge sources.
+* Build models for classification, prediction, generation, search, recommendation, anomaly detection, computer vision, audio processing, and other supported workloads.
+* Manage the complete machine-learning lifecycle from a unified administration interface.
+* Use local hardware, local model servers, remote compute nodes, or approved external providers.
+* Publish trained models to the Master AI inference system for use by web clients, desktop clients, local applications, MCP clients, development tools, and internal services.
+* Maintain strong security, auditability, reproducibility, and administrative control.
+
+This module must be available only when the authenticated user has the required administrator permissions.
+
+
+### 2. Sidebar Integration
+
+Add a primary sidebar option named:
+
+**Machine Learning**
+
+The Machine Learning option should expand into the following administrator interfaces:
+
+1. Dashboard
+2. Projects
+3. Model Registry
+4. Model Builder
+5. Dataset Manager
+6. Subject Knowledge Manager
+7. Data Labeling
+8. Data Preparation
+9. Training Jobs
+10. Fine-Tuning
+11. Evaluation Lab
+12. Experiment Tracking
+13. Prompt and Instruction Training
+14. Embeddings and Vector Stores
+15. Retrieval-Augmented Generation
+16. Synthetic Data
+17. Model Comparison
+18. Deployment Manager
+19. Inference Endpoints
+20. Hardware and Compute
+21. Automation Pipelines
+22. Safety and Governance
+23. Monitoring and Diagnostics
+24. Audit Logs
+25. Machine Learning Settings
+
+Each interface must respect role-based access control and only display operations the current administrator is authorized to perform.
+
+
+### 3. Administrator Permissions
+
+Create granular machine-learning permissions rather than relying on one unrestricted administrator role.
+
+Recommended permissions include:
+
+* `ml.dashboard.view`
+* `ml.projects.create`
+* `ml.projects.edit`
+* `ml.projects.delete`
+* `ml.datasets.view`
+* `ml.datasets.import`
+* `ml.datasets.edit`
+* `ml.datasets.delete`
+* `ml.datasets.approve`
+* `ml.datasets.export`
+* `ml.labels.manage`
+* `ml.models.view`
+* `ml.models.import`
+* `ml.models.create`
+* `ml.models.train`
+* `ml.models.finetune`
+* `ml.models.evaluate`
+* `ml.models.approve`
+* `ml.models.deploy`
+* `ml.models.rollback`
+* `ml.models.delete`
+* `ml.compute.manage`
+* `ml.endpoints.manage`
+* `ml.vectorstores.manage`
+* `ml.pipelines.manage`
+* `ml.safety.manage`
+* `ml.audit.view`
+* `ml.settings.manage`
+
+Administrative roles may include:
+
+* Master Administrator
+* Machine Learning Administrator
+* Data Administrator
+* Model Trainer
+* Model Evaluator
+* Deployment Administrator
+* Safety Reviewer
+* Read-Only Auditor
+
+Critical operations such as production deployment, dataset deletion, model deletion, safety-policy changes, and external publication should support dual approval.
+
+
+### 4. Machine Learning Dashboard
+
+The Machine Learning dashboard should provide an overview of the entire model-development environment.
+
+Display:
+
+* Active machine-learning projects
+* Models currently training
+* Models waiting for evaluation
+* Models awaiting administrative approval
+* Deployed production models
+* Failed training jobs
+* GPU, CPU, memory, storage, and network utilisation
+* Dataset storage consumption
+* Model storage consumption
+* Inference request volume
+* Inference latency
+* Model error rates
+* Safety-filter activity
+* Recent administrative actions
+* Alerts and recommendations
+
+Dashboard cards should provide direct navigation to the corresponding project, model, dataset, training job, or deployment.
+
+
+### 5. Machine Learning Projects
+
+A project is the main organizational container for a model-development objective.
+
+Each project should include:
+
+* Project name
+* Description
+* Business or technical objective
+* Subject domain
+* Model task
+* Project owner
+* Assigned administrators and contributors
+* Security classification
+* Approved data sources
+* Target model architecture
+* Target deployment environment
+* Success criteria
+* Evaluation requirements
+* Safety requirements
+* Storage allocation
+* Compute allocation
+* Project status
+* Creation and modification history
+
+Example project types:
+
+* Programming assistant
+* C++ code analysis model
+* Delphi development assistant
+* Game-engine documentation assistant
+* Accounting assistant
+* Business forecasting model
+* Customer-support classifier
+* Image-recognition model
+* Document summarization model
+* Internal search assistant
+* Security-event anomaly detector
+* Speech transcription model
+* Recommendation model
+
+Project statuses should include:
+
+* Draft
+* Data Collection
+* Data Preparation
+* Ready for Training
+* Training
+* Evaluation
+* Awaiting Approval
+* Approved
+* Deployed
+* Paused
+* Archived
+
+
+### 6. Supported Machine Learning Tasks
+
+The system should support multiple machine-learning task categories.
+
+#### 6.1 Language and Text
+
+* Text classification
+* Topic classification
+* Sentiment analysis
+* Named-entity recognition
+* Intent recognition
+* Question answering
+* Summarisation
+* Translation
+* Grammar correction
+* Text generation
+* Code generation
+* Code completion
+* Code explanation
+* Code-review assistance
+* Information extraction
+* Document comparison
+* Semantic search
+* Text embeddings
+* Reranking
+* Conversation models
+* Tool-selection models
+
+#### 6.2 Computer Vision
+
+* Image classification
+* Object detection
+* Image segmentation
+* Optical character recognition
+* Visual question answering
+* Image similarity
+* Defect detection
+* Facial recognition, where legally and ethically permitted
+* Scene understanding
+* Texture analysis
+* Video-frame analysis
+
+#### 6.3 Audio and Speech
+
+* Speech-to-text
+* Text-to-speech
+* Speaker recognition
+* Sound classification
+* Music classification
+* Audio-event detection
+* Noise detection
+* Voice-command recognition
+* Audio embeddings
+
+#### 6.4 Structured Data
+
+* Regression
+* Classification
+* Forecasting
+* Anomaly detection
+* Risk scoring
+* Recommendation
+* Clustering
+* Customer segmentation
+* Fraud detection
+* Resource prediction
+* Capacity planning
+
+#### 6.5 Multimodal Models
+
+* Text and image understanding
+* Text and audio understanding
+* Document image analysis
+* Video and text analysis
+* Code, logs, screenshots, and documentation analysis
+* Combined enterprise-data assistants
+
+
+### 7. Model Registry
+
+The Model Registry must be the authoritative catalog for all machine-learning models available to the Master AI system.
+
+Each model entry should contain:
+
+* Internal model identifier
+* Model name
+* Display name
+* Version
+* Model family
+* Base architecture
+* Model task
+* Model format
+* Parameter count
+* Precision
+* Quantization format
+* Context length
+* Input types
+* Output types
+* Supported languages
+* License
+* Source
+* Ownership
+* Security classification
+* Training dataset references
+* Fine-tuning dataset references
+* Evaluation results
+* Safety assessment
+* Hardware requirements
+* Runtime requirements
+* Deployment status
+* Approval status
+* Creation date
+* Last modified date
+* Model hash
+* Model signature
+* Storage location
+* Change log
+
+Supported model states should include:
+
+* Imported
+* Unverified
+* Verified
+* Training
+* Evaluation
+* Rejected
+* Approved
+* Staging
+* Production
+* Deprecated
+* Archived
+* Quarantined
+
+Models must never be placed into production merely because training completed successfully. Production use requires evaluation and explicit approval.
+
+
+### 8. Model Import
+
+Administrators should be able to import models from:
+
+* Local storage
+* Internal model repositories
+* Network storage
+* Approved model hubs
+* Existing Master AI installations
+* Model-development workstations
+* Remote training servers
+* Container images
+* Supported provider APIs
+
+Before import, the system should verify:
+
+* File integrity
+* Model format
+* Model architecture
+* Model size
+* License information
+* Malware or unsafe content
+* Required runtime
+* Required custom code
+* External dependencies
+* Model hash
+* Digital signature, where available
+* Compatibility with available hardware
+
+Imported models containing untrusted executable code must be isolated and must not execute automatically.
+
+
+### 9. Model Builder Interface
+
+The Model Builder should guide administrators through the creation of a model configuration.
+
+The interface should support:
+
+* New model from template
+* New model from existing architecture
+* New model from imported base model
+* New model from a previous model version
+* New classical machine-learning model
+* New neural-network model
+* New language-model adaptation
+* New embedding model
+* New reranking model
+* New vision model
+* New audio model
+
+The builder should allow configuration of:
+
+* Model architecture
+* Layer configuration
+* Hidden dimensions
+* Attention configuration
+* Vocabulary and tokenizer
+* Sequence length
+* Activation functions
+* Dropout
+* Initialisation strategy
+* Loss function
+* Optimiser
+* Learning-rate scheduler
+* Batch size
+* Epoch count
+* Gradient accumulation
+* Gradient clipping
+* Mixed precision
+* Checkpoint frequency
+* Validation frequency
+* Early stopping
+* Random seed
+* Reproducibility settings
+* Distributed-training settings
+
+The interface must provide basic and advanced configuration modes.
+
+
+### 10. Dataset Manager
+
+The Dataset Manager must organize all information used for training, fine-tuning, evaluation, retrieval, and testing.
+
+Supported dataset sources should include:
+
+* Uploaded files
+* Local folders
+* Network folders
+* Databases
+* Web APIs
+* Internal APIs
+* Source-code repositories
+* Document libraries
+* Support tickets
+* Knowledge bases
+* Chat transcripts
+* Application logs
+* System metrics
+* Images
+* Audio
+* Video
+* Structured data
+* Manually entered examples
+* Synthetic examples
+* Administrator-approved web content
+
+Supported file formats may include:
+
+* TXT
+* Markdown
+* HTML
+* JSON
+* JSONL
+* CSV
+* TSV
+* XML
+* YAML
+* PDF
+* DOCX
+* XLSX
+* Source-code files
+* Image formats
+* Audio formats
+* Video formats
+* Database exports
+
+Each dataset should record:
+
+* Dataset identifier
+* Name
+* Description
+* Subject area
+* Owner
+* Source
+* License
+* Security classification
+* Record count
+* File count
+* Total size
+* Data format
+* Schema
+* Language
+* Creation date
+* Modification date
+* Approval status
+* Data-quality score
+* Sensitive-data status
+* Duplicate rate
+* Train, validation, and test split
+* Dataset hash
+* Dataset version
+* Associated projects
+* Associated models
+
+
+### 11. Dataset Versioning
+
+Every dataset change must create a new version.
+
+Versioning should track:
+
+* Added records
+* Removed records
+* Modified records
+* Schema changes
+* Label changes
+* Cleaning operations
+* Filtering operations
+* Deduplication operations
+* Source changes
+* Administrator responsible
+* Reason for change
+* Date and time
+* Dataset checksum
+
+Training runs must reference immutable dataset versions so that results can be reproduced.
+
+
+### 12. Subject Knowledge Manager
+
+The Subject Knowledge Manager allows administrators to teach the Master AI system about defined domains without necessarily retraining the entire base model.
+
+A subject package should contain:
+
+* Subject name
+* Description
+* Scope
+* Target audience
+* Approved terminology
+* Definitions
+* Concepts
+* Rules
+* Procedures
+* Examples
+* Counterexamples
+* Reference documents
+* Frequently asked questions
+* Required reasoning patterns
+* Prohibited conclusions
+* Known limitations
+* Evaluation questions
+* Source citations
+* Update schedule
+* Subject owner
+* Review status
+
+Example subject packages may include:
+
+* C++17 programming
+* DirectX 11 rendering
+* Vulkan rendering
+* OpenGL rendering
+* Delphi 12 development
+* Blender scripting
+* Game-engine architecture
+* Accounting systems
+* Business-management systems
+* Web development
+* Network administration
+* Internal company procedures
+* Product documentation
+* Customer support
+* Security policies
+
+Subject packages may be used for:
+
+* Fine-tuning
+* Instruction tuning
+* Retrieval-augmented generation
+* Embedding generation
+* Evaluation-set creation
+* Prompt templates
+* Agent specialisation
+
+
+### 13. Knowledge Ingestion Pipeline
+
+Provide a controlled ingestion pipeline that converts source material into machine-learning-ready content.
+
+Pipeline stages should include:
+
+1. Source acquisition
+2. File verification
+3. Malware scanning
+4. Text extraction
+5. Encoding detection
+6. Language detection
+7. Metadata extraction
+8. Document classification
+9. Section detection
+10. Content cleaning
+11. Duplicate detection
+12. Sensitive-data detection
+13. Personal-information detection
+14. Secret and credential detection
+15. Content segmentation
+16. Chunk creation
+17. Label assignment
+18. Quality scoring
+19. Human review
+20. Approval
+21. Dataset publication
+22. Embedding generation
+23. Vector-store indexing
+
+Administrators must be able to inspect and correct the output at each stage.
+
+
+### 14. Data Labeling Interface
+
+The Data Labeling interface should support manual, assisted, and automated labeling.
+
+Supported labeling modes should include:
+
+* Text category labels
+* Intent labels
+* Sentiment labels
+* Entity spans
+* Question and answer pairs
+* Instruction and response pairs
+* Preferred and rejected responses
+* Code correctness labels
+* Security-severity labels
+* Image classification
+* Bounding boxes
+* Segmentation masks
+* Audio-event labels
+* Timestamp labels
+* Tabular target values
+
+Features should include:
+
+* Labeling queues
+* Assignment to reviewers
+* Label guidelines
+* Keyboard shortcuts
+* Bulk labeling
+* Suggested labels
+* Confidence values
+* Disagreement handling
+* Consensus review
+* Quality sampling
+* Reviewer accuracy metrics
+* Annotation history
+* Label versioning
+
+Machine-generated labels must be clearly distinguished from human-reviewed labels.
+
+
+### 15. Data Preparation Interface
+
+Administrators should be able to create reusable data-preparation pipelines.
+
+Operations should include:
+
+* Remove duplicates
+* Remove empty records
+* Normalize whitespace
+* Normalize encoding
+* Correct malformed records
+* Strip unwanted markup
+* Remove boilerplate
+* Detect language
+* Filter by language
+* Filter by quality
+* Remove secrets
+* Remove credentials
+* Redact personal information
+* Balance classes
+* Sample data
+* Shuffle data
+* Merge datasets
+* Split datasets
+* Tokenize text
+* Calculate token counts
+* Resize images
+* Normalize images
+* Resample audio
+* Generate features
+* Handle missing values
+* Encode categories
+* Scale numeric values
+* Detect outliers
+* Generate train, validation, and test sets
+
+Each pipeline operation must be logged and reproducible.
+
+
+### 16. Training Jobs
+
+The Training Jobs interface should allow administrators to create and manage training runs.
+
+A training job should include:
+
+* Job name
+* Project
+* Model configuration
+* Dataset version
+* Training type
+* Compute target
+* Hardware allocation
+* Runtime environment
+* Container image
+* Hyperparameters
+* Environment variables
+* Secrets references
+* Output directory
+* Checkpoint policy
+* Logging policy
+* Notification policy
+* Maximum runtime
+* Maximum resource usage
+* Maximum cost, where applicable
+* Failure-recovery strategy
+
+Training-job states should include:
+
+* Draft
+* Queued
+* Preparing
+* Running
+* Paused
+* Canceling
+* Canceled
+* Failed
+* Completed
+* Awaiting Evaluation
+* Archived
+
+Administrators should be able to:
+
+* Start
+* Pause
+* Resume
+* Stop
+* Clone
+* Retry
+* Compare
+* Archive
+* Delete
+* Promote resulting checkpoints
+
+
+### 17. Training Methods
+
+The system should support appropriate training methods based on the selected model type.
+
+Possible methods include:
+
+* Training from scratch
+* Supervised learning
+* Unsupervised learning
+* Semi-supervised learning
+* Self-supervised learning
+* Transfer learning
+* Fine-tuning
+* Instruction tuning
+* Parameter-efficient fine-tuning
+* Adapter training
+* Low-rank adaptation
+* Quantization-aware training
+* Knowledge distillation
+* Preference optimization
+* Reward-model training
+* Reinforcement learning
+* Continual learning
+* Incremental learning
+* Federated learning, where required
+* Active learning
+
+Only supported and approved methods should be displayed for each model architecture.
+
+
+### 18. Fine-Tuning Interface
+
+The Fine-Tuning interface should simplify adaptation of existing models.
+
+Administrators should be able to select:
+
+* Base model
+* Base model version
+* Fine-tuning dataset
+* Subject package
+* Training method
+* Adapter method
+* Target layers
+* Learning rate
+* Batch size
+* Epoch count
+* Context length
+* Precision
+* Checkpoint strategy
+* Validation dataset
+* Safety dataset
+* Output model name
+* Output version
+
+Fine-tuning presets should include:
+
+* General instruction tuning
+* Subject specialisation
+* Code assistant
+* Classification
+* Question answering
+* Conversation style
+* Tool-use behavior
+* Structured-output generation
+* Safety alignment
+* Terminology adaptation
+
+The interface must estimate expected hardware requirements and storage usage before the job starts.
+
+
+### 19. Prompt and Instruction Training
+
+Provide an interface for managing instruction datasets used to teach a model how to respond and behave.
+
+An instruction record may contain:
+
+* System instruction
+* User instruction
+* Context
+* Expected response
+* Rejected response
+* Tool calls
+* Tool results
+* Required output format
+* Subject classification
+* Difficulty
+* Safety classification
+* Reviewer status
+
+Administrators should be able to:
+
+* Create examples manually
+* Import examples
+* Generate draft examples
+* Review generated examples
+* Mark preferred and rejected outputs
+* Test instructions against multiple models
+* Detect contradictory instructions
+* Detect duplicated examples
+* Validate structured outputs
+
+Generated training examples must require approval before entering an approved dataset.
+
+
+### 20. Synthetic Data Generation
+
+The Synthetic Data interface should help expand limited datasets while preventing uncontrolled contamination.
+
+Supported operations should include:
+
+* Generate alternative questions
+* Generate paraphrases
+* Generate examples
+* Generate counterexamples
+* Generate difficult cases
+* Generate malformed inputs
+* Generate edge cases
+* Generate balanced-class samples
+* Generate code samples
+* Generate unit-test cases
+* Generate simulated conversations
+* Generate image variations
+* Generate tabular records
+
+Each generated record should include:
+
+* Generator model
+* Generator version
+* Prompt
+* Generation settings
+* Creation date
+* Confidence score
+* Validation status
+* Human-review status
+* Original source linkage
+
+Synthetic data must remain distinguishable from human-created and real-world data.
+
+
+### 21. Embeddings and Vector Stores
+
+The system should include an Embeddings and Vector Stores interface for semantic search and retrieval.
+
+Administrators should be able to:
+
+* Register embedding models
+* Create vector stores
+* Select distance metric
+* Configure vector dimensions
+* Import documents
+* Generate embeddings
+* Rebuild indexes
+* Delete documents
+* Update documents
+* Search vectors
+* Filter by metadata
+* Configure chunk size
+* Configure chunk overlap
+* Configure retrieval limits
+* Configure relevance thresholds
+* Configure reranking
+* Test retrieval quality
+
+Each vector store should record:
+
+* Name
+* Description
+* Embedding model
+* Embedding-model version
+* Vector dimensions
+* Distance metric
+* Document count
+* Chunk count
+* Storage size
+* Index type
+* Security classification
+* Access permissions
+* Creation date
+* Last rebuild date
+* Associated subject packages
+* Associated agents
+* Associated deployed models
+
+
+### 22. Retrieval-Augmented Generation
+
+Provide a Retrieval-Augmented Generation configuration interface.
+
+Administrators should be able to define:
+
+* User query preprocessing
+* Query rewriting
+* Search strategy
+* Vector store
+* Keyword-search source
+* Hybrid-search weighting
+* Retrieval count
+* Relevance threshold
+* Metadata filters
+* Reranking model
+* Context-size limit
+* Citation requirements
+* Response template
+* Fallback behavior
+* Source-priority rules
+* Restricted documents
+* Cache behavior
+
+The system should support testing:
+
+* Retrieved documents
+* Retrieval relevance
+* Missing information
+* Incorrect citations
+* Context conflicts
+* Response grounding
+* Unsupported claims
+* Retrieval latency
+
+
+### 23. Evaluation Lab
+
+Every model must be evaluated before approval or deployment.
+
+Evaluation categories should include:
+
+* Accuracy
+* Precision
+* Recall
+* F1 score
+* Loss
+* Perplexity
+* Mean absolute error
+* Mean squared error
+* Ranking quality
+* Retrieval accuracy
+* Response relevance
+* Groundedness
+* Hallucination rate
+* Code correctness
+* Compilation success
+* Unit-test success
+* Latency
+* Throughput
+* Memory usage
+* GPU usage
+* Stability
+* Safety compliance
+* Bias testing
+* Robustness
+* Adversarial resistance
+
+The interface should support:
+
+* Standard benchmark sets
+* Custom benchmark sets
+* Subject-specific tests
+* Regression tests
+* Safety tests
+* Adversarial prompts
+* Human evaluation
+* Pairwise model comparison
+* Blind model comparison
+* Automated scoring
+* Reviewer notes
+
+
+### 24. Subject Examination System
+
+To verify whether a model has learned a subject, provide a subject examination system.
+
+Each subject examination may include:
+
+* Multiple-choice questions
+* Short-answer questions
+* Long-answer questions
+* Code-writing tasks
+* Code-correction tasks
+* Scenario analysis
+* Troubleshooting exercises
+* Structured-output tasks
+* Tool-use tasks
+* Retrieval tasks
+* Fact-verification tasks
+
+The system should calculate:
+
+* Overall subject score
+* Score by topic
+* Score by difficulty
+* Accuracy by question type
+* Unsupported-claim rate
+* Hallucination rate
+* Source-citation quality
+* Reasoning consistency
+* Failure categories
+
+A minimum approval score should be configurable for each subject.
+
+
+### 25. Experiment Tracking
+
+Every training and evaluation run must be recorded as an experiment.
+
+Track:
+
+* Experiment identifier
+* Project
+* Model
+* Dataset
+* Source-code version
+* Configuration version
+* Container version
+* Hyperparameters
+* Random seed
+* Hardware
+* Runtime
+* Training metrics
+* Validation metrics
+* Evaluation metrics
+* Checkpoints
+* Logs
+* Artifacts
+* Notes
+* Tags
+* Owner
+* Start and completion times
+* Failure reason
+* Result status
+
+Administrators should be able to compare experiments side by side.
+
+Comparison should highlight:
+
+* Parameter differences
+* Dataset differences
+* Metric changes
+* Runtime changes
+* Hardware changes
+* Storage changes
+* Safety changes
+* Regression failures
+
+
+### 26. Hyperparameter Optimization
+
+Provide automated and manual hyperparameter search.
+
+Supported strategies may include:
+
+* Manual search
+* Grid search
+* Random search
+* Bayesian optimization
+* Population-based training
+* Successive halving
+* Early-stopping optimization
+
+Configurable search spaces should include:
+
+* Learning rate
+* Batch size
+* Epoch count
+* Optimiser
+* Weight decay
+* Dropout
+* Warmup steps
+* Scheduler
+* Adapter rank
+* Sequence length
+* Gradient accumulation
+* Data-sampling strategy
+
+The system should enforce resource and time limits.
+
+
+### 27. Model Comparison
+
+The Model Comparison interface should allow administrators to compare:
+
+* Model versions
+* Base models
+* Fine-tuned models
+* Quantized models
+* Local and remote models
+* Different training experiments
+* Different retrieval configurations
+
+Comparison categories should include:
+
+* Accuracy
+* Subject knowledge
+* Hallucination rate
+* Safety
+* Latency
+* Throughput
+* Memory use
+* GPU use
+* Context capacity
+* Output quality
+* Structured-output compliance
+* Tool-use success
+* Deployment cost
+* Hardware compatibility
+
+The interface should support blind response comparison to reduce reviewer bias.
+
+
+### 28. Model Optimization
+
+After training, administrators should be able to optimize models for deployment.
+
+Supported optimization operations may include:
+
+* Quantization
+* Pruning
+* Distillation
+* Graph optimization
+* Operator fusion
+* Weight compression
+* Adapter merging
+* Checkpoint merging
+* Vocabulary reduction
+* Context optimization
+* Cache optimization
+* Batch optimization
+* Runtime conversion
+
+The system should compare the optimized model against the original to detect unacceptable quality loss.
+
+
+### 29. Model Formats and Runtimes
+
+The architecture should support pluggable model formats and runtimes rather than being restricted to one framework.
+
+Possible supported formats include:
+
+* Native framework checkpoints
+* Safetensors
+* ONNX
+* GGUF
+* TensorRT-compatible models
+* OpenVINO-compatible models
+* Platform-specific optimized formats
+* Custom internal model packages
+
+Possible runtimes include:
+
+* CPU inference
+* NVIDIA GPU inference
+* AMD GPU inference
+* Intel accelerator inference
+* DirectML inference
+* ONNX Runtime
+* Local language-model runtimes
+* Containerised inference servers
+* Remote inference nodes
+* Approved provider APIs
+
+Model-runtime adapters should expose a common internal inference interface.
+
+
+### 30. Hardware and Compute Manager
+
+The Hardware and Compute interface should display available resources.
+
+Track:
+
+* Compute-node name
+* Node address
+* Operating system
+* CPU model
+* CPU core count
+* System memory
+* GPU model
+* GPU count
+* GPU memory
+* Driver version
+* Runtime versions
+* Available storage
+* Current workload
+* Node health
+* Temperature, where supported
+* Power usage, where supported
+* Queue length
+* Supported model formats
+* Supported precision modes
+
+Administrators should be able to:
+
+* Register nodes
+* Disable nodes
+* Assign nodes to projects
+* Reserve resources
+* Set resource quotas
+* Configure scheduling priority
+* Drain nodes for maintenance
+* Test node health
+* Update runtime components
+
+
+### 31. Training Scheduler
+
+The scheduler should allocate jobs according to:
+
+* User permissions
+* Project priority
+* Hardware requirements
+* Available GPU memory
+* Available system memory
+* Estimated runtime
+* Resource quotas
+* Maximum concurrent jobs
+* Maintenance windows
+* Administrative priority
+* Cost limits
+
+The scheduler should prevent one training job from exhausting all resources unless explicitly authorized.
+
+
+### 32. Distributed Training
+
+For larger models, the system should support distributed training across multiple devices or nodes.
+
+Required controls include:
+
+* Worker count
+* Node count
+* GPU assignment
+* Communication backend
+* Gradient synchronization
+* Checkpoint coordination
+* Failure recovery
+* Worker health
+* Network-bandwidth monitoring
+* Timeout configuration
+* Resume strategy
+
+Distributed training must be optional and hidden when unsupported by the available environment.
+
+
+### 33. Checkpoint Management
+
+The system should automatically manage training checkpoints.
+
+Checkpoint information should include:
+
+* Training step
+* Epoch
+* Validation metric
+* File size
+* Creation time
+* Parent model
+* Dataset version
+* Configuration version
+* Checkpoint hash
+* Storage location
+* Retention status
+
+Administrators should be able to:
+
+* Resume from checkpoint
+* Compare checkpoints
+* Promote checkpoint
+* Download checkpoint
+* Archive checkpoint
+* Delete checkpoint
+* Mark checkpoint as protected
+
+Retention policies should prevent storage from growing without control.
+
+
+### 34. Deployment Manager
+
+The Deployment Manager should promote approved models into supported environments.
+
+Deployment environments may include:
+
+* Development
+* Testing
+* Staging
+* Production
+* Offline workstation
+* Local intranet
+* MCP service
+* Desktop client
+* Web application
+* Visual Studio integration
+* VS Code integration
+* Internal API
+* Batch-processing service
+
+Deployment strategies should include:
+
+* Direct deployment
+* Blue-green deployment
+* Canary deployment
+* Shadow deployment
+* A/B testing
+* Rolling update
+
+Every deployment must record:
+
+* Model version
+* Runtime
+* Target node
+* Configuration
+* Deployment time
+* Administrator
+* Approval
+* Rollback version
+* Health status
+
+
+### 35. Inference Endpoints
+
+Administrators should be able to create controlled inference endpoints.
+
+Endpoint settings should include:
+
+* Endpoint name
+* Model
+* Model version
+* Runtime
+* Host
+* Port
+* Protocol
+* Authentication method
+* Encryption settings
+* Allowed clients
+* Rate limits
+* Request-size limits
+* Response-size limits
+* Timeout
+* Batch size
+* Maximum concurrent requests
+* Logging policy
+* Cache policy
+* Safety policy
+* Tool permissions
+* Network-access permissions
+
+Supported interfaces may include:
+
+* Internal REST API
+* WebSocket
+* Local IPC
+* Named pipes
+* MCP
+* Command-line client
+* Desktop application
+* Web administration interface
+* Visual Studio extension
+* VS Code extension
+
+
+### 36. Agent and Model Integration
+
+The Machine Learning module should allow trained models to be assigned to Master AI agents.
+
+An agent configuration should specify:
+
+* Primary model
+* Fallback model
+* Embedding model
+* Reranking model
+* Vision model
+* Audio model
+* Subject packages
+* Vector stores
+* Tools
+* System instructions
+* Context limits
+* Safety policy
+* Resource limits
+* Network permissions
+* File permissions
+* Execution permissions
+
+Different models may be assigned to specialized agents, including:
+
+* Coding agent
+* Planning agent
+* Documentation agent
+* Research agent
+* Data-analysis agent
+* Security-analysis agent
+* Image-analysis agent
+* Audio-analysis agent
+* Business-systems agent
+
+
+### 37. Automated Machine Learning Pipelines
+
+Provide reusable pipelines for the complete machine-learning lifecycle.
+
+A pipeline may include:
+
+1. Import data
+2. Validate data
+3. Clean data
+4. Label data
+5. Split data
+6. Train model
+7. Validate model
+8. Evaluate model
+9. Run safety tests
+10. Optimize model
+11. Request approval
+12. Deploy to staging
+13. Run staging tests
+14. Deploy to production
+15. Monitor production
+16. Trigger rollback when required
+
+Pipeline triggers may include:
+
+* Manual execution
+* Scheduled execution
+* New dataset version
+* New source documents
+* Model-performance degradation
+* Approval event
+* Source-code update
+* Configuration update
+
+Administrators must be able to pause, resume, clone, and inspect pipelines.
+
+
+### 38. Continual Learning
+
+Continual learning should be tightly controlled.
+
+The system must not automatically train production models from uncontrolled user conversations.
+
+A safe continual-learning workflow should be:
+
+1. Collect candidate examples.
+2. Remove personal information and secrets.
+3. Classify examples.
+4. Score quality.
+5. Detect harmful or malicious examples.
+6. Present examples for administrator review.
+7. Add approved examples to a versioned dataset.
+8. Run scheduled fine-tuning.
+9. Evaluate the new model.
+10. Compare against the production model.
+11. Require approval.
+12. Deploy using a controlled rollout.
+
+This prevents model poisoning, accidental memorization, and uncontrolled behavior changes.
+
+
+### 39. Feedback Collection
+
+The system may collect feedback from authorized users.
+
+Feedback types should include:
+
+* Correct response
+* Incorrect response
+* Partially correct response
+* Unsafe response
+* Outdated response
+* Unsupported claim
+* Poor citation
+* Tool-use failure
+* Formatting failure
+* Performance problem
+* Preferred alternative response
+
+Feedback should enter a review queue and must not become training data automatically.
+
+
+### 40. Safety and Governance
+
+The Safety and Governance interface should control how models are trained and used.
+
+Required controls include:
+
+* Dataset approval
+* Model approval
+* Deployment approval
+* Restricted data categories
+* Prohibited data sources
+* Personal-information handling
+* Credential detection
+* Secret detection
+* Copyright and license tracking
+* Harmful-content testing
+* Bias testing
+* Hallucination testing
+* Prompt-injection testing
+* Data-poisoning detection
+* Model provenance
+* Model cards
+* Dataset cards
+* Retention policies
+* Deletion policies
+* Export restrictions
+* Network restrictions
+
+Every production model should have a model card describing:
+
+* Purpose
+* Intended use
+* Prohibited use
+* Training data
+* Evaluation results
+* Known limitations
+* Safety controls
+* Hardware requirements
+* License
+* Owner
+* Approval status
+
+
+### 41. Security Requirements
+
+The Machine Learning module must follow strict security controls.
+
+Required protections include:
+
+* Administrator authentication
+* Multi-factor authentication support
+* Role-based access control
+* Session expiry
+* Account-lockout policy
+* Password hashing
+* Transport encryption
+* Encrypted sensitive storage
+* Secret vault integration
+* Signed model packages
+* File-integrity checks
+* Dataset checksums
+* Model checksums
+* Malware scanning
+* Path validation
+* File-type validation
+* Request-size limits
+* Rate limiting
+* Network-access restrictions
+* Sandboxed model conversion
+* Sandboxed custom code
+* Container isolation
+* Least-privilege service accounts
+* Audit logging
+* Backup encryption
+
+Training workloads must not automatically receive:
+
+* Host administrator privileges
+* Unrestricted file-system access
+* Unrestricted network access
+* Production credentials
+* Database-administrator credentials
+* Access to unrelated projects
+
+
+### 42. Model and Dataset Isolation
+
+Projects with different security classifications must be isolated.
+
+Isolation should apply to:
+
+* Storage
+* Databases
+* Vector stores
+* Training jobs
+* Runtime environments
+* API credentials
+* Compute nodes
+* Logs
+* Backups
+* Export permissions
+
+A model trained on confidential data must not be published to unrestricted users or external services without explicit approval.
+
+
+### 43. Audit Logging
+
+Every important action must be recorded.
+
+Audit events should include:
+
+* Administrator login
+* Permission changes
+* Dataset import
+* Dataset export
+* Dataset approval
+* Dataset deletion
+* Model import
+* Model creation
+* Training start
+* Training stop
+* Training failure
+* Model evaluation
+* Model approval
+* Model rejection
+* Model deployment
+* Model rollback
+* Endpoint creation
+* Endpoint modification
+* Compute-node changes
+* Safety-policy changes
+* Secret access
+* Configuration changes
+
+Each audit record should include:
+
+* Timestamp
+* User
+* Role
+* IP address
+* Session
+* Action
+* Target resource
+* Previous value
+* New value
+* Result
+* Failure reason
+* Correlation identifier
+
+Audit logs should be tamper-resistant and searchable.
+
+
+### 44. Monitoring and Diagnostics
+
+The monitoring interface should track both training and inference.
+
+#### Training Monitoring
+
+Display:
+
+* Current epoch
+* Current step
+* Training loss
+* Validation loss
+* Learning rate
+* Gradient norm
+* Throughput
+* Estimated completion progress
+* CPU usage
+* GPU usage
+* GPU memory
+* System memory
+* Disk activity
+* Network activity
+* Temperature
+* Errors
+* Warnings
+
+#### Inference Monitoring
+
+Display:
+
+* Requests per second
+* Average latency
+* Percentile latency
+* Queue depth
+* Input-token rate
+* Output-token rate
+* Error rate
+* Timeout rate
+* Memory usage
+* GPU usage
+* Cache-hit rate
+* Safety-filter rate
+* Tool-call success
+* Retrieval latency
+* Model-loading time
+
+
+### 45. Drift and Regression Detection
+
+The system should detect when deployed models deteriorate.
+
+Monitor:
+
+* Accuracy drift
+* Input-data drift
+* Output-distribution drift
+* Latency regressions
+* Increased hallucinations
+* Increased safety violations
+* Increased tool-use failures
+* Increased user rejection
+* Retrieval-quality degradation
+* Resource-use increases
+
+When a threshold is exceeded, the system should:
+
+* Raise an alert
+* Record diagnostic information
+* Compare against the previous model version
+* Recommend evaluation
+* Optionally disable automatic routing
+* Allow rollback to a stable version
+
+Automatic rollback should only occur when explicitly configured.
+
+
+### 46. Backup and Recovery
+
+Back up:
+
+* Project metadata
+* Dataset metadata
+* Approved datasets
+* Model configurations
+* Model files
+* Checkpoints
+* Evaluation results
+* Vector stores
+* Pipeline definitions
+* Safety policies
+* Audit logs
+
+Recovery procedures should support:
+
+* Project restoration
+* Dataset-version restoration
+* Model-version restoration
+* Vector-index rebuilding
+* Deployment rollback
+* Database recovery
+* Compute-node replacement
+
+Backups must be encrypted and periodically tested.
+
+
+### 47. Storage Management
+
+Provide storage quotas and retention policies for:
+
+* Uploaded datasets
+* Processed datasets
+* Temporary files
+* Checkpoints
+* Model versions
+* Logs
+* Evaluation artifacts
+* Vector indexes
+* Container images
+* Export packages
+
+Administrators should be able to identify:
+
+* Largest models
+* Largest datasets
+* Unused checkpoints
+* Old experiments
+* Duplicate files
+* Orphaned artifacts
+* Expired temporary data
+
+Deletion should support a protected recovery period where appropriate.
+
+
+### 48. Notifications
+
+Administrators should receive notifications for:
+
+* Training completed
+* Training failed
+* Evaluation completed
+* Model awaiting approval
+* Dataset awaiting approval
+* Hardware failure
+* Storage threshold reached
+* Model drift detected
+* Safety violation detected
+* Deployment completed
+* Deployment failed
+* Rollback performed
+* Endpoint unavailable
+
+Notification channels may include:
+
+* Master AI notification center
+* Email
+* Desktop notification
+* Internal webhook
+* Administrative dashboard alerts
+
+
+### 49. Machine Learning Settings
+
+Global Machine Learning settings should include:
+
+* Default storage paths
+* Dataset storage path
+* Model storage path
+* Checkpoint storage path
+* Log storage path
+* Temporary-data path
+* Default compute node
+* Default training runtime
+* Default inference runtime
+* Maximum concurrent training jobs
+* Maximum concurrent inference models
+* Default resource quotas
+* Default model context limit
+* Default dataset split ratios
+* Default checkpoint interval
+* Default retention policy
+* Allowed model formats
+* Allowed dataset formats
+* Approved external repositories
+* Network-access policy
+* Proxy settings
+* Notification settings
+* Audit retention
+* Backup schedule
+* Safety-policy defaults
+
+Settings should be stored in validated configuration files or the Master AI configuration database.
+
+
+### 50. Recommended Internal Services
+
+The Machine Learning module should be separated into internal services or clearly defined components.
+
+Recommended components include:
+
+* ML Administration API
+* Project Service
+* Dataset Service
+* Data-Ingestion Service
+* Labeling Service
+* Training Orchestrator
+* Compute Scheduler
+* Experiment Service
+* Model Registry Service
+* Evaluation Service
+* Deployment Service
+* Inference Gateway
+* Embedding Service
+* Vector Store Service
+* Safety Service
+* Audit Service
+* Notification Service
+* Storage Service
+* Secrets Service
+* Hardware Monitoring Service
+
+These services may initially run in one application but should use clear interfaces so they can later be separated.
+
+
+### 51. Suggested API Areas
+
+Recommended administrative API groups include:
+
+* `/api/admin/ml/projects`
+* `/api/admin/ml/datasets`
+* `/api/admin/ml/dataset-versions`
+* `/api/admin/ml/labels`
+* `/api/admin/ml/subjects`
+* `/api/admin/ml/models`
+* `/api/admin/ml/model-versions`
+* `/api/admin/ml/training-jobs`
+* `/api/admin/ml/experiments`
+* `/api/admin/ml/evaluations`
+* `/api/admin/ml/checkpoints`
+* `/api/admin/ml/vector-stores`
+* `/api/admin/ml/rag`
+* `/api/admin/ml/deployments`
+* `/api/admin/ml/endpoints`
+* `/api/admin/ml/compute-nodes`
+* `/api/admin/ml/pipelines`
+* `/api/admin/ml/safety`
+* `/api/admin/ml/audit`
+* `/api/admin/ml/settings`
+
+Normal users must not have direct access to administrative routes.
+
+
+### 52. User Interface Requirements
+
+All Machine Learning interfaces should provide:
+
+* Consistent navigation
+* Search
+* Filtering
+* Sorting
+* Pagination
+* Status indicators
+* Resource-usage indicators
+* Validation messages
+* Warning confirmations
+* Contextual help
+* Advanced settings panels
+* Change history
+* Export options
+* Permission-aware controls
+* Accessible keyboard navigation
+* Responsive layout
+* Dark and light interface support
+
+Long-running operations should display progress through job status updates rather than locking the browser request.
+
+
+### 53. Model-Teaching Workflow
+
+A recommended workflow for teaching a model a specialized subject is:
+
+1. Create a Machine Learning project.
+2. Define the subject and expected capabilities.
+3. Create a Subject Knowledge Package.
+4. Import approved source documents.
+5. Run the ingestion and cleaning pipeline.
+6. Detect secrets and sensitive information.
+7. Divide content into topics.
+8. Create training examples.
+9. Create evaluation questions.
+10. Review and approve the dataset.
+11. Select a suitable base model.
+12. Select fine-tuning or retrieval-based teaching.
+13. Run a small experimental training job.
+14. Evaluate subject knowledge.
+15. Review errors and weak topics.
+16. Improve the dataset.
+17. Repeat training and evaluation.
+18. Run safety and regression testing.
+19. Approve the model.
+20. Deploy to staging.
+21. Test through the Master AI interface.
+22. Deploy to production.
+23. Monitor performance.
+24. Collect reviewed feedback.
+25. Create later model versions as the subject changes.
+
+
+### 54. Choosing Between Fine-Tuning and Retrieval
+
+The system should help administrators select the correct teaching method.
+
+Use retrieval-augmented generation when:
+
+* Knowledge changes frequently.
+* Exact source citations are required.
+* Documents must remain separately manageable.
+* The model should answer from private internal material.
+* The subject is too large to encode into a fine-tuning dataset.
+* Administrators need immediate document updates.
+
+Use fine-tuning when:
+
+* The model must learn a response style.
+* The model must follow a specialized output format.
+* The model must learn repeated task behavior.
+* The model must improve domain terminology.
+* The model must learn tool-use patterns.
+* The desired behavior cannot be achieved reliably through prompts alone.
+
+Use both when:
+
+* The model needs specialized behavior and current factual knowledge.
+* The model should understand domain terminology while retrieving exact current information.
+* The model needs structured workflows backed by internal documents.
+
+
+### 55. Initial Implementation Phases
+
+#### Phase 1 — Administration Foundation
+
+Implement:
+
+* Sidebar integration
+* Administrator permissions
+* Machine Learning dashboard
+* Projects
+* Model Registry
+* Dataset Manager
+* Compute-node registration
+* Audit logging
+* Global settings
+
+#### Phase 2 — Dataset and Knowledge Preparation
+
+Implement:
+
+* Dataset versioning
+* Subject Knowledge Manager
+* Document ingestion
+* Data cleaning
+* Data splitting
+* Data labeling
+* Sensitive-data detection
+* Embedding generation
+* Vector stores
+
+#### Phase 3 — Training and Fine-Tuning
+
+Implement:
+
+* Model Builder
+* Training Jobs
+* Checkpoint management
+* Fine-tuning
+* Experiment tracking
+* Training monitoring
+* Resource scheduling
+
+#### Phase 4 — Evaluation and Approval
+
+Implement:
+
+* Evaluation Lab
+* Subject examinations
+* Model comparison
+* Safety tests
+* Regression tests
+* Approval workflow
+* Model cards
+
+#### Phase 5 — Deployment and Inference
+
+Implement:
+
+* Deployment Manager
+* Inference endpoints
+* Runtime adapters
+* MCP integration
+* Desktop and web integration
+* Staging and production environments
+* Rollback support
+
+#### Phase 6 — Automation and Advanced Features
+
+Implement:
+
+* Automated pipelines
+* Hyperparameter optimization
+* Synthetic data
+* Continual-learning review workflow
+* Drift monitoring
+* Canary deployment
+* Distributed training
+* Advanced multimodal training
+
+
+### 56. Important Design Rules
+
+The implementation must follow these rules:
+
+1. Do not allow ordinary users to access model-training administration.
+2. Do not automatically train from unreviewed conversations.
+3. Do not allow imported models to execute untrusted code without isolation.
+4. Do not overwrite models, datasets, or configurations without versioning.
+5. Do not deploy a model without evaluation and approval.
+6. Do not expose sensitive training data through logs or model outputs.
+7. Do not provide unrestricted network access to training jobs.
+8. Do not place secrets directly into datasets, scripts, logs, or configuration files.
+9. Do not rely on model filenames as proof of identity; use hashes and registry metadata.
+10. Do not delete production models without rollback protection.
+11. Do not permit training jobs to consume unlimited system resources.
+12. Do not mix training, validation, and test records incorrectly.
+13. Do not use the test dataset during training.
+14. Do not permit synthetic data to silently replace verified real data.
+15. Do not permit automatic continual learning without human approval.
+16. Preserve full audit history for administrative actions.
+17. Ensure every training result can be traced to its exact data, configuration, code, and runtime versions.
+18. Keep the machine-learning layer modular so that model frameworks and runtimes can be replaced.
+19. Support local-first operation so that private models and datasets can remain inside the Master AI intranet.
+20. Allow external services only when explicitly configured and approved.
+
+
+### 57. Expected Outcome
+
+When complete, the Machine Learning module will allow the Master AI system to function as a controlled local AI-development platform rather than only an inference interface.
+
+Administrators will be able to:
+
+* Build specialized AI capabilities.
+* Teach models internal and technical subjects.
+* Maintain subject-specific assistants.
+* Train models using local datasets.
+* Adapt imported base models.
+* Create retrieval-based knowledge systems.
+* Evaluate model quality scientifically.
+* Track every experiment.
+* Deploy approved models safely.
+* Integrate models with agents, MCP, APIs, desktop applications, web applications, Visual Studio, and VS Code.
+* Monitor models after deployment.
+* Improve models through reviewed and versioned development cycles.
+* Maintain ownership and control over private data, training assets, model versions, and deployment infrastructure.
 
 ## 26. Release Gates
 

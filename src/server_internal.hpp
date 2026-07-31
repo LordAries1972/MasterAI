@@ -30,6 +30,16 @@ std::string response(int status, const char* reason, const std::string& body,
 // Escapes untrusted text before it is embedded in an existing JSON envelope.
 std::string json_escape(const std::string& value);
 
+// Phase 30: byte-for-byte identical output to json_escape(), but written
+// into a std::vector<std::uint8_t> instead of a std::string so the caller
+// can move it straight into a SharedBuffer (SharedBuffer's move constructor
+// takes ownership of a std::vector<std::uint8_t> with no copy) and stream it
+// to a socket via a BufferView -- see server.cpp's streaming token path,
+// which is the one hot copy chain Phase 30 targets this session. Shares its
+// escaping rules with json_escape() via one internal template so the two
+// can never silently diverge.
+std::vector<std::uint8_t> json_escape_bytes(const std::string& value);
+
 // Builds the one canonical hardened HTML response envelope.
 std::string html_response(const std::string& body);
 

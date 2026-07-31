@@ -33,6 +33,7 @@ namespace masterai {
 namespace {
 
 using server_internal::json_escape;
+using server_internal::json_escape_bytes;
 using server_internal::Request;
 using server_internal::response;
 using server_internal::application_page;
@@ -58,12 +59,17 @@ void close_socket(const NativeSocket socket) noexcept {
 #endif
 }
 
-bool send_all(const NativeSocket socket, const std::string& response) {
+// Phase 30: raw pointer+length send loop -- the actual socket-write
+// primitive. The std::string overload below just forwards into this one,
+// so callers that already hold a BufferView/SharedBuffer (no owned
+// std::string) can write straight from that view's own backing storage
+// with no copy forced on them by this function's signature.
+bool send_all(const NativeSocket socket, const char* data, std::size_t size) {
     std::size_t sent = 0U;
-    while (sent < response.size()) {
-        const auto remaining = response.size() - sent;
+    while (sent < size) {
+        const auto remaining = size - sent;
         const auto chunk =
-            send(socket, response.data() + sent, static_cast<int>(remaining), 0);
+            send(socket, data + sent, static_cast<int>(remaining), 0);
         if (chunk <= 0) {
             return false;
         }
@@ -72,10 +78,45 @@ bool send_all(const NativeSocket socket, const std::string& response) {
     return true;
 }
 
+bool send_all(const NativeSocket socket, const std::string& response) {
+    return send_all(socket, response.data(), response.size());
+}
+
 bool send_chunk(const NativeSocket socket, const std::string& value) {
     std::ostringstream size;
     size << std::hex << value.size();
     return send_all(socket, size.str() + "\r\n" + value + "\r\n");
+}
+
+// Phase 30: zero-copy chunked-encoding write for the streaming chat-token
+// hot path (send_chat_message() below). HTTP/1.1 chunked encoding requires
+// the exact payload byte count up front, so the three parts' sizes are
+// summed first -- but unlike send_chunk() above, which concatenates
+// size+CRLF+value+CRLF into one new std::string before a single
+// send_all() call (a full copy of the whole payload, paid on every
+// streamed token), this writes `prefix`, `payload` (a BufferView -- e.g.
+// straight from json_escape_bytes()'s output moved into a SharedBuffer, see
+// the call site) and `suffix` directly from their own backing storage via
+// separate send_all() calls. The same bytes reach the socket in the same
+// order either way; only the framing copy is gone.
+bool send_chunk_parts(const NativeSocket socket, const std::string& prefix,
+                      const BufferView& payload, const std::string& suffix) {
+    const std::size_t total = prefix.size() + payload.size() + suffix.size();
+    std::ostringstream size;
+    size << std::hex << total;
+    if (!send_all(socket, size.str() + "\r\n")) return false;
+    if (!prefix.empty() && !send_all(socket, prefix.data(), prefix.size())) {
+        return false;
+    }
+    if (payload.size() > 0U &&
+        !send_all(socket, reinterpret_cast<const char*>(payload.data()),
+                  payload.size())) {
+        return false;
+    }
+    if (!suffix.empty() && !send_all(socket, suffix.data(), suffix.size())) {
+        return false;
+    }
+    return send_all(socket, "\r\n");
 }
 
 // Distinguishes an invalid one-time setup token from other malformed setup
@@ -283,6 +324,14 @@ public:
         }
         indexes = std::make_unique<ProjectIndexService>(
             value.runtime_root / "indexes", *memory);
+        // Phase 24: one long-lived planner rather than one per request --
+        // its in-flight join table (RetrievalPlanner::inflight_) can only
+        // ever join genuinely concurrent duplicate requests if the same
+        // instance sees both of them.
+        // Phase 30: pass the shared MemoryBudgetManager so the fusion-
+        // candidate pool's bytes_reserved() is registered live against
+        // MemoryCategory::retrieval_index_cache instead of being invisible.
+        retrieval_planner = std::make_unique<RetrievalPlanner>(*indexes, memory.get());
         if (value.watch_project_files) {
             watcher =
                 std::make_unique<ProjectWatcher>(*projects, *indexes);
@@ -292,6 +341,17 @@ public:
             value.cache_maximum_bytes_per_category;
         cache = std::make_unique<CacheManager>(
             value.runtime_root / "cache", *memory, cache_policy);
+        // Phase 23: wire the tokenization cache into the runner supervisor
+        // now that both exist. Safe even when caching is later disabled at
+        // the request layer -- CacheManager's own configuration.cache_enabled
+        // gate (see retrieve_with_cache() for the analogous Phase 17 gate)
+        // is not consulted here because tokenize() currently has no
+        // production caller that needs a kill switch; the cache lookup
+        // itself is cheap and fails safe (see tokenize()'s catch on a
+        // corrupt cached value).
+        if (inference != nullptr) {
+            inference->set_tokenization_cache(cache.get());
+        }
         // Phase 18: always constructed (cheap, in-memory, no disk/network
         // I/O) even when session_reuse_enabled is off -- send_chat_message()
         // is the single gate that decides whether to ever consult it, so
@@ -1486,26 +1546,25 @@ private:
                                      std::string& stop_sequence) const {
         const auto tmpl = chat_template_for_architecture(architecture);
         stop_sequence = tmpl.stop_sequence;
-        std::string prompt;
-        for (const auto& message : history) {
-            switch (message.role) {
-                case ChatRole::system:
-                    prompt += tmpl.system_prefix + message.content +
-                              tmpl.system_suffix;
-                    break;
-                case ChatRole::user:
-                    prompt += tmpl.user_prefix + message.content +
-                              tmpl.user_suffix;
-                    break;
-                case ChatRole::assistant:
-                    prompt += tmpl.assistant_prefix + message.content +
-                              tmpl.assistant_suffix;
-                    break;
-            }
-        }
-        prompt += tmpl.user_prefix + latest_user_content + tmpl.user_suffix;
-        prompt += tmpl.generation_prompt;
-        return prompt;
+        // Phase 23: adapt this file's local ChatTemplate literal table into
+        // the masterai.hpp ChatWrapTemplate shape so the process-lifetime
+        // compiled-template cache and segmented assembly in
+        // prompt_assembly.cpp can be reused here without duplicating the
+        // per-architecture literal tables or the wrapping logic. The
+        // resulting prompt is byte-for-byte identical to the old repeated
+        // std::string += concatenation this replaces (see
+        // test_phase_twentythree_segmented_assembly_byte_identical) --
+        // materialize_prompt() is the single point where the segmented
+        // representation is joined back into one contiguous string, right
+        // before it needs to leave this function.
+        const ChatWrapTemplate wrap{
+            tmpl.system_prefix,    tmpl.system_suffix, tmpl.user_prefix,
+            tmpl.user_suffix,      tmpl.assistant_prefix,
+            tmpl.assistant_suffix, tmpl.generation_prompt, tmpl.stop_sequence};
+        const auto& plan = compiled_chat_template(architecture, wrap);
+        const auto segments =
+            assemble_chat_prompt_segments(plan, history, latest_user_content);
+        return materialize_prompt(segments);
     }
 
     // Builds bounded chat context from attachments owned by the same user and
@@ -1567,9 +1626,13 @@ private:
                 return deserialize_retrieval_outcome(*cached);
             }
         }
-        RetrievalPlanner planner(*indexes);
         RetrievalRequest retrieval_request;
         retrieval_request.project = project;
+        // Phase 24: identity + policy generation are part of the in-flight
+        // join key, so two different users' concurrent requests -- or the
+        // same user's requests spanning a policy change -- can never join.
+        retrieval_request.requester_id = user.id;
+        retrieval_request.policy_generation = cache_key.policy_generation;
         retrieval_request.query_text = inference_prompt;
         retrieval_request.deadline = std::chrono::milliseconds(
             configuration.retrieval_deadline_milliseconds);
@@ -1579,7 +1642,7 @@ private:
             configuration.retrieval_maximum_chunks_per_source;
         retrieval_request.maximum_total_chunks =
             configuration.retrieval_maximum_total_chunks;
-        auto retrieved = planner.retrieve(retrieval_request);
+        auto retrieved = retrieval_planner->retrieve(retrieval_request);
         if (configuration.cache_enabled && !retrieved.partial) {
             cache->put(CacheCategory::retrieval_result, cache_key,
                       serialize_retrieval_outcome(retrieved));
@@ -1653,6 +1716,14 @@ private:
                     queries.record_retrieval(
                         query_id, retrieved.partial,
                         retrieval_disclosure_json(retrieved, cache_hit));
+                    // Phase 24: surface the deterministic classification and
+                    // any declared-but-disabled strategy reasons on the same
+                    // trace ordinary users already see via
+                    // /api/v1/queries/{id}.
+                    queries.record_classification(query_id,
+                                                  retrieved.classification);
+                    queries.record_retrieval_strategy_skips(
+                        query_id, retrieved.disabled_strategy_reasons);
                 }
             }
             queries.transition(query_id, QueryStage::ranking,
@@ -1815,11 +1886,27 @@ private:
                         }
                     }
                     streamed_text += chunk;
-                    if (streaming &&
-                        !send_chunk(stream_socket,
-                                    "{\"type\":\"token\",\"content\":\"" +
-                                        json_escape(chunk) + "\"}\n")) {
-                        cancellation.store(true);
+                    if (streaming) {
+                        // Phase 30: escape straight into a byte vector and
+                        // move it (no copy -- SharedBuffer's vector
+                        // constructor takes ownership) into a SharedBuffer,
+                        // then hand a BufferView over it to
+                        // send_chunk_parts(), which writes the JSON envelope
+                        // prefix/escaped-payload/suffix directly to the
+                        // socket instead of concatenating them into one
+                        // throwaway std::string first (the old
+                        // "prefix + json_escape(chunk) + suffix" line above
+                        // built two intermediate strings, then send_chunk()
+                        // built a third to add chunked-encoding framing --
+                        // all three copies of the full payload are gone).
+                        SharedBuffer escaped_buffer(json_escape_bytes(chunk));
+                        BufferView escaped_view(escaped_buffer, 0U,
+                                                escaped_buffer.size());
+                        if (!send_chunk_parts(stream_socket,
+                                              "{\"type\":\"token\",\"content\":\"",
+                                              escaped_view, "\"}\n")) {
+                            cancellation.store(true);
+                        }
                     }
                 },
                 cancellation);
@@ -1967,6 +2054,9 @@ private:
     std::unique_ptr<server_internal::WorkloadHttpController> workloads;
     std::unique_ptr<MemoryBudgetManager> memory;
     std::unique_ptr<ProjectIndexService> indexes;
+    // Phase 24: constructed once alongside `indexes` (see the constructor)
+    // so its in-flight join table actually sees concurrent requests.
+    std::unique_ptr<RetrievalPlanner> retrieval_planner;
     // Declared after `indexes` so it is destroyed first: the watcher thread
     // must stop calling indexes->request_update() before indexes itself is
     // torn down.

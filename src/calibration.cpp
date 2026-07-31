@@ -85,6 +85,92 @@ std::string padded_prompt(const std::size_t approximate_tokens) {
 
 }  // namespace
 
+// Phase 26: ModelLoadMode/PreTouchLevel string forms, used both by
+// tuning_profile_json() below and by anything logging/reporting a resolved
+// launch decision.
+std::string to_string(const ModelLoadMode mode) {
+    switch (mode) {
+        case ModelLoadMode::streamed: return "streamed";
+        case ModelLoadMode::mapped: return "mapped";
+        case ModelLoadMode::resident: return "resident";
+        case ModelLoadMode::auto_select: return "auto";
+    }
+    return "unknown";
+}
+
+std::string to_string(const PreTouchLevel level) {
+    switch (level) {
+        case PreTouchLevel::none: return "none";
+        case PreTouchLevel::metadata: return "metadata";
+        case PreTouchLevel::first_use: return "first_use";
+        case PreTouchLevel::layer_window: return "layer_window";
+        case PreTouchLevel::full: return "full";
+    }
+    return "unknown";
+}
+
+bool pre_touch_level_backend_actionable(const PreTouchLevel level) noexcept {
+    // See the PreTouchLevel comment in masterai.hpp: only "none" (do
+    // nothing) and "full" (the existing --mlock flag) actually change what
+    // gets launched today.
+    return level == PreTouchLevel::none || level == PreTouchLevel::full;
+}
+
+std::optional<std::string> pretouch_gap_reason(const PreTouchLevel level) {
+    if (pre_touch_level_backend_actionable(level)) return std::nullopt;
+    return "pre-touch level '" + to_string(level) +
+          "' is accepted policy but has no llama-server flag/adapter yet in "
+          "this build; it currently behaves like 'none' (no extra "
+          "pre-touch) until such a flag/adapter exists";
+}
+
+// Phase 26: evidence-based load-mode selection. See the declaration in
+// masterai.hpp for the full rationale; this only ever reasons from the
+// arguments given, never touches global/process state, so it is trivially
+// unit-testable with synthetic evidence.
+ModelLoadMode select_load_mode(const StorageLatencyProfile& storage,
+                               const std::uint64_t available_ram_bytes,
+                               const std::uint64_t model_size_bytes) noexcept {
+    // Unknown model size: nothing to reason about size-vs-RAM fit against,
+    // so stay with the always-safe pre-Phase-26 default rather than guess.
+    if (model_size_bytes == 0U) return ModelLoadMode::mapped;
+
+    const bool slow_storage =
+        storage.storage_class == "network" || storage.storage_class == "removable" ||
+        storage.storage_class == "optical" ||
+        storage.measured_read_latency_us >= 3000.0;  // HDD-shaped, see async_storage.cpp
+    const bool fast_storage =
+        !slow_storage && storage.measured_read_latency_us > 0.0 &&
+        storage.measured_read_latency_us < 200.0;  // NVMe-shaped
+
+    const bool barely_fits = available_ram_bytes >= model_size_bytes;
+    if (!barely_fits) {
+        // Not enough RAM to comfortably hold the whole model: prefer
+        // streamed reads over letting mmap pressure the OS into evicting
+        // pages mid-generation.
+        return ModelLoadMode::streamed;
+    }
+
+    const bool comfortable_fit = available_ram_bytes >= model_size_bytes * 2U;
+    if (comfortable_fit && slow_storage) {
+        // Plenty of headroom, and re-faulting pages from this storage class
+        // would be expensive: pin the model resident up front instead of
+        // paying repeated slow-disk page faults during generation.
+        return ModelLoadMode::resident;
+    }
+    if (comfortable_fit && !fast_storage) {
+        // Headroom to spare and storage isn't clearly fast (moderate SSD-
+        // shaped latency, unmeasured, etc.): resident still avoids
+        // uncertain on-demand fault latency without much downside given the
+        // available RAM.
+        return ModelLoadMode::resident;
+    }
+    // Enough RAM but not much to spare, or storage is fast enough that
+    // demand-paged mmap faults are cheap: the default, lowest-commitment
+    // mode.
+    return ModelLoadMode::mapped;
+}
+
 TuningProfile safe_default_profile(const std::string& profile_name) {
     static const std::set<std::string> known{"auto", "minimal", "balanced",
                                              "performance"};
@@ -118,6 +204,13 @@ LaunchTuning launch_tuning_from_profile(const TuningProfile& profile) {
     tuning.allow_memory_map = profile.recommended_allow_memory_map;
     tuning.allow_memory_lock = profile.recommended_allow_memory_lock;
     tuning.batch_tokens = profile.recommended_batch_tokens;
+    // Phase 26: load_mode/pre_touch ride along as advisory metadata -- their
+    // *effect* on the actual llama-server launch is already fully expressed
+    // through allow_memory_map/allow_memory_lock above (set consistently
+    // with them by resolve() below), so build_launch_spec() needs no
+    // separate argument branch for these two fields.
+    tuning.load_mode = profile.recommended_load_mode;
+    tuning.pre_touch = profile.recommended_pre_touch;
     return tuning;
 }
 
@@ -166,7 +259,15 @@ void TuningProfileStore::save(const TuningProfile& profile) {
              std::to_string(profile.average_cpu_percent),
              std::to_string(profile.disk_read_bytes),
              std::to_string(profile.disk_write_bytes),
-             std::to_string(profile.calibrated_at_epoch_seconds)});
+             std::to_string(profile.calibrated_at_epoch_seconds),
+             // Phase 26: appended at the end so a pre-Phase-26 reader would
+             // simply never see these fields; restore() below requires
+             // exactly the new count, so a genuinely old record instead
+             // fails loudly rather than silently truncating (consistent
+             // with this store's existing "malformed record throws"
+             // policy).
+             to_string(profile.recommended_load_mode),
+             to_string(profile.recommended_pre_touch)});
         record_store_->put("tuning_profiles", key, value);
     }
 }
@@ -186,10 +287,36 @@ std::optional<TuningProfile> TuningProfileStore::find(
 
 std::vector<TuningProfile> TuningProfileStore::all() const { return profiles_; }
 
+namespace {
+
+// Phase 26: parses to_string(ModelLoadMode)/to_string(PreTouchLevel) back
+// into their enum values for restore() below. Throws on anything else
+// rather than silently defaulting, matching this store's existing
+// "malformed record throws" policy for every other field.
+ModelLoadMode parse_load_mode(const std::string& value) {
+    if (value == "streamed") return ModelLoadMode::streamed;
+    if (value == "mapped") return ModelLoadMode::mapped;
+    if (value == "resident") return ModelLoadMode::resident;
+    if (value == "auto") return ModelLoadMode::auto_select;
+    throw std::runtime_error("persisted tuning profile has an unknown load mode");
+}
+
+PreTouchLevel parse_pre_touch_level(const std::string& value) {
+    if (value == "none") return PreTouchLevel::none;
+    if (value == "metadata") return PreTouchLevel::metadata;
+    if (value == "first_use") return PreTouchLevel::first_use;
+    if (value == "layer_window") return PreTouchLevel::layer_window;
+    if (value == "full") return PreTouchLevel::full;
+    throw std::runtime_error(
+        "persisted tuning profile has an unknown pre-touch level");
+}
+
+}  // namespace
+
 void TuningProfileStore::restore() {
     for (const auto& item : record_store_->list("tuning_profiles")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 24U) {
+        if (fields.size() != 26U) {
             throw std::runtime_error("persisted tuning profile is invalid");
         }
         TuningProfile profile;
@@ -222,6 +349,8 @@ void TuningProfileStore::restore() {
         profile.disk_read_bytes = std::stoull(fields[21]);
         profile.disk_write_bytes = std::stoull(fields[22]);
         profile.calibrated_at_epoch_seconds = std::stoull(fields[23]);
+        profile.recommended_load_mode = parse_load_mode(fields[24]);
+        profile.recommended_pre_touch = parse_pre_touch_level(fields[25]);
         if (!valid_sha256(profile.host_hash) ||
             !valid_sha256(profile.model_sha256)) {
             throw std::runtime_error("persisted tuning profile violates policy");
@@ -251,12 +380,47 @@ std::string CalibrationService::host_hash() const {
 }
 
 TuningProfile CalibrationService::resolve(
-    const std::string& model_sha256, const std::string& requested_profile) const {
+    const std::string& model_sha256, const std::string& requested_profile,
+    const StorageLatencyProfile* storage, const std::uint64_t available_ram_bytes,
+    const std::uint64_t model_size_bytes) const {
     if (const auto found =
             store_.find(host_hash(), model_sha256, backend_hash_, build_id_)) {
+        // A persisted profile already reflects a real measurement -- evidence
+        // passed to this call never overrides it, only fills the gap when
+        // there isn't one yet (see the safe-default branch below).
         return *found;
     }
-    return safe_default_profile(requested_profile);
+    TuningProfile profile = safe_default_profile(requested_profile);
+    if (storage != nullptr) {
+        profile.recommended_load_mode =
+            select_load_mode(*storage, available_ram_bytes, model_size_bytes);
+        // Phase 26: keep load_mode and the two booleans it is actually
+        // realized through (see LaunchTuning/launch_tuning_from_profile)
+        // consistent with each other -- "resident" implies both mmap and
+        // mlock, "streamed" implies no mmap, and "resident" also means the
+        // pre-touch policy is "full" (the one pre-touch level that is
+        // itself backend-actionable, via that same mlock flag).
+        switch (profile.recommended_load_mode) {
+            case ModelLoadMode::resident:
+                profile.recommended_allow_memory_map = true;
+                profile.recommended_allow_memory_lock = true;
+                profile.recommended_pre_touch = PreTouchLevel::full;
+                break;
+            case ModelLoadMode::streamed:
+                profile.recommended_allow_memory_map = false;
+                profile.recommended_allow_memory_lock = false;
+                profile.recommended_pre_touch = PreTouchLevel::none;
+                break;
+            case ModelLoadMode::mapped:
+            case ModelLoadMode::auto_select:
+            default:
+                profile.recommended_allow_memory_map = true;
+                profile.recommended_allow_memory_lock = false;
+                profile.recommended_pre_touch = PreTouchLevel::none;
+                break;
+        }
+    }
+    return profile;
 }
 
 TuningProfile CalibrationService::calibrate(
@@ -386,7 +550,11 @@ std::string tuning_profile_json(const TuningProfile& profile) {
           ",\"diskReadBytes\":" + std::to_string(profile.disk_read_bytes) +
           ",\"diskWriteBytes\":" + std::to_string(profile.disk_write_bytes) +
           ",\"calibratedAtEpochSeconds\":" +
-          std::to_string(profile.calibrated_at_epoch_seconds) + "}";
+          std::to_string(profile.calibrated_at_epoch_seconds) +
+          ",\"recommendedLoadMode\":\"" +
+          to_string(profile.recommended_load_mode) + "\"" +
+          ",\"recommendedPreTouch\":\"" +
+          to_string(profile.recommended_pre_touch) + "\"}";
 }
 
 }  // namespace masterai

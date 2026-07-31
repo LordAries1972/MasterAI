@@ -191,6 +191,36 @@ The current source includes native implementations for:
   prefetch, multiple warm runners, GPU/CPU KV placement), every one
   disabled by default with no code path able to enable it until its own
   evidence is produced.
+- A native asynchronous storage and prefetch engine (`IAsyncFileReader`):
+  IOCP-backed overlapped reads on Windows and a bounded worker-pool `pread`
+  fallback on POSIX, adjacent-request read coalescing, an adaptive
+  queue-depth policy keyed to a measured `StorageLatencyProfile`, and
+  cancellable requests, wired into model-manifest and index-segment reads
+  with automatic fallback to the prior blocking path.
+- Tokenization, chat-template, and segmented prompt-fragment caching: a
+  content/tokenizer-fingerprinted tokenization cache, compiled
+  process-lifetime chat-template execution plans, `PromptSegment`-based
+  assembly over shared immutable buffers, a restricted identifier intern
+  table, and an extended `PromptSessionManager` reuse decision reporting
+  exact reusable-prefix length, divergence offset, invalidation reason, and
+  a configurable prefix byte ceiling.
+- Staged, classified retrieval fan-out on top of `RetrievalPlanner`:
+  filename/path and recent-change strategies, a deterministic request
+  classifier, sticky-sufficiency staged execution, an authorization-scoped
+  in-flight request join table, and reference-first (`ChunkReference`)
+  candidate materialization gated on `ContextBudgeter` admission, with
+  not-yet-adapted strategies (semantic embedding, MCP-resource, call-graph,
+  and others) declared but disabled and disclosed on the query trace.
+- Explicit model load-mode/pre-touch selection and a warm-model state
+  machine: `ModelLoadMode`/`PreTouchLevel` chosen from measured storage and
+  RAM evidence, and a `WarmModelState` machine layered onto the existing
+  runner-state tracking via a regression-tested translation table, with
+  cancellable background warm-up that yields under memory pressure.
+- An immutable shared-buffer and request-scoped memory architecture:
+  `SharedBuffer`/`BufferView`/`MappedBufferView`/`ChunkReference`/
+  `TokenSpan`/`PromptSegment`, a debug-poison-checked `RequestArena`, and a
+  `FixedSizePool<T>` bridged into `MemoryBudgetManager` accounting, plus a
+  zero-copy write path for streamed chat tokens.
 
 Implementation does not automatically mean operational certification. The next
 section records the distinction.
@@ -223,6 +253,17 @@ Status below reflects the evidence recorded in
 | 18 | Prompt-prefix and KV/session reuse | Implemented; same-host repeated-turn benchmark pending |
 | 19 | Hardware/model calibration | Implemented; real-hardware-class benchmark pending |
 | 20 | Optional advanced throughput | Scaffolding only; every candidate remains disabled and unimplemented |
+| 21 | Native asynchronous storage and prefetch engine | Implemented at a scoped-down level; no Linux `io_uring` adapter |
+| 22 | Hierarchical content and model-data caching | Planned |
+| 23 | Tokenization, template, and prompt-fragment caching | Implemented at a scoped-down level |
+| 24 | Advanced retrieval fan-out and adaptive query planning | Implemented at a scoped-down level; some strategies stubbed pending adapters |
+| 25 | Continuous inference batching and request scheduling | Planned |
+| 26 | Model loading, mapping, pre-touch, and warm-state management | Implemented at a scoped-down level; two pre-touch levels not yet backend-actionable |
+| 27 | KV-cache compression, placement, and lifecycle management | Planned |
+| 28 | NUMA, processor-group, and topology-aware execution | Planned |
+| 29 | Model tiering, routing, and cascade inference | Planned |
+| 30 | Memory deduplication and immutable shared-data architecture | Implemented at a scoped-down level |
+| 31 | Storage tiering, virtual drives, and scratch-volume management | Planned |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -250,6 +291,20 @@ membership/policy change makes a stale entry unreachable automatically,
 with authenticated `GET/POST /api/v1/system/cache*` administrative routes.
 Both are Windows Debug- and Release-validated; each still has one
 evidence-gathering exit criterion outstanding (see the status table above).
+
+Phases 21, 23, 24, 26, and 30 add a first, real (but deliberately
+scoped-down) layer of performance/architecture work on top of Phases 15–19:
+an asynchronous storage/prefetch engine, tokenization/prompt-fragment
+caching with segmented assembly, staged/classified retrieval fan-out,
+explicit model load-mode and warm-state management, and an immutable
+shared-buffer/arena memory architecture with a zero-copy chat-streaming
+write path. Each is "Implemented at a scoped-down level": the mechanism is
+real, tested, and wired into the existing request paths, but the full
+PLAN.md specification for that phase includes further hardware-specific
+adapters (e.g. Linux `io_uring`) or a formal benchmark corpus that remain
+outstanding — see each phase's entry in [docs/PLAN.md](docs/PLAN.md) for the
+precise, itemized scope trim. Phases 22, 25, 27, 28, 29, and 31 remain
+Planned and unimplemented.
 
 No release may be called production-ready until the functional, security,
 migration, recovery, MCP conformance, performance, resource-ceiling, retrieval,
@@ -853,9 +908,43 @@ implemented on top of that foundation (Phases 16–19 in the status table
 above); each still has a real-model or real-hardware benchmark outstanding
 before its exit criterion is satisfied. Optional advanced-throughput
 features (Phase 20) exist only as a disabled-by-default registry scaffold —
-no candidate's optimization logic is implemented. None may bypass
-authorization, integrity, auditing, cancellation, quality checks, or memory
-ceilings.
+no candidate's optimization logic is implemented.
+
+A further, scoped-down layer (Phases 21, 23, 24, 26, 30) adds asynchronous
+storage/prefetch, tokenization/prompt-fragment caching with segmented
+assembly, staged retrieval fan-out, explicit model load-mode/warm-state
+management, and an immutable shared-buffer/arena memory model with
+zero-copy chat streaming. These are real, test-covered mechanisms wired
+into the live request paths, not scaffolding — but each still has
+hardware-specific adapters (Linux `io_uring`) or a formal benchmark corpus
+outstanding before its PLAN.md exit criteria are fully satisfied. None of
+this work may bypass authorization, integrity, auditing, cancellation,
+quality checks, or memory ceilings.
+
+How a chat request moves through the scoped-down performance layer:
+
+```mermaid
+flowchart TD
+    Req["Chat / retrieval request"]
+    P21["Phase 21 — async storage engine\n(IOCP / bounded pread, coalesced, cancellable reads)"]
+    P15_16["Phase 15/16 — disk-backed index + RetrievalPlanner"]
+    P24["Phase 24 — staged retrieval fan-out\n(classifier, sticky sufficiency, in-flight join)"]
+    P30_ref["Phase 30 — ChunkReference\n(reference-first candidates)"]
+    Budget["ContextBudgeter admission"]
+    P23["Phase 23 — tokenization + PromptSegment\nassembly cache"]
+    P26["Phase 26 — warm-model state machine\n(load mode, pre-touch, warm-up)"]
+    Runner["Isolated llama.cpp-compatible runner"]
+    P30_stream["Phase 30 — BufferView zero-copy\nstreaming write"]
+    Client["Client (browser / IDE / MCP)"]
+
+    Req --> P21 --> P15_16 --> P24 --> P30_ref --> Budget --> P23
+    P23 --> P26 --> Runner --> P30_stream --> Client
+```
+
+Each labeled stage is "Implemented at a scoped-down level" per the status
+table above; the diagram shows where the mechanism sits in the request
+path, not a claim that every listed optimization is fully realized end to
+end — see [docs/PLAN.md](docs/PLAN.md) for the itemized scope of each.
 
 ## Repository layout
 
@@ -924,6 +1013,16 @@ Near-term work is:
    registry scaffold does not pre-approve any candidate.
 6. Longer term: evaluate deeper language-aware symbol extraction for
    Phase 15.
+7. Close the scoped-down trims recorded for Phases 21, 23, 24, 26, and 30
+   (Linux `io_uring` storage adapter, remaining unadapted retrieval
+   strategies, backend-actionable metadata/first-use/layer-window pre-touch,
+   and broader zero-copy/arena adoption beyond the demonstrated call sites),
+   each with its own before/after measurement.
+8. Implement Phase 22 (hierarchical content/model-data caching), Phase 25
+   (continuous batching and request scheduling), Phase 27 (KV-cache
+   compression/placement/lifecycle), Phase 28 (NUMA/topology awareness),
+   Phase 29 (model tiering and cascade inference), and Phase 31 (storage
+   tiering and scratch-volume management), which remain Planned.
 
 Outstanding operational certification also includes:
 

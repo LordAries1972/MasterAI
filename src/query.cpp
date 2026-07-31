@@ -220,6 +220,28 @@ void QueryCoordinator::record_retrieval(const std::string& id,
             : std::move(disclosure_json);
 }
 
+// Phase 24: records the deterministic request classification independently
+// of the terminal diagnostic, matching record_retrieval()'s "never let a
+// later finish() erase earlier disclosure" convention.
+void QueryCoordinator::record_classification(const std::string& id,
+                                              std::string classification) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    auto& trace = state_->required(id);
+    trace.request_classification = std::move(classification);
+}
+
+// Phase 24: records "no adapter" skip reasons for declared-but-disabled
+// retrieval strategies. Bounded the same way record_retrieval() bounds its
+// disclosure JSON, so a pathological reason list cannot grow a trace
+// unboundedly.
+void QueryCoordinator::record_retrieval_strategy_skips(
+    const std::string& id, std::vector<std::string> reasons) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    auto& trace = state_->required(id);
+    if (reasons.size() > 64U) reasons.resize(64U);
+    trace.disabled_retrieval_strategies = std::move(reasons);
+}
+
 // Closes the final active stage and publishes a terminal state and sanitized
 // bounded diagnostic. Cancellation is also attached to the active stage.
 void QueryCoordinator::finish(const std::string& id, const QueryStatus status,
@@ -305,6 +327,10 @@ std::string QueryCoordinator::to_json(const QueryTrace& trace) {
            ",\"retrievalDisclosure\":" +
            (trace.retrieval_disclosure.empty() ? "null"
                                                : trace.retrieval_disclosure) +
+           ",\"requestClassification\":" +
+           json_string(trace.request_classification) +
+           ",\"disabledRetrievalStrategies\":" +
+           join_json_strings(trace.disabled_retrieval_strategies) +
            ",\"diagnostic\":" + json_string(trace.diagnostic) + "}";
 }
 

@@ -63,16 +63,16 @@ std::string read_bounded_file(const std::filesystem::path& path) {
     if (error || size == 0U || size > 1024U * 1024U) {
         throw std::runtime_error("manifest size is invalid");
     }
-    std::ifstream stream(path, std::ios::binary);
-    if (!stream) {
-        throw std::runtime_error("manifest could not be opened");
-    }
-    std::ostringstream content;
-    content << stream.rdbuf();
-    if (!stream.good() && !stream.eof()) {
+    // Phase 21: opt-in async read (via the process-lifetime reader cached
+    // per storage root) with automatic blocking fallback inside
+    // read_file_bytes() -- identical bytes/behavior either way, so manifest
+    // loading is unaffected when async storage isn't available.
+    auto* reader = global_async_file_reader(path.parent_path());
+    std::string content = read_file_bytes(reader, path, 0U, size);
+    if (content.size() != size) {
         throw std::runtime_error("manifest read failed");
     }
-    return content.str();
+    return content;
 }
 
 // Thrown by load_manifest() when a manifest parses and validates cleanly but
@@ -627,6 +627,13 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
         arguments.emplace_back("--n-gpu-layers");
         arguments.emplace_back(std::to_string(tuning.gpu_layers));
     }
+    // Phase 26: LaunchTuning::load_mode/pre_touch are advisory metadata that
+    // ride alongside allow_memory_map/allow_memory_lock rather than adding
+    // their own argument branches here -- CalibrationService::resolve() (see
+    // calibration.cpp) already keeps the two in sync (e.g. load_mode ==
+    // resident implies allow_memory_map == true and allow_memory_lock ==
+    // true), so this function's existing --no-mmap/--mlock logic already
+    // fully realizes whatever load_mode/pre_touch a caller resolved to.
     if (!tuning.allow_memory_map) {
         arguments.emplace_back("--no-mmap");
     }
@@ -646,6 +653,70 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
         arguments.emplace_back(std::to_string(tuning.ubatch_tokens));
     }
     return LaunchSpec{approved_backend_, std::move(arguments), model.directory};
+}
+
+// Phase 26: use-prediction signal recording. See the ModelUsagePredictor
+// comment in masterai.hpp -- deliberately plain recorded evidence (recency,
+// pin, project-preference count, waiting-request count), never an opaque
+// computed ranking.
+void ModelUsagePredictor::record_use(const std::string& model_id,
+                                     const std::uint64_t now_epoch_seconds) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto& entry = signals_[model_id];
+    entry.model_id = model_id;
+    entry.last_used_epoch_seconds = now_epoch_seconds;
+    ++entry.project_preference_score;
+}
+
+void ModelUsagePredictor::set_pinned(const std::string& model_id,
+                                     const bool pinned) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto& entry = signals_[model_id];
+    entry.model_id = model_id;
+    entry.pinned = pinned;
+}
+
+void ModelUsagePredictor::set_waiting_request_count(
+    const std::string& model_id, const std::uint32_t count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto& entry = signals_[model_id];
+    entry.model_id = model_id;
+    entry.waiting_request_count = count;
+}
+
+std::vector<ModelUsageSignals> ModelUsagePredictor::snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ModelUsageSignals> result;
+    result.reserve(signals_.size());
+    for (const auto& [id, signals] : signals_) result.push_back(signals);
+    return result;
+}
+
+// Reporting convention shared with tuning_profile_json()/model_state_name()
+// elsewhere in this codebase: a small struct plus a _json() free function an
+// administrator-facing route or CLI command can print directly, rather than
+// a bespoke new reporting surface for use-prediction alone.
+std::string model_usage_signals_json(
+    const std::vector<ModelUsageSignals>& signals) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& entry : signals) {
+        if (!first) body += ",";
+        first = false;
+        // model_id is validated elsewhere against is_safe_identifier() (see
+        // above), so -- like host_hash/model_sha256 in tuning_profile_json
+        // -- it never needs JSON escaping here.
+        body += "{\"modelId\":\"" + entry.model_id + "\"" +
+               ",\"lastUsedEpochSeconds\":" +
+               std::to_string(entry.last_used_epoch_seconds) +
+               ",\"pinned\":" + (entry.pinned ? "true" : "false") +
+               ",\"projectPreferenceScore\":" +
+               std::to_string(entry.project_preference_score) +
+               ",\"waitingRequestCount\":" +
+               std::to_string(entry.waiting_request_count) + "}";
+    }
+    body += "]";
+    return body;
 }
 
 }  // namespace masterai

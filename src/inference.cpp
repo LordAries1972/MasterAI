@@ -51,6 +51,17 @@ void close_socket(const NativeSocket socket) noexcept {
 #endif
 }
 
+// Phase 26: wall-clock epoch seconds used to stamp WarmModelTracker activity
+// (idle-timeout accounting), matching the same
+// system_clock::now().time_since_epoch() pattern calibration.cpp already
+// uses for TuningProfile::calibrated_at_epoch_seconds.
+std::uint64_t current_epoch_seconds() noexcept {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+}
+
 std::string json_escape(const std::string& value) {
     std::string result;
     result.reserve(value.size() + 16U);
@@ -304,6 +315,151 @@ HttpResult local_http(
 
 }  // namespace
 
+// Phase 26: WarmModelState/WarmModelTracker -- see masterai.hpp for the
+// full rationale. to_string(), the baseline translation table, and the
+// legal-transition graph live here (next to RunnerSupervisor, the class
+// that actually drives them) rather than in calibration.cpp/models.cpp.
+std::string to_string(const WarmModelState state) {
+    switch (state) {
+        case WarmModelState::Cold: return "Cold";
+        case WarmModelState::LoadingMetadata: return "LoadingMetadata";
+        case WarmModelState::MappingWeights: return "MappingWeights";
+        case WarmModelState::InitialisingBackend: return "InitialisingBackend";
+        case WarmModelState::Warming: return "Warming";
+        case WarmModelState::Ready: return "Ready";
+        case WarmModelState::Busy: return "Busy";
+        case WarmModelState::Idle: return "Idle";
+        case WarmModelState::Draining: return "Draining";
+        case WarmModelState::Evicting: return "Evicting";
+        case WarmModelState::Unloaded: return "Unloaded";
+        case WarmModelState::Failed: return "Failed";
+    }
+    return "Unknown";
+}
+
+// The regression-safe baseline table required by the plan: every
+// RunnerState maps to exactly one WarmModelState. "starting" maps to the
+// generic MappingWeights rather than any of its finer sub-phases -- those
+// (LoadingMetadata/InitialisingBackend/Warming) are only ever reached via
+// RunnerSupervisor's explicit WarmModelTracker::enter() calls at the exact
+// points in load() that know which sub-phase is actually happening; a
+// caller that only ever calls observe_runner_state() (as this table
+// implies) still gets a legal, if coarser, walk through the state graph.
+WarmModelState translate_runner_state(const RunnerState state) noexcept {
+    switch (state) {
+        case RunnerState::unloaded: return WarmModelState::Unloaded;
+        case RunnerState::starting: return WarmModelState::MappingWeights;
+        case RunnerState::ready: return WarmModelState::Ready;
+        case RunnerState::busy: return WarmModelState::Busy;
+        case RunnerState::stopping: return WarmModelState::Draining;
+        case RunnerState::failed: return WarmModelState::Failed;
+    }
+    return WarmModelState::Failed;
+}
+
+namespace {
+
+// Phase 26: the legal WarmModelState graph. Expressed as an explicit edge
+// list (rather than a switch of allowed-next-sets) so the whole graph is
+// visible in one place for review/testing.
+bool warm_state_edge(const WarmModelState from, const WarmModelState to) noexcept {
+    using W = WarmModelState;
+    static const std::pair<W, W> edges[] = {
+        {W::Cold, W::LoadingMetadata}, {W::Cold, W::Failed},
+        {W::LoadingMetadata, W::MappingWeights}, {W::LoadingMetadata, W::Failed},
+        {W::MappingWeights, W::InitialisingBackend}, {W::MappingWeights, W::Failed},
+        {W::InitialisingBackend, W::Warming}, {W::InitialisingBackend, W::Failed},
+        {W::Warming, W::Ready}, {W::Warming, W::Failed},
+        {W::Ready, W::Busy}, {W::Ready, W::Idle}, {W::Ready, W::Draining},
+        {W::Ready, W::Failed},
+        {W::Busy, W::Ready}, {W::Busy, W::Draining}, {W::Busy, W::Failed},
+        {W::Idle, W::Busy}, {W::Idle, W::Ready}, {W::Idle, W::Draining},
+        {W::Idle, W::Failed},
+        {W::Draining, W::Evicting}, {W::Draining, W::Unloaded},
+        {W::Evicting, W::Unloaded},
+        {W::Unloaded, W::LoadingMetadata},
+        {W::Failed, W::LoadingMetadata}, {W::Failed, W::Unloaded},
+    };
+    for (const auto& edge : edges) {
+        if (edge.first == from && edge.second == to) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+bool warm_state_transition_allowed(const WarmModelState from,
+                                   const WarmModelState to) noexcept {
+    if (from == to) return true;  // self-transition: always a legal no-op
+    return warm_state_edge(from, to);
+}
+
+void WarmModelTracker::observe_runner_state(const RunnerState state) {
+    enter(translate_runner_state(state));
+}
+
+void WarmModelTracker::enter(const WarmModelState next) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!warm_state_transition_allowed(state_, next)) {
+        throw std::logic_error(
+            "illegal warm-model state transition from " + to_string(state_) +
+            " to " + to_string(next));
+    }
+    state_ = next;
+}
+
+WarmModelState WarmModelTracker::current() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return state_;
+}
+
+void WarmModelTracker::record_activity(
+    const std::uint64_t now_epoch_seconds) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_activity_epoch_seconds_ = now_epoch_seconds;
+}
+
+std::uint64_t WarmModelTracker::last_activity_epoch_seconds() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_activity_epoch_seconds_;
+}
+
+bool WarmModelTracker::apply_idle_timeout(
+    const std::uint64_t now_epoch_seconds,
+    const std::uint32_t idle_unload_seconds) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ != WarmModelState::Ready) return false;
+    if (now_epoch_seconds < last_activity_epoch_seconds_) return false;
+    if (now_epoch_seconds - last_activity_epoch_seconds_ < idle_unload_seconds) {
+        return false;
+    }
+    // Ready -> Idle is a legal edge (see warm_state_edge above); bypass
+    // enter()'s own locking since this method already holds mutex_.
+    state_ = WarmModelState::Idle;
+    return true;
+}
+
+// Phase 26: cooperative-cancellation background warm-up runner. See the
+// declaration in masterai.hpp for the full rationale -- deliberately
+// synchronous (a caller wanting "background" wraps this in its own thread)
+// so it stays trivially testable.
+WarmupOutcome run_cancellable_warmup(const std::function<bool()>& step,
+                                     WarmupCancellationToken& token,
+                                     const MemoryBudgetManager& memory,
+                                     const std::size_t maximum_steps) {
+    for (std::size_t iteration = 0U; iteration < maximum_steps; ++iteration) {
+        if (token.is_cancelled()) return WarmupOutcome::cancelled;
+        if (!memory.permits_background_work()) {
+            return WarmupOutcome::skipped_low_memory;
+        }
+        if (step()) return WarmupOutcome::completed;
+    }
+    // Exhausting the step budget without `step` ever reporting "done" still
+    // counts as completed (not cancelled/skipped) -- the caller's `step`
+    // owns what "done" means; this is just a runaway-loop backstop.
+    return WarmupOutcome::completed;
+}
+
 class RunnerSupervisor::Process final {
 public:
     ~Process() { stop(2U); }
@@ -388,32 +544,48 @@ public:
 #endif
     }
 
-    void stop(const std::uint32_t grace_seconds) noexcept {
+    // Phase 26: return value reports whether the process had to be forced
+    // down (TerminateProcess/SIGKILL) rather than exiting within the grace
+    // period -- used by RunnerSupervisor::unload() to distinguish the
+    // WarmModelState::Draining (graceful) vs Evicting (forced) sub-phase.
+    // Purely additive: no existing caller inspected the old void return.
+    bool stop(const std::uint32_t grace_seconds) noexcept {
         if (!running()) {
             close_handle();
-            return;
+            return false;
         }
+        bool forced = false;
 #if defined(_WIN32)
         if (WaitForSingleObject(handle_, grace_seconds * 1000U) == WAIT_TIMEOUT) {
             TerminateProcess(handle_, 1U);
             WaitForSingleObject(handle_, 2000U);
+            forced = true;
         }
 #else
         kill(static_cast<pid_t>(process_id_), SIGTERM);
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::seconds(grace_seconds);
         int status = 0;
+        bool exited = false;
         while (std::chrono::steady_clock::now() < deadline) {
             if (waitpid(static_cast<pid_t>(process_id_), &status, WNOHANG) > 0) {
+                exited = true;
                 process_id_ = 0U;
-                return;
+                break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        kill(static_cast<pid_t>(process_id_), SIGKILL);
-        waitpid(static_cast<pid_t>(process_id_), &status, 0);
+        if (!exited) {
+            kill(static_cast<pid_t>(process_id_), SIGKILL);
+            waitpid(static_cast<pid_t>(process_id_), &status, 0);
+            forced = true;
+        } else {
+            close_handle();
+            return forced;
+        }
 #endif
         close_handle();
+        return forced;
     }
 
     std::uint64_t id() const noexcept { return process_id_; }
@@ -484,12 +656,28 @@ void RunnerSupervisor::load(const ModelRecord& model,
     metrics_.state = RunnerState::starting;
     metrics_.model_id = model.manifest.id;
     port_ = port;
+    // Phase 26: LoadingMetadata -- manifest/model record already validated
+    // by the caller, launch spec about to be built. Legal from Cold
+    // (first-ever load), Unloaded (reload after a clean unload), or Failed
+    // (retry after a previous failed load) -- see warm_state_edge().
+    warm_tracker_.enter(WarmModelState::LoadingMetadata);
+    // Phase 23: captured for tokenize()'s cache key -- see
+    // set_tokenization_cache(). The model's own already-verified content
+    // digest doubles as the tokenizer/vocabulary fingerprint, since a given
+    // model file always tokenizes the same text the same way.
+    model_sha256_ = model.manifest.model_sha256;
     try {
-        process_->start(adapter_.build_launch_spec(model, context_length, port,
-                                                    parallel_slots, tuning),
-                        runtime_root_ / "logs" /
-                            ("runner-" + model.manifest.id + ".log"));
+        const auto spec = adapter_.build_launch_spec(model, context_length, port,
+                                                      parallel_slots, tuning);
+        // Phase 26: MappingWeights -- the backend process is about to start
+        // reading/mapping the model file per LaunchTuning::load_mode.
+        warm_tracker_.enter(WarmModelState::MappingWeights);
+        process_->start(spec, runtime_root_ / "logs" /
+                                  ("runner-" + model.manifest.id + ".log"));
         metrics_.process_id = process_->id();
+        // Phase 26: InitialisingBackend -- process is up, waiting on its own
+        // readiness probe below.
+        warm_tracker_.enter(WarmModelState::InitialisingBackend);
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::seconds(startup_timeout_seconds);
         bool ready = false;
@@ -508,12 +696,19 @@ void RunnerSupervisor::load(const ModelRecord& model,
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         if (!ready) throw std::runtime_error("runner readiness timed out");
+        // Phase 26: Warming -- backend answered /health but has not yet
+        // actually served a request; Ready is only entered below, once this
+        // load() call itself is about to hand the runner back as usable.
+        warm_tracker_.enter(WarmModelState::Warming);
         metrics_.state = RunnerState::ready;
         metrics_.diagnostic.clear();
+        warm_tracker_.enter(WarmModelState::Ready);
+        warm_tracker_.record_activity(current_epoch_seconds());
     } catch (const std::exception& exception) {
         process_->stop(1U);
         metrics_.state = RunnerState::failed;
         metrics_.diagnostic = exception.what();
+        warm_tracker_.enter(WarmModelState::Failed);
         throw;
     }
 }
@@ -522,7 +717,27 @@ void RunnerSupervisor::unload(const std::uint32_t grace_seconds) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (metrics_.state == RunnerState::unloaded) return;
     metrics_.state = RunnerState::stopping;
-    process_->stop(grace_seconds);
+    // Phase 26: unload() only ever observes warm_tracker_ in Ready, Busy, or
+    // Failed here -- load() holds this same mutex_ for its entire body, so
+    // unload() can never interleave mid-load and see one of the
+    // LoadingMetadata/MappingWeights/InitialisingBackend/Warming sub-phases.
+    const bool was_failed = warm_tracker_.current() == WarmModelState::Failed;
+    if (!was_failed) {
+        // Draining -- graceful unload requested, process still up. Legal
+        // from both Ready and Busy (see warm_state_edge()).
+        warm_tracker_.enter(WarmModelState::Draining);
+    }
+    const bool forced = process_->stop(grace_seconds);
+    // Phase 26: Evicting -- the graceful stop above timed out and had to
+    // force-terminate the process. Skipped when the load itself had already
+    // failed (Failed -> Unloaded is its own direct legal edge; there is
+    // nothing "graceful" to distinguish from "forced" for a process that
+    // never became a working runner). Recorded before the final Unloaded
+    // transition so a caller polling metrics() mid-unload can observe it,
+    // even though by the time this function returns the state has already
+    // moved on to Unloaded.
+    if (forced && !was_failed) warm_tracker_.enter(WarmModelState::Evicting);
+    warm_tracker_.enter(WarmModelState::Unloaded);
     metrics_ = {};
 }
 
@@ -533,14 +748,78 @@ unsigned int RunnerSupervisor::ready_port(const bool mark_busy) {
     if (metrics_.state != RunnerState::ready) {
         throw std::logic_error("runner is not ready");
     }
-    if (mark_busy) metrics_.state = RunnerState::busy;
+    if (mark_busy) {
+        metrics_.state = RunnerState::busy;
+        // Phase 26: Busy is legal from both Ready and Idle (a request can
+        // arrive after the idle-timeout sweep already marked the model
+        // Idle), so no branching is needed here -- see warm_state_edge().
+        warm_tracker_.enter(WarmModelState::Busy);
+        warm_tracker_.record_activity(current_epoch_seconds());
+    }
     return port_;
 }
 
+bool RunnerSupervisor::apply_idle_timeout(
+    const std::uint64_t now_epoch_seconds,
+    const std::uint32_t idle_unload_seconds) {
+    return warm_tracker_.apply_idle_timeout(now_epoch_seconds,
+                                            idle_unload_seconds);
+}
+
+void RunnerSupervisor::set_tokenization_cache(
+    CacheManager* cache, std::string special_token_policy) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tokenization_cache_ = cache;
+    special_token_policy_ = std::move(special_token_policy);
+}
+
 // Tokenizes one policy-bounded prompt through the ready isolated runner.
+//
+// Phase 23: when a tokenization cache has been configured (see
+// set_tokenization_cache()), this first checks CacheManager for an entry
+// keyed by (content hash, model vocabulary fingerprint, special-token
+// policy) and only falls back to the runner's own /tokenize HTTP round
+// trip on a miss, storing the result afterward. Immutable prompt fragments
+// (system instructions, chat wrappers, repeated file chunks/conversation
+// prefixes) are exactly the callers this benefits: identical bytes tokenize
+// to an identical count for a fixed model/policy, every time.
 std::uint64_t RunnerSupervisor::tokenize(const std::string& text) {
     if (text.empty() || text.size() > 16U * 1024U * 1024U) {
         throw std::invalid_argument("tokenization input is outside policy");
+    }
+    CacheManager* cache = nullptr;
+    std::string model_sha256;
+    std::string special_token_policy;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cache = tokenization_cache_;
+        model_sha256 = model_sha256_;
+        special_token_policy = special_token_policy_;
+    }
+    CacheKey cache_key;
+    if (cache != nullptr) {
+        // Tokenization results carry no user/project-scoped confidentiality
+        // beyond the content itself (a token count reveals nothing a cache
+        // hit/miss timing side channel doesn't already), so this cache is
+        // intentionally shared process-wide (empty user_id/project_id)
+        // rather than partitioned -- what does partition it is the content
+        // digest plus the model/policy version tag, so two different texts
+        // or two different models/policies can never collide.
+        cache_key.policy_generation = cache->current_policy_generation();
+        cache_key.canonical_identity = "tokenize";
+        cache_key.content_digest = sha256_hex(text);
+        cache_key.version_tag =
+            "tokenize-v1:" + model_sha256 + ":" + special_token_policy;
+        if (const auto cached = cache->get(CacheCategory::tokenization, cache_key)) {
+            try {
+                return std::stoull(*cached);
+            } catch (const std::exception&) {
+                // A corrupt/unparsable cached value falls back to a fresh
+                // runner call rather than propagating a parse error --
+                // matches this codebase's "cache corruption falls back to
+                // safe uncached operation" convention (see cache.cpp).
+            }
+        }
     }
     const auto port = ready_port(false);
     const auto result = local_http(
@@ -550,8 +829,13 @@ std::uint64_t RunnerSupervisor::tokenize(const std::string& text) {
         throw std::runtime_error("runner tokenization request failed");
     }
     const auto root = parse_json(result.body);
-    return static_cast<std::uint64_t>(
+    const auto token_count = static_cast<std::uint64_t>(
         root.required("tokens").as_array().size());
+    if (cache != nullptr) {
+        cache->put(CacheCategory::tokenization, cache_key,
+                  std::to_string(token_count));
+    }
+    return token_count;
 }
 
 GenerationResult RunnerSupervisor::generate(
@@ -624,6 +908,12 @@ GenerationResult RunnerSupervisor::generate(
         std::lock_guard<std::mutex> lock(mutex_);
         metrics_.state = process_->running() ? RunnerState::ready
                                              : RunnerState::failed;
+        // Phase 26: Busy -> Ready and Busy -> Failed are both legal edges
+        // (see warm_state_edge()) -- ready_port(true) above already moved
+        // the tracker to Busy before this request started.
+        warm_tracker_.enter(metrics_.state == RunnerState::ready
+                                ? WarmModelState::Ready
+                                : WarmModelState::Failed);
         throw;
     }
     generated.elapsed_microseconds = static_cast<std::uint64_t>(
@@ -634,6 +924,12 @@ GenerationResult RunnerSupervisor::generate(
         std::lock_guard<std::mutex> lock(mutex_);
         metrics_.state = process_->running() ? RunnerState::ready
                                              : RunnerState::failed;
+        warm_tracker_.enter(metrics_.state == RunnerState::ready
+                                ? WarmModelState::Ready
+                                : WarmModelState::Failed);
+        if (metrics_.state == RunnerState::ready) {
+            warm_tracker_.record_activity(current_epoch_seconds());
+        }
         if (generated.cancelled) ++metrics_.requests_cancelled;
         else ++metrics_.requests_completed;
     }
@@ -644,6 +940,9 @@ RunnerMetrics RunnerSupervisor::metrics() const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto result = metrics_;
     result.resident_memory_bytes = process_->resident_memory();
+    // Phase 26: layered warm-state view alongside the RunnerState above --
+    // purely additive, see the RunnerMetrics comment in masterai.hpp.
+    result.warm_state = warm_tracker_.current();
     return result;
 }
 

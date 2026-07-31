@@ -21,21 +21,50 @@ bool append_normalized_control(const char character, std::string& output) {
 // Escapes a control character for safe embedding in a JSON string, using the
 // short escapes JSON defines for the common ones and \u00XX for the rest.
 // Newlines and tabs must survive round-trips (chat message formatting, code
-// blocks) rather than being collapsed to a single space.
-void append_json_control_escape(const char character, std::string& output) {
+// blocks) rather than being collapsed to a single space. Templated on
+// `Output` (rather than fixed to std::string) so it also serves
+// json_escape_bytes()'s std::vector<std::uint8_t> output below -- written
+// with only push_back() calls (no operator+=) so both output types work
+// identically with no separate overload to keep in sync.
+template <typename Output>
+void append_json_control_escape(const char character, Output& output) {
     switch (character) {
-        case '\n': output += "\\n"; return;
-        case '\r': output += "\\r"; return;
-        case '\t': output += "\\t"; return;
-        case '\b': output += "\\b"; return;
-        case '\f': output += "\\f"; return;
+        case '\n': output.push_back('\\'); output.push_back('n'); return;
+        case '\r': output.push_back('\\'); output.push_back('r'); return;
+        case '\t': output.push_back('\\'); output.push_back('t'); return;
+        case '\b': output.push_back('\\'); output.push_back('b'); return;
+        case '\f': output.push_back('\\'); output.push_back('f'); return;
         default: break;
     }
     static constexpr char digits[] = "0123456789abcdef";
     const auto value = static_cast<unsigned char>(character);
-    output += "\\u00";
+    output.push_back('\\');
+    output.push_back('u');
+    output.push_back('0');
+    output.push_back('0');
     output.push_back(digits[(value >> 4U) & 0x0fU]);
     output.push_back(digits[value & 0x0fU]);
+}
+
+// Phase 30: the one escaping algorithm both json_escape() (std::string
+// output, used by every ordinary one-shot JSON response body) and
+// json_escape_bytes() (std::vector<std::uint8_t> output, used by
+// server.cpp's zero-copy streaming token path) run -- `Output` only needs
+// push_back(char-ish), which both std::string and std::vector<std::uint8_t>
+// satisfy. Keeping this in one place means the two output shapes can never
+// quietly escape the same input differently.
+template <typename Output>
+void append_json_escaped(const std::string& value, Output& output) {
+    for (const char character : value) {
+        if (static_cast<unsigned char>(character) < 0x20U) {
+            append_json_control_escape(character, output);
+            continue;
+        }
+        if (character == '"' || character == '\\') {
+            output.push_back('\\');
+        }
+        output.push_back(character);
+    }
 }
 
 }  // namespace
@@ -64,16 +93,17 @@ std::string response(const int status, const char* reason,
 // content to round-trip with its original line breaks and indentation.
 std::string json_escape(const std::string& value) {
     std::string output;
-    for (const char character : value) {
-        if (static_cast<unsigned char>(character) < 0x20U) {
-            append_json_control_escape(character, output);
-            continue;
-        }
-        if (character == '"' || character == '\\') {
-            output.push_back('\\');
-        }
-        output.push_back(character);
-    }
+    append_json_escaped(value, output);
+    return output;
+}
+
+// Phase 30: see the declaration comment in server_internal.hpp -- identical
+// escaping to json_escape(), just written into a byte vector so it can move
+// into a SharedBuffer with no further copy.
+std::vector<std::uint8_t> json_escape_bytes(const std::string& value) {
+    std::vector<std::uint8_t> output;
+    output.reserve(value.size());
+    append_json_escaped(value, output);
     return output;
 }
 

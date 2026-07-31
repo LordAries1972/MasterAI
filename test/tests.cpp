@@ -1621,16 +1621,24 @@ void test_phase_sixteen_deadline_bound_retrieval() {
 
     // Context budgeting: synthetic ranked candidates exceeding the byte
     // budget must keep the highest-ranked evidence and disclose the rest as
-    // omitted rather than truncating a kept chunk's text.
+    // omitted rather than truncating a kept chunk's text. Phase 24: each
+    // candidate's text now lives once in a shared arena buffer, addressed by
+    // a ChunkReference, and is only materialized for candidates the budgeter
+    // actually admits.
     std::vector<masterai::RetrievalCandidate> ranked;
+    std::string arena;
     for (unsigned int index = 0U; index < 5U; ++index) {
         masterai::IndexChunk chunk;
         chunk.id = "chunk-" + std::to_string(index);
         chunk.relative_path = "src/big.cpp";
         chunk.offset = index * 4096ULL;
         chunk.language = "cpp";
-        chunk.text = std::string(3000U, 'x');
         chunk.digest = "digest-" + std::to_string(index);
+        masterai::ChunkReference reference;
+        reference.segment_key = "test-arena";
+        reference.offset = arena.size();
+        reference.length = 3000U;
+        arena += std::string(3000U, 'x');
         masterai::RetrievalDisclosureEntry disclosure;
         disclosure.source = "exact_text";
         disclosure.relative_path = chunk.relative_path;
@@ -1638,10 +1646,13 @@ void test_phase_sixteen_deadline_bound_retrieval() {
         disclosure.index_generation = 1U;
         disclosure.score = 5.0 - static_cast<double>(index);
         disclosure.reason = "synthetic";
-        ranked.push_back({chunk, disclosure});
+        ranked.push_back({chunk, reference, disclosure});
     }
+    masterai::SharedBuffer arena_buffer =
+        masterai::SharedBuffer::copy_from(arena.data(), arena.size());
+    masterai::BufferView arena_view(arena_buffer, 0U, arena.size());
     const auto budgeted = masterai::ContextBudgeter::apply(
-        ranked, "exact_text", false, "", 7000U, 6U, 20U);
+        ranked, arena_view, "exact_text", false, "", 7000U, 6U, 20U);
     std::size_t included_count = 0U;
     for (const auto& entry : budgeted.disclosure) {
         if (entry.included) ++included_count;
@@ -2107,6 +2118,1435 @@ void test_phase_twenty_advanced_optimizations_disabled() {
             "recording evidence for an unknown feature name was accepted");
 }
 
+// Phase 21: the read coalescer is pure/deterministic, so this drives it
+// directly rather than through a real backend -- two adjacent 4KB ranges on
+// the same file must become a single merged physical read, while a range on
+// a different file must never be folded into it.
+void test_phase_twentyone_coalescing_merges_adjacent() {
+    const std::filesystem::path same_file = "manifest.idx";
+    const std::filesystem::path other_file = "other.idx";
+    std::vector<masterai::CoalescedReadRequest> requests;
+    requests.push_back({same_file, 0U, 4096U});
+    requests.push_back({same_file, 4096U, 4096U});
+    requests.push_back({other_file, 0U, 128U});
+
+    const auto plans = masterai::coalesce_read_requests(requests);
+    require(plans.size() == 2U,
+            "adjacent same-file requests were not merged into one plan");
+
+    const auto merged = std::find_if(
+        plans.begin(), plans.end(),
+        [&](const masterai::CoalescedReadPlan& plan) { return plan.path == same_file; });
+    require(merged != plans.end(), "merged plan for the shared file was missing");
+    require(merged->offset == 0U && merged->length == 8192U,
+            "merged plan did not cover the full adjacent byte range");
+    require(merged->members.size() == 2U,
+            "merged plan lost track of one of its original requests");
+
+    const auto separate = std::find_if(
+        plans.begin(), plans.end(),
+        [&](const masterai::CoalescedReadPlan& plan) { return plan.path == other_file; });
+    require(separate != plans.end() && separate->members.size() == 1U,
+            "a request on a different file was incorrectly folded into another file's plan");
+}
+
+// Phase 21: a request cancelled before it is ever dispatched must release
+// its buffer and report cancelled=true with no bytes -- never publish
+// whatever was in the (never-written) buffer.
+void test_phase_twentyone_cancellation_releases_buffer() {
+    TemporaryDirectory temp;
+    const auto path = temp.path() / "cancel_target.bin";
+    write_text(path, std::string(4096U, 'x'));
+
+    const auto profile = masterai::probe_storage_latency(temp.path(), "fixed");
+    auto reader = masterai::make_async_file_reader(profile);
+    require(reader != nullptr, "async reader failed to construct for cancellation test");
+
+    masterai::AsyncReadCancellationToken token;
+    token.cancel();  // cancel before the read is even issued
+    const auto result = reader->read_range(path, 0U, 4096U, token);
+    require(result.cancelled, "a pre-cancelled read did not report cancelled");
+    require(!result.succeeded, "a pre-cancelled read reported success");
+    require(result.buffer.empty(),
+            "a cancelled read published a non-empty buffer instead of releasing it");
+}
+
+// Phase 21: a profile shaped like a spinning HDD (high measured latency, or
+// explicitly non-fan-out) must resolve to the serialized (depth 1) queue
+// policy, and non-local media (network/removable) must stay serialized
+// regardless of measured latency, matching the "denied-by-default fan-out"
+// requirement for active model-weight reads.
+void test_phase_twentyone_hdd_profile_stays_sequential() {
+    masterai::StorageLatencyProfile hdd_profile;
+    hdd_profile.storage_class = "fixed";
+    hdd_profile.measured_read_latency_us = 6000.0;  // spinning-disk-shaped
+    hdd_profile.sequential = true;
+    require(masterai::adaptive_queue_depth(hdd_profile) == 1U,
+            "an HDD-shaped storage profile did not stay sequential-only");
+
+    masterai::StorageLatencyProfile network_profile;
+    network_profile.storage_class = "network";
+    network_profile.measured_read_latency_us = 50.0;  // fast, but non-local
+    network_profile.sequential = false;
+    require(masterai::adaptive_queue_depth(network_profile) == 1U,
+            "a network storage profile allowed fan-out despite low latency");
+
+    masterai::StorageLatencyProfile nvme_profile;
+    nvme_profile.storage_class = "fixed";
+    nvme_profile.measured_read_latency_us = 80.0;  // NVMe-shaped
+    nvme_profile.sequential = false;
+    require(masterai::adaptive_queue_depth(nvme_profile) > 1U,
+            "a fast local NVMe-shaped profile was incorrectly denied fan-out");
+}
+
+// Phase 21: read_file_bytes() must transparently fall back to a direct
+// blocking read -- byte-identical to the pre-Phase-21 path -- whenever the
+// async reader is unavailable (e.g. async init failed and the caller was
+// handed nullptr), which is the exact fallback contract models.cpp and
+// indexing.cpp depend on.
+void test_phase_twentyone_fallback_to_blocking_path() {
+    TemporaryDirectory temp;
+    const auto path = temp.path() / "fallback_target.txt";
+    const std::string expected = "phase twenty-one fallback content";
+    write_text(path, expected);
+
+    const std::string content =
+        masterai::read_file_bytes(nullptr, path, 0U, expected.size());
+    require(content == expected,
+            "read_file_bytes() with a null reader did not match a direct blocking read");
+
+    // Also exercise a real (working) reader end-to-end to confirm the async
+    // path itself returns the same bytes as the fallback when it succeeds.
+    const auto profile = masterai::probe_storage_latency(temp.path(), "fixed");
+    auto reader = masterai::make_async_file_reader(profile);
+    require(reader != nullptr, "async reader failed to construct for the fallback comparison");
+    const std::string async_content =
+        masterai::read_file_bytes(reader.get(), path, 0U, expected.size());
+    require(async_content == expected,
+            "the async read path returned different bytes than the blocking fallback");
+}
+
+// Phase 30: SharedBuffer/BufferView correctness -- a view constructed from
+// a buffer must read exactly the bytes at [offset, offset+length), and the
+// underlying storage must stay alive (readable) through a BufferView even
+// after every SharedBuffer that named it directly has gone out of scope,
+// which is the whole point of reference-counted immutable sharing.
+void test_phase_thirty_shared_buffer_view_and_refcount() {
+    std::vector<std::uint8_t> bytes = {'h', 'e', 'l', 'l', 'o', ',', ' ',
+                                       'w', 'o', 'r', 'l', 'd'};
+    masterai::BufferView view;
+    {
+        // The owning SharedBuffer is deliberately scoped to die before the
+        // view is used below -- BufferView must keep the storage alive via
+        // its own internal SharedBuffer copy, not the caller's variable.
+        masterai::SharedBuffer owner(bytes);
+        require(owner.use_count() == 1, "a freshly constructed SharedBuffer had unexpected refcount");
+        view = masterai::BufferView(owner, 7U, 5U, "utf-8");
+        require(owner.use_count() == 2,
+                "constructing a BufferView did not retain the owning SharedBuffer");
+    }
+    require(view.size() == 5U, "BufferView length did not match the requested window");
+    require(view.encoding() == "utf-8", "BufferView did not retain its encoding metadata");
+    require(view.to_string() == "world",
+            "BufferView read the wrong bytes after its original owner variable went out of scope");
+
+    // copy_from() must produce an independent buffer with identical bytes.
+    const masterai::SharedBuffer copied =
+        masterai::SharedBuffer::copy_from(bytes.data(), bytes.size());
+    require(copied.size() == bytes.size(), "SharedBuffer::copy_from produced the wrong size");
+    require(std::memcmp(copied.data(), bytes.data(), bytes.size()) == 0,
+            "SharedBuffer::copy_from did not copy the exact bytes");
+
+    // An out-of-range window must clamp to empty rather than read past the
+    // buffer.
+    const masterai::BufferView overrun(copied, 100U, 5U);
+    require(overrun.empty(), "an out-of-range BufferView window was not clamped to empty");
+
+    // ChunkReference::materialize() must round-trip through a BufferView.
+    masterai::ChunkReference chunk;
+    chunk.segment_key = "test-segment";
+    chunk.offset = 0U;
+    chunk.length = 5U;
+    const masterai::BufferView segment(copied, 0U, copied.size());
+    require(chunk.materialize(segment) == "hello",
+            "ChunkReference::materialize did not return the referenced bytes");
+}
+
+// Phase 30: MappedBufferView must expose exactly the mapped byte range from
+// a real file, using the platform mapping backend (Win32 CreateFileMappingW
+// on this build target).
+void test_phase_thirty_mapped_buffer_view_reads_file() {
+    TemporaryDirectory temp;
+    const auto path = temp.path() / "mapped_source.bin";
+    const std::string content = "the quick brown fox jumps over the lazy dog";
+    write_text(path, content);
+
+    masterai::MappedBufferView whole(path);
+    require(whole.size() == content.size(),
+            "MappedBufferView with length=0 did not map the whole file");
+    require(std::string(reinterpret_cast<const char*>(whole.data()), whole.size()) == content,
+            "MappedBufferView did not expose the file's exact bytes");
+
+    masterai::MappedBufferView window(path, 4U, 5U);
+    require(window.size() == 5U, "MappedBufferView did not honor the requested length");
+    require(std::string(reinterpret_cast<const char*>(window.data()), window.size()) == "quick",
+            "MappedBufferView offset window returned the wrong bytes");
+
+    bool rejected_out_of_range = false;
+    try {
+        masterai::MappedBufferView bad(path, content.size() + 10U, 1U);
+    } catch (const std::exception&) {
+        rejected_out_of_range = true;
+    }
+    require(rejected_out_of_range,
+            "MappedBufferView accepted an offset beyond end of file instead of throwing");
+}
+
+// Phase 30: RequestArena must serve bump allocations up to its capacity,
+// fail (nullptr / throw, per the documented policy) past exhaustion, and --
+// in this debug build -- an ArenaHandle issued before reset()/destruction
+// must become detectably invalid afterward instead of silently pointing at
+// reused/freed memory.
+void test_phase_thirty_request_arena_allocation_and_poison() {
+    masterai::RequestArena arena(64U);
+    void* first = arena.allocate(32U);
+    require(first != nullptr, "RequestArena rejected an allocation within capacity");
+    void* second = arena.allocate(32U);
+    require(second != nullptr, "RequestArena rejected a second allocation within capacity");
+    void* overflow = arena.allocate(1U);
+    require(overflow == nullptr,
+            "RequestArena returned non-null past its capacity instead of following the "
+            "documented nullptr-on-exhaustion policy");
+
+    bool threw = false;
+    try {
+        arena.allocate_or_throw(1U);
+    } catch (const masterai::ArenaExhaustedError&) {
+        threw = true;
+    }
+    require(threw, "RequestArena::allocate_or_throw did not throw on exhaustion");
+
+    // Poison check: a handle issued before reset() must go invalid after.
+    masterai::RequestArena poison_arena(64U);
+    auto handle = masterai::allocate_handle<std::uint64_t>(poison_arena);
+    require(handle.valid(), "a freshly issued ArenaHandle reported invalid");
+    *handle = 42ULL;
+    require(*handle == 42ULL, "ArenaHandle did not read back a value written through it");
+    poison_arena.reset();
+    require(!handle.valid(),
+            "ArenaHandle stayed valid after its arena was reset() -- debug poison check failed "
+            "to trigger on a stale generation");
+
+    // Poison check: a handle must also go invalid once the arena that
+    // issued it is destroyed, without ever dereferencing the (freed) arena.
+    masterai::ArenaHandle<std::uint64_t> outlived_handle;
+    {
+        masterai::RequestArena short_lived_arena(64U);
+        outlived_handle = masterai::allocate_handle<std::uint64_t>(short_lived_arena);
+        require(outlived_handle.valid(), "a freshly issued ArenaHandle reported invalid");
+    }
+    require(!outlived_handle.valid(),
+            "ArenaHandle stayed valid after its arena was destroyed -- debug poison check did "
+            "not trigger");
+}
+
+// Phase 30: FixedSizePool basic acquire/release/shrink behavior -- pointers
+// stay stable while live, bytes_reserved() reflects grown-block footprint
+// (not just live objects), and shrink() releases only fully-unused blocks
+// without disturbing objects still in use.
+void test_phase_thirty_fixed_size_pool_alloc_release_shrink() {
+    masterai::FixedSizePool<std::string> pool(4U);  // small block size to force multiple blocks
+    require(pool.bytes_reserved() == 0U, "a freshly constructed pool reported nonzero reserved bytes");
+
+    std::vector<std::string*> handles;
+    for (int i = 0; i < 4; ++i) {
+        handles.push_back(pool.acquire("item-" + std::to_string(i)));
+    }
+    require(pool.live_count() == 4U, "pool live_count did not match the number of acquired objects");
+    require(pool.bytes_reserved() == 4U * sizeof(std::string),
+            "pool bytes_reserved did not match one fully-used block's footprint");
+    require(*handles[2] == "item-2", "pool acquire() did not construct the object with the given args");
+
+    // Force growth into a second block.
+    std::string* fifth = pool.acquire("item-4");
+    require(pool.live_count() == 5U, "pool live_count did not grow after a fifth acquisition");
+    require(pool.bytes_reserved() == 8U * sizeof(std::string),
+            "pool bytes_reserved did not grow by a full block after exceeding block_capacity");
+
+    // shrink() must not touch the first (still fully live) block, and must
+    // do nothing while the second block still has a live object.
+    require(pool.shrink() == 0U,
+            "shrink() released a block that still had a live object in it");
+
+    pool.release(fifth);
+    require(pool.live_count() == 4U, "pool live_count did not drop after release()");
+    require(pool.shrink() == 1U,
+            "shrink() did not release the now fully-unused second block");
+    require(pool.bytes_reserved() == 4U * sizeof(std::string),
+            "pool bytes_reserved did not shrink after releasing an empty block");
+
+    // The first block's objects must remain valid and unaffected by the
+    // shrink() call above.
+    require(*handles[0] == "item-0" && *handles[3] == "item-3",
+            "shrink() disturbed objects still live in a block that was kept");
+
+    for (auto* handle : handles) pool.release(handle);
+    require(pool.live_count() == 0U, "pool live_count was nonzero after releasing every object");
+    require(pool.shrink() == 1U, "shrink() did not release the final now-empty block");
+    require(pool.bytes_reserved() == 0U,
+            "pool bytes_reserved was nonzero after shrinking away every block");
+}
+
+// Phase 30: BudgetTrackedPool must actually call MemoryBudgetManager::reserve()
+// on every real block growth and MemoryBudgetManager::release() on every real
+// shrink -- proving FixedSizePool::on_reserved_bytes_changed's live-accounting
+// hook does what its comment promises, independent of any real consumer.
+void test_phase_thirty_fixed_size_pool_registers_with_budget_manager() {
+    const auto hardware = masterai::probe_hardware(std::filesystem::current_path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+
+    // Careful: memory.status() returns MemoryStatus by value, so calling it
+    // twice and comparing an iterator from one temporary's category_bytes
+    // map against .end() of a *different* temporary's map is undefined
+    // behavior (they are unrelated container instances) -- capture one
+    // snapshot and query it once.
+    const auto initial_status = memory.status();
+    require(initial_status.category_bytes.find(
+                masterai::MemoryCategory::retrieval_index_cache) ==
+                initial_status.category_bytes.end(),
+            "a freshly constructed MemoryBudgetManager already had a "
+            "retrieval_index_cache entry");
+
+    {
+        masterai::BudgetTrackedPool<std::string> tracked(
+            memory, masterai::MemoryCategory::retrieval_index_cache,
+            /*interactive=*/true, /*block_capacity=*/2U);
+        require(tracked.lease_id().empty(),
+                "a freshly constructed BudgetTrackedPool already held a lease");
+
+        // First acquire() forces the pool's first block growth (block
+        // capacity 2, so this both allocates block 0 and fills its first
+        // slot) -- the on_reserved_bytes_changed callback must fire and
+        // reserve() must actually be called (not merely tracked internally).
+        auto* alpha = tracked.pool().acquire("alpha");
+        require(!tracked.lease_id().empty(),
+                "pool growth did not register a MemoryBudgetManager lease");
+        require(memory.status().category_bytes.at(
+                    masterai::MemoryCategory::retrieval_index_cache) ==
+                    tracked.pool().bytes_reserved(),
+                "registered category bytes did not match the pool's real "
+                "bytes_reserved() after growth");
+
+        // A second acquire() recycles block 0's remaining free slot -- no
+        // growth, so the lease must not churn (still the same footprint).
+        auto* beta = tracked.pool().acquire("beta");
+        require(memory.status().category_bytes.at(
+                    masterai::MemoryCategory::retrieval_index_cache) ==
+                    tracked.pool().bytes_reserved(),
+                "an acquire() that only recycled a free slot changed the "
+                "registered footprint");
+
+        // A third acquire() forces a second block (block 0 is now full) --
+        // growth again, so the registered footprint must grow with it.
+        // gamma ends up the sole live object in block 1 -- block 1 keeps a
+        // free slot, block 0 is completely full (alpha + beta).
+        auto* gamma = tracked.pool().acquire("gamma");
+        const auto grown_bytes = memory.status().category_bytes.at(
+            masterai::MemoryCategory::retrieval_index_cache);
+        require(grown_bytes == tracked.pool().bytes_reserved() && grown_bytes > 0U,
+                "registered category bytes did not grow with a second block");
+
+        // Releasing both of block 0's objects (alpha, beta) empties it
+        // completely while leaving block 1 (gamma, still live) untouched --
+        // shrink() must release exactly the one now-empty block, and the
+        // registration must shrink by exactly that block's footprint.
+        tracked.pool().release(alpha);
+        tracked.pool().release(beta);
+        require(tracked.pool().shrink() == 1U,
+                "shrink() did not release the now-empty first block");
+        require(memory.status().category_bytes.at(
+                    masterai::MemoryCategory::retrieval_index_cache) ==
+                    tracked.pool().bytes_reserved(),
+                "registered category bytes did not shrink after shrink() "
+                "released a block");
+        require(*gamma == "gamma", "surviving pool object was disturbed by "
+                                   "an unrelated block's shrink()");
+    }
+    // BudgetTrackedPool's destructor must release its outstanding lease even
+    // though the pool still had one live object (gamma) when it went out of
+    // scope -- an unreleased lease here would be a permanent, invisible
+    // memory-budget leak.
+    require(memory.status().category_bytes.at(
+                masterai::MemoryCategory::retrieval_index_cache) == 0U,
+            "BudgetTrackedPool destruction did not release its outstanding "
+            "MemoryBudgetManager lease");
+}
+
+// Phase 30: json_escape_bytes() (the byte-vector escape used by
+// server.cpp's zero-copy streaming token path) must produce byte-for-byte
+// identical output to json_escape() (the std::string escape every ordinary
+// one-shot JSON response still uses) across control characters, the
+// characters JSON itself requires escaping, and ordinary text -- otherwise
+// switching the streaming path to the byte-vector form would silently
+// change what a client receives.
+void test_phase_thirty_json_escape_bytes_matches_string_escape() {
+    const std::vector<std::string> fixtures = {
+        "",
+        "plain ascii text",
+        "line one\nline two\ttabbed",
+        "quote \" and backslash \\ together",
+        "control chars: \x01\x02\x1f end",
+        "carriage\rreturn and \bbackspace and \fformfeed",
+        std::string(500U, 'x') + "\n\"\\",
+    };
+    for (const auto& fixture : fixtures) {
+        const auto string_escaped = masterai::server_internal::json_escape(fixture);
+        const auto byte_escaped = masterai::server_internal::json_escape_bytes(fixture);
+        const std::string byte_escaped_as_string(byte_escaped.begin(), byte_escaped.end());
+        require(string_escaped == byte_escaped_as_string,
+                "json_escape_bytes() diverged from json_escape() for a "
+                "streaming-path fixture -- the two escape paths must stay "
+                "byte-identical");
+    }
+}
+
+// Phase 30: server.cpp's streaming token path moves json_escape_bytes()'s
+// output directly into a SharedBuffer instead of copying it into a new
+// std::string for JSON-envelope concatenation the way the pre-Phase-30 code
+// did (see server.cpp's token-send call site and send_chunk_parts()).
+// std::vector's move constructor is required by the standard to transfer
+// ownership of the existing heap allocation rather than reallocate and
+// copy, so if this really is a move (not a disguised copy), the
+// SharedBuffer's data pointer must be the exact same address the vector
+// held before the move -- a concrete, pointer-identity proof of "fewer
+// copies" rather than an assertion about internal call counts.
+void test_phase_thirty_streaming_escape_moves_into_shared_buffer_without_copy() {
+    const std::string chunk =
+        "line one\nline two\twith \"quotes\" and \\backslash\\ and control \x01 char";
+    auto bytes = masterai::server_internal::json_escape_bytes(chunk);
+    const auto* original_data_pointer = bytes.data();
+    const auto original_size = bytes.size();
+    require(original_size > 0U, "escape fixture produced no bytes");
+
+    masterai::SharedBuffer buffer(std::move(bytes));
+    require(buffer.data() == original_data_pointer && buffer.size() == original_size,
+            "moving json_escape_bytes() output into a SharedBuffer copied "
+            "the payload instead of taking ownership of its existing "
+            "allocation -- the streaming path would no longer be zero-copy");
+
+    masterai::BufferView view(buffer, 0U, buffer.size());
+    require(view.to_string() == masterai::server_internal::json_escape(chunk),
+            "BufferView materialized from the moved SharedBuffer did not "
+            "match json_escape()'s output byte-for-byte");
+}
+
+// Phase 23: a repeated tokenize() call for identical text/model/policy must
+// be served from CacheManager instead of the runner's /tokenize HTTP round
+// trip. Proven here by unloading the runner (so any HTTP attempt would
+// throw "runner is not ready") between the two calls -- the second call can
+// only succeed by having actually skipped the runner.
+void test_phase_twentythree_tokenization_cache_hit_avoids_retokenize() {
+    TemporaryDirectory temporary;
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+    masterai::CachePolicy cache_policy;
+    cache_policy.maximum_bytes_per_category = 1024ULL * 1024ULL;
+    masterai::CacheManager cache(temporary.path() / "cache", memory, cache_policy);
+
+    const auto model_directory = temporary.path() / "model";
+    std::filesystem::create_directories(model_directory);
+    const auto model_file = model_directory / "model.gguf";
+    write_text(model_file, "GGUF-tokcache-fixture");
+    masterai::ModelRecord model;
+    model.directory = model_directory;
+    model.manifest.id = "tokcache-fixture";
+    model.manifest.model_file = "model.gguf";
+    model.manifest.model_size_bytes = std::filesystem::file_size(model_file);
+    model.manifest.model_sha256 = masterai::sha256_file_hex(model_file);
+    model.state = masterai::ModelState::ready;
+    const auto backend = fake_llama_executable();
+    masterai::RunnerSupervisor supervisor(backend, temporary.path() / "runtime");
+    supervisor.load(model, 4096U, 18090U, 5U);
+    supervisor.set_tokenization_cache(&cache);
+
+    require(supervisor.tokenize("one two three") == 3U,
+            "first tokenize() call (a cache miss) did not reach the runner");
+    supervisor.unload(0U);
+    require(supervisor.metrics().state == masterai::RunnerState::unloaded,
+            "runner did not unload before the cache-hit check");
+    require(supervisor.tokenize("one two three") == 3U,
+            "a cache hit did not avoid the runner HTTP round trip -- the "
+            "runner is unloaded, so this could only succeed from cache");
+
+    bool threw_for_uncached_text = false;
+    try {
+        static_cast<void>(supervisor.tokenize("a different uncached string"));
+    } catch (const std::exception&) {
+        threw_for_uncached_text = true;
+    }
+    require(threw_for_uncached_text,
+            "tokenizing different, never-cached text against an unloaded "
+            "runner unexpectedly succeeded -- the cache-hit check above is "
+            "not actually proving anything if this can happen");
+}
+
+// Phase 23: cached (process-lifetime-compiled) chat-template output must be
+// byte-for-byte identical to the old repeated std::string += concatenation
+// it replaces.
+void test_phase_twentythree_segmented_assembly_byte_identical() {
+    const masterai::ChatWrapTemplate tmpl{
+        "<|system|>\n", "<|end|>\n", "<|user|>\n", "<|end|>\n",
+        "<|assistant|>\n", "<|end|>\n", "<|assistant|>\n", "<|end|>"};
+    std::vector<masterai::ChatMessage> history;
+    history.push_back(masterai::ChatMessage{masterai::ChatRole::system, "be terse", 0U});
+    history.push_back(masterai::ChatMessage{masterai::ChatRole::user, "hello", 0U});
+    history.push_back(masterai::ChatMessage{masterai::ChatRole::assistant, "hi there", 0U});
+    const std::string latest = "what's next?";
+
+    // Reference implementation: mirrors server.cpp's pre-Phase-23
+    // assemble_chat_prompt() body exactly (plain concatenation).
+    std::string expected;
+    for (const auto& message : history) {
+        switch (message.role) {
+            case masterai::ChatRole::system:
+                expected += tmpl.system_prefix + message.content + tmpl.system_suffix;
+                break;
+            case masterai::ChatRole::user:
+                expected += tmpl.user_prefix + message.content + tmpl.user_suffix;
+                break;
+            case masterai::ChatRole::assistant:
+                expected += tmpl.assistant_prefix + message.content + tmpl.assistant_suffix;
+                break;
+        }
+    }
+    expected += tmpl.user_prefix + latest + tmpl.user_suffix;
+    expected += tmpl.generation_prompt;
+
+    const auto& plan =
+        masterai::compiled_chat_template("phi3-test-architecture", tmpl);
+    const auto segments =
+        masterai::assemble_chat_prompt_segments(plan, history, latest);
+    const auto actual = masterai::materialize_prompt(segments);
+    require(actual == expected,
+            "segmented prompt assembly diverged from the old "
+            "concatenation-based output");
+
+    // A repeat call for the same architecture must return the same cached
+    // plan instance (process-lifetime cache, not rebuilt every call) and
+    // still produce byte-identical output.
+    const auto& plan_again =
+        masterai::compiled_chat_template("phi3-test-architecture", tmpl);
+    require(&plan_again == &plan,
+            "compiled_chat_template() did not return the cached plan on a "
+            "repeat call for the same architecture");
+    const auto segments_again =
+        masterai::assemble_chat_prompt_segments(plan_again, history, latest);
+    require(masterai::materialize_prompt(segments_again) == expected,
+            "cached-template output was not byte-identical to the uncached "
+            "run");
+}
+
+// Phase 23: a clean, fingerprint-matching literal-prefix extension reports
+// reuse == true along with the exact reusable-prefix byte count, a
+// divergence_offset at the boundary of the reused prefix, no invalidation
+// reason, and the configured ceiling.
+void test_phase_twentythree_session_reuse_reports_prefix_fields_on_success() {
+    masterai::PromptSessionManager sessions(4U, 300U);
+    masterai::SessionFingerprint fingerprint;
+    fingerprint.model_sha256 = "model-digest";
+    fingerprint.backend_executable = "/opt/llama-server";
+    fingerprint.architecture = "llama";
+    fingerprint.context_length = 4096U;
+    fingerprint.project_index_generation = 1U;
+    const std::string turn_one = "system+turn-one";
+    const auto slot = sessions.record("chat-a", fingerprint, turn_one, std::nullopt);
+    const std::string turn_two = turn_one + "+turn-two";
+    const auto decision = sessions.try_reuse("chat-a", fingerprint, turn_two);
+    require(decision.reuse && decision.slot_id == slot,
+            "a valid prefix-extending turn was not granted reuse of its warm slot");
+    require(decision.invalidation_reason ==
+                masterai::SessionInvalidationReason::none,
+            "a granted reuse decision carried a non-none invalidation reason");
+    require(decision.reusable_prefix_bytes == turn_one.size(),
+            "reusable_prefix_bytes did not equal the recorded prior prompt's length");
+    require(decision.divergence_offset == turn_one.size(),
+            "divergence_offset did not mark the boundary of the reused prefix");
+    require(decision.prefix_byte_ceiling ==
+                masterai::PromptSessionManager::kDefaultMaxRetainedPrefixBytes,
+            "decision did not report the default configured prefix byte ceiling");
+}
+
+// Phase 23: editing an earlier chat turn (a non-prefix divergence) must be
+// reported with SessionInvalidationReason::prefix_diverged and the exact
+// byte offset where the two prompts actually stop matching -- not just a
+// bare refusal.
+void test_phase_twentythree_session_reuse_edit_reports_divergence_offset() {
+    masterai::PromptSessionManager sessions(4U, 300U);
+    masterai::SessionFingerprint fingerprint;
+    fingerprint.model_sha256 = "model-digest";
+    fingerprint.backend_executable = "/opt/llama-server";
+    fingerprint.architecture = "llama";
+    fingerprint.context_length = 4096U;
+    fingerprint.project_index_generation = 1U;
+
+    const std::string turn_one = "SYS:be terse|USR:hello";
+    sessions.record("chat-a", fingerprint, turn_one, std::nullopt);
+    // The earlier user turn ("hello") is edited to "goodbye" before a new
+    // turn is appended -- a non-prefix edit, not a clean extension.
+    const std::string edited = "SYS:be terse|USR:goodbye|USR:what now?";
+    const auto decision = sessions.try_reuse("chat-a", fingerprint, edited);
+    require(!decision.reuse, "an edited earlier turn was still granted reuse");
+    require(decision.invalidation_reason ==
+                masterai::SessionInvalidationReason::prefix_diverged,
+            "an edited earlier turn was not reported as prefix_diverged");
+
+    std::size_t expected_divergence = 0U;
+    while (expected_divergence < turn_one.size() &&
+           expected_divergence < edited.size() &&
+           turn_one[expected_divergence] == edited[expected_divergence]) {
+        ++expected_divergence;
+    }
+    require(decision.divergence_offset == expected_divergence,
+            "divergence_offset did not match the actual point of byte "
+            "divergence between the recorded and edited prompts");
+}
+
+// Phase 23: a literal-prefix match that exceeds the configured maximum
+// retained prefix byte ceiling must be refused (never fuzzy-truncated or
+// silently allowed), with the ceiling-specific invalidation reason.
+void test_phase_twentythree_session_reuse_prefix_ceiling_enforced() {
+    // A tiny 8-byte ceiling so an ordinary short recorded prompt already
+    // exceeds it -- proves try_reuse() refuses purely on ceiling grounds
+    // even though the underlying prefix match is perfectly valid.
+    masterai::PromptSessionManager sessions(4U, 300U, 8U);
+    masterai::SessionFingerprint fingerprint;
+    fingerprint.model_sha256 = "model-digest";
+    fingerprint.backend_executable = "/opt/llama-server";
+    fingerprint.architecture = "llama";
+    fingerprint.context_length = 4096U;
+    fingerprint.project_index_generation = 1U;
+
+    const std::string turn_one = "this recorded prompt is longer than the ceiling";
+    sessions.record("chat-a", fingerprint, turn_one, std::nullopt);
+    const auto decision =
+        sessions.try_reuse("chat-a", fingerprint, turn_one + "+more");
+    require(!decision.reuse,
+            "reuse was granted despite exceeding the configured prefix byte "
+            "ceiling");
+    require(decision.invalidation_reason ==
+                masterai::SessionInvalidationReason::prefix_ceiling_exceeded,
+            "a ceiling overrun was not reported with the correct "
+            "invalidation reason");
+    require(decision.prefix_byte_ceiling == 8U,
+            "decision did not report the configured ceiling");
+    require(decision.reusable_prefix_bytes == turn_one.size(),
+            "reusable_prefix_bytes did not reflect the full valid prefix "
+            "match even though reuse was refused for exceeding the ceiling");
+}
+
+// Phase 23: the intern table accepts and stably dedupes short, repeated
+// identifiers, and structurally rejects anything long enough to plausibly
+// be arbitrary user content or file text rather than a role/route/JSON-key
+// style identifier.
+void test_phase_twentythree_intern_table_restricted_to_short_identifiers() {
+    const auto& first = masterai::intern_identifier("assistant");
+    const auto& second = masterai::intern_identifier("assistant");
+    require(&first == &second,
+            "interning the same short identifier twice returned different "
+            "backing storage");
+    require(first == "assistant",
+            "interned value did not match the input text");
+
+    bool threw = false;
+    try {
+        static_cast<void>(masterai::intern_identifier(
+            std::string(masterai::kMaxInternedLength + 1U, 'x')));
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw,
+            "interning oversized text (a stand-in for arbitrary user/file "
+            "content) was accepted instead of structurally rejected");
+}
+
+// Phase 24 fixture: builds a small on-disk project with a distinctive
+// shared identifier and waits for it to settle to IndexJobState::ready,
+// mirroring test_phase_sixteen_deadline_bound_retrieval's setup.
+void build_ready_retrieval_project(const std::filesystem::path& project_root,
+                                   masterai::ProjectIndexService& service,
+                                   const masterai::ProjectRecord& project) {
+    std::filesystem::create_directories(project_root / "src");
+    write_text(project_root / "src" / "one.cpp",
+               "// one\nint phase24_marker_symbol = 41;\n");
+    require(service.request_rebuild(project),
+            "Phase 24 retrieval fixture index rebuild was not admitted");
+    for (unsigned int attempt = 0U; attempt < 200U; ++attempt) {
+        const auto status = service.status(project.id);
+        if (status && status->state == masterai::IndexJobState::ready) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    require(false, "Phase 24 retrieval fixture index did not settle");
+}
+
+// Deterministic request classification: path-looking tokens win over every
+// other signal, then diagnostic wording, then explicit doc/completion
+// wording, then a bare identifier defaults to symbol explanation, and plain
+// prose with none of these falls back to generic lexical search.
+void test_phase_twentyfour_request_classification() {
+    require(masterai::classify_retrieval_request("open src/one.cpp please") ==
+                masterai::RetrievalRequestClassification::navigation,
+            "a query containing a path-looking token was not classified as navigation");
+    require(masterai::classify_retrieval_request(
+                "error: undefined reference to marker_symbol") ==
+                masterai::RetrievalRequestClassification::symbol_explanation,
+            "a diagnostic-looking query was not classified as symbol explanation");
+    require(masterai::classify_retrieval_request(
+                "how to use the readme documentation") ==
+                masterai::RetrievalRequestClassification::documentation,
+            "a documentation-intent query was not classified as documentation");
+    require(masterai::classify_retrieval_request("please complete this function") ==
+                masterai::RetrievalRequestClassification::completion,
+            "a completion-intent query was not classified as completion");
+    require(masterai::classify_retrieval_request("what does marker_symbol do") ==
+                masterai::RetrievalRequestClassification::symbol_explanation,
+            "a bare identifier-shaped query was not classified as symbol explanation");
+    require(masterai::classify_retrieval_request("hello there friend") ==
+                masterai::RetrievalRequestClassification::generic_lexical,
+            "plain prose with no shape signal was not classified as generic lexical");
+}
+
+// Declared-but-disabled strategies: every strategy without an adapter must
+// report exactly itself with a "no adapter" reason, the enabled set must
+// not appear in the disabled list, and RetrievalPlanner must stamp both the
+// classification and the disabled-strategy reasons onto every outcome so a
+// caller can push them onto QueryTrace.
+void test_phase_twentyfour_disabled_strategies_recorded_on_trace() {
+    const auto disabled = masterai::disabled_retrieval_strategy_reasons();
+    require(disabled.size() == 7U,
+            "the declared-but-disabled retrieval strategy count drifted from "
+            "the seven strategies with no adapter");
+    for (const auto& entry : disabled) {
+        require(!masterai::retrieval_strategy_has_adapter(entry.first),
+                "a strategy with a working adapter was reported as disabled");
+        require(entry.second.find("no adapter") != std::string::npos,
+                "a disabled strategy's skip reason did not explain why");
+    }
+    require(masterai::retrieval_strategy_has_adapter(
+                masterai::RetrievalStrategy::exact_symbol) &&
+                masterai::retrieval_strategy_has_adapter(
+                    masterai::RetrievalStrategy::filename_path) &&
+                masterai::retrieval_strategy_has_adapter(
+                    masterai::RetrievalStrategy::recent_change),
+            "an enabled Phase 24 strategy was incorrectly reported as having no adapter");
+
+    TemporaryDirectory temporary;
+    const auto project_root = temporary.path() / "disabled-strategy-project";
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+    masterai::ProjectIndexService service(
+        temporary.path() / "disabled-strategy-indexes", memory, 2U);
+    masterai::ProjectRecord project{"phase24-disabled", "Phase 24 Disabled", project_root};
+    build_ready_retrieval_project(project_root, service, project);
+
+    masterai::RetrievalPlanner planner(service);
+    masterai::RetrievalRequest request;
+    request.project = project;
+    request.query_text = "phase24_marker_symbol";
+    request.deadline = std::chrono::milliseconds(2000);
+    const auto outcome = planner.retrieve(request);
+    require(!outcome.classification.empty(),
+            "retrieve() did not stamp a request classification onto its outcome");
+    require(outcome.disabled_strategy_reasons.size() == 7U,
+            "retrieve() did not stamp every disabled strategy's skip reason onto its outcome");
+
+    masterai::QueryCoordinator queries;
+    const auto query_id = queries.begin("user", project.id, "model");
+    queries.record_classification(query_id, outcome.classification);
+    queries.record_retrieval_strategy_skips(query_id, outcome.disabled_strategy_reasons);
+    queries.finish(query_id, masterai::QueryStatus::completed);
+    const auto trace = queries.find(query_id);
+    require(trace && trace->request_classification == outcome.classification &&
+                trace->disabled_retrieval_strategies.size() == 7U,
+            "a successful finish() lost the recorded classification/disabled strategies");
+    const auto json = masterai::QueryCoordinator::to_json(*trace);
+    require(json.find("\"requestClassification\":") != std::string::npos &&
+                json.find("\"disabledRetrievalStrategies\":[") != std::string::npos,
+            "query trace JSON omitted the classification/disabled strategy fields");
+}
+
+// Staged fan-out: a query the cheap exact-symbol stage alone can satisfy
+// must never reach the lexical/path stages -- observable both as the
+// reported strategy staying "exact_symbol" (not "hybrid") and as no
+// disclosure entry ever carrying a "filename_path" or "lexical" source.
+void test_phase_twentyfour_staged_fanout_skips_later_stages() {
+    TemporaryDirectory temporary;
+    const auto project_root = temporary.path() / "staged-fanout-project";
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+    masterai::ProjectIndexService service(
+        temporary.path() / "staged-fanout-indexes", memory, 2U);
+    masterai::ProjectRecord project{"phase24-staged", "Phase 24 Staged", project_root};
+    build_ready_retrieval_project(project_root, service, project);
+
+    masterai::RetrievalPlanner planner(service);
+    masterai::RetrievalRequest request;
+    request.project = project;
+    request.query_text = "please explain phase24_marker_symbol";
+    request.deadline = std::chrono::milliseconds(2000);
+    const auto outcome = planner.retrieve(request);
+    require(outcome.strategy == "exact_symbol",
+            "a query the cheap symbol stage alone could satisfy still ran a "
+            "later, more expensive stage");
+    for (const auto& entry : outcome.disclosure) {
+        require(entry.source != "filename_path" && entry.source != "lexical",
+                "staged fan-out ran a later stage even though the first "
+                "sufficient stage already found evidence");
+    }
+}
+
+// Duplicate evidence: a single chunk containing two distinct identifiers
+// that both appear in the query text is found by two separate exact-symbol
+// search tasks (one per identifier token) within stage 1 -- fusion by
+// canonical chunk id must collapse that into exactly one candidate, so the
+// shared arena buffer materializes the chunk's bytes exactly once rather
+// than once per corroborating hit.
+void test_phase_twentyfour_duplicate_chunks_materialize_once() {
+    TemporaryDirectory temporary;
+    const auto project_root = temporary.path() / "dedup-project";
+    std::filesystem::create_directories(project_root / "src");
+    write_text(project_root / "src" / "one.cpp",
+               "// one\nint phase24_dedup_alpha = 1;\n"
+               "int phase24_dedup_beta = 2;\n");
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+    masterai::ProjectIndexService service(
+        temporary.path() / "dedup-indexes", memory, 2U);
+    masterai::ProjectRecord project{"phase24-dedup", "Phase 24 Dedup", project_root};
+    require(service.request_rebuild(project),
+            "Phase 24 dedup fixture index rebuild was not admitted");
+    for (unsigned int attempt = 0U; attempt < 200U; ++attempt) {
+        const auto status = service.status(project.id);
+        if (status && status->state == masterai::IndexJobState::ready) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    masterai::RetrievalPlanner planner(service);
+    masterai::RetrievalRequest request;
+    request.project = project;
+    // Both identifiers live in the same 4KB chunk, so the two separate
+    // exact-symbol search tasks this query text produces both return the
+    // exact same chunk id.
+    request.query_text = "phase24_dedup_alpha phase24_dedup_beta";
+    request.deadline = std::chrono::milliseconds(2000);
+    const auto outcome = planner.retrieve(request);
+
+    require(outcome.strategy == "exact_symbol",
+            "the dedup fixture query unexpectedly needed a later, more "
+            "expensive stage");
+    std::size_t included_count = 0U;
+    for (const auto& entry : outcome.disclosure) {
+        if (entry.included) ++included_count;
+    }
+    require(outcome.disclosure.size() == 1U && included_count == 1U,
+            "a chunk found by two corroborating exact-symbol searches fused "
+            "into more than one candidate instead of one corroborated one");
+    std::size_t occurrences = 0U;
+    std::size_t position = 0U;
+    while ((position = outcome.context_text.find("phase24_dedup_alpha", position)) !=
+           std::string::npos) {
+        ++occurrences;
+        position += 1U;
+    }
+    require(occurrences == 1U,
+            "the fused chunk's bytes were materialized more than once into "
+            "the assembled context text");
+}
+
+// Shared in-flight futures: genuinely concurrent identical requests (same
+// project/requester/policy-generation/settings) must join into exactly one
+// underlying computation.
+void test_phase_twentyfour_concurrent_identical_requests_join() {
+    TemporaryDirectory temporary;
+    const auto project_root = temporary.path() / "join-project";
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+    masterai::ProjectIndexService service(
+        temporary.path() / "join-indexes", memory, 2U);
+    masterai::ProjectRecord project{"phase24-join", "Phase 24 Join", project_root};
+    build_ready_retrieval_project(project_root, service, project);
+
+    masterai::RetrievalPlanner planner(service);
+    masterai::RetrievalRequest request;
+    request.project = project;
+    request.requester_id = "user-join";
+    request.policy_generation = 7U;
+    request.query_text = "phase24_marker_symbol";
+    request.deadline = std::chrono::milliseconds(2000);
+
+    constexpr int thread_count = 8;
+    std::atomic<int> ready_count{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> threads;
+    std::vector<masterai::RetrievalOutcome> results(thread_count);
+    threads.reserve(thread_count);
+    for (int index = 0; index < thread_count; ++index) {
+        threads.emplace_back([&, index]() {
+            ready_count.fetch_add(1);
+            while (!go.load()) { /* spin until every thread is ready */ }
+            results[static_cast<std::size_t>(index)] = planner.retrieve(request);
+        });
+    }
+    while (ready_count.load() < thread_count) { /* wait for all threads */ }
+    go.store(true);
+    for (auto& thread : threads) thread.join();
+
+    require(planner.uncached_invocation_count() == 1U,
+            "concurrent identical retrieval requests did not join into a "
+            "single in-flight computation");
+    for (int index = 1; index < thread_count; ++index) {
+        require(results[static_cast<std::size_t>(index)].context_text ==
+                    results[0].context_text &&
+                    results[static_cast<std::size_t>(index)].strategy ==
+                        results[0].strategy,
+                "joined in-flight requests returned divergent outcomes");
+    }
+}
+
+// Hard correctness requirement: joining must never cross an authorization
+// or project boundary. Two concurrent requests that differ only in
+// requester_id (a stand-in for "different authenticated caller") must never
+// join, even though every other field -- including the query text -- is
+// identical.
+void test_phase_twentyfour_mismatched_auth_does_not_join() {
+    TemporaryDirectory temporary;
+    const auto project_root = temporary.path() / "no-join-project";
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+    masterai::ProjectIndexService service(
+        temporary.path() / "no-join-indexes", memory, 2U);
+    masterai::ProjectRecord project{"phase24-no-join", "Phase 24 No Join", project_root};
+    build_ready_retrieval_project(project_root, service, project);
+
+    masterai::RetrievalPlanner planner(service);
+    masterai::RetrievalRequest request_alice;
+    request_alice.project = project;
+    request_alice.requester_id = "alice";
+    request_alice.policy_generation = 1U;
+    request_alice.query_text = "phase24_marker_symbol";
+    request_alice.deadline = std::chrono::milliseconds(2000);
+
+    masterai::RetrievalRequest request_bob = request_alice;
+    request_bob.requester_id = "bob";  // only the authorized identity differs
+
+    std::atomic<int> ready_count{0};
+    std::atomic<bool> go{false};
+    masterai::RetrievalOutcome alice_result;
+    masterai::RetrievalOutcome bob_result;
+    std::thread alice_thread([&]() {
+        ready_count.fetch_add(1);
+        while (!go.load()) { /* spin */ }
+        alice_result = planner.retrieve(request_alice);
+    });
+    std::thread bob_thread([&]() {
+        ready_count.fetch_add(1);
+        while (!go.load()) { /* spin */ }
+        bob_result = planner.retrieve(request_bob);
+    });
+    while (ready_count.load() < 2) { /* wait for both threads */ }
+    go.store(true);
+    alice_thread.join();
+    bob_thread.join();
+
+    require(planner.uncached_invocation_count() == 2U,
+            "requests authorized under different identities were incorrectly "
+            "joined into a single in-flight computation");
+    require(alice_result.context_text == bob_result.context_text,
+            "mismatched-identity requests should still compute the same "
+            "evidence independently, just never share the computation");
+}
+
+// Phase 30: RetrievalPlanner's fusion-candidate pool must actually register
+// against MemoryBudgetManager when one is supplied (the real consumer this
+// session wires up -- see retrieval.cpp's retrieve_uncached()), and must
+// leave zero residue once retrieve() returns (its lease is call-scoped,
+// released via PoolLeaseGuard on every return path) -- and, symmetrically, a
+// planner constructed without a MemoryBudgetManager (the default, matching
+// every pre-Phase-30 call site and test fixture) must never touch the
+// category at all, nor change retrieval's own outcome.
+void test_phase_thirty_retrieval_candidate_pool_registers_with_budget_manager() {
+    TemporaryDirectory temporary;
+    const auto project_root = temporary.path() / "pool-budget-project";
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+    masterai::ProjectIndexService service(
+        temporary.path() / "pool-budget-indexes", memory, 2U);
+    masterai::ProjectRecord project{"phase30-pool-budget", "Phase 30 Pool Budget",
+                                    project_root};
+    build_ready_retrieval_project(project_root, service, project);
+
+    masterai::RetrievalPlanner unwired_planner(service);  // memory_ == nullptr
+    masterai::RetrievalRequest request;
+    request.project = project;
+    request.query_text = "phase24_marker_symbol";
+    const auto unwired_outcome = unwired_planner.retrieve(request);
+    require(!unwired_outcome.disclosure.empty(),
+            "fixture query returned no evidence for the unwired planner");
+    // Same "single snapshot" caution as above: memory.status() returns
+    // MemoryStatus by value, so this must not compare iterators from two
+    // separately-called temporaries.
+    const auto unwired_status = memory.status();
+    require(unwired_status.category_bytes.find(
+                masterai::MemoryCategory::retrieval_index_cache) ==
+                unwired_status.category_bytes.end(),
+            "a RetrievalPlanner constructed without a MemoryBudgetManager "
+            "touched the category anyway");
+
+    masterai::RetrievalPlanner wired_planner(service, &memory);
+    const auto wired_outcome = wired_planner.retrieve(request);
+    require(wired_outcome.disclosure.size() == unwired_outcome.disclosure.size() &&
+                wired_outcome.context_text == unwired_outcome.context_text,
+            "wiring a MemoryBudgetManager changed retrieval's own outcome");
+    require(memory.status().category_bytes.at(
+                masterai::MemoryCategory::retrieval_index_cache) == 0U,
+            "the fusion-candidate pool's lease was not fully released once "
+            "retrieve() returned");
+}
+
+// Phase 30: many concurrent retrieval requests, each pool-allocating its own
+// call-scoped RetrievalCandidate set and registering/releasing its own
+// MemoryBudgetManager lease, must never produce a dangling ChunkReference/
+// BufferView (every returned outcome's materialized context text must
+// contain exactly its own request's expected marker, never another
+// request's) and must leave the shared MemoryBudgetManager's
+// retrieval_index_cache category back at zero once every thread has
+// finished, proving no lease leaked or double-released under concurrency.
+// Builds on the same concurrent-thread harness shape as Phase 24's
+// test_phase_twentyfour_concurrent_identical_requests_join, but with
+// deliberately distinct per-thread query text so the in-flight join table
+// never collapses these into one shared computation -- this test wants many
+// genuinely independent pool lifetimes racing on the same manager.
+void test_phase_thirty_concurrent_retrieval_no_dangling_view() {
+    TemporaryDirectory temporary;
+    const auto project_root = temporary.path() / "stress-project";
+    std::filesystem::create_directories(project_root / "src");
+    constexpr int file_count = 12;
+    for (int i = 0; i < file_count; ++i) {
+        write_text(project_root / "src" / ("file" + std::to_string(i) + ".cpp"),
+                   "// file " + std::to_string(i) + "\n"
+                   "int phase30_stress_marker_" + std::to_string(i) + " = " +
+                       std::to_string(i) + ";\n");
+    }
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+    masterai::ProjectIndexService service(
+        temporary.path() / "stress-indexes", memory, 4U);
+    masterai::ProjectRecord project{"phase30-stress", "Phase 30 Stress", project_root};
+    require(service.request_rebuild(project),
+            "Phase 30 stress fixture index rebuild was not admitted");
+    for (unsigned int attempt = 0U; attempt < 200U; ++attempt) {
+        const auto status = service.status(project.id);
+        if (status && status->state == masterai::IndexJobState::ready) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    masterai::RetrievalPlanner planner(service, &memory);
+    constexpr int thread_count = 12;
+    std::vector<std::thread> threads;
+    std::vector<masterai::RetrievalOutcome> results(thread_count);
+    threads.reserve(thread_count);
+    std::atomic<int> ready_count{0};
+    std::atomic<bool> go{false};
+    for (int index = 0; index < thread_count; ++index) {
+        threads.emplace_back([&, index]() {
+            masterai::RetrievalRequest request;
+            request.project = project;
+            request.requester_id = "stress-user-" + std::to_string(index);
+            request.query_text =
+                "phase30_stress_marker_" + std::to_string(index % file_count);
+            ready_count.fetch_add(1);
+            while (!go.load()) { /* spin until every thread is ready */ }
+            results[static_cast<std::size_t>(index)] = planner.retrieve(request);
+        });
+    }
+    while (ready_count.load() < thread_count) { /* wait for all threads */ }
+    go.store(true);
+    for (auto& thread : threads) thread.join();
+
+    for (int index = 0; index < thread_count; ++index) {
+        const auto& outcome = results[static_cast<std::size_t>(index)];
+        require(!outcome.disclosure.empty(),
+                "a concurrent retrieval request returned no evidence");
+        const auto expected =
+            "phase30_stress_marker_" + std::to_string(index % file_count);
+        require(outcome.context_text.find(expected) != std::string::npos,
+                "a concurrent request's materialized context text did not "
+                "contain its own expected marker -- possible dangling view "
+                "or cross-request corruption");
+    }
+
+    require(memory.status().category_bytes.at(
+                masterai::MemoryCategory::retrieval_index_cache) == 0U,
+            "concurrent retrieval left a residual MemoryBudgetManager "
+            "reservation after every request finished");
+}
+
+// Phase 26: select_load_mode() responds to storage-latency/RAM evidence,
+// pre-touch levels report their real backend-actionable set (only
+// none/full), and CalibrationService::resolve()'s evidence-aware overload
+// picks a load mode from that evidence while its pre-Phase-26 2-arg form
+// stays byte-for-byte the same as before.
+void test_phase_twentysix_load_mode_selection() {
+    masterai::StorageLatencyProfile unknown_size_storage;
+    unknown_size_storage.storage_class = "fixed";
+    unknown_size_storage.measured_read_latency_us = 150.0;
+    require(masterai::select_load_mode(unknown_size_storage,
+                                       8ULL * 1024 * 1024 * 1024, 0U) ==
+                masterai::ModelLoadMode::mapped,
+            "an unknown model size did not fall back to the safe mapped default");
+
+    require(masterai::select_load_mode(unknown_size_storage,
+                                       1ULL * 1024 * 1024 * 1024,
+                                       4ULL * 1024 * 1024 * 1024) ==
+                masterai::ModelLoadMode::streamed,
+            "insufficient RAM to hold the model did not select streamed mode");
+
+    masterai::StorageLatencyProfile hdd_shaped;
+    hdd_shaped.storage_class = "fixed";
+    hdd_shaped.measured_read_latency_us = 6000.0;
+    hdd_shaped.sequential = true;
+    require(masterai::select_load_mode(hdd_shaped, 16ULL * 1024 * 1024 * 1024,
+                                       2ULL * 1024 * 1024 * 1024) ==
+                masterai::ModelLoadMode::resident,
+            "ample RAM with HDD-shaped slow storage did not select resident");
+
+    masterai::StorageLatencyProfile nvme_shaped;
+    nvme_shaped.storage_class = "fixed";
+    nvme_shaped.measured_read_latency_us = 80.0;
+    nvme_shaped.sequential = false;
+    require(masterai::select_load_mode(nvme_shaped, 16ULL * 1024 * 1024 * 1024,
+                                       2ULL * 1024 * 1024 * 1024) ==
+                masterai::ModelLoadMode::mapped,
+            "ample RAM with NVMe-shaped fast storage did not stay at mapped");
+
+    require(masterai::pre_touch_level_backend_actionable(
+                masterai::PreTouchLevel::none) &&
+                masterai::pre_touch_level_backend_actionable(
+                    masterai::PreTouchLevel::full) &&
+                !masterai::pre_touch_level_backend_actionable(
+                    masterai::PreTouchLevel::metadata) &&
+                !masterai::pre_touch_level_backend_actionable(
+                    masterai::PreTouchLevel::first_use) &&
+                !masterai::pre_touch_level_backend_actionable(
+                    masterai::PreTouchLevel::layer_window),
+            "pre-touch backend-actionable set was not exactly {none, full}");
+    require(!masterai::pretouch_gap_reason(masterai::PreTouchLevel::none)
+                 .has_value() &&
+                !masterai::pretouch_gap_reason(masterai::PreTouchLevel::full)
+                     .has_value() &&
+                masterai::pretouch_gap_reason(masterai::PreTouchLevel::layer_window)
+                    .has_value(),
+            "pretouch_gap_reason() did not document the accepted-but-inert "
+            "pre-touch levels");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::TuningProfileStore store(records);
+    const auto backend = fake_llama_executable();
+    require(std::filesystem::is_regular_file(backend),
+            "fake llama runner fixture is unavailable");
+    masterai::HardwareInfo hardware;
+    hardware.platform = "test-platform";
+    hardware.architecture = "x86_64";
+    hardware.logical_cpu_count = 4U;
+    masterai::RunnerSupervisor supervisor(backend, temporary.path() / "runtime");
+    masterai::CalibrationService calibration(supervisor, store, hardware,
+                                             "backend-hash-p26", "build-p26");
+    const std::string model_sha256(64U, 'c');
+    const auto resolved =
+        calibration.resolve(model_sha256, "balanced", &hdd_shaped,
+                            16ULL * 1024 * 1024 * 1024, 2ULL * 1024 * 1024 * 1024);
+    require(resolved.recommended_load_mode == masterai::ModelLoadMode::resident &&
+                resolved.recommended_pre_touch == masterai::PreTouchLevel::full &&
+                resolved.recommended_allow_memory_lock &&
+                resolved.recommended_allow_memory_map,
+            "resolve() with evidence did not select resident/full and keep "
+            "allow_memory_map/allow_memory_lock consistent with it");
+
+    const auto no_evidence = calibration.resolve(model_sha256, "balanced");
+    require(no_evidence.recommended_load_mode == masterai::ModelLoadMode::mapped &&
+                no_evidence.recommended_pre_touch == masterai::PreTouchLevel::none,
+            "resolve() without evidence (the pre-Phase-26 2-arg call) changed "
+            "its default output");
+}
+
+// Phase 26: WarmModelState legal graph, illegal-transition rejection, the
+// RunnerState -> WarmModelState baseline translation table, and idle-timeout
+// bookkeeping, all driven directly against WarmModelTracker.
+void test_phase_twentysix_warm_state_transitions() {
+    require(masterai::translate_runner_state(masterai::RunnerState::unloaded) ==
+                    masterai::WarmModelState::Unloaded &&
+                masterai::translate_runner_state(masterai::RunnerState::starting) ==
+                    masterai::WarmModelState::MappingWeights &&
+                masterai::translate_runner_state(masterai::RunnerState::ready) ==
+                    masterai::WarmModelState::Ready &&
+                masterai::translate_runner_state(masterai::RunnerState::busy) ==
+                    masterai::WarmModelState::Busy &&
+                masterai::translate_runner_state(masterai::RunnerState::stopping) ==
+                    masterai::WarmModelState::Draining &&
+                masterai::translate_runner_state(masterai::RunnerState::failed) ==
+                    masterai::WarmModelState::Failed,
+            "RunnerState -> WarmModelState baseline translation table drifted");
+
+    masterai::WarmModelTracker tracker;
+    require(tracker.current() == masterai::WarmModelState::Cold,
+            "a fresh WarmModelTracker did not start Cold");
+    tracker.enter(masterai::WarmModelState::LoadingMetadata);
+    tracker.enter(masterai::WarmModelState::MappingWeights);
+    tracker.enter(masterai::WarmModelState::InitialisingBackend);
+    tracker.enter(masterai::WarmModelState::Warming);
+    tracker.enter(masterai::WarmModelState::Ready);
+    tracker.record_activity(1000U);
+    tracker.enter(masterai::WarmModelState::Busy);
+    tracker.enter(masterai::WarmModelState::Ready);
+
+    require(!tracker.apply_idle_timeout(1000U + 599U, 600U) &&
+                tracker.current() == masterai::WarmModelState::Ready,
+            "idle timeout fired before the configured threshold elapsed");
+    require(tracker.apply_idle_timeout(1000U + 600U, 600U) &&
+                tracker.current() == masterai::WarmModelState::Idle,
+            "idle timeout did not fire once the threshold elapsed");
+
+    tracker.enter(masterai::WarmModelState::Busy);  // a request wakes it up
+    tracker.enter(masterai::WarmModelState::Draining);
+    tracker.enter(masterai::WarmModelState::Evicting);
+    tracker.enter(masterai::WarmModelState::Unloaded);
+    tracker.enter(masterai::WarmModelState::LoadingMetadata);  // reload
+
+    masterai::WarmModelTracker illegal;
+    bool rejected = false;
+    try {
+        illegal.enter(masterai::WarmModelState::Ready);  // skips the pipeline
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    require(rejected, "an illegal warm-state transition (Cold -> Ready) was accepted");
+    require(illegal.current() == masterai::WarmModelState::Cold,
+            "a rejected transition still mutated the tracker's state");
+    require(masterai::warm_state_transition_allowed(
+                masterai::WarmModelState::Ready, masterai::WarmModelState::Ready),
+            "a self-transition was not treated as legal");
+}
+
+// Phase 26 regression guard: every existing RunnerState-based check (the
+// same pattern server.cpp's ensure_model_loaded() and the Phase 4/19 tests
+// already use) must keep behaving identically once WarmModelTracker is
+// wired into RunnerSupervisor's load()/generate()/unload() -- this also
+// exercises apply_idle_timeout() through the real supervisor, showing idle
+// unload is predictable and never disturbs RunnerState.
+void test_phase_twentysix_runner_state_regression() {
+    TemporaryDirectory temporary;
+    const auto model_directory = temporary.path() / "model";
+    std::filesystem::create_directories(model_directory);
+    const auto model_file = model_directory / "model.gguf";
+    write_text(model_file, "GGUF-phase26-fixture");
+    masterai::ModelRecord model;
+    model.directory = model_directory;
+    model.manifest.id = "phase26-fixture";
+    model.manifest.model_file = "model.gguf";
+    model.manifest.model_size_bytes = std::filesystem::file_size(model_file);
+    model.manifest.model_sha256 = masterai::sha256_file_hex(model_file);
+    model.state = masterai::ModelState::ready;
+    const auto backend = fake_llama_executable();
+    require(std::filesystem::is_regular_file(backend),
+            "fake llama runner fixture is unavailable");
+
+    masterai::RunnerSupervisor supervisor(backend, temporary.path() / "runtime");
+    require(supervisor.metrics().state == masterai::RunnerState::unloaded,
+            "a fresh supervisor was not RunnerState::unloaded");
+    require(supervisor.metrics().warm_state == masterai::WarmModelState::Cold,
+            "a fresh supervisor was not WarmModelState::Cold");
+
+    supervisor.load(model, 4096U, 18096U, 5U);
+    require(supervisor.metrics().state == masterai::RunnerState::ready,
+            "RunnerState regression: load() did not reach ready");
+    require(supervisor.metrics().warm_state == masterai::WarmModelState::Ready,
+            "warm_state did not reach Ready alongside RunnerState::ready");
+
+    std::atomic_bool cancellation{false};
+    const auto generated =
+        supervisor.generate("return value", {}, {}, cancellation);
+    require(generated.text == "return value;",
+            "regression fixture generation produced unexpected text");
+    require(supervisor.metrics().state == masterai::RunnerState::ready,
+            "RunnerState regression: generate() left the state incorrect");
+    require(supervisor.metrics().requests_completed == 1U,
+            "RunnerState regression: completion metrics were not recorded");
+
+    require(!supervisor.apply_idle_timeout(0U, 0U),
+            "apply_idle_timeout fired against a now_epoch_seconds earlier "
+            "than the last recorded activity");
+    const auto now = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    require(supervisor.apply_idle_timeout(now + 10000U, 1U),
+            "idle timeout did not fire against a plausible future timestamp");
+    require(supervisor.metrics().state == masterai::RunnerState::ready &&
+                supervisor.metrics().warm_state == masterai::WarmModelState::Idle,
+            "idle timeout must move warm_state without ever disturbing "
+            "RunnerState, which the rest of the codebase still reads");
+
+    supervisor.unload(0U);
+    require(supervisor.metrics().state == masterai::RunnerState::unloaded,
+            "RunnerState regression: unload() did not reach unloaded");
+    require(supervisor.metrics().warm_state == masterai::WarmModelState::Unloaded,
+            "warm_state did not reach Unloaded alongside RunnerState::unloaded");
+}
+
+// Phase 26: run_cancellable_warmup() yields on a token cancelled before or
+// during the run (no further steps execute once cancellation is observed,
+// so a caller's per-step resource acquisition never leaks past that point)
+// and on sustained MemoryBudgetManager pressure, without ever needing a
+// second worker-pool implementation.
+void test_phase_twentysix_cancelled_warmup_releases_resources() {
+    auto hardware = masterai::probe_hardware(std::filesystem::current_path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+
+    masterai::WarmupCancellationToken pre_cancelled;
+    pre_cancelled.cancel();
+    int pre_cancelled_steps = 0;
+    const auto outcome_a = masterai::run_cancellable_warmup(
+        [&]() { ++pre_cancelled_steps; return false; }, pre_cancelled, memory);
+    require(outcome_a == masterai::WarmupOutcome::cancelled &&
+                pre_cancelled_steps == 0,
+            "a pre-cancelled warm-up token still ran a step");
+
+    masterai::WarmupCancellationToken token;
+    std::vector<int> acquired;
+    std::mutex acquired_mutex;
+    std::thread canceller([&]() {
+        while (true) {
+            {
+                std::lock_guard<std::mutex> lock(acquired_mutex);
+                if (acquired.size() >= 3U) break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        token.cancel();
+    });
+    const auto outcome_b = masterai::run_cancellable_warmup(
+        [&]() {
+            {
+                std::lock_guard<std::mutex> lock(acquired_mutex);
+                acquired.push_back(static_cast<int>(acquired.size()));
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            return false;  // only cancellation/pressure end this run
+        },
+        token, memory, 1000U);
+    canceller.join();
+    require(outcome_b == masterai::WarmupOutcome::cancelled,
+            "mid-run cancellation was not observed between steps");
+    const auto acquired_at_stop = acquired.size();
+    require(acquired_at_stop >= 3U, "the canceller never observed any acquisitions");
+    // Simulates the caller's cleanup of whatever the cancelled steps
+    // acquired -- nothing outstanding remains, and (since the loop only
+    // checks between steps, never mid-step) no further acquisition raced
+    // past the observed cancellation.
+    acquired.clear();
+    require(acquired.empty(), "cancelled warm-up left resources unreleased");
+
+    auto pressured_policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    pressured_policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager pressured(pressured_policy, hardware);
+    masterai::MemoryEstimate estimate;
+    // 470 MiB of 512 MiB (~92%) crosses this policy's default critical_percent
+    // (92) as well as high_percent (82), so permits_background_work() (which
+    // only requires pressure < high) is reliably false regardless of the
+    // host's real available RAM.
+    estimate.weights_bytes = 470ULL * 1024ULL * 1024ULL;
+    const auto admitted = pressured.reserve(
+        masterai::MemoryCategory::runner_weights, estimate, true);
+    require(admitted.admitted, "test setup failed to reserve toward pressure");
+    pressured.sample();
+    require(!pressured.permits_background_work(),
+            "test setup did not reach a pressure level that blocks "
+            "background work");
+
+    masterai::WarmupCancellationToken uncancelled;
+    int pressured_steps = 0;
+    const auto outcome_c = masterai::run_cancellable_warmup(
+        [&]() { ++pressured_steps; return false; }, uncancelled, pressured);
+    require(outcome_c == masterai::WarmupOutcome::skipped_low_memory &&
+                pressured_steps == 0,
+            "warm-up did not yield under sustained memory pressure");
+}
+
+// Phase 26: use-prediction signals (recency, pin, project-preference count,
+// waiting-request count) accumulate as plain recorded evidence and are
+// reportable through the same "_json() free function" convention as
+// tuning_profile_json(), not a new opaque ranking surface.
+void test_phase_twentysix_use_prediction_signals() {
+    masterai::ModelUsagePredictor predictor;
+    require(predictor.snapshot().empty(), "a fresh predictor was not empty");
+    predictor.record_use("model-a", 1000U);
+    predictor.record_use("model-a", 2000U);
+    predictor.set_pinned("model-a", true);
+    predictor.set_waiting_request_count("model-a", 3U);
+    predictor.record_use("model-b", 1500U);
+
+    const auto snapshot = predictor.snapshot();
+    require(snapshot.size() == 2U, "predictor did not track both recorded models");
+    const auto model_a = std::find_if(
+        snapshot.begin(), snapshot.end(),
+        [](const masterai::ModelUsageSignals& signals) {
+            return signals.model_id == "model-a";
+        });
+    require(model_a != snapshot.end() && model_a->last_used_epoch_seconds == 2000U &&
+                model_a->pinned && model_a->project_preference_score == 2U &&
+                model_a->waiting_request_count == 3U,
+            "use-prediction signals did not accumulate recency/pin/preference/"
+            "waiting evidence");
+
+    const auto json = masterai::model_usage_signals_json(snapshot);
+    require(json.find("\"modelId\":\"model-a\"") != std::string::npos &&
+                json.find("\"pinned\":true") != std::string::npos &&
+                json.find("\"waitingRequestCount\":3") != std::string::npos,
+            "model_usage_signals_json did not report the recorded signals");
+}
+
 }  // namespace
 
 int main() {
@@ -2148,6 +3588,61 @@ int main() {
         run("adaptive calibration", test_phase_nineteen_calibration);
         run("advanced optimizations gated",
             test_phase_twenty_advanced_optimizations_disabled);
+        run("async storage coalescing", test_phase_twentyone_coalescing_merges_adjacent);
+        run("async storage cancellation", test_phase_twentyone_cancellation_releases_buffer);
+        run("async storage HDD queue depth", test_phase_twentyone_hdd_profile_stays_sequential);
+        run("async storage blocking fallback", test_phase_twentyone_fallback_to_blocking_path);
+        run("shared buffer view and refcount",
+            test_phase_thirty_shared_buffer_view_and_refcount);
+        run("mapped buffer view reads file", test_phase_thirty_mapped_buffer_view_reads_file);
+        run("request arena allocation and poison",
+            test_phase_thirty_request_arena_allocation_and_poison);
+        run("fixed size pool alloc release shrink",
+            test_phase_thirty_fixed_size_pool_alloc_release_shrink);
+        run("fixed size pool registers with budget manager",
+            test_phase_thirty_fixed_size_pool_registers_with_budget_manager);
+        run("json_escape_bytes matches json_escape byte-for-byte",
+            test_phase_thirty_json_escape_bytes_matches_string_escape);
+        run("streaming escape moves into SharedBuffer without copy",
+            test_phase_thirty_streaming_escape_moves_into_shared_buffer_without_copy);
+        run("tokenization cache hit avoids retokenize",
+            test_phase_twentythree_tokenization_cache_hit_avoids_retokenize);
+        run("segmented prompt assembly byte-identical",
+            test_phase_twentythree_segmented_assembly_byte_identical);
+        run("session reuse reports prefix fields on success",
+            test_phase_twentythree_session_reuse_reports_prefix_fields_on_success);
+        run("session reuse reports divergence offset on edit",
+            test_phase_twentythree_session_reuse_edit_reports_divergence_offset);
+        run("session reuse prefix ceiling enforced",
+            test_phase_twentythree_session_reuse_prefix_ceiling_enforced);
+        run("intern table restricted to short identifiers",
+            test_phase_twentythree_intern_table_restricted_to_short_identifiers);
+        run("retrieval request classification",
+            test_phase_twentyfour_request_classification);
+        run("disabled retrieval strategies recorded on trace",
+            test_phase_twentyfour_disabled_strategies_recorded_on_trace);
+        run("staged fan-out skips later stages",
+            test_phase_twentyfour_staged_fanout_skips_later_stages);
+        run("duplicate chunks materialize once",
+            test_phase_twentyfour_duplicate_chunks_materialize_once);
+        run("concurrent identical retrieval requests join",
+            test_phase_twentyfour_concurrent_identical_requests_join);
+        run("mismatched auth does not join in-flight retrieval",
+            test_phase_twentyfour_mismatched_auth_does_not_join);
+        run("retrieval candidate pool registers with budget manager",
+            test_phase_thirty_retrieval_candidate_pool_registers_with_budget_manager);
+        run("concurrent retrieval leaves no dangling view or budget residue",
+            test_phase_thirty_concurrent_retrieval_no_dangling_view);
+        run("load-mode selection responds to storage/RAM evidence",
+            test_phase_twentysix_load_mode_selection);
+        run("warm-state legal transition graph",
+            test_phase_twentysix_warm_state_transitions);
+        run("RunnerState regression under WarmModelTracker",
+            test_phase_twentysix_runner_state_regression);
+        run("cancelled warm-up releases resources",
+            test_phase_twentysix_cancelled_warmup_releases_resources);
+        run("use-prediction signals reporting",
+            test_phase_twentysix_use_prediction_signals);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

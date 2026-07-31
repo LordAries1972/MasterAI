@@ -16,7 +16,9 @@
 // MasterAI restart would just describe slots that no longer exist.
 #include "masterai.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <iterator>
 #include <list>
 #include <map>
 #include <mutex>
@@ -46,9 +48,11 @@ struct Entry {
 
 class PromptSessionManager::State {
 public:
-    State(unsigned int max_slots, std::uint32_t idle_retention_seconds)
+    State(unsigned int max_slots, std::uint32_t idle_retention_seconds,
+          std::size_t max_retained_prefix_bytes)
         : max_slots_(max_slots),
-          idle_retention_(std::chrono::seconds(idle_retention_seconds)) {
+          idle_retention_(std::chrono::seconds(idle_retention_seconds)),
+          max_retained_prefix_bytes_(max_retained_prefix_bytes) {
         if (max_slots_ == 0U) {
             throw std::invalid_argument("session reuse requires at least one slot");
         }
@@ -58,25 +62,72 @@ public:
                               const SessionFingerprint& fingerprint,
                               const std::string& generation_prompt) const {
         std::lock_guard<std::mutex> lock(mutex_);
+        SessionDecision decision;
+        decision.prefix_byte_ceiling = max_retained_prefix_bytes_;
         const auto it = by_chat_.find(chat_id);
-        if (it == by_chat_.end()) return {};
+        if (it == by_chat_.end()) {
+            decision.invalidation_reason =
+                SessionInvalidationReason::no_prior_session;
+            return decision;
+        }
         const auto& entry = *it->second;
         const auto now = std::chrono::steady_clock::now();
-        if (now - entry.last_used > idle_retention_) return {};
-        if (!(entry.fingerprint == fingerprint)) return {};
+        if (now - entry.last_used > idle_retention_) {
+            decision.invalidation_reason = SessionInvalidationReason::idle_expired;
+            return decision;
+        }
+        if (!(entry.fingerprint == fingerprint)) {
+            decision.invalidation_reason =
+                SessionInvalidationReason::fingerprint_mismatch;
+            return decision;
+        }
         // Stable-prefix detection: the model's own chat template guarantees
         // every prior turn is an immutable prefix of the next turn's fully
         // wrapped prompt, so a literal, case-sensitive prefix match is the
         // whole compatibility check -- an edited/resubmitted earlier turn or
         // any other divergence fails this and correctly falls back to a
         // fresh, uncached request instead of feeding the runner a KV cache
-        // that no longer matches what it thinks it already evaluated.
-        if (generation_prompt.size() <= entry.last_prompt.size() ||
-            generation_prompt.compare(0, entry.last_prompt.size(),
-                                      entry.last_prompt) != 0) {
-            return {};
+        // that no longer matches what it thinks it already evaluated. No
+        // fuzzy matching is performed: std::mismatch() below finds the exact
+        // longest common prefix, nothing more forgiving.
+        const auto mismatch = std::mismatch(
+            entry.last_prompt.begin(), entry.last_prompt.end(),
+            generation_prompt.begin(),
+            generation_prompt.begin() +
+                static_cast<std::ptrdiff_t>(std::min(generation_prompt.size(),
+                                                     entry.last_prompt.size())));
+        const std::size_t common_prefix_bytes = static_cast<std::size_t>(
+            std::distance(entry.last_prompt.begin(), mismatch.first));
+        decision.reusable_prefix_bytes = common_prefix_bytes;
+        decision.divergence_offset = common_prefix_bytes;
+        const bool is_literal_extension =
+            generation_prompt.size() > entry.last_prompt.size() &&
+            common_prefix_bytes == entry.last_prompt.size();
+        if (!is_literal_extension) {
+            // Either the new prompt is not longer (nothing new to
+            // generate/resume), or it diverges from the recorded prompt
+            // before reaching its end (an earlier turn was edited or
+            // resubmitted) -- either way this is a correctness failure, not
+            // a policy one, so it is reported distinctly from the ceiling
+            // case below.
+            decision.invalidation_reason =
+                SessionInvalidationReason::prefix_diverged;
+            return decision;
         }
-        return {true, entry.slot_id};
+        if (entry.last_prompt.size() > max_retained_prefix_bytes_) {
+            // A genuine literal-prefix match exists, but replaying/retaining
+            // that much KV state exceeds the configured ceiling -- refuse
+            // reuse to bound worst-case KV memory/latency growth for one
+            // long-running chat, rather than reusing an unboundedly large
+            // slot.
+            decision.invalidation_reason =
+                SessionInvalidationReason::prefix_ceiling_exceeded;
+            return decision;
+        }
+        decision.reuse = true;
+        decision.slot_id = entry.slot_id;
+        decision.invalidation_reason = SessionInvalidationReason::none;
+        return decision;
     }
 
     unsigned int record(const std::string& chat_id,
@@ -144,14 +195,19 @@ private:
 
     unsigned int max_slots_;
     std::chrono::steady_clock::duration idle_retention_;
+    // Phase 23: maximum reusable prefix length, in bytes, try_reuse() will
+    // grant reuse for -- see PromptSessionManager::kDefaultMaxRetainedPrefixBytes.
+    std::size_t max_retained_prefix_bytes_;
     mutable std::mutex mutex_;
     std::list<Entry> order_;
     std::map<std::string, std::list<Entry>::iterator> by_chat_;
 };
 
-PromptSessionManager::PromptSessionManager(unsigned int max_slots,
-                                           std::uint32_t idle_retention_seconds)
-    : state_(std::make_unique<State>(max_slots, idle_retention_seconds)) {}
+PromptSessionManager::PromptSessionManager(
+    unsigned int max_slots, std::uint32_t idle_retention_seconds,
+    std::size_t max_retained_prefix_bytes)
+    : state_(std::make_unique<State>(max_slots, idle_retention_seconds,
+                                     max_retained_prefix_bytes)) {}
 
 PromptSessionManager::~PromptSessionManager() = default;
 
