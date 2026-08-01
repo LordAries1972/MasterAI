@@ -15,6 +15,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -309,6 +310,7 @@ public:
         ml_projects = std::make_unique<MLProjectStore>(records);
         ml_models = std::make_unique<ModelRegistryStore>(records);
         ml_datasets = std::make_unique<DatasetStore>(records);
+        ml_subjects = std::make_unique<SubjectPackageStore>(records);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -617,6 +619,26 @@ public:
         if (request.method == "GET" && request.target == "/api/v1/models") {
             return workloads->model_inventory();
         }
+        // Lets the chat UI show a one-shot "model warmed" confirmation once
+        // the runner actually finishes loading, instead of silently going
+        // quiet after the "Thinking..." spinner from the first message --
+        // and, since warmState is exposed here too, avoid repeating that
+        // confirmation on every poll by only reacting to state transitions,
+        // not to Ready being merely re-observed. No permission gate beyond
+        // being logged in: this is read-only status a chatting user already
+        // implicitly knows (which model they picked), not an administrator
+        // secret.
+        if (request.method == "GET" && request.target == "/api/v1/runner/status") {
+            if (inference == nullptr) {
+                return response(200, "OK",
+                                "{\"modelId\":\"\",\"warmState\":\"Unloaded\"}");
+            }
+            const auto current = inference->metrics();
+            return response(200, "OK",
+                "{\"modelId\":\"" + json_escape(current.model_id) +
+                "\",\"warmState\":\"" + to_string(current.warm_state) +
+                "\"}");
+        }
         if (request.method == "GET" &&
             request.target == "/api/v1/system/resources") {
             return response(
@@ -885,7 +907,7 @@ public:
                                 "{\"error\":\"permission_denied\"}");
             }
             const auto id = request.target.substr(
-                21U, request.target.size() - 21U - 7U);
+                20U, request.target.size() - 20U - 7U);
             if (!ml_projects->remove(id)) {
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_project_not_found\"}");
@@ -943,7 +965,7 @@ public:
                                 "{\"error\":\"permission_denied\"}");
             }
             const auto id = request.target.substr(
-                19U, request.target.size() - 19U - 6U);
+                18U, request.target.size() - 18U - 6U);
             try {
                 auto root = parse_json(request.body);
                 const auto state =
@@ -970,7 +992,7 @@ public:
                                 "{\"error\":\"permission_denied\"}");
             }
             const auto id = request.target.substr(
-                19U, request.target.size() - 19U - 7U);
+                18U, request.target.size() - 18U - 7U);
             if (!ml_models->remove(id)) {
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_model_not_found\"}");
@@ -1027,7 +1049,7 @@ public:
                                 "{\"error\":\"permission_denied\"}");
             }
             const auto id = request.target.substr(
-                21U, request.target.size() - 21U - 8U);
+                20U, request.target.size() - 20U - 8U);
             try {
                 auto root = parse_json(request.body);
                 const auto status = parse_dataset_approval_status(
@@ -1055,12 +1077,99 @@ public:
                                 "{\"error\":\"permission_denied\"}");
             }
             const auto id = request.target.substr(
-                21U, request.target.size() - 21U - 7U);
+                20U, request.target.size() - 20U - 7U);
             if (!ml_datasets->remove(id)) {
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_dataset_not_found\"}");
             }
             audit.append("ml.dataset.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 40: Subject Knowledge Manager (docs/PLAN.md "Machine
+        // Learning Abilities" section 12), scoped to identity/scope/
+        // ownership/review-status fields -- see SubjectPackageStore's class
+        // comment in masterai.hpp for the fields deferred to the later
+        // Knowledge Ingestion Pipeline phase.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/subjects") {
+            if (!role_allows(user->role, "ml.subjects.view")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            return response(200, "OK",
+                            "{\"subjects\":" +
+                                subject_packages_json(ml_subjects->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/subjects") {
+            if (!role_allows(user->role, "ml.subjects.create")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto package = ml_subjects->create(
+                    user->id, name, text_field("description"),
+                    text_field("scope"), text_field("targetAudience"));
+                audit.append("ml.subject.create", user->id, "success",
+                             package.id);
+                return response(201, "Created", subject_package_json(package));
+            } catch (const std::exception& error) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_ml_subject\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/subjects/", 0U) == 0U &&
+            request.target.size() > 14U &&
+            request.target.compare(request.target.size() - 14U, 14U,
+                                   "/review-status") == 0) {
+            if (!role_allows(user->role, "ml.subjects.review")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto id = request.target.substr(
+                20U, request.target.size() - 20U - 14U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_subject_review_status(
+                    root.required("status").as_string());
+                if (!ml_subjects->set_review_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_subject_not_found\"}");
+                }
+                audit.append("ml.subject.review", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_subject_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/subjects/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (!role_allows(user->role, "ml.subjects.delete")) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto id = request.target.substr(
+                20U, request.target.size() - 20U - 7U);
+            if (!ml_subjects->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_subject_not_found\"}");
+            }
+            audit.append("ml.subject.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
         }
         if (request.method == "GET" && request.target == "/models") {
@@ -1127,6 +1236,11 @@ public:
             if (target == "/app/ml/datasets") {
                 return is_administrator
                            ? application_page(*user, "ml-datasets")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/subjects") {
+                return is_administrator
+                           ? application_page(*user, "ml-subjects")
                            : response(302, "Found", "", {"Location: /app"});
             }
             if (target == "/app/admin/create") {
@@ -1205,6 +1319,12 @@ public:
                 return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
             }
             return create_chat(request, *user);
+        }
+        // Client-driven warm trigger -- see the comment on warm_runner()
+        // above for why this replaced get_chat_messages() firing it as a
+        // side effect of merely opening a chat.
+        if (request.method == "POST" && request.target == "/api/v1/runner/warm") {
+            return warm_runner(request, *user);
         }
         if (request.method == "POST" &&
             request.target.rfind("/api/v1/chats/", 0U) == 0U &&
@@ -1607,7 +1727,35 @@ private:
                     "\",\"createdAtEpochSeconds\":" +
                     std::to_string(message.created_at_epoch_seconds) + "}";
         }
+        // Deliberately NOT warm_model_async() here: this fires mid-page-load
+        // (openChat() is called from load(), before the browser has
+        // finished painting the chat history this very response carries, or
+        // the models dropdown from the request racing it), so starting a
+        // multi-gigabyte cold load right now competes with the page still
+        // rendering. The client instead calls POST /api/v1/runner/warm of
+        // its own accord once the whole page -- history, model list,
+        // sidebar -- is actually up on screen.
         return response(200, "OK", body + "]}");
+    }
+
+    // Explicit, client-driven counterpart to the warm_model_async() calls in
+    // create_chat()/set_chat_model() below (which fire from a direct user
+    // action, so warming immediately is correct there). This one exists so
+    // the web UI can defer warming a chat's model until its own load()
+    // sequence has actually finished rendering everything -- see the
+    // comment on get_chat_messages() above for why that GET no longer
+    // triggers it itself.
+    std::string warm_runner(Request& request, const UserRecord&) const {
+        try {
+            const auto root = parse_json(request.body);
+            const auto model_id = root.required("modelId").as_string();
+            if (find_model(model_id)) warm_model_async(model_id);
+        } catch (const std::exception&) {
+            // Best-effort: a malformed body or unknown model just means
+            // nothing gets warmed, not a request failure the UI needs to
+            // surface -- the first real message still loads it synchronously.
+        }
+        return response(202, "Accepted", "{}");
     }
 
     std::string create_chat(Request& request, const UserRecord& user) {
@@ -1639,6 +1787,7 @@ private:
             }
             const auto chat = chats->create(user.id, project_id, model_id);
             audit.append("chat.create", user.id, "success", chat.id);
+            warm_model_async(model_id);
             return response(201, "Created",
                             "{\"id\":\"" + json_escape(chat.id) + "\"}");
         } catch (const std::exception&) {
@@ -1681,6 +1830,7 @@ private:
                 return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
             }
             audit.append("chat.model_change", user.id, "success", chat_id);
+            warm_model_async(model_id);
             return response(200, "OK", "{\"modelId\":\"" + json_escape(model_id) + "\"}");
         } catch (const std::exception&) {
             return response(400, "Bad Request",
@@ -1718,7 +1868,26 @@ private:
         return std::nullopt;
     }
 
-    void ensure_model_loaded(const std::string& model_id) {
+    // Best-effort pre-warm: starts the same load ensure_model_loaded() would
+    // do on the first chat message, but fires the moment a chat is opened,
+    // created, or its model changes, so the runner is already cold-loading
+    // by the time the user finishes typing instead of only starting once
+    // they hit send. Detached and exception-swallowing on purpose -- this is
+    // strictly a head start, never the thing a caller depends on for
+    // correctness: send_chat_message()'s own ensure_model_loaded() call
+    // still runs synchronously and is what actually surfaces a real load
+    // failure to the user.
+    void warm_model_async(const std::string& model_id) const {
+        if (inference == nullptr) return;
+        std::thread([this, model_id]() {
+            try {
+                ensure_model_loaded(model_id);
+            } catch (const std::exception&) {
+            }
+        }).detach();
+    }
+
+    void ensure_model_loaded(const std::string& model_id) const {
         const auto current = inference->metrics();
         if (current.state == RunnerState::ready &&
             current.model_id == model_id) {
@@ -1739,12 +1908,29 @@ private:
             prompt_sessions->reset();
         }
         if (const auto model = find_model(model_id)) {
+            // A live chat load always asks for a GPU-offload recommendation
+            // (see select_gpu_layers()) even with no persisted calibration
+            // profile for this host/model pair yet -- resolve() computes
+            // recommended_gpu_layers from the model's real size and the
+            // host's detected VRAM regardless of whether a full calibration
+            // run has ever measured anything else, so a compatible GPU gets
+            // used for model weights from the very first load rather than
+            // only after an administrator runs /api/v1/performance/calibrate.
+            LaunchTuning tuning;
+            if (calibration != nullptr) {
+                const auto profile = calibration->resolve(
+                    model->manifest.model_sha256, "balanced", nullptr, 0U,
+                    model->manifest.model_size_bytes,
+                    model->manifest.required_gpu_backend);
+                tuning = launch_tuning_from_profile(profile);
+            }
             inference->load(*model, configuration.chat_context_length,
                             configuration.runner_port,
                             configuration.runner_startup_timeout_seconds,
                             configuration.session_reuse_enabled
                                 ? configuration.session_reuse_max_slots
-                                : 1U);
+                                : 1U,
+                            tuning);
             return;
         }
         throw std::runtime_error("selected chat model was not found");
@@ -2317,6 +2503,7 @@ private:
     std::unique_ptr<MLProjectStore> ml_projects;
     std::unique_ptr<ModelRegistryStore> ml_models;
     std::unique_ptr<DatasetStore> ml_datasets;
+    std::unique_ptr<SubjectPackageStore> ml_subjects;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
     std::unique_ptr<DownloadManager> downloads;

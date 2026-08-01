@@ -231,9 +231,17 @@ Current phase status:
   to a measured `StorageLatencyProfile`, and per-request cancellation are
   implemented and wired into model manifest and index segment reads, with
   automatic fallback to the prior blocking path. Priority A.
-- Phase 22: Planned — hierarchical content and model-data caching (L0–L5
-  layers, per-category bounded caches, segmented admission/eviction).
-  Priority A/B split; see the phase entry for which categories land first.
+- Phase 22: Implemented at a scoped-down level (2026-08-01) — hierarchical
+  content and model-data caching. `CacheCategory` expands from Phase 17's six
+  values to the plan's full 17-category L0–L5 set; each category's
+  `CacheManager::State::Segment` gains probationary/protected/pinned
+  segmented eviction (a large one-time scan can only evict other
+  probationary entries, never the protected working set) plus a single-hash
+  frequency-sketch admission gate that refuses a brand-new candidate rather
+  than displacing a demonstrably hotter protected entry, and short-lived
+  version-bound negative caching (`put_negative()`/`is_negative()`).
+  Immutable, checksummed, atomically-published entries and corruption
+  quarantine already existed from Phase 17 and are unchanged. Priority A/B.
 - Phase 23: Implemented at a scoped-down level (2026-08-01) — tokenization,
   prompt-template, and prompt-fragment caching. A `CacheCategory::tokenization`
   producer/consumer around `RunnerSupervisor::tokenize()`, compiled
@@ -253,9 +261,20 @@ Current phase status:
   dependency-neighbour, and conversation-memory strategies remain declared
   but disabled pending their adapters, with skip reasons disclosed on
   `QueryTrace`. Priority B.
-- Phase 25: Planned — weighted-fair inference scheduling and continuous
-  batching across compatible requests. Priority C; superset of the Phase 20
-  continuous-batching candidate.
+- Phase 25: Implemented at a scoped-down level (2026-08-01) — weighted-fair
+  priority scheduling and backpressure. `RequestScheduler`
+  (`src/scheduler.cpp`) implements the plan's eight priority classes
+  (cancellation/shutdown through maintenance), per-class weight/queue-depth/
+  residence-time/concurrency/memory-allowance policy, deficit-round-robin
+  weighted dequeue with cancellation always preempting, and backpressure
+  that evicts the lowest-priority still-queued (never running) ticket first
+  when a global concurrency ceiling is set. Real continuous batching of live
+  backend token-generation steps is out of scope this pass — it requires
+  cooperation from the external llama.cpp runner process this control plane
+  launches, and no backend flag for it is validated yet (see the class-level
+  scope note in masterai.hpp); this phase ships the admission/scheduling
+  layer a batching backend can plug into once one exists. Priority C;
+  superset of the Phase 20 continuous-batching candidate.
 - Phase 26: Implemented at a scoped-down level (2026-08-01) — model loading/
   mapping modes, selective pre-touch, cancellable background warm-up, and a
   warm-model state machine. `ModelLoadMode`/`PreTouchLevel` are selected
@@ -267,13 +286,55 @@ Current phase status:
   today (`metadata`/`first-use`/`layer-window` are accepted policy that
   currently behaves like `none`). Priority A (mapping and storage-aware
   placement) with Priority B warm-up refinements.
-- Phase 27: Planned — KV-cache accounting, backend-validated
-  reduced-precision placement, context-aware reservation, and gated
-  prefix-tree reuse. Priority B/C.
-- Phase 28: Planned — NUMA, processor-group, and hybrid-core topology
-  awareness. Priority C; superset of the Phase 20 NUMA candidate.
-- Phase 29: Planned — model tiering, routing, and cascade inference with
-  disclosed signals and user override. Priority B.
+- Phase 27: Implemented at a scoped-down level (2026-08-01) — KV-cache
+  accounting, bounded reservation, and deterministic lifecycle. `KvCacheManager`
+  (`src/kv_cache.cpp`) tracks per-slot context length, token count, dtype,
+  CPU/GPU/split placement, and owning user/chat/project against
+  `MemoryBudgetManager`; `reserve()`/`grow()` round up to a configured
+  growth step and never optimistically exceed a hard per-slot ceiling
+  (refusing the whole request rather than partially granting one); `evict_one()`
+  implements the plan's exact deterministic order (failed/cancelled, expired
+  idle prefixes, lowest-reuse private slots, large low-value reusable
+  prefixes, idle non-pinned sessions, then safe rejection) and never returns
+  a pinned or active slot. Backend-validated reduced-precision KV and
+  cross-request prefix-tree sharing stay declared-but-disabled
+  (`precision_admitted()` is always false for anything but full precision,
+  matching `AdvancedOptimizationRegistry`'s "evidence never self-enables"
+  discipline from Phase 20) since this codebase has not validated either
+  against the external llama.cpp backend it launches. Priority B (accounting/
+  placement, delivered) with Priority C precision/prefix-sharing still gated.
+- Phase 28: Implemented at a scoped-down level (2026-08-01) — NUMA,
+  processor-group, and hybrid-core topology awareness. `probe_hardware_topology()`
+  (`src/topology.cpp`) enumerates packages, NUMA nodes, Windows processor
+  groups, and performance/efficiency core counts via
+  `GetLogicalProcessorInformationEx(RelationAll)`; `recommend_thread_placement()`
+  is a pure, tested decision function mapping a `ThreadClass` plus policy to
+  a preferred NUMA node and performance/efficiency core preference, always
+  falling back to normal OS scheduling on single-node/non-hybrid hosts. A
+  real (Win32 `GetNumaNodeProcessorMaskEx`/`SetThreadGroupAffinity`) pinning
+  primitive exists and is available but is not called from any real worker
+  thread's startup in this pass — the plan requires affinity be applied only
+  where per-host measurement shows benefit, and that measurement is Phase
+  36's still-Planned benchmark matrix. Priority C; superset of the Phase 20
+  NUMA candidate.
+- Phase 29: Implemented at a scoped-down level (2026-08-01) — model tiering,
+  routing, and cascade inference decision logic. `ModelRouter`
+  (`src/model_routing.cpp`) selects the cheapest of five declared tiers
+  (deterministic/compact-router/small-fast/medium-general/large-specialist)
+  that satisfies disclosed `RoutingSignals` (task category, quality,
+  context size, capabilities, available RAM/VRAM, queue depth, benchmark
+  evidence), downgrading further to fit available memory and always
+  honouring an explicit user pin; `evaluate_cascade()` escalates on the
+  plan's exact listed conditions (low confidence, unsupported syntax,
+  conflicting retrieval evidence, failed deterministic validation, security
+  sensitivity, explicit user request) and safely refuses once already at
+  the largest tier instead of escalating past it;
+  `resident_set_within_profile()` validates the Minimal/Balanced/Performance
+  resident-model ceilings. Wiring tier selection into the live chat pipeline
+  so a real request is transparently routed and, on escalation, re-run
+  against a second warm runner is out of scope this pass — that needs Phase
+  26 warm-state management driving which tiers stay resident, itself only
+  scoped-down. Priority B.
 - Phase 30: Implemented at a scoped-down level (2026-08-01) — immutable
   shared buffers, request-scoped arenas, and zero-copy streaming.
   `SharedBuffer`/`BufferView`/`MappedBufferView`/`ChunkReference`/
@@ -344,6 +405,52 @@ Current phase status:
   (matching `ChatStore`'s own reload guarantee), the dashboard's
   `activeProjects` count reflects real projects and excludes archived
   ones, and `remove()` actually deletes.
+- Phase 39: Implemented at a scoped-down level (2026-08-01) — the Model
+  Registry (section 7 below) and Dataset Manager (section 10 below), both
+  scoped down to identity, provenance, and lifecycle/approval status
+  (`ModelRegistryEntry`/`ModelRegistryStore` and `Dataset`/`DatasetStore`,
+  `src/ml.cpp`), not the full field lists (evaluation results, safety
+  assessment, hardware/runtime requirements, model hash/signature, dataset
+  schema, quality score, versioning) that later training/evaluation/
+  ingestion phases will attach to a registry entry or dataset once they
+  exist. New administrator-only `ml.models.*` and `ml.datasets.*`
+  permissions gate the `GET`/`POST /api/v1/ml/models` and
+  `/api/v1/ml/datasets` routes (state/approval transitions and delete
+  included), and new "Model Registry"/"Dataset Manager" entries under the
+  Machine Learning sidebar list, register, and transition them.
+  `ModelRegistryStore::set_state` enforces section 7's rule that a model
+  must never reach `production` merely because training finished --
+  only an already-`approved` or `staging` entry may make that transition.
+  `MachineLearningRegistry::dashboard()` now also takes a `ModelRegistryStore`
+  and reports real `modelsTraining`/`modelsAwaitingEvaluation`/
+  `deployedModels` counts. `test_machine_learning_model_registry_lifecycle`
+  and `test_machine_learning_dataset_manager_lifecycle` cover the same
+  permission/lifecycle/reload/remove guarantees as Phase 38's test, plus the
+  production-requires-approval rule.
+- Phase 40: Implemented at a scoped-down level (2026-08-01) — the Subject
+  Knowledge Manager (section 12 below), scoped down to identity, scope,
+  ownership, and review status (`SubjectPackage`/`SubjectPackageStore`,
+  `src/ml.cpp`), not the full field list (approved terminology,
+  definitions, concepts, rules, procedures, examples, counterexamples,
+  reference documents, FAQ, required reasoning patterns, prohibited
+  conclusions, known limitations, evaluation questions, source citations,
+  update schedule) that the later Knowledge Ingestion Pipeline (section 13)
+  will attach to a subject package once it exists. New administrator-only
+  `ml.subjects.view`/`ml.subjects.create`/`ml.subjects.review`/
+  `ml.subjects.delete` permissions gate `GET`/`POST /api/v1/ml/subjects`,
+  `POST /api/v1/ml/subjects/{id}/review-status`, and
+  `POST /api/v1/ml/subjects/{id}/delete`, and a new "Subject Knowledge
+  Manager" entry under the Machine Learning sidebar
+  (`/app/ml/subjects`) in `src/web_ui.cpp` lists, creates, and moves them
+  through review (`draft` / `in_review` / `approved` / `needs_revision` /
+  `retired`). `test_machine_learning_subject_knowledge_manager_lifecycle`
+  covers the same permission/lifecycle/reload/remove guarantees as Phase
+  38's test. While implementing this phase, an off-by-one in the existing
+  Phase 38/39 delete and state/approval routes was also found and fixed:
+  `request.target.substr()` was using each route's URL-prefix length plus
+  one, silently dropping the first character of the id and making every ML
+  project/model/dataset delete, model state change, and dataset approval
+  request 404 regardless of a valid id.
 
 Priority note: segmented prompt assembly (Phase 23), tokenization caching
 (Phase 23), lazy retrieval-content materialization (Phase 24), immutable
@@ -2809,7 +2916,10 @@ Exit criteria:
 
 ### Phase 22 — Hierarchical content and model-data caching
 
-Status: Planned. Priority A/B — file-metadata, file-content, and
+Status: Implemented at a scoped-down level (2026-08-01) — see the summary
+entry above (`src/cache.cpp`, `src/masterai.hpp`) for the full-category
+expansion, segmented eviction, admission gate, and negative caching that
+shipped. Priority A/B — file-metadata, file-content, and
 model-manifest/verification caches land first (Priority A); embedding,
 reranking, and MCP-resource caches follow once their producers exist
 (Priority B).
@@ -3024,9 +3134,12 @@ Exit criteria:
 
 ### Phase 25 — Continuous inference batching and request scheduling
 
-Status: Planned. Priority C — depends on multiple concurrent compatible
-requests being common enough to benefit measurably; superset of the Phase 20
-continuous-batching candidate.
+Status: Implemented at a scoped-down level (2026-08-01) — see the summary
+entry above (`src/scheduler.cpp`, `RequestScheduler`) for the weighted-fair
+scheduling and backpressure that shipped, and why continuous batching of
+live backend generation steps did not. Priority C — depends on multiple
+concurrent compatible requests being common enough to benefit measurably;
+superset of the Phase 20 continuous-batching candidate.
 
 Purpose:
 
@@ -3128,9 +3241,13 @@ Exit criteria:
 
 ### Phase 27 — KV-cache compression, placement, and lifecycle management
 
-Status: Planned. Priority B for accounting and placement modes; Priority C
+Status: Implemented at a scoped-down level (2026-08-01) — see the summary
+entry above (`src/kv_cache.cpp`, `KvCacheManager`) for the accounting,
+bounded reservation, and deterministic eviction that shipped, and why
+reduced-precision KV and prefix-tree sharing stay declared-but-disabled.
+Priority B for accounting and placement modes (delivered); Priority C
 for reduced-precision KV and prefix-tree sharing given their quality-parity
-and cross-boundary-isolation risk.
+and cross-boundary-isolation risk (still gated).
 
 Purpose:
 
@@ -3172,8 +3289,12 @@ Exit criteria:
 
 ### Phase 28 — NUMA, processor-group, and topology-aware execution
 
-Status: Planned. Priority C; superset of the Phase 20 NUMA candidate, and
-only relevant on multi-socket/high-core-count hosts.
+Status: Implemented at a scoped-down level (2026-08-01) — see the summary
+entry above (`src/topology.cpp`, `probe_hardware_topology()`/
+`recommend_thread_placement()`) for the real topology probing and pure
+placement-recommendation logic that shipped, and why it is not yet applied
+to any real worker thread. Priority C; superset of the Phase 20 NUMA
+candidate, and only relevant on multi-socket/high-core-count hosts.
 
 Purpose:
 
@@ -3210,7 +3331,10 @@ Exit criteria:
 
 ### Phase 29 — Model tiering, routing, and cascade inference
 
-Status: Planned. Priority B.
+Status: Implemented at a scoped-down level (2026-08-01) — see the summary
+entry above (`src/model_routing.cpp`, `ModelRouter`) for the tier-selection,
+cascade-escalation, and resident-profile-validation logic that shipped, and
+why live chat-pipeline wiring did not. Priority B.
 
 Purpose:
 
@@ -3583,10 +3707,17 @@ model hash/signature, dataset schema, quality score, versioning) that
 later training/evaluation/ingestion phases will attach to a registry
 entry or dataset once they exist. The dashboard's models-training,
 models-awaiting-evaluation, and deployed-models counts are now real,
-drawn from the Model Registry's own state counts. Every other capability
-in this section (Model Builder, training, fine-tuning, deployment, and
-everything through section 51) remains `Planned`: no implementation has
-started.
+drawn from the Model Registry's own state counts. Phase 40 implements the
+Subject Knowledge Manager (section 12) at the same scoped-down level —
+identity, scope, ownership, and review status only, not the full field
+list (approved terminology, definitions, concepts, rules, procedures,
+examples, counterexamples, reference documents, FAQ, required reasoning
+patterns, prohibited conclusions, known limitations, evaluation questions,
+source citations, update schedule) that the later Knowledge Ingestion
+Pipeline (section 13) will attach to a subject package once it exists.
+Every other capability in this section (Model Builder, training,
+fine-tuning, deployment, and everything through section 51) remains
+`Planned`: no implementation has started.
 
 This section extends the plan with an administrator-only Machine Learning
 administration and model-development module, covering the full lifecycle

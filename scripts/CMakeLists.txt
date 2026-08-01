@@ -43,6 +43,10 @@ add_library(masterai_core STATIC
     ../src/prompt_assembly.cpp
     ../src/calibration.cpp
     ../src/optimization_registry.cpp
+    ../src/scheduler.cpp
+    ../src/kv_cache.cpp
+    ../src/topology.cpp
+    ../src/model_routing.cpp
     ../src/performance_cli.cpp
     ../src/ml.cpp
     ../src/http_support.cpp
@@ -57,7 +61,7 @@ target_include_directories(masterai_core PUBLIC ../src)
 if(MSVC)
     target_compile_options(masterai_core PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_compile_definitions(masterai_core PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_link_libraries(masterai_core PUBLIC bcrypt crypt32 ws2_32 advapi32 psapi)
+    target_link_libraries(masterai_core PUBLIC bcrypt crypt32 ws2_32 advapi32 psapi dxgi)
 else()
     target_compile_options(masterai_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     target_link_libraries(masterai_core PUBLIC pthread dl)

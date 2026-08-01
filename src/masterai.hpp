@@ -204,6 +204,85 @@ struct HardwareInfo {
 
 HardwareInfo probe_hardware(const std::filesystem::path& storage_root);
 
+// Phase 28: topology probing plus a pure, testable thread-placement
+// recommendation function. Deliberately NOT wired into any real worker
+// thread's startup in this pass -- the plan requires affinity be "applied
+// only where measurement shows benefit -- not pinned by default", and this
+// codebase has no per-host benefit measurement (that is Phase 36's
+// benchmark matrix, explicitly listed as this phase's second dependency
+// and still Planned). What ships working and tested this pass: real
+// topology probing (packages/NUMA nodes/processor groups/hybrid core
+// counts), the recommendation decision function callers can use once
+// measurement exists, and a real (but unused-by-default) Windows
+// NUMA-affinity primitive for a future caller to invoke. Every host with a
+// single NUMA node and no efficiency/performance core split gets an
+// all-disabled recommendation regardless of policy, so normal OS
+// scheduling is always the fallback on non-applicable hardware.
+struct ProcessorGroupInfo {
+    unsigned int group_id{0};
+    unsigned int processor_count{0};
+};
+
+struct NumaNodeInfo {
+    unsigned int numa_node_id{0};
+    unsigned int logical_processor_count{0};
+};
+
+struct HardwareTopology {
+    unsigned int package_count{1U};
+    unsigned int numa_node_count{1U};
+    unsigned int physical_core_count{0};
+    unsigned int logical_core_count{0};
+    // 0 when the host is not a detected hybrid (performance/efficiency
+    // split) design -- Windows exposes this via
+    // RelationProcessorCore::EfficiencyClass; no such distinction exists on
+    // homogeneous hosts, so both stay 0 there rather than guessing.
+    unsigned int performance_core_count{0};
+    unsigned int efficiency_core_count{0};
+    std::vector<ProcessorGroupInfo> processor_groups;
+    std::vector<NumaNodeInfo> numa_nodes;
+    bool multi_node{false};
+    bool hybrid_cores{false};
+};
+
+HardwareTopology probe_hardware_topology();
+
+enum class ThreadClass {
+    inference_compute,
+    http_streaming,
+    retrieval,
+    indexing,
+    storage_completion,
+    download,
+    background_maintenance
+};
+
+struct TopologyAffinityPolicy {
+    bool numa_local_placement_enabled{false};
+    bool hybrid_core_policy_enabled{false};
+};
+
+struct ThreadPlacementRecommendation {
+    std::optional<unsigned int> preferred_numa_node;
+    bool prefer_efficiency_core{false};
+    std::string reason;
+};
+
+ThreadPlacementRecommendation recommend_thread_placement(
+    const HardwareTopology& topology, ThreadClass klass,
+    const TopologyAffinityPolicy& policy, bool on_battery_power);
+
+// Pins the CALLING thread's affinity mask to `numa_node_id`'s logical
+// processors. Real on Windows (GetNumaNodeProcessorMaskEx +
+// SetThreadAffinityMask); a documented no-op returning false everywhere
+// else and whenever the node id is out of range, never a silent partial
+// pin. Not invoked by any code path in this pass -- see the scope note
+// above.
+bool apply_current_thread_to_numa_node(unsigned int numa_node_id);
+
+std::string to_string(ThreadClass klass);
+std::string hardware_topology_json(const HardwareTopology& topology);
+
 struct ProcessResourceSample {
     std::uint64_t resident_memory_bytes{0};
     std::uint64_t private_memory_bytes{0};
@@ -1044,6 +1123,128 @@ struct ModelRecord {
     std::string diagnostic;
 };
 
+// Phase 29: model tiering, routing, and cascade inference.
+//
+// Scope note (docs/PLAN.md Phase 29): actually wiring tier selection into
+// the live chat pipeline (HttpServer::State::send_chat_message /
+// RunnerSupervisor) so a real request is transparently routed and, on
+// escalation, re-run against a second warm runner is a substantially
+// larger change spanning the request-handling path this pass does not
+// make -- doing that safely needs Phase 26 warm-state management driving
+// which tiers stay resident, which is only scoped-down itself. What ships
+// working and tested this pass: the deterministic tier-selection,
+// cascade-escalation, and resident-profile-validation decision logic the
+// plan describes, exercised directly rather than through a live request.
+enum class ModelTier {
+    deterministic_processing,
+    compact_router,
+    small_fast,
+    medium_general,
+    large_specialist
+};
+
+struct ModelTierAssignment {
+    ModelTier tier{ModelTier::medium_general};
+    std::string model_id;
+};
+
+// Every signal the plan requires routing to disclose. Not all signals
+// influence every decision below -- each one that does is exercised in the
+// Phase 29 tests, and every one is still recorded/returned so a caller can
+// disclose the full input on the query trace even where the current
+// decision rule does not yet use it (the same "declared, disclosed, real
+// even if a later rule will use it more" discipline Phase 24's
+// classification categories already followed).
+struct RoutingSignals {
+    std::string task_category;
+    std::string language;
+    std::uint64_t context_size_tokens{0};
+    std::string requested_quality;  // "draft" | "standard" | "high"
+    std::uint32_t latency_requirement_ms{0};
+    std::set<std::string> required_capabilities;
+    std::uint64_t available_ram_mib{0};
+    std::uint64_t available_vram_mib{0};
+    std::uint32_t queue_depth{0};
+    bool benchmark_evidence_favours_small_model{false};
+    std::optional<std::string> user_pinned_model_id;
+};
+
+enum class EscalationReason {
+    none,
+    low_confidence,
+    unsupported_syntax,
+    conflicting_retrieval_evidence,
+    failed_deterministic_validation,
+    security_sensitivity,
+    explicit_user_request,
+    context_exceeds_capacity
+};
+
+struct CascadeStageOutcome {
+    ModelTier tier{ModelTier::small_fast};
+    std::string model_id;
+    bool succeeded{false};
+    double confidence{0.0};
+    bool security_sensitive{false};
+    bool deterministic_validation_failed{false};
+    bool retrieval_conflict{false};
+    bool unsupported_syntax{false};
+    bool user_requested_escalation{false};
+};
+
+struct CascadeDecision {
+    bool escalate{false};
+    EscalationReason reason{EscalationReason::none};
+    // Unset when escalate is false, OR when a triggering condition fired
+    // but no higher tier exists to escalate to -- callers distinguish
+    // "no escalation needed" (reason == none) from "wanted to escalate but
+    // the cascade is already at its ceiling" (reason != none, escalate ==
+    // false, next_tier unset) by inspecting `reason`.
+    std::optional<ModelTier> next_tier;
+};
+
+enum class ResidentModelProfile { minimal, balanced, performance };
+
+// Pure decision logic; owns no runner state and never itself loads or
+// unloads a model. A caller (a later, larger integration than this pass
+// attempts -- see the scope note above) is responsible for actually
+// invoking the selected tier's model and feeding its outcome back through
+// evaluate_cascade().
+class ModelRouter final {
+public:
+    explicit ModelRouter(
+        std::map<ModelTier, std::vector<std::string>> tier_models = {});
+
+    // Selects the cheapest tier whose declared capability/quality/context
+    // requirements are met, downgraded further if needed to fit
+    // available_ram_mib/available_vram_mib against each tier's notional
+    // minimum footprint -- "avoid using the largest resident model for
+    // every request" is enforced structurally: nothing here ever jumps
+    // straight to large_specialist except an explicit high-quality/
+    // large-context/security-sensitive signal or an unresolvable user pin.
+    std::optional<ModelTierAssignment> select_initial_tier(
+        const RoutingSignals& signals) const;
+    static CascadeDecision evaluate_cascade(const CascadeStageOutcome& outcome,
+                                            double confidence_threshold = 0.6);
+    static std::optional<ModelTier> next_tier_after(ModelTier tier);
+    // Resident-model profile validation (docs/PLAN.md Phase 29): does this
+    // set of currently-warm tiers stay within `profile`'s declared ceiling?
+    // Memory/benchmark-evidence gating for `performance` is
+    // MemoryBudgetManager's job, not this pure function's -- it always
+    // returns true for `performance` (no fixed tier-count ceiling is
+    // declared for it, only an evidence requirement this function has no
+    // evidence to evaluate).
+    static bool resident_set_within_profile(
+        ResidentModelProfile profile, const std::vector<ModelTier>& resident_tiers);
+
+private:
+    std::map<ModelTier, std::vector<std::string>> tier_models_;
+};
+
+std::string to_string(ModelTier tier);
+std::string to_string(ResidentModelProfile profile);
+std::string to_string(EscalationReason reason);
+
 class ModelRegistry final {
 public:
     explicit ModelRegistry(std::filesystem::path model_root,
@@ -1081,6 +1282,21 @@ private:
     HardwareInfo hardware_;
     std::uint64_t memory_reserve_mib_{2048};
 };
+
+// Records one model as verified directly into the same on-disk cache
+// ModelRegistry::verify() writes, without hashing anything itself. The one
+// caller of this (DownloadManager::run(), downloads.cpp) already computes a
+// full SHA-256 of the file as part of its own transfer-integrity check --
+// this lets that already-paid-for hash immediately promote the model to
+// Ready on the very next scan() instead of requiring a separate, redundant
+// `masterai verify-models` pass to re-hash a file that was just hashed
+// moments ago. Best-effort: a write failure here only means the model
+// falls back to showing as unverified until the next explicit verify run,
+// never fails the download itself.
+void record_verified_model(const std::filesystem::path& model_root,
+                           const std::string& model_id,
+                           const std::string& sha256_hex,
+                           std::uint64_t size_bytes);
 
 // Phase 26: use-prediction evidence for one model, recorded as it happens
 // (recency, an administrator/user pin, how often a project selects this
@@ -1212,6 +1428,28 @@ std::optional<std::string> pretouch_gap_reason(PreTouchLevel level);
 // See CalibrationService::resolve() for how this feeds a TuningProfile.
 ModelLoadMode select_load_mode(const StorageLatencyProfile& storage,
                                std::uint64_t available_ram_bytes,
+                               std::uint64_t model_size_bytes) noexcept;
+
+// GPU-layer offload selection: how many transformer layers of a model's
+// weights should be copied into GPU (VRAM) memory instead of staying
+// CPU-resident, expressed as the same layer count the backend's
+// --n-gpu-layers flag takes. kGpuLayersOffloadAll is a sentinel (llama.cpp
+// and llama-server both clamp any --n-gpu-layers value larger than the
+// model's real layer count down to "every layer"), used here instead of an
+// exact layer count because ModelManifest does not carry per-model layer
+// counts -- only a total weight size. Without that, a layer count between
+// "none" and "all" cannot honestly be computed (it would be a guess dressed
+// up as a measurement), so this function only ever decides the two cases it
+// really can reason about from size alone: the whole model comfortably fits
+// in the VRAM left after a headroom reservation (offload everything), or it
+// doesn't (offload nothing, the always-safe CPU-only fallback). Returns 0
+// whenever GPU offload cannot be justified: no GPU backend detected, the
+// model declares a required_gpu_backend the host doesn't have, VRAM size is
+// unknown (0 -- probing failed or is unsupported on this host), or
+// model_size_bytes is unknown (0). Never throws.
+constexpr unsigned int kGpuLayersOffloadAll = 999U;
+unsigned int select_gpu_layers(const HardwareInfo& hardware,
+                               const std::string& required_gpu_backend,
                                std::uint64_t model_size_bytes) noexcept;
 
 // Phase 19: optional backend-launch tuning a calibration profile can
@@ -1837,11 +2075,18 @@ public:
     // reproduces exactly the old, evidence-free behavior -- a *persisted*
     // profile is always returned as-is, never overridden by this evidence,
     // since it already reflects a real measurement.
+    //
+    // `model_size_bytes` and `required_gpu_backend` also drive
+    // recommended_gpu_layers (see select_gpu_layers()), independently of
+    // whether `storage` is supplied -- a caller that only knows the model's
+    // size still gets a real GPU-offload recommendation instead of always
+    // being stuck at the pre-GPU-support default of 0.
     TuningProfile resolve(const std::string& model_sha256,
                          const std::string& requested_profile,
                          const StorageLatencyProfile* storage = nullptr,
                          std::uint64_t available_ram_bytes = 0U,
-                         std::uint64_t model_size_bytes = 0U) const;
+                         std::uint64_t model_size_bytes = 0U,
+                         const std::string& required_gpu_backend = std::string()) const;
 
     std::string host_hash() const;
 
@@ -1911,6 +2156,111 @@ private:
 
 std::string advanced_optimization_registry_json(
     const std::vector<AdvancedOptimizationFeature>& features);
+
+// Phase 25: weighted-fair priority scheduling and backpressure across
+// concurrent inference-adjacent requests. Declared in priority order
+// (highest first) exactly as the plan lists it; the enum's own ordinal
+// value doubles as its priority rank, so `cancellation` (rank 0) always
+// preempts `maintenance` (rank 7) without a separate lookup table.
+//
+// Scope note (docs/PLAN.md Phase 25): true continuous batching of live
+// backend token-generation steps requires cooperation from the llama.cpp
+// server process this control plane launches as an external runner --
+// there is no in-process generation loop here to interleave, and no
+// validated backend flag yet proven safe to depend on for it (the same
+// "backend-validated support required" discipline Phase 27 KV precision
+// and Phase 32 speculative decoding already apply). What this phase
+// delivers instead, honestly: the weighted-fair admission/scheduling and
+// backpressure layer the plan calls for, ready for a batching backend to
+// plug into once one exists, exercised here by request *admission* order
+// rather than by an actual batched generation step.
+enum class SchedulingClass {
+    cancellation_shutdown,
+    ide_completion,
+    interactive_chat,
+    interactive_analysis,
+    user_background_job,
+    benchmark,
+    indexing_embedding,
+    maintenance
+};
+
+std::string to_string(SchedulingClass klass);
+
+struct SchedulingClassPolicy {
+    unsigned int weight{1U};
+    std::size_t max_queue_depth{64U};
+    std::chrono::milliseconds max_residence_time{std::chrono::minutes(5)};
+    unsigned int concurrency_allowance{1U};
+    std::uint64_t memory_allowance_bytes{0};  // 0 = unlimited
+};
+
+std::map<SchedulingClass, SchedulingClassPolicy> default_scheduling_policies();
+
+struct ScheduledTicket {
+    std::uint64_t id{0};
+    SchedulingClass klass{SchedulingClass::interactive_chat};
+};
+
+struct SchedulingAdmission {
+    bool admitted{false};
+    std::string reason;
+    std::optional<ScheduledTicket> ticket;
+    // Set when admission succeeded only after evicting a queued (not yet
+    // running) lower-priority ticket to make room -- the plan's "rejects
+    // low-priority background work first" backpressure rule.
+    std::optional<ScheduledTicket> preempted;
+};
+
+struct SchedulingClassStatus {
+    std::size_t queued{0};
+    std::size_t running{0};
+    std::uint64_t reserved_memory_bytes{0};
+    std::uint64_t admitted_total{0};
+    std::uint64_t rejected_total{0};
+    std::uint64_t expired_total{0};
+    std::uint64_t preempted_total{0};
+};
+
+// Bounded, in-process, admission/backpressure/dequeue scheduler over
+// SchedulingClass queues. Never touches the network or disk; it decides
+// *order and admission*, not how work executes -- a caller still runs the
+// dequeued ticket's actual work itself and calls complete()/cancel() to
+// release the accounting. Thread-safe.
+class RequestScheduler final {
+public:
+    explicit RequestScheduler(
+        std::map<SchedulingClass, SchedulingClassPolicy> policies =
+            default_scheduling_policies(),
+        std::size_t global_concurrency_limit = 0U /* 0 = unlimited */);
+    ~RequestScheduler();
+    RequestScheduler(const RequestScheduler&) = delete;
+    RequestScheduler& operator=(const RequestScheduler&) = delete;
+
+    SchedulingAdmission admit(SchedulingClass klass,
+                              std::uint64_t memory_bytes_required = 0U);
+    // Weighted-fair dequeue: returns the next ticket whose class has
+    // running < concurrency_allowance, chosen by a deficit-round-robin
+    // credit counter seeded from each class's configured weight, always
+    // preferring any non-empty cancellation_shutdown queue first.
+    std::optional<ScheduledTicket> next_ready();
+    void complete(const ScheduledTicket& ticket);
+    // Removes a still-queued ticket before it was ever returned by
+    // next_ready(); returns false if it was already running or unknown.
+    bool cancel(const ScheduledTicket& ticket);
+    // Cancels any queued ticket whose residence time already exceeds its
+    // class's max_residence_time. Called internally on admit()/next_ready()
+    // as well, so callers never need to poll this on their own to keep
+    // queues bounded, but may call it explicitly to force a sweep.
+    std::size_t expire_stale();
+    std::map<SchedulingClass, SchedulingClassStatus> status() const;
+    static std::string to_json(
+        const std::map<SchedulingClass, SchedulingClassStatus>& status);
+
+private:
+    class State;
+    std::unique_ptr<State> state_;
+};
 
 // Machine Learning foundation phase (docs/PLAN.md "Machine Learning
 // Abilities" section 1-51): an administrator-only module for teaching and
@@ -2163,6 +2513,59 @@ private:
 
 std::string dataset_json(const Dataset& dataset);
 std::string datasets_json(const std::vector<Dataset>& datasets);
+
+// Phase 40: docs/PLAN.md "Machine Learning Abilities" section 12 (Subject
+// Knowledge Manager) -- lets an administrator register a subject domain the
+// system will eventually be taught (via fine-tuning, RAG, or an embedding
+// store), tracked through the same identity/ownership/lifecycle pattern as
+// MLProject and Dataset above. Scoped down from the section's full field
+// list (approved terminology, definitions, concepts, rules, procedures,
+// examples, counterexamples, reference documents, FAQ, required reasoning
+// patterns, prohibited conclusions, known limitations, evaluation
+// questions, source citations, update schedule) to identity, scope,
+// ownership, and review status -- the fields that mean something before the
+// Knowledge Ingestion Pipeline (section 13) exists to actually populate a
+// subject package's content.
+enum class SubjectReviewStatus { draft, in_review, approved, needs_revision, retired };
+
+std::string subject_review_status_name(SubjectReviewStatus status);
+SubjectReviewStatus parse_subject_review_status(const std::string& status);
+
+struct SubjectPackage {
+    std::string id;
+    std::string name;
+    std::string description;
+    std::string scope;
+    std::string target_audience;
+    std::string owner_id;
+    SubjectReviewStatus review_status{SubjectReviewStatus::draft};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class SubjectPackageStore final {
+public:
+    SubjectPackageStore() = default;
+    explicit SubjectPackageStore(RecordStore& records);
+    SubjectPackage create(const std::string& owner_id, const std::string& name,
+                          const std::string& description,
+                          const std::string& scope,
+                          const std::string& target_audience);
+    std::optional<SubjectPackage> find(const std::string& id) const;
+    std::vector<SubjectPackage> list() const;
+    bool set_review_status(const std::string& id, SubjectReviewStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const SubjectPackage& package);
+    RecordStore* records_{nullptr};
+    std::map<std::string, SubjectPackage> packages_;
+    mutable std::mutex mutex_;
+};
+
+std::string subject_package_json(const SubjectPackage& package);
+std::string subject_packages_json(const std::vector<SubjectPackage>& packages);
 
 struct PerformanceSample {
     std::string name;
@@ -2845,18 +3248,35 @@ public:
                                   std::uint64_t maximum_total_chunks);
 };
 
-// Phase 17: one segment per kind of repeated work worth avoiding. Embedding,
-// tokenization, and prompt segments are declared now (matching the phases
-// that will produce them: 18-19) even though nothing writes into them yet --
-// the same "declared but no producer" shape Phase 16 used for retrieval
-// strategies its dependencies could not yet serve.
+// Phase 17 declared one segment per kind of repeated work worth avoiding.
+// Phase 22 expands that to the full L0-L5 layering the plan calls for --
+// file-level, parsed/derived, retrieval/ranking, prompt-preparation, and
+// model/hardware/environment metadata each get their own independently
+// bounded category so one large scan in any one of them cannot evict another
+// category's hot working set (categories are already separate `Segment`s in
+// cache.cpp, so this costs no new eviction logic, only finer admission
+// boundaries). `tokenization` and `retrieval_result` are the two names
+// already load-bearing (src/inference.cpp, src/server.cpp) and keep their
+// exact spelling; every other value here is newly declared, some (like
+// Phase 16/24's disabled-adapter strategies) without a producer yet.
 enum class CacheCategory {
+    file_metadata,
     file_content,
-    parsed_chunk,
-    embedding,
+    parsed_document,
+    source_chunk,
+    symbol,
     retrieval_result,
+    reranking,
+    embedding,
     tokenization,
-    prompt
+    prompt_template,
+    prompt_fragment,
+    model_manifest,
+    download_metadata,
+    hardware_probe,
+    tuning_profile,
+    mcp_resource,
+    static_web_asset
 };
 
 std::string to_string(CacheCategory category);
@@ -2888,6 +3308,11 @@ struct CacheCategoryStatus {
     std::uint64_t misses{0};
     std::uint64_t evictions{0};
     std::uint64_t oldest_entry_age_seconds{0};
+    // Phase 22 segmented-eviction/negative-cache visibility.
+    std::uint64_t protected_entries{0};
+    std::uint64_t pinned_entries{0};
+    std::uint64_t negative_entries{0};
+    std::uint64_t admission_rejections{0};
 };
 
 struct CacheStatus {
@@ -2917,6 +3342,22 @@ public:
 
     std::optional<std::string> get(CacheCategory category, const CacheKey& key);
     void put(CacheCategory category, const CacheKey& key, std::string value);
+    // Phase 22: pinned entries are exempt from capacity-driven eviction
+    // (administrator/streaming use only -- never a substitute for the
+    // version-bound key already making staleness impossible) until
+    // explicitly unpinned or invalidated by project/policy.
+    void pin(CacheCategory category, const CacheKey& key);
+    void unpin(CacheCategory category, const CacheKey& key);
+    // Short-lived, version-bound "known absent" marker so a repeated miss
+    // (e.g. a lookup that requires an expensive round trip to discover
+    // nothing exists) does not repeat the expensive work every call. Bound
+    // to the same CacheKey generations as a normal entry, so a policy
+    // change, index republication, or new content immediately invalidates
+    // it exactly like a positive entry -- it can never hide newly granted
+    // access or newly completed work past `ttl`.
+    void put_negative(CacheCategory category, const CacheKey& key,
+                      std::chrono::seconds ttl);
+    bool is_negative(CacheCategory category, const CacheKey& key);
     // Drops every entry for one project (e.g. on project deletion). Not
     // required for staleness -- generation-versioned keys already make a
     // republished index or a policy change an automatic miss -- but keeps
@@ -3011,6 +3452,110 @@ struct SessionDecision {
     // caller can log/report why reuse was capped even when it succeeded.
     std::size_t prefix_byte_ceiling{0};
 };
+
+// Phase 27: per-slot KV-cache accounting, bounded context-aware
+// reservation, and deterministic eviction ordering, layered over the same
+// slot identity PromptSessionManager (Phase 18/23) already tracks.
+//
+// Scope note (docs/PLAN.md Phase 27): reduced-precision KV (half/quantized)
+// and the cross-request prefix-tree sharing the plan describes both
+// explicitly "require backend-validated support before any precision
+// change is admitted" / must "never expose private conversation KV state
+// across unauthorized boundaries" -- this codebase launches llama.cpp as an
+// external process and has not validated either against it, so both stay
+// declared-but-disabled here, following the exact honesty convention
+// AdvancedOptimizationRegistry (Phase 20) already established: recording
+// evidence is supported and tested, but it can never itself flip a
+// precision policy or prefix-sharing on. What ships working and tested this
+// pass: per-slot/layer accounting by context length, token count, dtype,
+// and CPU/GPU/split placement; bounded-growth-step reservation against a
+// hard per-slot ceiling; and the plan's deterministic eviction order.
+enum class KvPrecision { full, half, quantized_k, quantized_v };
+enum class KvPlacement { cpu, gpu, split };
+enum class KvSlotState { active, idle, failed_cancelled, expired };
+
+struct KvSlotAccounting {
+    unsigned int slot_id{0};
+    std::string owning_user_id;
+    std::string owning_chat_id;
+    std::string owning_project_id;
+    std::uint64_t context_length_tokens{0};
+    std::uint64_t token_count{0};
+    KvPrecision precision{KvPrecision::full};
+    KvPlacement placement{KvPlacement::cpu};
+    std::uint64_t bytes_reserved{0};
+    bool pinned{false};
+    // Marks a slot as holding a shareable immutable-prefix node rather than
+    // a private per-chat slot; see the prefix-tree scope note above -- no
+    // sharing is actually performed yet, this field only feeds the
+    // deterministic eviction order's "large low-value reusable prefixes"
+    // bucket ahead of time.
+    bool reusable_prefix{false};
+    std::uint64_t reuse_count{0};
+    KvSlotState state{KvSlotState::active};
+};
+
+struct KvReservationResult {
+    bool admitted{false};
+    std::string reason;
+    std::uint64_t granted_bytes{0};
+};
+
+// Backend-validation evidence for a reduced-precision KV policy. Recording
+// evidence never enables the policy (see KvCacheManager::precision_admitted
+// -- always false for anything but KvPrecision::full in this pass), exactly
+// as AdvancedOptimizationEvidence/AdvancedOptimizationRegistry (Phase 20)
+// already never let recorded evidence self-enable a feature.
+struct KvPrecisionEvidence {
+    KvPrecision precision{KvPrecision::half};
+    std::string backend_hash;
+    std::string quality_notes;
+    bool quality_parity_verified{false};
+};
+
+class KvCacheManager final {
+public:
+    KvCacheManager(MemoryBudgetManager& memory,
+                  std::uint64_t hard_max_bytes_per_slot,
+                  std::uint64_t growth_step_bytes);
+    ~KvCacheManager();
+    KvCacheManager(const KvCacheManager&) = delete;
+    KvCacheManager& operator=(const KvCacheManager&) = delete;
+
+    // Admits a new slot at `initial.bytes_reserved` (rounded up to the next
+    // growth step), never exceeding `hard_max_bytes_per_slot`.
+    KvReservationResult reserve(KvSlotAccounting initial);
+    // Grows an existing slot's reservation by bounded steps up to the hard
+    // ceiling; refuses (does not partially grant) once the ceiling would be
+    // exceeded.
+    KvReservationResult grow(unsigned int slot_id,
+                             std::uint64_t additional_bytes_requested);
+    void touch(unsigned int slot_id);  // reuse: bumps reuse_count, marks active
+    void set_state(unsigned int slot_id, KvSlotState state);
+    void release(unsigned int slot_id);
+    // Deterministic eviction order (docs/PLAN.md Phase 27): failed/
+    // cancelled slots, expired idle prefixes, lowest-reuse private slots,
+    // large low-value reusable prefixes, idle non-pinned sessions, then
+    // nullopt ("safe rejection" -- no eviction candidate exists). An active
+    // (in-flight) or pinned slot is never returned.
+    std::optional<unsigned int> evict_one();
+    std::optional<KvSlotAccounting> find(unsigned int slot_id) const;
+    std::vector<KvSlotAccounting> status() const;
+    static std::string to_json(const std::vector<KvSlotAccounting>& slots);
+
+    // Backend-validated reduced-precision admission gate; see class-level
+    // scope note. Always false for non-full precision in this pass.
+    bool precision_admitted(KvPrecision precision) const;
+    void record_precision_evidence(const KvPrecisionEvidence& evidence);
+
+private:
+    class State;
+    std::unique_ptr<State> state_;
+};
+
+std::string to_string(KvPrecision precision);
+std::string to_string(KvPlacement placement);
+std::string to_string(KvSlotState state);
 
 class PromptSessionManager final {
 public:

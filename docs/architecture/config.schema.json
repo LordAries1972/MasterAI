@@ -33,7 +33,8 @@
         "mode": {"enum": ["disabled-loopback-only", "required"]},
         "certificateFile": {"type": "string"},
         "privateKeyFile": {"type": "string"}
-      }
+      },
+      "$comment": "certificateFile/privateKeyFile must both be non-empty, existing regular files whenever server.host is non-loopback or mode is 'required' -- a cross-field/filesystem check ConfigurationManager::validate() enforces at load time, not representable as a plain per-property schema constraint."
     },
     "auth": {
       "type": "object", "additionalProperties": false,
@@ -43,7 +44,8 @@
         "sessionMinutes": {"type": "integer", "minimum": 1, "maximum": 10080},
         "allowLocalPasswordAccounts": {"type": "boolean"},
         "allowOsIdentityAccounts": {"type": "boolean"}
-      }
+      },
+      "$comment": "At least one of allowLocalPasswordAccounts (default true) or allowOsIdentityAccounts (default false) must remain true -- enforced by ConfigurationManager::validate(), not expressible per-property here."
     },
     "workspace": {
       "type": "object", "additionalProperties": false,
@@ -65,8 +67,12 @@
       "required": ["llamaServerExecutable", "runnerPort"],
       "properties": {
         "llamaServerExecutable": {"type": "string"},
-        "runnerPort": {"type": "integer", "minimum": 1024, "maximum": 65535}
-      }
+        "runnerPort": {"type": "integer", "minimum": 1024, "maximum": 65535},
+        "chatMaxReplyTokens": {"type": "integer", "minimum": 1, "maximum": 32768},
+        "chatContextLength": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "startupTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 3600}
+      },
+      "$comment": "runnerPort must also differ from server.port -- a cross-field check ConfigurationManager::validate() enforces, not representable per-property here. chatMaxReplyTokens/chatContextLength/startupTimeoutSeconds default to 8192/4096/120 respectively when omitted -- see docs/architecture/configuration.md."
     },
     "downloads": {
       "type": "object", "additionalProperties": false,
@@ -92,6 +98,40 @@
         "maximumContextBytes": {"type": "integer", "minimum": 1, "maximum": 4194304},
         "maximumChunksPerSource": {"type": "integer", "minimum": 1, "maximum": 256},
         "maximumTotalChunks": {"type": "integer", "minimum": 1, "maximum": 1024}
+      }
+    },
+    "cache": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "maximumBytesPerCategory"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "maximumBytesPerCategory": {"type": "integer", "minimum": 1, "maximum": 4294967296}
+      }
+    },
+    "session": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "maxSlots", "idleRetentionSeconds"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "maxSlots": {"type": "integer", "minimum": 1, "maximum": 64},
+        "idleRetentionSeconds": {"type": "integer", "minimum": 1, "maximum": 86400}
+      }
+    },
+    "performance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["autoTune"],
+      "properties": {
+        "autoTune": {"type": "boolean"}
+      }
+    },
+    "memory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["hardLimitMiB", "minimumFreePercent", "criticalPressurePercent", "profile"],
+      "properties": {
+        "hardLimitMiB": {"type": "integer", "minimum": 0, "maximum": 1048576},
+        "minimumFreePercent": {"type": "integer", "minimum": 1, "maximum": 50},
+        "criticalPressurePercent": {"type": "integer", "minimum": 80, "maximum": 99},
+        "profile": {"enum": ["minimal", "balanced", "performance"]}
       }
     }
   }

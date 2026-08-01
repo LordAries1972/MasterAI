@@ -35,6 +35,18 @@
     "button:hover{background:var(--accent-hover)}" \
     "progress{width:100%;height:.6rem;margin-top:.6rem;accent-color:var(--accent)}" \
     "#actionStatus,#status{color:var(--muted);min-height:1.2em}" \
+    /* Fixed top-of-viewport banner every action-failure catch block now \
+       raises through showSystemError() instead of the easy-to-miss \
+       #actionStatus line -- maroon body with yellow text so a failure is \
+       unmissable regardless of which page/section triggered it. */ \
+    "#systemErrorBanner{position:fixed;top:0;left:0;right:0;z-index:9999;" \
+    "background:#3a0a0a;color:#ffd54a;padding:.75rem 1rem;" \
+    "border-bottom:2px solid #ffd54a;box-shadow:0 2px 10px rgba(0,0,0,.4);" \
+    "display:flex;align-items:flex-start;gap:.75rem}" \
+    "#systemErrorBanner .systemErrorTitle{font-weight:800;letter-spacing:.03em}" \
+    "#systemErrorBanner .systemErrorBody{flex:1;overflow-wrap:anywhere}" \
+    "#systemErrorBanner .systemErrorClose{margin:0;padding:0 .4rem;" \
+    "background:transparent;color:#ffd54a;font-weight:700;cursor:pointer}" \
     ".checkboxLabel{display:flex;align-items:center;gap:.5rem}" \
     ".checkboxLabel input{width:auto}"
 
@@ -51,6 +63,11 @@ std::string application_script() {
         // has a value, so attachFiles() below re-reads that picker each time
         // rather than caching it once.
         "let attachedFiles=[],openedProjectId='';"
+        // Last chat list rendered by renderChatList(), kept around so a
+        // brand-new chat can be shown in the sidebar immediately (see
+        // streamMessage()) instead of waiting on the next full load()
+        // round trip, which the composer only fires once more anyway.
+        "let lastChats=[];"
         "function currentProjectId(){return openedProjectId||"
         "(q('#chatProject')?q('#chatProject').value:'');}"
         // Tracks which download ids already have a pollDownloadProgress
@@ -64,10 +81,29 @@ std::string application_script() {
         "const r=await fetch(path,{method,headers:h,body:body?JSON.stringify(body):undefined});"
         "const t=await r.text();if(!r.ok)throw new Error(t||r.status);"
         "return t?JSON.parse(t):{};}"
+        // Every action-failure catch block across the app raises through
+        // here instead of quietly setting the small #actionStatus line --
+        // a fixed banner pinned to the very top of the viewport, maroon
+        // body/yellow text, titled 'SYSTEM ERROR!' so a failure is
+        // impossible to miss regardless of scroll position or which
+        // section triggered it. Reuses one banner element (created lazily)
+        // so a second failure while the first is still showing just
+        // replaces the message rather than stacking banners.
+        "function showSystemError(message){let el=q('#systemErrorBanner');"
+        "if(!el){el=document.createElement('div');el.id='systemErrorBanner';"
+        "const title=document.createElement('div');"
+        "title.className='systemErrorTitle';title.textContent='SYSTEM ERROR!';"
+        "const body=document.createElement('div');body.className='systemErrorBody';"
+        "const close=document.createElement('button');close.type='button';"
+        "close.className='systemErrorClose';close.textContent='\\u00d7';"
+        "close.setAttribute('aria-label','Dismiss error');"
+        "close.addEventListener('click',()=>{el.hidden=true;});"
+        "el.append(title,body,close);document.body.prepend(el);}"
+        "el.querySelector('.systemErrorBody').textContent=message;el.hidden=false;}"
         "async function login(e){e.preventDefault();try{const d=await api('/api/v1/auth/login','POST',"
         "{username:q('#username').value,password:q('#password').value});"
         "sessionStorage.setItem('csrf',d.csrfToken);location.href='/app';}"
-        "catch(x){q('#status').textContent='Login failed. Check your username and password.';}}"
+        "catch(x){showSystemError('Login failed. Check your username and password.');}}"
         // Toggles the setup-vs-login sections on the initial page load by
         // asking the already-public /health/ready route whether the first
         // administrator still needs to be created.
@@ -80,9 +116,9 @@ std::string application_script() {
         "displayName:q('#setupDisplay').value});"
         "s.textContent='Administrator created. Sign in below.';"
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
-        "catch(x){s.textContent='Setup failed: '+x.message;}}"
+        "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
-        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld]=await Promise.all([api('/api/v1/users/me'),"
+        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls]=await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
         "api('/api/v1/models').catch(()=>({models:[]})),"
@@ -98,7 +134,8 @@ std::string application_script() {
         "deployedModels:0,failedTrainingJobs:0,interfaces:[]})),"
         "api('/api/v1/ml/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/ml/models').catch(()=>({models:[]})),"
-        "api('/api/v1/ml/datasets').catch(()=>({datasets:[]}))]);"
+        "api('/api/v1/ml/datasets').catch(()=>({datasets:[]})),"
+        "api('/api/v1/ml/subjects').catch(()=>({subjects:[]}))]);"
         "q('#who').textContent=me.displayName+' ('+me.role+')';"
         // A viewer's sidebar renders none of the settings pages, so these
         // elements legitimately don't exist -- guard every write instead of
@@ -107,6 +144,7 @@ std::string application_script() {
         "renderBenchmarks(b.benchmarks);renderDownloads(d.downloads);"
         "renderUsers(u.users);renderMlDashboard(ml);renderMlProjects(mlp.projects);"
         "renderMlModels(mlm.models);renderMlDatasets(mld.datasets);"
+        "renderMlSubjects(mls.subjects);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
         // Chat offers every downloaded, verified model whose backend/format
         // and required CPU/GPU features this machine actually has (state
@@ -175,9 +213,10 @@ std::string application_script() {
         "if(q('#messageChat')&&q('#messageChat').value===c.id){location.href='/app';return;}"
         "await load();}"
         "catch(x){const s=q('#actionStatus');"
-        "if(s)s.textContent='Delete failed: '+x.message;}});"
+        "showSystemError('Delete failed: '+x.message);}});"
         "row.append(a,del);return row;}"
-        "function renderChatList(chats){const list=q('#chatList');if(!list)return;"
+        "function renderChatList(chats){lastChats=chats;"
+        "const list=q('#chatList');if(!list)return;"
         "list.replaceChildren();"
         "for(const c of chats.slice(0,RECENT_CHAT_LIMIT))list.append(chatLink(c));"
         "const older=chats.slice(RECENT_CHAT_LIMIT);"
@@ -214,8 +253,20 @@ std::string application_script() {
         "if(q('#chatProject'))q('#chatProject').disabled=true;"
         "const box=q('#chatMessages');box.replaceChildren();"
         "for(const message of chat.messages)appendMessage(box,message.role,message.content);"
-        "box.scrollTop=box.scrollHeight;}"
-        "catch(x){s.textContent='Failed to load chat: '+x.message;}}"
+        "box.scrollTop=box.scrollHeight;"
+        // Warming used to be a side effect of the GET above (fired the
+        // instant a chat was opened, mid-load -- before the browser had
+        // actually painted this history or the models dropdown from the
+        // request racing it). It's triggered explicitly now, and only
+        // after two animation frames have actually elapsed, which
+        // guarantees a real paint has happened -- so the full page
+        // (sidebar, model list, this chat's history) is genuinely on
+        // screen before a multi-gigabyte cold load starts competing with
+        // it for CPU/disk. Fire-and-forget: a failure here just means the
+        // pre-warm head start didn't happen, not a page error.
+        "if(chat.modelId)requestAnimationFrame(()=>requestAnimationFrame(()=>"
+        "api('/api/v1/runner/warm','POST',{modelId:chat.modelId}).catch(()=>{})));}"
+        "catch(x){showSystemError('Failed to load chat: '+x.message);}}"
         // Bubble side and color already say who's speaking; only the system
         // role (rendered plain, centered) still needs a label. User/assistant
         // content renders through renderMarkdown() below (fenced code
@@ -227,14 +278,96 @@ std::string application_script() {
         "function appendMessage(box,role,content){const p=document.createElement('div');"
         "p.className='chatMsg chatMsg-'+role;"
         "if(role==='system'){p.textContent='system: '+content;}"
-        "else{p.dataset.raw=content;p.innerHTML=renderMarkdown(content);}"
+        "else{p.dataset.raw=content;"
+        // Assistant replies get a 'Response' title, matching the error
+        // card's own title row -- the copy button (added below) shares
+        // that row's top-right corner via .msgCopyBtn's absolute
+        // positioning, same as it already does for the error card and
+        // every other bubble. User messages don't need a label: the
+        // bubble's side and color already say who's speaking.
+        "if(role==='assistant'){const title=document.createElement('div');"
+        "title.className='chatMsg-responseTitle';title.textContent='Response';"
+        "p.append(title);}"
+        // Rendered content lives in its own .msgBody child rather than
+        // directly in p -- streamMessage() rewrites just that child's
+        // innerHTML as tokens arrive, so the copy button appended below
+        // survives every re-render instead of being wiped out along with
+        // the old content each time.
+        "const bodyEl=document.createElement('div');bodyEl.className='msgBody';"
+        "bodyEl.innerHTML=renderMarkdown(content);p.append(bodyEl);"
+        "addMessageCopyButton(p);addCodeCopyButtons(bodyEl);}"
         "box.append(p);return p;}"
+        // Writes text to the clipboard and gives the clicked button
+        // momentary 'Copied!' feedback so the click registers as having
+        // worked, then restores its original label.
+        "function copyToClipboard(text,btn){navigator.clipboard.writeText(text||'')"
+        ".then(()=>{const old=btn.textContent;btn.textContent='Copied!';"
+        "setTimeout(()=>{btn.textContent=old;},1500);});}"
+        // One button per message bubble that copies the whole reply's raw
+        // source (kept on p.dataset.raw, same field renderMarkdown()
+        // re-renders from) -- not the HTML, so pasting elsewhere gets plain
+        // text/Markdown rather than this page's markup.
+        "function addMessageCopyButton(msgEl){const btn=document.createElement('button');"
+        "btn.type='button';btn.className='msgCopyBtn';btn.textContent='Copy';"
+        "btn.setAttribute('aria-label','Copy message');"
+        "btn.addEventListener('click',()=>copyToClipboard(msgEl.dataset.raw,btn));"
+        "msgEl.append(btn);}"
+        // One button per fenced code block (renderMarkdown() emits
+        // <pre><code>) so a snippet can be copied on its own without the
+        // surrounding prose -- idempotent (skips a <pre> that already has
+        // one) since streamed re-renders call this again on every token.
+        "function addCodeCopyButtons(container){"
+        "container.querySelectorAll('pre').forEach(pre=>{"
+        "if(pre.querySelector('.codeCopyBtn'))return;"
+        "const btn=document.createElement('button');btn.type='button';"
+        "btn.className='codeCopyBtn';btn.textContent='Copy';"
+        "btn.setAttribute('aria-label','Copy code block');"
+        "btn.addEventListener('click',e=>{e.stopPropagation();"
+        "const code=pre.querySelector('code');"
+        "copyToClipboard(code?code.textContent:pre.textContent,btn);});"
+        "pre.append(btn);});}"
+        // Best-effort LaTeX-to-HTML for the common constructs model replies
+        // actually use (fractions, super/subscripts, Greek letters, common
+        // operators) -- not a real TeX engine (this project takes no
+        // third-party dependencies), just enough substitution that
+        // \\frac{a}{b}, x_i, x^2, and \\theta read as intended instead of
+        // showing their raw backslash source. Operates on already
+        // HTML-escaped text (see renderInline below), so every replacement
+        // only ever introduces the handful of safe tags below, never raw
+        // user/model text as markup.
+        "function renderMathExpr(t){"
+        "t=t.replace(/\\\\frac\\{([^{}]*)\\}\\{([^{}]*)\\}/g,"
+        "(m,a,b)=>'<span class=\"frac\"><span class=\"fracNum\">'+a+"
+        "'</span><span class=\"fracDen\">'+b+'</span></span>');"
+        "t=t.replace(/\\\\sqrt\\{([^{}]*)\\}/g,(m,a)=>'\\u221a('+a+')');"
+        "t=t.replace(/\\^\\{([^{}]*)\\}/g,(m,a)=>'<sup>'+a+'</sup>');"
+        "t=t.replace(/\\^(\\w)/g,(m,a)=>'<sup>'+a+'</sup>');"
+        "t=t.replace(/_\\{([^{}]*)\\}/g,(m,a)=>'<sub>'+a+'</sub>');"
+        "t=t.replace(/_(\\w)/g,(m,a)=>'<sub>'+a+'</sub>');"
+        "const symbols={alpha:'\\u03b1',beta:'\\u03b2',gamma:'\\u03b3',"
+        "delta:'\\u03b4',epsilon:'\\u03b5',zeta:'\\u03b6',eta:'\\u03b7',"
+        "theta:'\\u03b8',lambda:'\\u03bb',mu:'\\u03bc',nu:'\\u03bd',"
+        "pi:'\\u03c0',rho:'\\u03c1',sigma:'\\u03c3',tau:'\\u03c4',"
+        "phi:'\\u03c6',chi:'\\u03c7',psi:'\\u03c8',omega:'\\u03c9',"
+        "Delta:'\\u0394',Theta:'\\u0398',Lambda:'\\u039b',Pi:'\\u03a0',"
+        "Sigma:'\\u03a3',Phi:'\\u03a6',Psi:'\\u03a8',Omega:'\\u03a9',"
+        "cdot:'\\u00b7',times:'\\u00d7',pm:'\\u00b1',mp:'\\u2213',"
+        "leq:'\\u2264',geq:'\\u2265',neq:'\\u2260',approx:'\\u2248',"
+        "infty:'\\u221e',to:'\\u2192',rightarrow:'\\u2192',"
+        "partial:'\\u2202',nabla:'\\u2207',in:'\\u2208',"
+        "sum:'\\u2211',int:'\\u222b',prod:'\\u220f'};"
+        "t=t.replace(/\\\\([a-zA-Z]+)/g,(m,name)=>"
+        "symbols[name]!==undefined?symbols[name]:name);"
+        "return t.replace(/[{}]/g,'');}"
         // Inline span-level formatting within a single line: backtick code
-        // spans and **bold**. Operates on already-HTML-escaped text so the
-        // replacement groups never need escaping themselves.
+        // spans, **bold**, and \\(...\\) inline math. Operates on
+        // already-HTML-escaped text so the replacement groups never need
+        // escaping themselves.
         "function renderInline(text){let t=esc(text);"
         "t=t.replace(/`([^`]+)`/g,(m,c)=>'<code>'+c+'</code>');"
         "t=t.replace(/\\*\\*([^*]+)\\*\\*/g,(m,b)=>'<strong>'+b+'</strong>');"
+        "t=t.replace(/\\\\\\((.+?)\\\\\\)/g,"
+        "(m,e)=>'<span class=\"math\">'+renderMathExpr(e)+'</span>');"
         "return t;}"
         // Small block-level Markdown renderer covering what model replies
         // actually use: fenced code blocks, bullet and numbered lists, and
@@ -249,6 +382,16 @@ std::string application_script() {
         "while(i<lines.length&&!/^```\\s*$/.test(lines[i])){code.push(lines[i]);i++;}"
         "i++;const cls=lang?' class=\"language-'+esc(lang)+'\"':'';"
         "html+='<pre><code'+cls+'>'+esc(code.join('\\n'))+'</code></pre>';continue;}"
+        // Block math: \\[ ... \\], possibly spanning multiple lines (each
+        // line of a wrapped equation is common in model output). Collected
+        // as raw (unescaped) source and rendered the same way inline math
+        // is, then dropped into its own centered block.
+        "if(/^\\s*\\\\\\[/.test(line)){const mathLines=[line];i++;"
+        "while(i<lines.length&&!/\\\\\\]\\s*$/.test(mathLines[mathLines.length-1])){"
+        "mathLines.push(lines[i]);i++;}"
+        "const joined=mathLines.join(' ');"
+        "const inner=joined.replace(/^\\s*\\\\\\[/,'').replace(/\\\\\\]\\s*$/,'');"
+        "html+='<div class=\"mathBlock\">'+renderMathExpr(esc(inner))+'</div>';continue;}"
         // A single blank line between two list items (common in model
         // output that puts a blank line after every bullet for readability)
         // must not end the list -- otherwise each item becomes its own
@@ -356,8 +499,8 @@ std::string application_script() {
         "try{await api('/api/v1/ml/projects/'+"
         "encodeURIComponent(btn.dataset.deleteMlProject)+'/delete','POST');"
         "await load();}"
-        "catch(x){s.textContent='Delete Machine Learning project failed: '+"
-        "x.message;}});}}"
+        "catch(x){showSystemError('Delete Machine Learning project failed: '+"
+        "x.message);}});}}"
         // Model Registry (docs/PLAN.md "Machine Learning Abilities" section
         // 7): each row carries its own lifecycle-state dropdown so an
         // administrator can move a model along its states one deliberate
@@ -390,13 +533,13 @@ std::string application_script() {
         "const state=el.querySelector('[data-state-for=\"'+id+'\"]').value;"
         "try{await api('/api/v1/ml/models/'+encodeURIComponent(id)+'/state',"
         "'POST',{state});await load();}"
-        "catch(x){s.textContent='Update model state failed: '+x.message;}});}"
+        "catch(x){showSystemError('Update model state failed: '+x.message);}});}"
         "for(const btn of el.querySelectorAll('[data-delete-ml-model]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
         "try{await api('/api/v1/ml/models/'+"
         "encodeURIComponent(btn.dataset.deleteMlModel)+'/delete','POST');"
         "await load();}"
-        "catch(x){s.textContent='Delete model failed: '+x.message;}});}}"
+        "catch(x){showSystemError('Delete model failed: '+x.message);}});}}"
         // Dataset Manager (docs/PLAN.md "Machine Learning Abilities"
         // section 10): each row shows its approval status plus Approve,
         // Reject, and Delete actions.
@@ -419,19 +562,57 @@ std::string application_script() {
         "try{await api('/api/v1/ml/datasets/'+"
         "encodeURIComponent(btn.dataset.approveMlDataset)+'/approve','POST',"
         "{status:'approved'});await load();}"
-        "catch(x){s.textContent='Approve dataset failed: '+x.message;}});}"
+        "catch(x){showSystemError('Approve dataset failed: '+x.message);}});}"
         "for(const btn of el.querySelectorAll('[data-reject-ml-dataset]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
         "try{await api('/api/v1/ml/datasets/'+"
         "encodeURIComponent(btn.dataset.rejectMlDataset)+'/approve','POST',"
         "{status:'rejected'});await load();}"
-        "catch(x){s.textContent='Reject dataset failed: '+x.message;}});}"
+        "catch(x){showSystemError('Reject dataset failed: '+x.message);}});}"
         "for(const btn of el.querySelectorAll('[data-delete-ml-dataset]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
         "try{await api('/api/v1/ml/datasets/'+"
         "encodeURIComponent(btn.dataset.deleteMlDataset)+'/delete','POST');"
         "await load();}"
-        "catch(x){s.textContent='Delete dataset failed: '+x.message;}});}}"
+        "catch(x){showSystemError('Delete dataset failed: '+x.message);}});}}"
+        // Subject Knowledge Manager (docs/PLAN.md "Machine Learning
+        // Abilities" section 12): each row carries its own review-status
+        // dropdown, mirroring the Model Registry's set-state pattern above,
+        // plus a Delete button.
+        "const SUBJECT_REVIEW_STATUSES=['draft','in_review','approved',"
+        "'needs_revision','retired'];"
+        "function renderMlSubjects(subjects){const el=q('#mlSubjectsList');"
+        "if(!el)return;"
+        "if(!subjects.length){el.innerHTML='<p>No subject packages "
+        "registered yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Scope','Target audience','Review "
+        "status','Set status',''],"
+        "subjects.map(x=>[esc(x.name),esc(x.scope),esc(x.targetAudience),"
+        "'<span class=\"stateTag stateTag-'+esc(x.reviewStatus)+'\">'+"
+        "esc(x.reviewStatus)+'</span>',"
+        "'<select data-review-status-for=\"'+x.id+'\">'+"
+        "SUBJECT_REVIEW_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.reviewStatus?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-review-status=\"'+x.id+"
+        "'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-subject=\"'+x.id+'\">Delete"
+        "</button>']));"
+        "for(const btn of el.querySelectorAll('[data-apply-review-status]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applyReviewStatus;"
+        "const status=el.querySelector("
+        "'[data-review-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/subjects/'+encodeURIComponent(id)+"
+        "'/review-status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update subject review status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll('[data-delete-ml-subject]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/subjects/'+"
+        "encodeURIComponent(btn.dataset.deleteMlSubject)+'/delete','POST');"
+        "await load();}"
+        "catch(x){showSystemError('Delete subject failed: '+x.message);}});}}"
         // Each row gets its own Start/resume, Pause, Stop, and Remove buttons
         // wired directly to that job's id -- nothing to hand-type, unlike the
         // old single manual 'Download job ID' field this replaces. The State
@@ -859,7 +1040,7 @@ std::string application_script() {
         "lastAppliedPreset.sourceUrl===body.sourceUrl?lastAppliedPreset.sizeBytes:null;"
         "s.textContent='Queued download '+r.id+' ('+r.hardwareRecommendation+"
         "'). Starting transfer...';await load();await runDownloadJob(r.id);}"
-        "catch(x){s.textContent='Queue failed: '+x.message;}}"
+        "catch(x){showSystemError('Queue failed: '+x.message);}}"
         // Polls the job-list route (the /run response itself only arrives
         // once the whole transfer finishes) and updates that row's state and
         // progress cells from the polled job, using a known total size when
@@ -900,7 +1081,7 @@ std::string application_script() {
         "const timer=await pollDownloadProgress(id);"
         "try{const r=await api('/api/v1/model-downloads/'+encodeURIComponent(id)+'/run','POST');"
         "s.textContent='Download '+id+' finished with state: '+r.state;}"
-        "catch(x){s.textContent='Download failed: '+x.message;}"
+        "catch(x){showSystemError('Download failed: '+x.message);}"
         "finally{if(timer)clearInterval(timer);await load();}}"
         // Pause/Stop signal the in-flight run() call (still pending on the
         // /run request started by runDownloadJob) rather than perform the
@@ -911,11 +1092,11 @@ std::string application_script() {
         "async function pauseDownload(id){const s=q('#actionStatus');"
         "try{await api('/api/v1/model-downloads/'+encodeURIComponent(id)+'/pause','POST');"
         "s.textContent='Pausing download '+id+'...';await load();}"
-        "catch(x){s.textContent='Pause failed: '+x.message;}}"
+        "catch(x){showSystemError('Pause failed: '+x.message);}}"
         "async function stopDownload(id){const s=q('#actionStatus');"
         "try{await api('/api/v1/model-downloads/'+encodeURIComponent(id)+'/cancel','POST');"
         "s.textContent='Stopping download '+id+'...';await load();}"
-        "catch(x){s.textContent='Stop failed: '+x.message;}}"
+        "catch(x){showSystemError('Stop failed: '+x.message);}}"
         // Removing an active transfer stops it first (mirroring Stop) and
         // waits for its own run() call to actually unwind -- the manager
         // rejects remove() while a job is still in flight -- before deleting
@@ -934,19 +1115,19 @@ std::string application_script() {
         "await api('/api/v1/model-downloads/'+encodeURIComponent(id)+'/remove','POST');"
         "if(activePolls[id]){clearInterval(activePolls[id]);delete activePolls[id];}"
         "s.textContent='Download '+id+' removed.';await load();}"
-        "catch(x){s.textContent='Remove failed: '+x.message;}}"
+        "catch(x){showSystemError('Remove failed: '+x.message);}}"
         "async function createUser(e){e.preventDefault();const s=q('#actionStatus');"
         "try{await api('/api/v1/users','POST',{username:q('#newUserName').value,"
         "displayName:q('#newUserDisplay').value,role:q('#newUserRole').value,"
         "password:q('#newUserPassword').value});"
         "s.textContent='Local account created.';q('#newUser').reset();await load();}"
-        "catch(x){s.textContent='Create account failed: '+x.message;}}"
+        "catch(x){showSystemError('Create account failed: '+x.message);}}"
         "function fill(sel,items,key,label){const e=q(sel);if(!e)return;e.replaceChildren();"
         "for(const x of items){const o=document.createElement('option');o.value=key(x);"
         "o.textContent=label(x);e.append(o);}}"
         "async function submit(e,path,body){e.preventDefault();const s=q('#actionStatus');"
         "try{const r=await api(path,'POST',body());s.textContent='Completed: '+JSON.stringify(r);"
-        "await load();}catch(x){s.textContent='Action failed: '+x.message;}}"
+        "await load();}catch(x){showSystemError('Action failed: '+x.message);}}"
         // Uploads one picked file as a project attachment (text only, per
         // AttachmentStore::add_text) and adds it to the pending list for the
         // message currently being composed; attachmentIds are read off that
@@ -956,7 +1137,7 @@ std::string application_script() {
         "const record=await api('/api/v1/attachments','POST',"
         "{projectId:currentProjectId(),filename:file.name,content});"
         "attachedFiles.push({id:record.id,filename:file.name});renderAttachChips();}"
-        "catch(x){s.textContent='Attach \\''+file.name+'\\' failed: '+x.message;}}"
+        "catch(x){showSystemError('Attach \\''+file.name+'\\' failed: '+x.message);}}"
         "function renderAttachChips(){const box=q('#attachChips');if(!box)return;"
         "box.replaceChildren();"
         "attachedFiles.forEach((f,i)=>{const chip=document.createElement('span');"
@@ -997,6 +1178,12 @@ std::string application_script() {
         "s.textContent='Choose a project and a downloaded model first.';return;}"
         "const created=await api('/api/v1/chats','POST',{projectId,modelId});"
         "chatId=created.id;openedProjectId=projectId;"
+        // Render the new chat into the sidebar immediately from the
+        // create response itself, instead of waiting on load()'s full
+        // GET /api/v1/chats round trip below to be the only thing that
+        // ever shows it -- a caller that navigates away, or where that
+        // refetch is ever skipped, still leaves the new chat visible.
+        "renderChatList([{id:chatId,title:'New chat'},...lastChats]);"
         // Sync the hidden chat-id field before reloading so load() takes the
         // openChat() branch (hides the empty-state greeting, clears/repopulates
         // #chatMessages, disables the now-fixed project/model pickers) instead
@@ -1005,13 +1192,28 @@ std::string application_script() {
         // appended below.
         "q('#messageChat').value=chatId;"
         "history.pushState(null,'','/app/chat/'+encodeURIComponent(chatId));"
-        "await load();}"
+        "await load();"
+        // The dropdown itself doesn't fire 'change' for the model a new
+        // chat was created with (only for a later switch, via
+        // changeChatModel() above), so nothing would otherwise say which
+        // model this chat is actually using -- confirm it here instead,
+        // reading the label back off the now-reloaded #chatModel picker.
+        "const chosen=q('#chatModel');"
+        "const chosenOpt=chosen?chosen.options[chosen.selectedIndex]:null;"
+        "appendModelCard(q('#chatMessages'),"
+        "'Using model '+(chosenOpt?chosenOpt.textContent:modelId));}"
         "q('#messageContent').value='';"
         "const attachmentIds=attachedFiles.map(x=>x.id);"
         "attachedFiles=[];renderAttachChips();"
         "appendMessage(box,'user',content);box.scrollTop=box.scrollHeight;"
         "generation=new AbortController();"
         "assistantEl=appendMessage(box,'assistant','');"
+        // Shown until the first token actually streams back -- reasoning
+        // models in particular can take a real amount of time to produce
+        // anything, and an empty bubble with no feedback reads as a hang.
+        "assistantEl.querySelector('.msgBody').innerHTML='<span class=\"chatThinking\">"
+        "<span class=\"chatThinkingSpinner\"></span>Thinking</span>';"
+        "box.scrollTop=box.scrollHeight;"
         "const r=await fetch('/api/v1/chats/'+encodeURIComponent(chatId)+'/messages',"
         "{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},"
         "body:JSON.stringify({content,attachmentIds}),signal:generation.signal});"
@@ -1024,7 +1226,9 @@ std::string application_script() {
         "if(line){const event=JSON.parse(line);"
         "if(event.type==='token'){assistantEl.dataset.raw="
         "(assistantEl.dataset.raw||'')+event.content;"
-        "assistantEl.innerHTML=renderMarkdown(assistantEl.dataset.raw);"
+        "const bodyEl=assistantEl.querySelector('.msgBody');"
+        "bodyEl.innerHTML=renderMarkdown(assistantEl.dataset.raw);"
+        "addCodeCopyButtons(bodyEl);"
         "box.scrollTop=box.scrollHeight;}"
         "if(event.type==='error')throw new Error(event.error,"
         "{cause:event.detail});}}}}"
@@ -1040,7 +1244,7 @@ std::string application_script() {
         "'The model failed to generate a reply. It may still be loading, "
         "downloading, or unable to run on this machine -- check Model "
         "inventory and try again.';"
-        "s.textContent=cancelled?'Cancelled.':'Action failed: '+x.message;"
+        "if(cancelled)s.textContent='Cancelled.';"
         // A cancelled turn already left whatever partial reply the user saw
         // in assistantEl (the server persists it too, see streamed_text in
         // send_chat_message) -- overwriting it here would erase text the
@@ -1050,10 +1254,17 @@ std::string application_script() {
         // (or as a new one, if the failure happened before any bubble
         // existed -- e.g. no project/model chosen yet) puts it where the
         // reply itself would have appeared.
-        "if(!cancelled){const msg='\\u26a0\\ufe0f '+x.message;"
-        "const el=assistantEl||appendMessage(box,'assistant','');"
-        "el.className='chatMsg chatMsg-assistant chatMsg-error';"
-        "el.dataset.raw=msg;el.innerHTML=renderMarkdown(msg);"
+        "if(!cancelled){const el=assistantEl||appendMessage(box,'assistant','');"
+        "el.className='chatMsg chatMsg-assistant chatMsg-error';el.replaceChildren();"
+        "const title=document.createElement('div');"
+        "title.className='chatMsg-errorTitle';title.textContent='SYSTEM ERROR!';"
+        "const body=document.createElement('div');body.textContent=x.message;"
+        // Same reusable clipboard helper the reply/code copy buttons use --
+        // dataset.raw is what addMessageCopyButton() would normally read,
+        // set here since this card replaces the bubble's usual rendered
+        // content instead of going through appendMessage()'s own path.
+        "el.dataset.raw=x.message;"
+        "el.append(title,body);addMessageCopyButton(el);"
         "box.scrollTop=box.scrollHeight;}}"
         "finally{generation=null;}}"
         // Fills the raw source fields from the Hugging Face helper inputs;
@@ -1086,27 +1297,56 @@ std::string application_script() {
         "q('#downloadRevision').value=revision;q('#downloadFilename').value=filename;"
         "q('#actionStatus').textContent='Filled the source URL from ModelScope fields. "
         "Still set model ID, RAM, SHA-256, and review the license before queueing.';}"
+        // Confirms which model a chat is using inline, in the transcript
+        // itself, rather than only in the easy-to-miss status line -- so
+        // it's obvious which replies came from which model. Shared by the
+        // very first model choice on a brand-new chat and by later
+        // switches (changeChatModel() below) so the confirmation always
+        // appears, not just on a subsequent change.
+        "function appendModelCard(box,text){if(!box)return;"
+        "const card=document.createElement('div');"
+        "card.className='chatMsg chatMsg-modelChange';card.textContent=text;"
+        "box.append(card);box.scrollTop=box.scrollHeight;}"
+        // Polls GET /api/v1/runner/status (see server.cpp) so the chat page
+        // can announce once, inline, the moment the backend actually
+        // finishes loading -- not just the initial 'Using model X' choice.
+        // warmPollBaselined swallows whatever warmState the very first poll
+        // finds (a model that was already warm from an earlier chat isn't a
+        // transition worth announcing); after that, lastAnnouncedWarmModelId
+        // is compared against the polled modelId, so the card fires exactly
+        // once per model becoming Ready and stays silent on every later poll
+        // for that same model -- it only fires again once the id actually
+        // changes (the model was switched away from and back, or a
+        // different chat's model finished loading), matching "warmed" being
+        // per-model state, not a one-time-ever flag.
+        "let warmPollBaselined=false,lastAnnouncedWarmModelId=null;"
+        "async function pollRunnerStatus(){try{const st=await api('/api/v1/runner/status');"
+        "if(!warmPollBaselined){warmPollBaselined=true;"
+        "if(st.warmState==='Ready')lastAnnouncedWarmModelId=st.modelId;return;}"
+        "if(st.warmState==='Ready'&&st.modelId&&"
+        "lastAnnouncedWarmModelId!==st.modelId){"
+        "lastAnnouncedWarmModelId=st.modelId;"
+        "const box=q('#chatMessages');if(!box)return;"
+        "const select=q('#chatModel');"
+        "const opt=select?[...select.options].find(o=>o.value===st.modelId):null;"
+        "appendModelCard(box,'Model warmed: '+(opt?opt.textContent:st.modelId)+"
+        "' is ready.');}}catch(x){}}"
         // Fires when the composer's model picker changes while a chat is
         // already open -- persists the new model against the chat so it's
         // still selected (and used) on the next message and after a reload.
         // A brand-new chat (no id yet) has nothing to persist against, so
-        // it's left alone; the chosen model just gets used when the chat is
-        // created on first send, as before.
+        // it's left alone; the chosen model just gets used (and confirmed
+        // via appendModelCard) when the chat is created on first send, see
+        // streamMessage().
         "async function changeChatModel(){const chatId=q('#messageChat').value;"
         "if(!chatId)return;const s=q('#actionStatus');const select=q('#chatModel');"
         "const modelId=select.value;"
         "try{await api('/api/v1/chats/'+encodeURIComponent(chatId)+'/model','POST',"
         "{modelId});"
-        // Confirms the switch inline, in the transcript itself, rather than
-        // only in the easy-to-miss status line -- so it's obvious which
-        // replies below this point came from the new model.
-        "const box=q('#chatMessages');"
-        "if(box){const opt=select.options[select.selectedIndex];"
-        "const card=document.createElement('div');"
-        "card.className='chatMsg chatMsg-modelChange';"
-        "card.textContent='Model switched to '+(opt?opt.textContent:modelId);"
-        "box.append(card);box.scrollTop=box.scrollHeight;}}"
-        "catch(x){s.textContent='Failed to switch model: '+x.message;}}"
+        "const opt=select.options[select.selectedIndex];"
+        "appendModelCard(q('#chatMessages'),"
+        "'Model switched to '+(opt?opt.textContent:modelId));}"
+        "catch(x){showSystemError('Failed to switch model: '+x.message);}}"
         "function toggleSourceFields(){const type=q('#downloadSourceType').value;"
         "q('#hfFields').hidden=type!=='huggingface';"
         "q('#githubFields').hidden=type!=='github';"
@@ -1117,6 +1357,16 @@ std::string application_script() {
         // Every section below is its own page, so only one of these blocks'
         // elements exists on any given load -- each is independently guarded.
         "if(q('#sidebar')){load();"
+        "setInterval(pollRunnerStatus,4000);"
+        // Sidebar section collapse state persists across the full-page
+        // navigations every sidebar click already does (see
+        // sidebar_section() in web_ui.cpp): each <details> only overrides
+        // its default-open state when localStorage actually has a saved
+        // value, and a 'toggle' listener keeps that value current.
+        "document.querySelectorAll('.sidebarSection[data-key]').forEach(d=>{"
+        "const k='sidebarSection:'+d.dataset.key;const saved=localStorage.getItem(k);"
+        "if(saved!==null)d.open=saved==='1';"
+        "d.addEventListener('toggle',()=>localStorage.setItem(k,d.open?'1':'0'));});"
         "if(q('#newProject'))q('#newProject').addEventListener('submit',e=>submit(e,'/api/v1/projects',"
         "()=>({id:q('#projectId').value,displayName:q('#projectName').value})));"
         "if(q('#attachToggle'))q('#attachToggle').addEventListener('click',()=>{"
@@ -1176,7 +1426,12 @@ std::string application_script() {
         "subjectArea:q('#mlDatasetSubjectArea').value,"
         "source:q('#mlDatasetSource').value,"
         "license:q('#mlDatasetLicense').value,"
-        "dataFormat:q('#mlDatasetFormat').value})));}});";
+        "dataFormat:q('#mlDatasetFormat').value})));"
+        "if(q('#newMlSubject'))q('#newMlSubject').addEventListener('submit',"
+        "e=>submit(e,'/api/v1/ml/subjects',()=>({name:q('#mlSubjectName').value,"
+        "description:q('#mlSubjectDescription').value,"
+        "scope:q('#mlSubjectScope').value,"
+        "targetAudience:q('#mlSubjectTargetAudience').value})));}});";
 }
 
 // Presents the native OS account sign-in form without embedding credentials.
@@ -1221,6 +1476,22 @@ std::string nav_link(const std::string& href, const std::string& label,
                      bool active) {
     return "<a class=\"navButton" + std::string(active ? " active" : "") +
            "\" href=\"" + href + "\">" + label + "</a>";
+}
+
+// Wraps one titled group of sidebar links (Workspace, Settings, Machine
+// Learning, Admin, ...) in a collapsible <details> instead of a plain <h3>,
+// so a caller with many reachable sections can shrink the sidebar down to
+// just the section titles that matter to them. `key` is a short stable
+// identifier persisted client-side (see the sidebar-collapse script in
+// application_page) so the collapsed/expanded state survives the full-page
+// navigation every sidebar click already does -- <details> alone resets to
+// `open` on every fresh page load otherwise. Defaults to expanded so
+// nothing already reachable becomes newly hidden by this change.
+std::string sidebar_section(const std::string& key, const std::string& title,
+                            const std::string& body) {
+    return "<details open class=\"sidebarSection\" data-key=\"" + key +
+          "\"><summary>" + title + "</summary><div>" + body +
+          "</div></details>";
 }
 
 // Presents one section (chat, projects, models/*, admin/*) of the workspace
@@ -1507,6 +1778,29 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<h2>Registered datasets</h2>"
             "<div id=\"mlDatasetsList\">Loading...</div>"
             "</div></section>";
+    } else if (section == "ml-subjects") {
+        // Phase 40 (docs/PLAN.md "Machine Learning Abilities" section 12):
+        // register and list subject packages, and move them through review.
+        // Only the identity/scope/ownership/review-status fields
+        // SubjectPackageStore actually persists are collected here -- see
+        // that class's comment in masterai.hpp for the fields deferred to
+        // the later Knowledge Ingestion Pipeline phase.
+        body =
+            "<section id=\"panel-ml-subjects\" class=\"panel\"><div>"
+            "<h2>New subject package</h2>"
+            "<form id=\"newMlSubject\"><label>Name"
+            "<input id=\"mlSubjectName\" required maxlength=\"160\"></label>"
+            "<label>Description<textarea id=\"mlSubjectDescription\" "
+            "rows=\"2\"></textarea></label>"
+            "<label>Scope<textarea id=\"mlSubjectScope\" rows=\"2\" "
+            "placeholder=\"what this subject does and does not cover\">"
+            "</textarea></label>"
+            "<label>Target audience<input id=\"mlSubjectTargetAudience\"></label>"
+            "<button>Create subject package</button></form>"
+            "</div><div>"
+            "<h2>Subject packages</h2>"
+            "<div id=\"mlSubjectsList\">Loading...</div>"
+            "</div></section>";
     } else if (section == "admin-create") {
         body =
             "<section id=\"panel-admin-create\" class=\"panel\">"
@@ -1533,39 +1827,47 @@ std::string application_page(const UserRecord& user, const std::string& section,
 
     std::string sidebar_links =
         nav_link("/app", "+ New chat", section == "chat" && chat_id.empty()) +
-        "<h3>Chats</h3><div id=\"chatList\"></div>"
-        // Older conversations (anything past the most recent 20) render
-        // here instead, so the primary list above stays a fixed, scannable
-        // size. Hidden by default; renderChatList() reveals it once there
-        // is anything to show.
-        "<details id=\"chatHistorySection\" hidden><summary>History</summary>"
-        "<div id=\"chatHistoryList\"></div></details>";
+        sidebar_section(
+            "chats", "Chats",
+            "<div id=\"chatList\"></div>"
+            // Older conversations (anything past the most recent 20) render
+            // here instead, so the primary list above stays a fixed,
+            // scannable size. Hidden by default; renderChatList() reveals
+            // it once there is anything to show.
+            "<details id=\"chatHistorySection\" hidden><summary>History</summary>"
+            "<div id=\"chatHistoryList\"></div></details>");
     if (can_manage_settings) {
-        sidebar_links += "<h3>Workspace</h3>" +
-                         nav_link("/app/projects", "Projects", section == "projects") +
-                         "<h3>Settings</h3>" +
-                         nav_link("/app/models/inventory", "Model inventory",
-                                  section == "models-inventory") +
-                         nav_link("/app/models/download", "Download a model",
-                                  section == "models-download") +
-                         nav_link("/app/models/benchmarks", "Benchmarks",
-                                  section == "models-benchmarks");
+        sidebar_links +=
+            sidebar_section("workspace", "Workspace",
+                            nav_link("/app/projects", "Projects",
+                                     section == "projects")) +
+            sidebar_section(
+                "settings", "Settings",
+                nav_link("/app/models/inventory", "Model inventory",
+                         section == "models-inventory") +
+                    nav_link("/app/models/download", "Download a model",
+                             section == "models-download") +
+                    nav_link("/app/models/benchmarks", "Benchmarks",
+                             section == "models-benchmarks"));
     }
     if (is_administrator) {
-        sidebar_links += "<h3>Machine Learning</h3>" +
-                         nav_link("/app/ml", "Dashboard",
-                                  section == "ml-dashboard") +
-                         nav_link("/app/ml/projects", "Projects",
-                                  section == "ml-projects") +
-                         nav_link("/app/ml/models", "Model Registry",
-                                  section == "ml-models") +
-                         nav_link("/app/ml/datasets", "Dataset Manager",
-                                  section == "ml-datasets") +
-                         "<h3>Admin</h3>" +
-                         nav_link("/app/admin/create", "Create user",
-                                  section == "admin-create") +
-                         nav_link("/app/admin/users", "User list",
-                                  section == "admin-users");
+        sidebar_links +=
+            sidebar_section(
+                "ml", "Machine Learning",
+                nav_link("/app/ml", "Dashboard", section == "ml-dashboard") +
+                    nav_link("/app/ml/projects", "Projects",
+                             section == "ml-projects") +
+                    nav_link("/app/ml/models", "Model Registry",
+                             section == "ml-models") +
+                    nav_link("/app/ml/datasets", "Dataset Manager",
+                             section == "ml-datasets") +
+                    nav_link("/app/ml/subjects", "Subject Knowledge Manager",
+                             section == "ml-subjects")) +
+            sidebar_section("admin", "Admin",
+                            nav_link("/app/admin/create", "Create user",
+                                     section == "admin-create") +
+                                nav_link("/app/admin/users", "User list",
+                                         section == "admin-users"));
     }
 
     return html_response(
@@ -1586,6 +1888,16 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "display:flex;flex-direction:column;gap:.5rem;overflow-y:auto}"
         "#sidebar h1{font-size:1.3rem}"
         "#sidebar h3{margin-top:1rem}"
+        // Collapsible sidebar section groups (Chats/Workspace/Settings/
+        // Machine Learning/Admin) replace the old plain <h3> group
+        // headings -- the marker plus summary text takes the same visual
+        // role the h3 used to, but a click now shrinks the whole group away
+        // instead of just being a label.
+        ".sidebarSection{margin-top:1rem}"
+        ".sidebarSection summary{font-weight:600;cursor:pointer;"
+        "list-style-position:outside;padding:.15rem 0;user-select:none}"
+        ".sidebarSection summary:hover{color:var(--text)}"
+        ".sidebarSection>div{margin-top:.15rem}"
         "#content{flex:1;padding:1.5rem;overflow-y:auto;max-width:1200px;"
         "display:flex;flex-direction:column;min-height:0}"
         "#actionStatus{margin-bottom:1rem;flex:none}"
@@ -1640,15 +1952,29 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "#chatMessages{flex:1;overflow-y:auto;padding:.25rem 0;"
         "display:flex;flex-direction:column;gap:.35rem}"
         "#chatMessages:empty{flex:0}"
-        ".chatMsg{max-width:80%;margin:0;padding:.45rem .8rem;line-height:1.45;"
-        "border-radius:.9rem;overflow-wrap:anywhere}"
+        ".chatMsg{position:relative;max-width:80%;margin:0;padding:.45rem .8rem;"
+        "line-height:1.45;border-radius:.9rem;overflow-wrap:anywhere}"
+        // Copy button sits in the bubble's own corner and stays out of the
+        // way until hovered/focused -- matches the rest of the chat UI
+        // staying uncluttered while every message and code block still
+        // gets one.
+        ".msgCopyBtn{position:absolute;top:.35rem;right:.5rem;margin:0;"
+        "width:auto;padding:.15rem .5rem;font-size:.7rem;font-weight:600;"
+        "border-radius:.4rem;border:1px solid var(--panel-border);"
+        "background:rgba(0,0,0,.25);color:inherit;opacity:0;"
+        "transition:opacity .15s}"
+        ".chatMsg:hover>.msgCopyBtn,.msgCopyBtn:focus{opacity:1}"
+        ".chatMsg-user>.msgCopyBtn{background:rgba(0,0,0,.2);color:#fff}"
         ".chatMsg-user{margin-left:auto;background:var(--accent);color:#fff}"
         ".chatMsg-assistant{margin-right:auto;background:var(--panel);"
         "border:1px solid var(--panel-border);color:#8fe6c9}"
+        ".chatMsg-responseTitle{font-weight:800;letter-spacing:.03em;"
+        "margin-bottom:.25rem;opacity:.85}"
         ".chatMsg-system{margin:0 auto;color:var(--muted);font-style:italic;"
         "background:none;white-space:pre-wrap}"
-        ".chatMsg-error{background:rgba(220,53,69,.12);"
-        "border:1px solid rgba(220,53,69,.5);color:#e5657a}"
+        ".chatMsg-error{background:#3a0a0a;border:1px solid #ffd54a;color:#ffd54a}"
+        ".chatMsg-errorTitle{font-weight:800;letter-spacing:.03em;"
+        "margin-bottom:.25rem}"
         ".chatMsg-modelChange{margin:0 auto;background:rgba(40,167,69,.12);"
         "border:1px solid rgba(40,167,69,.5);color:#4ade80;font-size:.82rem;"
         "text-align:center}"
@@ -1669,7 +1995,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // clipped. overscroll-behavior stops the scroll from chaining into
         // the outer #chatMessages once the block's own scroll hits its end,
         // which otherwise makes it feel like the block itself won't scroll.
-        ".chatMsg pre{margin:0 0 .5rem;background:#0e0e11;"
+        ".chatMsg pre{position:relative;margin:0 0 .5rem;background:#0e0e11;"
         "border:1px solid var(--panel-border);border-radius:.5rem;"
         "padding:.6rem .75rem;overflow-x:auto;overflow-y:auto;max-height:24rem;"
         "overscroll-behavior:contain;scrollbar-width:thin}"
@@ -1678,6 +2004,39 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "border-radius:.5rem}"
         ".chatMsg pre code{background:none;padding:0;color:#c8c8d4;"
         "white-space:pre}"
+        // Same corner-button treatment as .msgCopyBtn, but scoped to the
+        // individual code block so a snippet can be copied without the
+        // surrounding reply -- visible on hovering the block itself,
+        // independent of whether the whole bubble is hovered.
+        ".codeCopyBtn{position:absolute;top:.4rem;right:.5rem;margin:0;"
+        "width:auto;padding:.15rem .5rem;font-size:.7rem;font-weight:600;"
+        "border-radius:.4rem;border:1px solid var(--panel-border);"
+        "background:rgba(255,255,255,.08);color:#c8c8d4;opacity:0;"
+        "transition:opacity .15s}"
+        ".chatMsg pre:hover>.codeCopyBtn,.codeCopyBtn:focus{opacity:1}"
+        // Best-effort inline/block math (see renderMathExpr()): a plain
+        // serif-leaning span for inline expressions, a centered block for
+        // \\[...\\] with a little breathing room above/below.
+        ".math{font-family:'Cambria Math',ui-serif,Georgia,serif}"
+        ".mathBlock{font-family:'Cambria Math',ui-serif,Georgia,serif;"
+        "text-align:center;margin:.5rem 0;padding:.3rem 0}"
+        // A hand-rolled fraction: numerator over denominator with a rule
+        // between them, since there is no TeX engine here to lay one out.
+        ".frac{display:inline-flex;flex-direction:column;vertical-align:middle;"
+        "text-align:center;margin:0 .15em;line-height:1.1}"
+        ".fracNum,.fracDen{display:block;padding:0 .2em}"
+        ".fracNum{border-bottom:1px solid currentColor}"
+        // The "Thinking..." placeholder shown in the assistant bubble from
+        // the moment a message is sent until the first token streams back
+        // (see streamMessage()) -- a spinner plus label instead of an
+        // empty-looking bubble, since reasoning-heavy models can take a
+        // real amount of time before their first visible token.
+        ".chatThinking{display:inline-flex;align-items:center;gap:.5rem;"
+        "color:var(--muted)}"
+        ".chatThinkingSpinner{width:.9rem;height:.9rem;flex:none;"
+        "border-radius:50%;border:2px solid currentColor;"
+        "border-top-color:transparent;animation:chatThinkingSpin .7s linear infinite}"
+        "@keyframes chatThinkingSpin{to{transform:rotate(360deg)}}"
         // The composer: a single rounded pill carrying the attach toggle,
         // the message box, the model picker, and send/cancel -- no separate
         // "start chat" form above it.

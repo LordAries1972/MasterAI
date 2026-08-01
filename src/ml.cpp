@@ -1,9 +1,9 @@
 // Machine Learning foundation phase: administrator-only scaffolding for
 // docs/PLAN.md's "Machine Learning Abilities" section. Dashboard, Projects,
-// Model Registry, and Dataset Manager are real; the remaining 21 planned
-// interfaces (Model Builder, Training Jobs, ...) are listed so an
-// administrator can see the roadmap, but none of them have a backing
-// service yet -- see MachineLearningRegistry's class comment in
+// Model Registry, Dataset Manager, and Subject Knowledge Manager are real;
+// the remaining 20 planned interfaces (Model Builder, Training Jobs, ...)
+// are listed so an administrator can see the roadmap, but none of them have
+// a backing service yet -- see MachineLearningRegistry's class comment in
 // masterai.hpp for why this stays honest rather than fabricating data.
 #include "masterai.hpp"
 
@@ -100,7 +100,7 @@ MachineLearningRegistry::MachineLearningRegistry() {
         {"model-registry", "Model Registry", "available"},
         {"model-builder", "Model Builder", "planned"},
         {"dataset-manager", "Dataset Manager", "available"},
-        {"subject-knowledge", "Subject Knowledge Manager", "planned"},
+        {"subject-knowledge", "Subject Knowledge Manager", "available"},
         {"data-labeling", "Data Labeling", "planned"},
         {"data-preparation", "Data Preparation", "planned"},
         {"training-jobs", "Training Jobs", "planned"},
@@ -650,6 +650,143 @@ std::string datasets_json(const std::vector<Dataset>& datasets) {
         if (!first) body += ",";
         first = false;
         body += dataset_json(dataset);
+    }
+    return body + "]";
+}
+
+std::string subject_review_status_name(const SubjectReviewStatus status) {
+    switch (status) {
+        case SubjectReviewStatus::draft: return "draft";
+        case SubjectReviewStatus::in_review: return "in_review";
+        case SubjectReviewStatus::approved: return "approved";
+        case SubjectReviewStatus::needs_revision: return "needs_revision";
+        case SubjectReviewStatus::retired: return "retired";
+    }
+    throw std::runtime_error("invalid subject review status");
+}
+
+SubjectReviewStatus parse_subject_review_status(const std::string& status) {
+    if (status == "draft") return SubjectReviewStatus::draft;
+    if (status == "in_review") return SubjectReviewStatus::in_review;
+    if (status == "approved") return SubjectReviewStatus::approved;
+    if (status == "needs_revision") return SubjectReviewStatus::needs_revision;
+    if (status == "retired") return SubjectReviewStatus::retired;
+    throw std::runtime_error("stored subject review status is invalid");
+}
+
+SubjectPackageStore::SubjectPackageStore(RecordStore& records)
+    : records_(&records) {
+    restore();
+}
+
+void SubjectPackageStore::restore() {
+    for (const auto& item : records_->list("ml_subject_packages")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 6U) {
+            throw std::runtime_error(
+                "persisted subject package record field count is wrong");
+        }
+        SubjectPackage package;
+        package.id = item.first;
+        package.name = fields[0];
+        package.description = fields[1];
+        package.scope = fields[2];
+        package.target_audience = fields[3];
+        package.owner_id = fields[4];
+        package.review_status = parse_subject_review_status(fields[5]);
+        packages_[package.id] = package;
+    }
+}
+
+void SubjectPackageStore::persist(const SubjectPackage& package) {
+    records_->put(
+        "ml_subject_packages", package.id,
+        pack({package.name, package.description, package.scope,
+             package.target_audience, package.owner_id,
+             subject_review_status_name(package.review_status)}));
+}
+
+SubjectPackage SubjectPackageStore::create(const std::string& owner_id,
+                                           const std::string& name,
+                                           const std::string& description,
+                                           const std::string& scope,
+                                           const std::string& target_audience) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("subject package name is invalid");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    SubjectPackage package;
+    package.id = random_id();
+    package.name = name;
+    package.description = description;
+    package.scope = scope;
+    package.target_audience = target_audience;
+    package.owner_id = owner_id;
+    package.review_status = SubjectReviewStatus::draft;
+    package.created_at_epoch_seconds = epoch_seconds();
+    package.updated_at_epoch_seconds = package.created_at_epoch_seconds;
+    packages_[package.id] = package;
+    if (records_) persist(package);
+    return package;
+}
+
+std::optional<SubjectPackage> SubjectPackageStore::find(
+    const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = packages_.find(id);
+    return found != packages_.end() ? std::optional<SubjectPackage>(found->second)
+                                    : std::nullopt;
+}
+
+std::vector<SubjectPackage> SubjectPackageStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<SubjectPackage> result;
+    result.reserve(packages_.size());
+    for (const auto& item : packages_) result.push_back(item.second);
+    return result;
+}
+
+bool SubjectPackageStore::set_review_status(const std::string& id,
+                                            const SubjectReviewStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = packages_.find(id);
+    if (found == packages_.end()) return false;
+    found->second.review_status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool SubjectPackageStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = packages_.find(id);
+    if (found == packages_.end()) return false;
+    packages_.erase(found);
+    if (records_) records_->erase("ml_subject_packages", id);
+    return true;
+}
+
+std::string subject_package_json(const SubjectPackage& package) {
+    return "{\"id\":\"" + json_escape(package.id) + "\",\"name\":\"" +
+           json_escape(package.name) + "\",\"description\":\"" +
+           json_escape(package.description) + "\",\"scope\":\"" +
+           json_escape(package.scope) + "\",\"targetAudience\":\"" +
+           json_escape(package.target_audience) + "\",\"ownerId\":\"" +
+           json_escape(package.owner_id) + "\",\"reviewStatus\":\"" +
+           subject_review_status_name(package.review_status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(package.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(package.updated_at_epoch_seconds) + "}";
+}
+
+std::string subject_packages_json(const std::vector<SubjectPackage>& packages) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& package : packages) {
+        if (!first) body += ",";
+        first = false;
+        body += subject_package_json(package);
     }
     return body + "]";
 }

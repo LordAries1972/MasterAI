@@ -171,6 +171,33 @@ ModelLoadMode select_load_mode(const StorageLatencyProfile& storage,
     return ModelLoadMode::mapped;
 }
 
+// See the declaration in masterai.hpp for the full rationale. Fraction of
+// detected VRAM actually offered to a model's weights: the remainder is
+// deliberately left unallocated as headroom for the backend's own CUDA/HIP/
+// Vulkan context overhead plus any KV-cache/activation memory the runner
+// will also need on the GPU during generation, neither of which this
+// function has evidence about at load-selection time.
+constexpr double kUsableVramFraction = 0.7;
+
+unsigned int select_gpu_layers(const HardwareInfo& hardware,
+                               const std::string& required_gpu_backend,
+                               const std::uint64_t model_size_bytes) noexcept {
+    if (model_size_bytes == 0U) return 0U;
+    if (hardware.gpu_backends.empty()) return 0U;
+    if (!required_gpu_backend.empty() &&
+        std::find(hardware.gpu_backends.begin(), hardware.gpu_backends.end(),
+                  required_gpu_backend) == hardware.gpu_backends.end()) {
+        return 0U;
+    }
+    if (hardware.gpu_memory_mib == 0U) return 0U;
+
+    const auto usable_vram_bytes = static_cast<std::uint64_t>(
+        static_cast<double>(hardware.gpu_memory_mib) * 1024.0 * 1024.0 *
+        kUsableVramFraction);
+    if (model_size_bytes > usable_vram_bytes) return 0U;
+    return kGpuLayersOffloadAll;
+}
+
 TuningProfile safe_default_profile(const std::string& profile_name) {
     static const std::set<std::string> known{"auto", "minimal", "balanced",
                                              "performance"};
@@ -382,7 +409,8 @@ std::string CalibrationService::host_hash() const {
 TuningProfile CalibrationService::resolve(
     const std::string& model_sha256, const std::string& requested_profile,
     const StorageLatencyProfile* storage, const std::uint64_t available_ram_bytes,
-    const std::uint64_t model_size_bytes) const {
+    const std::uint64_t model_size_bytes,
+    const std::string& required_gpu_backend) const {
     if (const auto found =
             store_.find(host_hash(), model_sha256, backend_hash_, build_id_)) {
         // A persisted profile already reflects a real measurement -- evidence
@@ -391,6 +419,8 @@ TuningProfile CalibrationService::resolve(
         return *found;
     }
     TuningProfile profile = safe_default_profile(requested_profile);
+    profile.recommended_gpu_layers =
+        select_gpu_layers(hardware_, required_gpu_backend, model_size_bytes);
     if (storage != nullptr) {
         profile.recommended_load_mode =
             select_load_mode(*storage, available_ram_bytes, model_size_bytes);
@@ -431,6 +461,9 @@ TuningProfile CalibrationService::calibrate(
     profile.model_sha256 = model.manifest.model_sha256;
     profile.backend_hash = backend_hash_;
     profile.build_id = build_id_;
+    profile.recommended_gpu_layers =
+        select_gpu_layers(hardware_, model.manifest.required_gpu_backend,
+                          model.manifest.model_size_bytes);
     const auto tuning = launch_tuning_from_profile(profile);
 
     std::atomic_bool sampling{true};

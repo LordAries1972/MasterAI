@@ -371,6 +371,26 @@ DownloadJob DownloadManager::run(const std::string& id,
         }
         if (final_state == DownloadState::complete) {
             std::filesystem::rename(partial, destination);
+            // The rename above lands the file at
+            // models_root/category/model_id/filename (see create_download,
+            // workload_http.cpp, for the one place that layout is defined);
+            // walking up from it here avoids DownloadManager needing to
+            // know models_root as a separate constructor argument. Recorded
+            // with the hash `actual` already computed just above -- this is
+            // the same file, so re-hashing it again via a later
+            // `masterai verify-models` run would just reconfirm what
+            // integrity verification already just proved. Best-effort: a
+            // failure here (e.g. the models root layout not matching, an
+            // unwritable cache file) only means this model shows as
+            // unverified until the next explicit verify run, never fails
+            // the download that already succeeded.
+            try {
+                record_verified_model(
+                    destination.parent_path().parent_path().parent_path(),
+                    destination.parent_path().filename().string(), actual,
+                    std::filesystem::file_size(destination));
+            } catch (const std::exception&) {
+            }
         } else {
             const auto quarantine =
                 std::filesystem::path(partial.string() + ".quarantine." + id);

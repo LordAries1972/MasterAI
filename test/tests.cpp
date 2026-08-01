@@ -1846,6 +1846,110 @@ void test_phase_seventeen_security_partitioned_cache() {
     }
 }
 
+// Phase 22: hierarchical categories, segmented (probationary/protected/
+// pinned) eviction, and negative caching layered on Phase 17's CacheManager.
+void test_phase_twentytwo_hierarchical_cache() {
+    TemporaryDirectory temporary;
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware,
+        512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+
+    masterai::CacheKey base_key;
+    base_key.user_id = "user-a";
+    base_key.project_id = "project-a";
+    base_key.version_tag = "v1";
+    base_key.index_generation = 1U;
+
+    // A pinned entry survives a capacity-driven flood that would otherwise
+    // evict it, and returns to normal eviction eligibility once unpinned.
+    {
+        masterai::CachePolicy small_policy;
+        small_policy.maximum_bytes_per_category = 300U;
+        masterai::CacheManager cache(temporary.path() / "pin-cache", memory,
+                                     small_policy);
+        auto pinned_key = base_key;
+        pinned_key.canonical_identity = "pin-fixture";
+        cache.put(masterai::CacheCategory::source_chunk, pinned_key,
+                 std::string(100U, 'p'));
+        cache.pin(masterai::CacheCategory::source_chunk, pinned_key);
+        for (unsigned int index = 0U; index < 6U; ++index) {
+            auto flood_key = base_key;
+            flood_key.canonical_identity = "flood-" + std::to_string(index);
+            cache.put(masterai::CacheCategory::source_chunk, flood_key,
+                     std::string(100U, 'f'));
+        }
+        require(cache.get(masterai::CacheCategory::source_chunk, pinned_key)
+                    .has_value(),
+                "a pinned entry was evicted by a capacity-driven flood");
+        cache.unpin(masterai::CacheCategory::source_chunk, pinned_key);
+        const auto status_after_unpin = cache.status();
+        const auto found = status_after_unpin.categories.find(
+            masterai::CacheCategory::source_chunk);
+        require(found != status_after_unpin.categories.end() &&
+                    found->second.pinned_entries == 0U,
+                "unpin() did not remove the entry from the pinned tier");
+    }
+
+    // Segmented eviction: an entry accessed twice is promoted to the
+    // protected tier and survives a subsequent flood of never-reused
+    // probationary entries that would otherwise fill the category.
+    {
+        masterai::CachePolicy small_policy;
+        small_policy.maximum_bytes_per_category = 500U;
+        masterai::CacheManager cache(temporary.path() / "protect-cache",
+                                     memory, small_policy);
+        auto hot_key = base_key;
+        hot_key.canonical_identity = "hot-fixture";
+        cache.put(masterai::CacheCategory::symbol, hot_key,
+                 std::string(100U, 'h'));
+        require(cache.get(masterai::CacheCategory::symbol, hot_key)
+                    .has_value(),
+                "setup lost the hot entry before it could be promoted");
+        const auto status_after_promotion = cache.status();
+        const auto promoted = status_after_promotion.categories.find(
+            masterai::CacheCategory::symbol);
+        require(promoted != status_after_promotion.categories.end() &&
+                    promoted->second.protected_entries == 1U,
+                "a twice-accessed entry was not promoted to the protected tier");
+        for (unsigned int index = 0U; index < 8U; ++index) {
+            auto flood_key = base_key;
+            flood_key.canonical_identity = "scan-" + std::to_string(index);
+            cache.put(masterai::CacheCategory::symbol, flood_key,
+                     std::string(100U, 's'));
+        }
+        require(cache.get(masterai::CacheCategory::symbol, hot_key).has_value(),
+                "a one-time scan evicted the protected working set");
+    }
+
+    // Negative caching: a marker records "known absent" until it expires,
+    // and never masks a normal positive entry written for the same key.
+    {
+        masterai::CacheManager cache(temporary.path() / "negative-cache",
+                                     memory, masterai::CachePolicy{});
+        auto miss_key = base_key;
+        miss_key.canonical_identity = "negative-fixture";
+        require(!cache.is_negative(masterai::CacheCategory::mcp_resource,
+                                   miss_key),
+                "a key with nothing ever recorded reported as negatively cached");
+        cache.put_negative(masterai::CacheCategory::mcp_resource, miss_key,
+                           std::chrono::seconds(3600));
+        require(cache.is_negative(masterai::CacheCategory::mcp_resource,
+                                  miss_key),
+                "put_negative() did not make is_negative() report true");
+        require(!cache.get(masterai::CacheCategory::mcp_resource, miss_key)
+                     .has_value(),
+                "a negative marker was served through get() as a positive hit");
+        cache.put_negative(masterai::CacheCategory::mcp_resource, miss_key,
+                           std::chrono::seconds(0));
+        require(!cache.is_negative(masterai::CacheCategory::mcp_resource,
+                                   miss_key),
+                "an expired negative marker was still reported as negative");
+    }
+}
+
 // Phase 18: PromptSessionManager is process-lifetime, in-memory state with
 // no disk/network dependency, so it is exercised directly rather than
 // through a full HttpServer/fake-runner round trip -- the compatibility and
@@ -2541,6 +2645,383 @@ void test_phase_thirty_streaming_escape_moves_into_shared_buffer_without_copy() 
     require(view.to_string() == masterai::server_internal::json_escape(chunk),
             "BufferView materialized from the moved SharedBuffer did not "
             "match json_escape()'s output byte-for-byte");
+}
+
+// Phase 25: weighted-fair priority scheduling and backpressure.
+void test_phase_twentyfive_scheduler_weighted_fairness_and_backpressure() {
+    // Cancellation/shutdown work always preempts weighted selection.
+    {
+        masterai::RequestScheduler scheduler;
+        const auto chat = scheduler.admit(masterai::SchedulingClass::interactive_chat);
+        const auto cancel =
+            scheduler.admit(masterai::SchedulingClass::cancellation_shutdown);
+        require(chat.admitted && cancel.admitted,
+                "scheduler refused ordinary admission under no pressure");
+        const auto next = scheduler.next_ready();
+        require(next.has_value() &&
+                    next->klass == masterai::SchedulingClass::cancellation_shutdown,
+                "cancellation_shutdown work was not selected ahead of "
+                "interactive_chat");
+    }
+
+    // Per-class queue-depth backpressure: exceeding a class's own bound is
+    // refused without touching any other class.
+    {
+        std::map<masterai::SchedulingClass, masterai::SchedulingClassPolicy>
+            policies = masterai::default_scheduling_policies();
+        policies[masterai::SchedulingClass::maintenance].max_queue_depth = 2U;
+        masterai::RequestScheduler scheduler(policies);
+        require(scheduler.admit(masterai::SchedulingClass::maintenance).admitted,
+                "first maintenance admission was unexpectedly refused");
+        require(scheduler.admit(masterai::SchedulingClass::maintenance).admitted,
+                "second maintenance admission was unexpectedly refused");
+        const auto third = scheduler.admit(masterai::SchedulingClass::maintenance);
+        require(!third.admitted,
+                "maintenance admission exceeded its configured queue depth");
+    }
+
+    // Global backpressure rejects/evicts low-priority background work
+    // first, never a higher-or-equal-priority class's queued work.
+    {
+        masterai::RequestScheduler scheduler(masterai::default_scheduling_policies(),
+                                             1U);
+        const auto background =
+            scheduler.admit(masterai::SchedulingClass::maintenance);
+        require(background.admitted, "seed maintenance admission failed");
+        const auto interactive =
+            scheduler.admit(masterai::SchedulingClass::interactive_chat, 0U);
+        require(interactive.admitted,
+                "interactive_chat request was refused instead of preempting "
+                "lower-priority queued maintenance work");
+        require(interactive.preempted.has_value() &&
+                    interactive.preempted->klass ==
+                        masterai::SchedulingClass::maintenance,
+                "global backpressure did not evict the lower-priority queued "
+                "maintenance ticket to make room");
+        const auto status = scheduler.status();
+        const auto maintenance_status =
+            status.find(masterai::SchedulingClass::maintenance);
+        require(maintenance_status != status.end() &&
+                    maintenance_status->second.queued == 0U,
+                "preempted maintenance ticket was still reported as queued");
+    }
+
+    // A higher-weight class is dequeued more often than a lower-weight one
+    // under sustained contention (weighted fairness, not strict priority
+    // starvation of the lighter class).
+    {
+        std::map<masterai::SchedulingClass, masterai::SchedulingClassPolicy>
+            policies = masterai::default_scheduling_policies();
+        policies[masterai::SchedulingClass::interactive_chat] = {
+            8U, 128U, std::chrono::minutes(5), 128U, 0U};
+        policies[masterai::SchedulingClass::maintenance] = {
+            1U, 128U, std::chrono::minutes(5), 128U, 0U};
+        masterai::RequestScheduler scheduler(policies);
+        for (unsigned int i = 0U; i < 40U; ++i) {
+            scheduler.admit(masterai::SchedulingClass::interactive_chat);
+            scheduler.admit(masterai::SchedulingClass::maintenance);
+        }
+        unsigned int chat_selected = 0U;
+        unsigned int maintenance_selected = 0U;
+        for (unsigned int i = 0U; i < 80U; ++i) {
+            const auto next = scheduler.next_ready();
+            require(next.has_value(), "scheduler ran dry before all work was drained");
+            if (next->klass == masterai::SchedulingClass::interactive_chat) {
+                ++chat_selected;
+            } else if (next->klass == masterai::SchedulingClass::maintenance) {
+                ++maintenance_selected;
+            }
+            scheduler.complete(*next);
+        }
+        require(chat_selected == 40U && maintenance_selected == 40U,
+                "weighted scheduler dropped work instead of eventually "
+                "draining every admitted ticket");
+        require(chat_selected > 0U && maintenance_selected > 0U,
+                "the lower-weight class was starved outright rather than "
+                "merely selected less often");
+    }
+
+    // Cancellation removes queued work immediately and it is never dequeued.
+    {
+        masterai::RequestScheduler scheduler;
+        const auto admission =
+            scheduler.admit(masterai::SchedulingClass::user_background_job);
+        require(admission.admitted && admission.ticket.has_value(),
+                "seed admission for the cancellation case failed");
+        require(scheduler.cancel(*admission.ticket),
+                "cancel() reported failure for a still-queued ticket");
+        require(!scheduler.cancel(*admission.ticket),
+                "cancel() succeeded twice for the same ticket");
+    }
+}
+
+// Phase 27: per-slot KV accounting, bounded growth, and deterministic
+// eviction order.
+void test_phase_twentyseven_kv_cache_accounting_and_eviction() {
+    TemporaryDirectory temporary;
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+
+    // Bounded growth steps: growth is rounded up to the step size and never
+    // exceeds the configured hard per-slot ceiling.
+    {
+        masterai::KvCacheManager kv(memory, /*hard_max=*/1024ULL * 1024ULL,
+                                    /*step=*/64ULL * 1024ULL);
+        masterai::KvSlotAccounting initial;
+        initial.slot_id = 1U;
+        initial.bytes_reserved = 10ULL * 1024ULL;
+        const auto reservation = kv.reserve(initial);
+        require(reservation.admitted && reservation.granted_bytes == 64ULL * 1024ULL,
+                "initial KV reservation was not rounded up to the growth step");
+
+        const auto grown = kv.grow(1U, 500ULL * 1024ULL);
+        require(grown.admitted && grown.granted_bytes % (64ULL * 1024ULL) == 0U,
+                "grow() did not stay aligned to the configured growth step");
+
+        const auto refused = kv.grow(1U, 10ULL * 1024ULL * 1024ULL);
+        require(!refused.admitted,
+                "grow() admitted a request that would exceed the hard "
+                "per-slot memory ceiling");
+        const auto after = kv.find(1U);
+        require(after.has_value() && after->bytes_reserved == grown.granted_bytes,
+                "a refused grow() call still mutated the slot's reservation");
+    }
+
+    // Deterministic eviction order: failed/cancelled slots are evicted
+    // before an idle private slot, which is evicted before a pinned slot
+    // (never touched).
+    {
+        masterai::KvCacheManager kv(memory, /*hard_max=*/1024ULL * 1024ULL,
+                                    /*step=*/4096ULL);
+        masterai::KvSlotAccounting pinned;
+        pinned.slot_id = 10U;
+        pinned.bytes_reserved = 4096U;
+        pinned.pinned = true;
+        pinned.state = masterai::KvSlotState::idle;
+        require(kv.reserve(pinned).admitted, "pinned slot seed reservation failed");
+
+        masterai::KvSlotAccounting idle_slot;
+        idle_slot.slot_id = 11U;
+        idle_slot.bytes_reserved = 4096U;
+        idle_slot.state = masterai::KvSlotState::idle;
+        idle_slot.reuse_count = 5U;
+        require(kv.reserve(idle_slot).admitted, "idle slot seed reservation failed");
+
+        masterai::KvSlotAccounting failed_slot;
+        failed_slot.slot_id = 12U;
+        failed_slot.bytes_reserved = 4096U;
+        failed_slot.state = masterai::KvSlotState::failed_cancelled;
+        require(kv.reserve(failed_slot).admitted,
+                "failed slot seed reservation failed");
+
+        const auto first_victim = kv.evict_one();
+        require(first_victim.has_value() && *first_victim == 12U,
+                "a failed/cancelled slot was not evicted before an idle slot");
+        kv.release(12U);
+
+        const auto second_victim = kv.evict_one();
+        require(second_victim.has_value() && *second_victim == 11U,
+                "an idle private slot was not evicted before a pinned slot");
+        kv.release(11U);
+
+        const auto third_victim = kv.evict_one();
+        require(!third_victim.has_value(),
+                "evict_one() selected a pinned slot instead of refusing "
+                "(safe rejection)");
+    }
+
+    // Reduced-precision KV never self-enables from recorded evidence.
+    {
+        masterai::KvCacheManager kv(memory, 1024ULL * 1024ULL, 4096ULL);
+        require(kv.precision_admitted(masterai::KvPrecision::full),
+                "full precision was unexpectedly refused");
+        require(!kv.precision_admitted(masterai::KvPrecision::half),
+                "half precision was admitted without backend validation");
+        masterai::KvPrecisionEvidence evidence;
+        evidence.precision = masterai::KvPrecision::half;
+        evidence.quality_parity_verified = true;
+        kv.record_precision_evidence(evidence);
+        require(!kv.precision_admitted(masterai::KvPrecision::half),
+                "recording evidence alone enabled a reduced-precision policy");
+    }
+}
+
+// Phase 28: hardware topology probing and thread-placement recommendation.
+void test_phase_twentyeight_topology_and_placement_recommendation() {
+    const auto topology = masterai::probe_hardware_topology();
+    require(topology.logical_core_count > 0U,
+            "topology probe reported zero logical cores");
+    require(topology.numa_node_count >= 1U,
+            "topology probe reported zero NUMA nodes");
+
+    // A synthetic single-node topology always falls back to normal OS
+    // scheduling regardless of policy.
+    masterai::HardwareTopology single_node;
+    single_node.multi_node = false;
+    single_node.numa_node_count = 1U;
+    masterai::TopologyAffinityPolicy enabled_policy;
+    enabled_policy.numa_local_placement_enabled = true;
+    enabled_policy.hybrid_core_policy_enabled = true;
+    const auto single_node_recommendation = masterai::recommend_thread_placement(
+        single_node, masterai::ThreadClass::inference_compute, enabled_policy, false);
+    require(!single_node_recommendation.preferred_numa_node.has_value(),
+            "a single-node host was given a NUMA placement recommendation");
+
+    // A synthetic multi-node, hybrid-core topology: latency-sensitive
+    // classes stay on performance cores; background classes prefer
+    // efficiency cores once hybrid policy is enabled.
+    masterai::HardwareTopology multi_node;
+    multi_node.multi_node = true;
+    multi_node.numa_node_count = 2U;
+    multi_node.hybrid_cores = true;
+    multi_node.performance_core_count = 4U;
+    multi_node.efficiency_core_count = 4U;
+
+    const auto interactive_recommendation = masterai::recommend_thread_placement(
+        multi_node, masterai::ThreadClass::inference_compute, enabled_policy, false);
+    require(interactive_recommendation.preferred_numa_node.has_value() &&
+                !interactive_recommendation.prefer_efficiency_core,
+            "a latency-sensitive class was moved off performance cores");
+
+    const auto background_recommendation = masterai::recommend_thread_placement(
+        multi_node, masterai::ThreadClass::indexing, enabled_policy, false);
+    require(background_recommendation.prefer_efficiency_core,
+            "a background class was not moved to efficiency cores under "
+            "hybrid policy");
+
+    masterai::TopologyAffinityPolicy disabled_policy;
+    const auto disabled_recommendation = masterai::recommend_thread_placement(
+        multi_node, masterai::ThreadClass::inference_compute, disabled_policy, false);
+    require(!disabled_recommendation.preferred_numa_node.has_value() &&
+                !disabled_recommendation.prefer_efficiency_core,
+            "topology affinity was applied even though policy disabled it");
+}
+
+// Phase 29: model tiering, routing, and cascade inference.
+void test_phase_twentynine_model_tiering_and_cascade() {
+    std::map<masterai::ModelTier, std::vector<std::string>> tiers;
+    tiers[masterai::ModelTier::compact_router] = {"router-tiny"};
+    tiers[masterai::ModelTier::small_fast] = {"fast-1b"};
+    tiers[masterai::ModelTier::medium_general] = {"general-8b"};
+    tiers[masterai::ModelTier::large_specialist] = {"specialist-70b"};
+    masterai::ModelRouter router(tiers);
+
+    // A plain draft-quality request routes to the small tier, never
+    // straight to the largest resident model.
+    {
+        masterai::RoutingSignals signals;
+        signals.requested_quality = "draft";
+        signals.available_ram_mib = 999999U;
+        const auto assignment = router.select_initial_tier(signals);
+        require(assignment.has_value() &&
+                    assignment->tier == masterai::ModelTier::small_fast,
+                "a draft-quality request was not routed to the small tier");
+    }
+
+    // A high-quality request escalates the initial choice to the large
+    // specialist tier.
+    {
+        masterai::RoutingSignals signals;
+        signals.requested_quality = "high";
+        signals.available_ram_mib = 999999U;
+        const auto assignment = router.select_initial_tier(signals);
+        require(assignment.has_value() &&
+                    assignment->tier == masterai::ModelTier::large_specialist,
+                "a high-quality request was not routed to the large "
+                "specialist tier");
+    }
+
+    // Constrained available RAM downgrades the selected tier instead of
+    // routing to a model that cannot fit.
+    {
+        masterai::RoutingSignals signals;
+        signals.requested_quality = "high";
+        signals.available_ram_mib = 1024U;
+        const auto assignment = router.select_initial_tier(signals);
+        require(assignment.has_value() &&
+                    assignment->tier != masterai::ModelTier::large_specialist,
+                "a memory-constrained host was still routed to the large "
+                "specialist tier");
+    }
+
+    // An explicit user pin wins regardless of other signals.
+    {
+        masterai::RoutingSignals signals;
+        signals.requested_quality = "draft";
+        signals.user_pinned_model_id = "specialist-70b";
+        const auto assignment = router.select_initial_tier(signals);
+        require(assignment.has_value() && assignment->model_id == "specialist-70b",
+                "an explicit user pin was not honoured over routing signals");
+    }
+
+    // Cascade escalation on failed deterministic validation, and safe
+    // refusal once already at the largest tier.
+    {
+        masterai::CascadeStageOutcome outcome;
+        outcome.tier = masterai::ModelTier::small_fast;
+        outcome.succeeded = true;
+        outcome.confidence = 0.95;
+        outcome.deterministic_validation_failed = true;
+        const auto decision = masterai::ModelRouter::evaluate_cascade(outcome);
+        require(decision.escalate &&
+                    decision.reason ==
+                        masterai::EscalationReason::failed_deterministic_validation &&
+                    decision.next_tier.has_value() &&
+                    *decision.next_tier == masterai::ModelTier::medium_general,
+                "failed deterministic validation did not escalate to the "
+                "next tier");
+
+        masterai::CascadeStageOutcome at_ceiling;
+        at_ceiling.tier = masterai::ModelTier::large_specialist;
+        at_ceiling.succeeded = false;
+        const auto ceiling_decision =
+            masterai::ModelRouter::evaluate_cascade(at_ceiling);
+        require(!ceiling_decision.escalate && !ceiling_decision.next_tier.has_value(),
+                "cascade escalation was granted past the largest tier "
+                "instead of safely refusing");
+    }
+
+    // No escalation when the stage succeeded with high confidence and no
+    // triggering condition fired.
+    {
+        masterai::CascadeStageOutcome clean;
+        clean.tier = masterai::ModelTier::small_fast;
+        clean.succeeded = true;
+        clean.confidence = 0.99;
+        const auto decision = masterai::ModelRouter::evaluate_cascade(clean);
+        require(!decision.escalate &&
+                    decision.reason == masterai::EscalationReason::none,
+                "a clean, high-confidence stage outcome was escalated anyway");
+    }
+
+    // Resident-model profile validation.
+    {
+        require(masterai::ModelRouter::resident_set_within_profile(
+                    masterai::ResidentModelProfile::minimal,
+                    {masterai::ModelTier::small_fast}),
+                "minimal profile rejected a single resident generation model");
+        require(!masterai::ModelRouter::resident_set_within_profile(
+                    masterai::ResidentModelProfile::minimal,
+                    {masterai::ModelTier::small_fast,
+                     masterai::ModelTier::medium_general}),
+                "minimal profile accepted two simultaneously resident "
+                "generation models");
+        require(masterai::ModelRouter::resident_set_within_profile(
+                    masterai::ResidentModelProfile::balanced,
+                    {masterai::ModelTier::medium_general,
+                     masterai::ModelTier::compact_router}),
+                "balanced profile rejected one generation model plus one "
+                "compact router model");
+        require(!masterai::ModelRouter::resident_set_within_profile(
+                    masterai::ResidentModelProfile::balanced,
+                    {masterai::ModelTier::medium_general,
+                     masterai::ModelTier::large_specialist}),
+                "balanced profile accepted two simultaneously resident "
+                "generation models");
+    }
 }
 
 // Phase 23: a repeated tokenize() call for identical text/model/policy must
@@ -3307,6 +3788,42 @@ void test_phase_twentysix_load_mode_selection() {
             "its default output");
 }
 
+// GPU-layer offload selection: select_gpu_layers() only ever recommends
+// "offload everything" or "offload nothing" -- see the declaration in
+// masterai.hpp for why a partial layer count cannot honestly be computed
+// from a total model size alone -- and only when a compatible GPU backend
+// and a real (non-zero) VRAM size are both known.
+void test_gpu_layer_selection() {
+    masterai::HardwareInfo no_gpu;
+    require(masterai::select_gpu_layers(no_gpu, "", 4ULL * 1024 * 1024 * 1024) ==
+                0U,
+            "a host with no detected GPU backend recommended GPU offload");
+
+    masterai::HardwareInfo cuda_host;
+    cuda_host.gpu_backends = {"cuda"};
+    cuda_host.gpu_memory_mib = 24U * 1024U;  // 24 GiB
+    require(masterai::select_gpu_layers(cuda_host, "", 0U) == 0U,
+            "an unknown model size did not fall back to no GPU offload");
+    require(masterai::select_gpu_layers(cuda_host, "", 4ULL * 1024 * 1024 * 1024) ==
+                masterai::kGpuLayersOffloadAll,
+            "a model that comfortably fits in detected VRAM was not "
+            "recommended for full GPU offload");
+    require(masterai::select_gpu_layers(cuda_host, "",
+                                        64ULL * 1024 * 1024 * 1024) == 0U,
+            "a model far larger than detected VRAM was still recommended "
+            "for GPU offload");
+    require(masterai::select_gpu_layers(cuda_host, "vulkan",
+                                        4ULL * 1024 * 1024 * 1024) == 0U,
+            "a model requiring a GPU backend the host does not have was "
+            "still recommended for GPU offload");
+
+    masterai::HardwareInfo unknown_vram_host;
+    unknown_vram_host.gpu_backends = {"cuda"};
+    require(masterai::select_gpu_layers(unknown_vram_host, "",
+                                        1ULL * 1024 * 1024 * 1024) == 0U,
+            "an unknown (zero) VRAM size did not fall back to no GPU offload");
+}
+
 // Phase 26: WarmModelState legal graph, illegal-transition rejection, the
 // RunnerState -> WarmModelState baseline translation table, and idle-timeout
 // bookkeeping, all driven directly against WarmModelTracker.
@@ -3586,15 +4103,17 @@ void test_machine_learning_foundation_dashboard() {
     require(dashboard_entry != dashboard.interfaces.end() &&
                 dashboard_entry->status == "available",
             "the Dashboard interface must report available");
-    // Dashboard (Phase 37), Projects (Phase 38), and Model Registry /
-    // Dataset Manager (Phase 39) are the only interfaces with a real
-    // backing service so far; every other roadmap entry from docs/PLAN.md
-    // "Machine Learning Abilities" section 2 must still report planned
-    // rather than fabricating readiness ahead of its own phase.
+    // Dashboard (Phase 37), Projects (Phase 38), Model Registry / Dataset
+    // Manager (Phase 39), and Subject Knowledge Manager (Phase 40) are the
+    // only interfaces with a real backing service so far; every other
+    // roadmap entry from docs/PLAN.md "Machine Learning Abilities" section 2
+    // must still report planned rather than fabricating readiness ahead of
+    // its own phase.
     for (const auto& interface : dashboard.interfaces) {
         if (interface.key == "dashboard" || interface.key == "projects" ||
             interface.key == "model-registry" ||
-            interface.key == "dataset-manager") {
+            interface.key == "dataset-manager" ||
+            interface.key == "subject-knowledge") {
             continue;
         }
         require(interface.status == "planned",
@@ -3819,6 +4338,65 @@ void test_machine_learning_dataset_manager_lifecycle() {
             "dataset_json did not report the dataset's own fields");
 }
 
+void test_machine_learning_subject_knowledge_manager_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.subjects.create") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.subjects.create") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.subjects.view"),
+            "ml.subjects.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::SubjectPackageStore subjects(records);
+    const auto package = subjects.create(
+        "administrator-1", "cpp17-programming",
+        "Core C++17 language and standard library.",
+        "Language features and stdlib; excludes build systems.",
+        "internal engineers");
+    require(!package.id.empty() &&
+                package.review_status == masterai::SubjectReviewStatus::draft &&
+                package.owner_id == "administrator-1",
+            "a newly created subject package must start draft with its "
+            "owner recorded");
+    require(subjects.list().size() == 1U,
+            "the created subject package was not visible in list()");
+
+    require(subjects.set_review_status(
+                package.id, masterai::SubjectReviewStatus::in_review),
+            "set_review_status() rejected a known subject package id");
+    require(subjects.find(package.id)->review_status ==
+                masterai::SubjectReviewStatus::in_review,
+            "set_review_status() did not persist the new status");
+    require(!subjects.set_review_status(
+                "nonexistent-subject", masterai::SubjectReviewStatus::approved),
+            "set_review_status() must no-op for an unknown subject package "
+            "id, not throw");
+
+    masterai::SubjectPackageStore reloaded(records);
+    const auto reloaded_package = reloaded.find(package.id);
+    require(reloaded_package.has_value() &&
+                reloaded_package->name == "cpp17-programming" &&
+                reloaded_package->review_status ==
+                    masterai::SubjectReviewStatus::in_review,
+            "SubjectPackageStore did not restore a persisted subject "
+            "package after reload");
+
+    require(subjects.remove(package.id),
+            "remove() rejected a known subject package id");
+    require(subjects.list().empty(), "remove() did not delete the subject package");
+    require(!subjects.remove(package.id),
+            "remove() must no-op for an already-removed subject package id, "
+            "not throw");
+
+    const auto json = masterai::subject_package_json(package);
+    require(json.find("\"name\":\"cpp17-programming\"") != std::string::npos &&
+                json.find("\"reviewStatus\":\"draft\"") != std::string::npos,
+            "subject_package_json did not report the package's own fields");
+}
+
 }  // namespace
 
 int main() {
@@ -3855,9 +4433,19 @@ int main() {
         run("deadline-bound retrieval", test_phase_sixteen_deadline_bound_retrieval);
         run("security-partitioned cache",
             test_phase_seventeen_security_partitioned_cache);
+        run("hierarchical cache admission/eviction",
+            test_phase_twentytwo_hierarchical_cache);
         run("prompt-prefix session reuse",
             test_phase_eighteen_prompt_session_reuse);
         run("adaptive calibration", test_phase_nineteen_calibration);
+        run("weighted-fair scheduler and backpressure",
+            test_phase_twentyfive_scheduler_weighted_fairness_and_backpressure);
+        run("KV-cache accounting and deterministic eviction",
+            test_phase_twentyseven_kv_cache_accounting_and_eviction);
+        run("topology probing and placement recommendation",
+            test_phase_twentyeight_topology_and_placement_recommendation);
+        run("model tiering, routing, and cascade inference",
+            test_phase_twentynine_model_tiering_and_cascade);
         run("advanced optimizations gated",
             test_phase_twenty_advanced_optimizations_disabled);
         run("async storage coalescing", test_phase_twentyone_coalescing_merges_adjacent);
@@ -3907,6 +4495,7 @@ int main() {
             test_phase_thirty_concurrent_retrieval_no_dangling_view);
         run("load-mode selection responds to storage/RAM evidence",
             test_phase_twentysix_load_mode_selection);
+        run("GPU-layer offload selection", test_gpu_layer_selection);
         run("warm-state legal transition graph",
             test_phase_twentysix_warm_state_transitions);
         run("RunnerState regression under WarmModelTracker",
@@ -3923,6 +4512,8 @@ int main() {
             test_machine_learning_model_registry_lifecycle);
         run("Machine Learning dataset manager lifecycle",
             test_machine_learning_dataset_manager_lifecycle);
+        run("Machine Learning subject knowledge manager lifecycle",
+            test_machine_learning_subject_knowledge_manager_lifecycle);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

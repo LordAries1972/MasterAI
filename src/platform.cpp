@@ -15,6 +15,8 @@
 #include <intrin.h>
 #include <windows.h>
 #include <psapi.h>
+#include <dxgi.h>
+#include <wrl/client.h>
 #elif defined(__linux__)
 #include <dlfcn.h>
 #if defined(__x86_64__)
@@ -58,6 +60,65 @@ std::string sanitize_log_value(const std::string& value) {
     return result;
 }
 
+#if defined(_WIN32)
+// PCI vendor IDs for the discrete-GPU vendors llama.cpp actually has an
+// accelerated backend for (CUDA/NVIDIA, HIP/AMD). Used to score adapters
+// below -- Intel (0x8086) is deliberately excluded even though its iGPUs
+// support Vulkan, since on the laptops this matters for it is virtually
+// always the low-VRAM onboard part sharing system RAM, never the card we
+// want the offload decision to land on.
+constexpr unsigned int kVendorNvidia = 0x10DEU;
+constexpr unsigned int kVendorAmd1 = 0x1002U;
+constexpr unsigned int kVendorAmd2 = 0x1022U;
+
+bool is_discrete_gpu_vendor(unsigned int vendor_id) noexcept {
+    return vendor_id == kVendorNvidia || vendor_id == kVendorAmd1 ||
+           vendor_id == kVendorAmd2;
+}
+
+// Real dedicated-VRAM size via DXGI, so the GPU-layer offload decision
+// (select_gpu_layers() in calibration.cpp) has real capacity evidence
+// instead of only knowing a backend driver is present. Enumerates every
+// adapter DXGI reports; the software/WARP adapter DXGI always lists
+// reports 0 or a trivial figure, so it's skipped outright. A laptop's
+// onboard Intel/AMD-APU GPU can still report a non-trivial "dedicated"
+// figure (BIOS-carved graphics memory), which used to be able to outscore
+// a real discrete card if DXGI's ordering or reporting quirks favoured it
+// -- adapters from a recognised discrete-GPU vendor (NVIDIA/AMD, see
+// is_discrete_gpu_vendor()) are now scored ahead of every other adapter
+// regardless of reported size, and only the largest card is compared
+// within that preferred group; the vendor check is skipped only if no
+// adapter reports a discrete vendor at all, in which case the largest
+// reported figure among the rest is used as before. On a multi-GPU host
+// this deliberately picks a single card rather than summing them, since
+// llama.cpp offloads onto one device, not a GPU-memory pool spanning
+// several. Returns 0 (not just "unknown", but the same value
+// select_gpu_layers() already treats as "cannot offload") if DXGI is
+// unavailable or every adapter fails to report a size.
+unsigned int probe_gpu_memory_mib() noexcept {
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return 0U;
+    std::uint64_t largest_discrete_bytes = 0U;
+    std::uint64_t largest_other_bytes = 0U;
+    for (UINT index = 0U;; ++index) {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        if (FAILED(factory->EnumAdapters1(index, &adapter))) break;
+        DXGI_ADAPTER_DESC1 desc{};
+        if (FAILED(adapter->GetDesc1(&desc))) continue;
+        if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0U) continue;
+        const auto bytes = static_cast<std::uint64_t>(desc.DedicatedVideoMemory);
+        if (is_discrete_gpu_vendor(desc.VendorId)) {
+            largest_discrete_bytes = std::max(largest_discrete_bytes, bytes);
+        } else {
+            largest_other_bytes = std::max(largest_other_bytes, bytes);
+        }
+    }
+    const std::uint64_t chosen_bytes =
+        largest_discrete_bytes > 0U ? largest_discrete_bytes : largest_other_bytes;
+    return static_cast<unsigned int>(chosen_bytes / (1024ULL * 1024ULL));
+}
+#endif
+
 void probe_acceleration(HardwareInfo& info) {
 #if defined(_WIN32) && defined(_M_X64)
     int registers[4]{};
@@ -80,6 +141,7 @@ void probe_acceleration(HardwareInfo& info) {
     probe_library(L"nvcuda.dll", "cuda");
     probe_library(L"vulkan-1.dll", "vulkan");
     probe_library(L"amdhip64.dll", "hip");
+    if (!info.gpu_backends.empty()) info.gpu_memory_mib = probe_gpu_memory_mib();
 #elif defined(__linux__) && defined(__x86_64__)
     unsigned int eax = 0U, ebx = 0U, ecx = 0U, edx = 0U;
     if (__get_cpuid(1U, &eax, &ebx, &ecx, &edx) != 0) {

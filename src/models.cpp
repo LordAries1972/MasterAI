@@ -304,6 +304,18 @@ void write_verification_cache(
 
 }  // namespace
 
+void record_verified_model(const std::filesystem::path& model_root,
+                           const std::string& model_id,
+                           const std::string& sha256_hex,
+                           std::uint64_t size_bytes) {
+    std::error_code root_error;
+    const auto root = std::filesystem::weakly_canonical(model_root, root_error);
+    if (root_error || !std::filesystem::is_directory(root)) return;
+    auto cache = read_verification_cache(root);
+    cache[model_id] = VerifiedEntry{sha256_hex, size_bytes};
+    write_verification_cache(root, cache);
+}
+
 void write_model_manifest(const std::filesystem::path& model_directory,
                           const std::string& model_id,
                           const std::string& display_name,
@@ -481,6 +493,12 @@ std::size_t ModelRegistry::verify(
     // that are still perfectly valid.
     auto cache = read_verification_cache(root);
     std::size_t verified_count = 0U;
+    // Every model id actually seen on disk this run -- anything left in
+    // `cache` afterward belongs to a model directory that no longer exists
+    // (removed, renamed, or its manifest deleted) and is pruned below rather
+    // than lingering forever as a stale entry no scan() lookup can ever
+    // match again anyway.
+    std::set<std::string> seen_ids;
 
     for (const auto& category_entry : std::filesystem::directory_iterator(root)) {
         if (!category_entry.is_directory() || category_entry.is_symlink()) {
@@ -499,7 +517,29 @@ std::size_t ModelRegistry::verify(
             }
             const auto directory = model_entry.path();
             const std::string id = directory.filename().string();
+            seen_ids.insert(id);
             try {
+                // Cheap pre-check (no hashing): parses the manifest and
+                // confirms the file exists with the declared size (see
+                // load_manifest's verify_hash=false path). If the id is
+                // already in the cache with the exact same declared
+                // sha256/size, the file was hash-verified on a prior run and
+                // nothing about its manifest has changed since -- re-hashing
+                // it again would just re-confirm the same fact at the cost
+                // of reading the whole (often multi-gigabyte) file. Only a
+                // changed manifest (redownload/replacement under the same
+                // id) or a first-time id actually needs the real hash below.
+                const auto cheap_manifest =
+                    load_manifest(directory, category, /*verify_hash=*/false);
+                const auto already_verified = cache.find(id);
+                if (already_verified != cache.end() &&
+                    already_verified->second.sha256 ==
+                        cheap_manifest.model_sha256 &&
+                    already_verified->second.size_bytes ==
+                        cheap_manifest.model_size_bytes) {
+                    if (progress) progress(id, true, "");
+                    continue;
+                }
                 // Reported at each 10% step reached, and only for files
                 // large enough (256 MiB+) that hashing them takes long
                 // enough for interim progress to matter -- small manifests
@@ -520,7 +560,8 @@ std::size_t ModelRegistry::verify(
                         hash_progress(id, bytes_hashed, total_bytes);
                     };
                 // verify_hash=true: this is the one place a model file's
-                // SHA-256 actually gets computed.
+                // SHA-256 actually gets computed -- only reached for a new
+                // or changed model, per the cache short-circuit above.
                 const auto manifest = load_manifest(
                     directory, category, /*verify_hash=*/true,
                     hash_progress_for_file);
@@ -537,6 +578,15 @@ std::size_t ModelRegistry::verify(
                 if (progress) progress(id, false, exception.what());
             }
         }
+    }
+    // Drop any cache entry for a model id that no longer exists on disk
+    // (directory removed/renamed, or its manifest.json deleted) instead of
+    // letting it linger indefinitely -- it can never be matched by scan()
+    // again anyway once its manifest is gone.
+    for (auto entry = cache.begin(); entry != cache.end();) {
+        entry = seen_ids.find(entry->first) == seen_ids.end()
+                    ? cache.erase(entry)
+                    : std::next(entry);
     }
     write_verification_cache(root, cache);
     return verified_count;

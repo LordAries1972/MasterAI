@@ -8,6 +8,7 @@
 #include <array>
 #include <chrono>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -590,6 +591,30 @@ public:
 
     std::uint64_t id() const noexcept { return process_id_; }
 
+    // Lets load() tell "the backend crashed on startup" apart from "the
+    // backend is still loading weights" -- both look identical from the
+    // readiness-poll loop's perspective (no 200 from /health yet), but only
+    // the first one is a lost cause worth reporting distinctly instead of
+    // under the same generic "runner readiness timed out" message. Returns
+    // nullopt while the process is still running or its exit status is not
+    // (yet) obtainable.
+    std::optional<int> exit_code() const noexcept {
+#if defined(_WIN32)
+        if (handle_ == nullptr) return std::nullopt;
+        DWORD code = 0U;
+        if (!GetExitCodeProcess(handle_, &code) || code == STILL_ACTIVE) {
+            return std::nullopt;
+        }
+        return static_cast<int>(code);
+#else
+        if (process_id_ == 0U) return std::nullopt;
+        int status = 0;
+        const pid_t result = waitpid(static_cast<pid_t>(process_id_), &status, WNOHANG);
+        if (result <= 0) return std::nullopt;
+        return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
+    }
+
     std::uint64_t resident_memory() const noexcept {
 #if defined(_WIN32)
         if (handle_ == nullptr) return 0U;
@@ -672,8 +697,9 @@ void RunnerSupervisor::load(const ModelRecord& model,
         // Phase 26: MappingWeights -- the backend process is about to start
         // reading/mapping the model file per LaunchTuning::load_mode.
         warm_tracker_.enter(WarmModelState::MappingWeights);
-        process_->start(spec, runtime_root_ / "logs" /
-                                  ("runner-" + model.manifest.id + ".log"));
+        const auto log_path =
+            runtime_root_ / "logs" / ("runner-" + model.manifest.id + ".log");
+        process_->start(spec, log_path);
         metrics_.process_id = process_->id();
         // Phase 26: InitialisingBackend -- process is up, waiting on its own
         // readiness probe below.
@@ -681,8 +707,12 @@ void RunnerSupervisor::load(const ModelRecord& model,
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::seconds(startup_timeout_seconds);
         bool ready = false;
+        bool crashed = false;
         while (std::chrono::steady_clock::now() < deadline) {
-            if (!process_->running()) break;
+            if (!process_->running()) {
+                crashed = true;
+                break;
+            }
             try {
                 const auto health =
                     local_http(port_, "GET", "/health", "", {});
@@ -695,7 +725,27 @@ void RunnerSupervisor::load(const ModelRecord& model,
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        if (!ready) throw std::runtime_error("runner readiness timed out");
+        if (!ready) {
+            // A crash reported as the same generic "timed out" message as a
+            // model that's still cold-loading was a real diagnosability gap
+            // -- an operator would burn the whole startup_timeout_seconds
+            // window waiting on a process that had already exited seconds
+            // in. Report which one actually happened, with the exit code
+            // and log path so the real cause (bad launch flags, missing
+            // GPU library, OOM) is visible without guessing.
+            if (crashed) {
+                const auto exit_code = process_->exit_code();
+                throw std::runtime_error(
+                    "runner process exited before becoming ready (exit code " +
+                    (exit_code.has_value() ? std::to_string(*exit_code) : "unknown") +
+                    ") -- see " + log_path.string());
+            }
+            throw std::runtime_error(
+                "runner readiness timed out after " +
+                std::to_string(startup_timeout_seconds) +
+                "s -- backend process is still running but never answered "
+                "/health; see " + log_path.string());
+        }
         // Phase 26: Warming -- backend answered /health but has not yet
         // actually served a request; Ready is only entered below, once this
         // load() call itself is about to hand the runner back as usable.

@@ -514,11 +514,20 @@ std::string WorkloadHttpController::load_model(
                         "{\"error\":\"model_not_ready\",\"reason\":\"" +
                             json_escape(model.diagnostic) + "\"}");
                 }
+                // Same GPU-offload recommendation ensure_model_loaded() uses
+                // for chat auto-loads (see server.cpp): a manual admin load
+                // through this endpoint should not be the one path that
+                // never touches VRAM for a compatible model/GPU pair.
+                LaunchTuning tuning;
+                tuning.gpu_layers = select_gpu_layers(
+                    probe_hardware(state_->configuration.models_root),
+                    model.manifest.required_gpu_backend,
+                    model.manifest.model_size_bytes);
                 state_->inference->load(
                     model,
                     static_cast<unsigned int>(
                         root.required("contextLength").as_integer()),
-                    state_->configuration.runner_port);
+                    state_->configuration.runner_port, 30U, 1U, tuning);
                 state_->audit.append("model.load", user.id, "success", id);
                 return response(200, "OK", "{\"state\":\"ready\"}");
             }

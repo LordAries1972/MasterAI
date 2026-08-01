@@ -184,8 +184,16 @@ The current source includes native implementations for:
 - Adaptive hardware/model calibration (`CalibrationService`): a real
   cold-load-plus-generation measurement persisted as a host/model/backend/
   build-keyed `TuningProfile`, with automatic invalidation and a safe-default
-  fallback on any identity change, plus optional GPU-layer/mmap/mlock/
-  thread/batch launch tuning and CPU%/disk-byte calibration evidence.
+  fallback on any identity change, plus GPU-layer/mmap/mlock/thread/batch
+  launch tuning and CPU%/disk-byte calibration evidence.
+- Real GPU memory (VRAM) detection (`probe_hardware`, DXGI-backed on
+  Windows) feeding an evidence-based GPU-layer offload decision
+  (`select_gpu_layers`): a model whose weights comfortably fit the detected
+  VRAM (minus a reserved headroom for the backend's own context/runtime
+  overhead) is recommended for full `--n-gpu-layers` offload; otherwise the
+  always-safe CPU-only default is kept rather than guessing a partial layer
+  count. Applied automatically to every chat auto-load and manual model
+  load, not only after an administrator runs an explicit calibration.
 - A framework-only registry for optional advanced-throughput candidates
   (continuous batching, speculative decoding, NUMA affinity, storage
   prefetch, multiple warm runners, GPU/CPU KV placement), every one
@@ -329,7 +337,10 @@ Release 1 baseline hardware:
 - 20 GiB free storage plus model and backup requirements
 - Optional GPU; CPU inference remains the compatibility baseline
 - For GPU acceleration: a supported CUDA, Vulkan, or HIP backend, a compatible
-  driver, and at least 8 GiB dedicated VRAM
+  driver, and at least 8 GiB dedicated VRAM. Dedicated VRAM size is
+  auto-detected on Windows (DXGI); the largest real (non-software) adapter
+  found decides whether a given model's weights are recommended for full
+  GPU offload.
 
 Individual model manifests may require more capable hardware. MasterAI reports
 `Unsupported`, `Memory Risk`, `Slow`, `Usable`, or `Recommended` and blocks
@@ -587,6 +598,11 @@ sh ./scripts/diagnose.sh ./config/settings.json Release
 
 ## Configuration
 
+For a complete, field-by-field explanation of every `config/settings.json`
+entry — what it does, its default, and its enforced policy ceiling — see
+[docs/architecture/configuration.md](docs/architecture/configuration.md).
+The summary below covers precedence and environment overrides only.
+
 Configuration precedence is:
 
 1. Compiled safe defaults
@@ -689,7 +705,10 @@ The native service provides browser workflows for:
   (`/app/chat`, `/app/projects`, `/app/models/inventory`,
   `/app/models/download`, `/app/models/benchmarks`, `/app/admin/create`,
   `/app/admin/users`) served at its own URL and gated by role
-- Ready-model selection and loading
+- Ready-model selection and loading, with best-effort background model
+  pre-warming triggered the moment a chat is opened, created, or its model
+  is switched — instead of only starting the cold load once the first
+  message is sent — so the runner has a head start on the wait
 - Incrementally streamed responses and cancellation
 - Bounded UTF-8 source/text attachments
 - Model inventory and suitability, including a cached verification state so
@@ -1093,6 +1112,7 @@ does not implement cryptographic primitives.
 - [Authoritative implementation plan](docs/PLAN.md)
 - [Project objectives](docs/objectives.md)
 - [Architecture decisions](docs/architecture/)
+- [`settings.json` field reference](docs/architecture/configuration.md)
 - [Security design](docs/security/)
 - [Operations guides](docs/operations/)
 - [Performance evidence](docs/performance/)
