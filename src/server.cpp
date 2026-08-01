@@ -11,6 +11,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <fstream>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -264,9 +265,11 @@ class HttpServer::State final {
 public:
     // Opens durable services in dependency order, then wires the MCP dispatcher
     // to the same project catalogue and model root used by the normal API.
-    explicit State(const AppConfig& value)
+    explicit State(const AppConfig& value,
+                   std::filesystem::path settings_file_path = {})
         : configuration(value), records(value.runtime_root / "database"),
-          audit(value.runtime_root / "audit" / "audit.log") {
+          audit(value.runtime_root / "audit" / "audit.log"),
+          settings_file(std::move(settings_file_path)) {
         records.open();
         const auto hardware = probe_hardware(value.runtime_root);
         const auto profile =
@@ -321,7 +324,7 @@ public:
             calibration = std::make_unique<CalibrationService>(
                 *inference, *tuning_profiles, hardware,
                 sha256_file_hex(value.llama_server_executable),
-                "masterai-0.1.0");
+                "masterai-0.1.0", value.accelerator_policy);
         }
         if (!value.curl_executable.empty()) {
             downloads = std::make_unique<DownloadManager>(
@@ -345,7 +348,7 @@ public:
         cache_policy.maximum_bytes_per_category =
             value.cache_maximum_bytes_per_category;
         cache = std::make_unique<CacheManager>(
-            value.runtime_root / "cache", *memory, cache_policy);
+            resolve_page_file_root(value), *memory, cache_policy);
         // Phase 23: wire the tokenization cache into the runner supervisor
         // now that both exist. Safe even when caching is later disabled at
         // the request layer -- CacheManager's own configuration.cache_enabled
@@ -364,6 +367,19 @@ public:
         prompt_sessions = std::make_unique<PromptSessionManager>(
             value.session_reuse_max_slots,
             value.session_reuse_idle_retention_seconds);
+        // Phase 30A: same minimal/performance/balanced idle-unload seconds
+        // CalibrationService::safe_default_profile() recommends per profile
+        // (calibration.cpp) -- one background sweep applies it unattended
+        // instead of it only ever taking effect when an administrator
+        // happens to run /api/v1/performance/calibrate.
+        runner_idle_unload_seconds =
+            value.resource_profile == "minimal"
+                ? 300U
+                : value.resource_profile == "performance" ? 1800U : 600U;
+        memory_sweeper = std::make_unique<MemorySweeper>(
+            *memory, inference.get(), cache.get(), prompt_sessions.get(),
+            runner_idle_unload_seconds,
+            [this]() { release_runner_weights_lease(); });
         workloads = std::make_unique<
             server_internal::WorkloadHttpController>(
             configuration, *projects, *attachments, inference.get(),
@@ -497,6 +513,8 @@ public:
                 required_scope = "identity.read";
             } else if (request.target == "/api/v1/users") {
                 required_scope = "users.manage";
+            } else if (request.target == "/api/v1/admin/config") {
+                required_scope = "settings.manage";
             } else if (request.method == "GET" &&
                        request.target.rfind("/api/v1/projects", 0U) == 0U) {
                 required_scope = "projects.read";
@@ -616,6 +634,14 @@ public:
         if (request.method == "POST" && request.target == "/api/v1/users") {
             return create_user(request, *user);
         }
+        if (request.method == "GET" &&
+            request.target == "/api/v1/admin/config") {
+            return admin_config_get(*user);
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/admin/config") {
+            return admin_config_put(request, *user);
+        }
         if (request.method == "GET" && request.target == "/api/v1/models") {
             return workloads->model_inventory();
         }
@@ -634,22 +660,155 @@ public:
                                 "{\"modelId\":\"\",\"warmState\":\"Unloaded\"}");
             }
             const auto current = inference->metrics();
+            // Phase 30A: requested-vs-actual GPU layers and the unload
+            // countdown are administrator-relevant, not a chat secret --
+            // this route already has no permission gate beyond being logged
+            // in (see the comment above), so both are exposed to every role
+            // exactly like modelId/warmState already are.
+            std::uint64_t unload_countdown_seconds = 0U;
+            if (current.state == RunnerState::ready &&
+                current.warm_state == WarmModelState::Ready) {
+                const auto elapsed =
+                    epoch_seconds() >= current.last_activity_epoch_seconds
+                        ? epoch_seconds() - current.last_activity_epoch_seconds
+                        : 0U;
+                unload_countdown_seconds =
+                    elapsed >= runner_idle_unload_seconds
+                        ? 0U
+                        : runner_idle_unload_seconds - elapsed;
+            }
             return response(200, "OK",
                 "{\"modelId\":\"" + json_escape(current.model_id) +
                 "\",\"warmState\":\"" + to_string(current.warm_state) +
-                "\"}");
+                "\",\"requestedGpuLayers\":" +
+                std::to_string(current.requested_gpu_layers) +
+                ",\"loadAcceleratorPolicy\":\"" +
+                json_escape(current.accelerator_policy) +
+                "\",\"unloadCountdownSeconds\":" +
+                std::to_string(unload_countdown_seconds) + "}");
         }
         if (request.method == "GET" &&
             request.target == "/api/v1/system/resources") {
-            return response(
-                200, "OK",
-                hardware_info_json(
-                    probe_hardware(configuration.runtime_root)));
+            // Phase 30A: appended, not baked into hardware_info_json()
+            // itself -- CalibrationService::host_hash() hashes that
+            // function's output as a host identity fingerprint, and must
+            // stay independent of the administrator's accelerator policy
+            // choice. "totalVirtualMemoryMiB"/"availableVirtualMemoryMiB"
+            // already report pagefile-inclusive commit capacity (Windows
+            // GlobalMemoryStatusEx ullTotalPageFile) -- see
+            // src/platform.cpp -- so this only adds the policy itself, not
+            // a duplicate probe.
+            auto body = hardware_info_json(
+                probe_hardware(configuration.runtime_root));
+            body.pop_back();
+            body += ",\"acceleratorPolicy\":" +
+                    ('"' + json_escape(configuration.accelerator_policy) +
+                     '"') +
+                    "}";
+            return response(200, "OK", body);
         }
         if (request.method == "GET" &&
             request.target == "/api/v1/system/memory") {
-            return response(200, "OK",
-                            MemoryBudgetManager::to_json(memory->sample()));
+            // Phase 30A: appended the same way /api/v1/system/resources
+            // appends acceleratorPolicy above -- pagefile/swap headroom
+            // (already probed for hardware_info_json's virtual-memory
+            // fields) and this process's own commit/hard-fault counters
+            // round out what an administrator needs to judge whether a
+            // cpu_only host is actually staying inside its configured
+            // ceiling, without duplicating MemoryBudgetManager's own
+            // reserved/category accounting.
+            const auto hardware = probe_hardware(configuration.runtime_root);
+            const auto process = probe_process_resources();
+            auto body = MemoryBudgetManager::to_json(memory->sample());
+            body.pop_back();
+            body += ",\"totalVirtualMemoryMiB\":" +
+                    std::to_string(hardware.total_virtual_memory_mib) +
+                    ",\"availableVirtualMemoryMiB\":" +
+                    std::to_string(hardware.available_virtual_memory_mib) +
+                    ",\"processCommitBytes\":" +
+                    std::to_string(process.commit_bytes) +
+                    ",\"processPageFaults\":" +
+                    std::to_string(process.page_faults) +
+                    ",\"runnerIdleUnloadSeconds\":" +
+                    std::to_string(runner_idle_unload_seconds) + "}";
+            return response(200, "OK", body);
+        }
+        // "System Report" (Report sidebar): a single consolidated,
+        // administrator-only read combining what several narrower endpoints
+        // already expose piecemeal (hardware, process resources, RAM
+        // pressure, the real Windows pagefile's commit headroom, feature
+        // enablement) plus the "PageFile" setting's own usage -- the
+        // MasterAI-scoped substitute cache/scratch area CacheManager is
+        // rooted at (see resolve_page_file_root()). "Used" there is the sum
+        // of every cache category's used_bytes; "capacity" is the sum of
+        // their configured ceilings; "drive" figures come from probing the
+        // filesystem the page-file root actually lives on, which can differ
+        // from the workspace's own runtime/models roots once an
+        // administrator points it elsewhere.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/system/report") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto hardware = probe_hardware(configuration.models_root);
+            const auto process = probe_process_resources();
+            const auto page_file_root = resolve_page_file_root(configuration);
+            const auto page_file_drive = probe_hardware(page_file_root);
+            const auto cache_status = cache->status();
+            std::uint64_t page_file_used_bytes = 0U;
+            std::uint64_t page_file_capacity_bytes = 0U;
+            for (const auto& [category, status] : cache_status.categories) {
+                static_cast<void>(category);
+                page_file_used_bytes += status.used_bytes;
+                page_file_capacity_bytes += status.capacity_bytes;
+            }
+            const std::string body =
+                "{\"hardware\":" + hardware_info_json(hardware) +
+                ",\"process\":{\"residentMemoryBytes\":" +
+                std::to_string(process.resident_memory_bytes) +
+                ",\"privateMemoryBytes\":" +
+                std::to_string(process.private_memory_bytes) +
+                ",\"commitBytes\":" + std::to_string(process.commit_bytes) +
+                ",\"pageFaults\":" + std::to_string(process.page_faults) +
+                "}"
+                ",\"memory\":" + MemoryBudgetManager::to_json(memory->sample()) +
+                ",\"systemPageFile\":{\"totalVirtualMemoryMiB\":" +
+                std::to_string(hardware.total_virtual_memory_mib) +
+                ",\"availableVirtualMemoryMiB\":" +
+                std::to_string(hardware.available_virtual_memory_mib) + "}"
+                ",\"pageFile\":{\"location\":\"" +
+                json_escape(page_file_root.string()) +
+                "\",\"usingDefault\":" +
+                (configuration.page_file_root.empty() ? "true" : "false") +
+                ",\"driveCapacityMiB\":" +
+                std::to_string(page_file_drive.storage_capacity_mib) +
+                ",\"driveFreeMiB\":" +
+                std::to_string(page_file_drive.free_disk_mib) +
+                ",\"usedBytes\":" + std::to_string(page_file_used_bytes) +
+                ",\"capacityBytes\":" + std::to_string(page_file_capacity_bytes) +
+                ",\"categories\":" + CacheManager::to_json(cache_status) + "}"
+                ",\"features\":{\"acceleratorPolicy\":\"" +
+                json_escape(configuration.accelerator_policy) +
+                "\",\"retrievalEnabled\":" +
+                (configuration.retrieval_enabled ? "true" : "false") +
+                ",\"cacheEnabled\":" +
+                (configuration.cache_enabled ? "true" : "false") +
+                ",\"sessionReuseEnabled\":" +
+                (configuration.session_reuse_enabled ? "true" : "false") +
+                ",\"performanceAutoTune\":" +
+                (configuration.performance_auto_tune ? "true" : "false") +
+                ",\"watchProjectFiles\":" +
+                (configuration.watch_project_files ? "true" : "false") +
+                ",\"allowLocalPasswordAccounts\":" +
+                (configuration.allow_local_password_accounts ? "true"
+                                                              : "false") +
+                ",\"allowOsIdentityAccounts\":" +
+                (configuration.allow_os_identity_accounts ? "true" : "false") +
+                ",\"tlsMode\":\"" + json_escape(configuration.tls_mode) +
+                "\"}"
+                "}";
+            return response(200, "OK", body);
         }
         // Phase 17: administrators see bounded cache use and can trim/clear
         // it; ordinary users see only the per-request cacheHit indicator
@@ -1243,6 +1402,16 @@ public:
                            ? application_page(*user, "ml-subjects")
                            : response(302, "Found", "", {"Location: /app"});
             }
+            if (target == "/app/report/system") {
+                return is_administrator
+                           ? application_page(*user, "report-system")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/settings/config") {
+                return is_administrator
+                           ? application_page(*user, "settings-config")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
             if (target == "/app/admin/create") {
                 return is_administrator
                            ? application_page(*user, "admin-create")
@@ -1676,6 +1845,157 @@ private:
         }
     }
 
+    // Phase 30A: administrator-only view of the live settings.json this
+    // process started from (the same document `masterai configure` writes),
+    // so the accelerator policy and other local-configuration knobs the rest
+    // of Phase 30A added can be read and changed from the web UI instead of
+    // requiring shell access to the host. Never exposed to developer/viewer
+    // roles -- see the Admin/Settings sidebar in web_ui.cpp.
+    std::string admin_config_get(const UserRecord& admin) const {
+        if (!role_allows(admin.role, "settings.manage")) {
+            return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+        }
+        if (settings_file.empty()) {
+            return response(503, "Service Unavailable",
+                            "{\"error\":\"admin_configuration_unavailable\"}");
+        }
+        return response(200, "OK", ConfigurationManager::serialize(configuration));
+    }
+
+    // Accepts a full settings.json-shaped document (the exact shape
+    // admin_config_get() above returns), validates and durably persists it
+    // via the same ConfigurationManager::save_atomic() `masterai configure`
+    // uses, then applies the subset of fields every live request path
+    // already re-reads straight from `configuration` (accelerator policy,
+    // reply/context length, retrieval and cache toggles, session reuse,
+    // rate/body limits, allow-lists, local/OS sign-in toggles, the runner
+    // generation stall timeout) so those take effect immediately. Every
+    // other field -- host/port/TLS, storage roots,
+    // memory ceilings baked into MemoryBudgetManager at construction, the
+    // runner executable/port, and anything else only ever read once at
+    // server startup -- is saved for the next restart and reported back in
+    // "restartRequired" rather than silently pretended to be live.
+    std::string admin_config_put(Request& request, const UserRecord& admin) {
+        if (!role_allows(admin.role, "settings.manage")) {
+            return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+        }
+        if (settings_file.empty()) {
+            return response(503, "Service Unavailable",
+                            "{\"error\":\"admin_configuration_unavailable\"}");
+        }
+        AppConfig incoming;
+        try {
+            const auto pending_path = settings_file.string() + ".pending";
+            {
+                std::ofstream output(pending_path,
+                                     std::ios::binary | std::ios::trunc);
+                output.write(
+                    request.body.data(),
+                    static_cast<std::streamsize>(request.body.size()));
+                output.flush();
+                if (!output) {
+                    throw std::runtime_error(
+                        "could not stage the submitted configuration");
+                }
+            }
+            try {
+                incoming = ConfigurationManager::load(pending_path);
+            } catch (...) {
+                std::filesystem::remove(pending_path);
+                throw;
+            }
+            std::filesystem::remove(pending_path);
+        } catch (const std::exception& error) {
+            return response(400, "Bad Request",
+                            "{\"error\":\"invalid_configuration\",\"detail\":\"" +
+                                json_escape(error.what()) + "\"}");
+        }
+        ConfigurationManager::save_atomic(incoming, settings_file);
+        const AppConfig previous = configuration;
+        configuration.accelerator_policy = incoming.accelerator_policy;
+        configuration.chat_context_length = incoming.chat_context_length;
+        configuration.chat_max_reply_tokens = incoming.chat_max_reply_tokens;
+        configuration.retrieval_enabled = incoming.retrieval_enabled;
+        configuration.retrieval_deadline_milliseconds =
+            incoming.retrieval_deadline_milliseconds;
+        configuration.retrieval_maximum_context_bytes =
+            incoming.retrieval_maximum_context_bytes;
+        configuration.retrieval_maximum_chunks_per_source =
+            incoming.retrieval_maximum_chunks_per_source;
+        configuration.retrieval_maximum_total_chunks =
+            incoming.retrieval_maximum_total_chunks;
+        configuration.cache_enabled = incoming.cache_enabled;
+        configuration.session_reuse_enabled = incoming.session_reuse_enabled;
+        configuration.performance_auto_tune = incoming.performance_auto_tune;
+        configuration.allow_local_password_accounts =
+            incoming.allow_local_password_accounts;
+        configuration.allow_os_identity_accounts =
+            incoming.allow_os_identity_accounts;
+        configuration.rate_limit_per_minute = incoming.rate_limit_per_minute;
+        configuration.max_request_bytes = incoming.max_request_bytes;
+        configuration.allowed_hosts = incoming.allowed_hosts;
+        configuration.allowed_origins = incoming.allowed_origins;
+        configuration.runner_stall_timeout_seconds =
+            incoming.runner_stall_timeout_seconds;
+        // Phase 30A: an accelerator-policy change must retire the stale
+        // CalibrationService immediately -- otherwise resolve()/calibrate()
+        // would keep validating against the policy this process started
+        // with (see CalibrationService::accelerator_policy_, fixed at
+        // construction) even though ensure_model_loaded() itself now reads
+        // the new configuration.accelerator_policy on every load, which
+        // would surface as a confusing build_launch_spec() rejection instead
+        // of the new policy actually taking effect.
+        if (inference != nullptr && tuning_profiles != nullptr &&
+            previous.accelerator_policy != configuration.accelerator_policy) {
+            const auto hardware = probe_hardware(configuration.runtime_root);
+            calibration = std::make_unique<CalibrationService>(
+                *inference, *tuning_profiles, hardware,
+                sha256_file_hex(configuration.llama_server_executable),
+                "masterai-0.1.0", configuration.accelerator_policy);
+        }
+        const bool restart_required =
+            previous.host != incoming.host || previous.port != incoming.port ||
+            previous.tls_mode != incoming.tls_mode ||
+            previous.tls_certificate_file != incoming.tls_certificate_file ||
+            previous.tls_private_key_file != incoming.tls_private_key_file ||
+            previous.allow_intranet != incoming.allow_intranet ||
+            previous.runtime_root != incoming.runtime_root ||
+            previous.models_root != incoming.models_root ||
+            previous.page_file_root != incoming.page_file_root ||
+            previous.memory_reserve_mib != incoming.memory_reserve_mib ||
+            previous.memory_hard_limit_mib != incoming.memory_hard_limit_mib ||
+            previous.minimum_free_ram_percent !=
+                incoming.minimum_free_ram_percent ||
+            previous.critical_memory_percent !=
+                incoming.critical_memory_percent ||
+            previous.resource_profile != incoming.resource_profile ||
+            previous.llama_server_executable !=
+                incoming.llama_server_executable ||
+            previous.runner_port != incoming.runner_port ||
+            previous.runner_startup_timeout_seconds !=
+                incoming.runner_startup_timeout_seconds ||
+            previous.curl_executable != incoming.curl_executable ||
+            previous.watch_project_files != incoming.watch_project_files ||
+            previous.session_reuse_max_slots !=
+                incoming.session_reuse_max_slots ||
+            previous.session_reuse_idle_retention_seconds !=
+                incoming.session_reuse_idle_retention_seconds ||
+            previous.max_concurrent_connections !=
+                incoming.max_concurrent_connections ||
+            previous.request_timeout_seconds !=
+                incoming.request_timeout_seconds ||
+            previous.cache_maximum_bytes_per_category !=
+                incoming.cache_maximum_bytes_per_category ||
+            previous.session_minutes != incoming.session_minutes;
+        audit.append("admin.config.update", admin.id, "success",
+                    settings_file.string());
+        return response(
+            200, "OK",
+            "{\"configuration\":" + ConfigurationManager::serialize(configuration) +
+                ",\"restartRequired\":" +
+                (restart_required ? "true" : "false") + "}");
+    }
+
     std::string list_chats(const UserRecord& user) const {
         std::string body{"{\"chats\":["};
         bool first = true;
@@ -1887,6 +2207,95 @@ private:
         }).detach();
     }
 
+    // Phase 30A deliverable 3: bounded, lock-free admission against
+    // MemoryPolicy::maximum_active_inference (compare-and-swap retry loop
+    // rather than a mutex since this is checked on every chat request).
+    // Returns false without incrementing anything once the configured number
+    // of concurrent generations is already in flight -- the cpu_only/minimal
+    // profile's "one active request" default becomes a real ceiling instead
+    // of a validated-but-unread policy field.
+    bool try_admit_inference_slot() const {
+        const auto limit = memory->policy().maximum_active_inference;
+        auto current = active_inference_count.load(std::memory_order_relaxed);
+        while (current < limit) {
+            if (active_inference_count.compare_exchange_weak(
+                    current, current + 1U, std::memory_order_acq_rel)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void release_inference_slot() const noexcept {
+        active_inference_count.fetch_sub(1U, std::memory_order_acq_rel);
+    }
+
+    // Releases whatever runner_weights lease admit_runner_weights() last
+    // granted, if any. Safe to call even when nothing is currently held
+    // (MemoryBudgetManager::release() is itself a no-op on an unknown/empty
+    // lease id) -- every caller below invokes this unconditionally rather
+    // than tracking whether a lease is outstanding.
+    void release_runner_weights_lease() const {
+        std::lock_guard<std::mutex> lock(runner_admission_mutex);
+        if (!runner_weights_lease_id.empty()) {
+            memory->release(runner_weights_lease_id);
+            runner_weights_lease_id.clear();
+        }
+    }
+
+    // Phase 30A CPU-only admission estimator (docs/PLAN.md Phase 30A,
+    // deliverable 2 / implementation-order item 2): a model that would push
+    // resident/committed memory past the configured ceiling or OS reserve is
+    // rejected -- with a concrete, actionable reason -- before the runner
+    // process is ever started, rather than discovered only after llama.cpp
+    // has already mapped/loaded gigabytes of weights. This does not add a
+    // second memory authority: it is one more MemoryCategory::runner_weights
+    // reservation against the same MemoryBudgetManager every other category
+    // (compute_buffers, kv_cache, ...) already reserves against, held for as
+    // long as this model stays loaded and released by
+    // release_runner_weights_lease() above on every unload path.
+    void admit_runner_weights(const ModelRecord& model,
+                              unsigned int parallel_slots) const {
+        const auto hardware = probe_hardware(configuration.models_root);
+        const auto suitability = assess_model(
+            model.manifest, hardware, configuration.memory_reserve_mib);
+        if (suitability.rating == Suitability::unsupported) {
+            throw std::runtime_error(
+                "model rejected before load: " + suitability.reason);
+        }
+        MemoryEstimate estimate;
+        estimate.weights_bytes = model.manifest.model_size_bytes;
+        // Backend graph/compute-buffer and tokenizer-state overhead: a
+        // conservative flat heuristic (same order of magnitude as the 64 MiB
+        // per-request compute_buffers estimate in send_chat_message(), just
+        // scaled up for the larger one-time backend init allocation) pending
+        // the real-model measurement docs/PLAN.md Phase 30A's benchmark
+        // matrix deliverable calls for.
+        estimate.runtime_buffer_bytes = 256ULL * 1024ULL * 1024ULL;
+        // Matches the KV-per-slot figure send_chat_message() already
+        // estimates for MemoryCategory::compute_buffers, since llama.cpp
+        // reserves this much KV cache for every --parallel slot at
+        // model-load time regardless of how many slots later see traffic.
+        estimate.kv_bytes_per_sequence = 128ULL * 1024ULL * 1024ULL;
+        estimate.sequences = parallel_slots;
+        estimate.safety_margin_bytes = 32ULL * 1024ULL * 1024ULL;
+        std::lock_guard<std::mutex> lock(runner_admission_mutex);
+        if (!runner_weights_lease_id.empty()) {
+            memory->release(runner_weights_lease_id);
+            runner_weights_lease_id.clear();
+        }
+        const auto admission =
+            memory->reserve(MemoryCategory::runner_weights, estimate, true);
+        if (!admission.admitted) {
+            std::string message = admission.diagnostic;
+            if (!suitability.reason.empty()) {
+                message += " (" + suitability.reason + ")";
+            }
+            throw std::runtime_error(message);
+        }
+        runner_weights_lease_id = admission.lease_id;
+    }
+
     void ensure_model_loaded(const std::string& model_id) const {
         const auto current = inference->metrics();
         if (current.state == RunnerState::ready &&
@@ -1906,6 +2315,7 @@ private:
             // meaningless (and its slot ids may now collide with a
             // differently-loaded model's slots).
             prompt_sessions->reset();
+            release_runner_weights_lease();
         }
         if (const auto model = find_model(model_id)) {
             // A live chat load always asks for a GPU-offload recommendation
@@ -1924,13 +2334,21 @@ private:
                     model->manifest.required_gpu_backend);
                 tuning = launch_tuning_from_profile(profile);
             }
-            inference->load(*model, configuration.chat_context_length,
-                            configuration.runner_port,
-                            configuration.runner_startup_timeout_seconds,
-                            configuration.session_reuse_enabled
-                                ? configuration.session_reuse_max_slots
-                                : 1U,
-                            tuning);
+            const unsigned int parallel_slots =
+                configuration.session_reuse_enabled
+                    ? configuration.session_reuse_max_slots
+                    : 1U;
+            admit_runner_weights(*model, parallel_slots);
+            try {
+                inference->load(*model, configuration.chat_context_length,
+                                configuration.runner_port,
+                                configuration.runner_startup_timeout_seconds,
+                                parallel_slots, tuning,
+                                configuration.accelerator_policy);
+            } catch (...) {
+                release_runner_weights_lease();
+                throw;
+            }
             return;
         }
         throw std::runtime_error("selected chat model was not found");
@@ -2119,6 +2537,7 @@ private:
         bool stream_started = false;
         std::string query_id;
         std::string memory_lease_id;
+        bool inference_slot_admitted = false;
         // Tokens are streamed to the client as they arrive, so a client
         // watching the reply has already seen this text by the time
         // anything below can fail (a dropped runner connection, a policy
@@ -2127,6 +2546,18 @@ private:
         // read on screen.
         std::string streamed_text;
         try {
+            // Phase 30A: one of, at most, MemoryPolicy::maximum_active_inference
+            // concurrent generations -- checked before touching the runner at
+            // all, so a rejection under the cpu_only/minimal one-slot default
+            // never contends with, or interrupts, whichever generation is
+            // already in flight.
+            if (!try_admit_inference_slot()) {
+                throw std::runtime_error(
+                    "the server is already running its maximum number of "
+                    "concurrent inference requests; try again once the "
+                    "current reply finishes");
+            }
+            inference_slot_admitted = true;
             query_id = queries.begin(user.id, chat->project_id, chat->model_id);
             queries.transition(query_id, QueryStage::authentication,
                                QueryStatus::accepted);
@@ -2362,7 +2793,7 @@ private:
                         }
                     }
                 },
-                cancellation);
+                cancellation, configuration.runner_stall_timeout_seconds);
             if (first_token) {
                 queries.transition(query_id, QueryStage::generation,
                                    QueryStatus::generating);
@@ -2411,6 +2842,8 @@ private:
                                               : QueryStatus::completed);
             memory->release(memory_lease_id);
             memory_lease_id.clear();
+            release_inference_slot();
+            inference_slot_admitted = false;
             audit.append("chat.generate", user.id, "success", chat_id);
             if (streaming) {
                 send_chunk(
@@ -2441,6 +2874,10 @@ private:
         } catch (const std::exception& generation_exception) {
             if (!memory_lease_id.empty()) {
                 memory->release(memory_lease_id);
+            }
+            if (inference_slot_admitted) {
+                release_inference_slot();
+                inference_slot_admitted = false;
             }
             if (configuration.session_reuse_enabled) {
                 prompt_sessions->release(chat_id);
@@ -2489,6 +2926,11 @@ private:
     AppConfig configuration;
     RecordStore records;
     AuditLog audit;
+    // Phase 30A: empty unless the caller (HttpServer's two-argument
+    // constructor, wired from main.cpp's `serve` command) supplied the real
+    // settings.json path -- see the admin configuration API below, which
+    // refuses to run without it rather than guessing a path.
+    const std::filesystem::path settings_file;
     std::unique_ptr<UserStore> users;
     std::unique_ptr<SessionStore> sessions;
     std::unique_ptr<ApiTokenStore> api_tokens;
@@ -2510,6 +2952,17 @@ private:
     std::unique_ptr<BenchmarkStore> benchmarks;
     std::unique_ptr<server_internal::WorkloadHttpController> workloads;
     std::unique_ptr<MemoryBudgetManager> memory;
+    // Phase 30A: guards runner_weights_lease_id against ensure_model_loaded()
+    // being entered concurrently (warm_model_async() detaches a background
+    // thread that races the synchronous send_chat_message() call path).
+    mutable std::mutex runner_admission_mutex;
+    mutable std::string runner_weights_lease_id;
+    // Phase 30A deliverable 3 (docs/PLAN.md Phase 30A): enforces
+    // MemoryPolicy::maximum_active_inference (1 under the minimal/cpu_only
+    // profile) as a real admission gate on send_chat_message() instead of
+    // leaving the field validated-but-inert -- see try_admit_inference_slot()
+    // / release_inference_slot() below.
+    mutable std::atomic<std::uint32_t> active_inference_count{0U};
     std::unique_ptr<ProjectIndexService> indexes;
     // Phase 24: constructed once alongside `indexes` (see the constructor)
     // so its in-flight join table actually sees concurrent requests.
@@ -2520,6 +2973,12 @@ private:
     std::unique_ptr<ProjectWatcher> watcher;
     std::unique_ptr<CacheManager> cache;
     std::unique_ptr<PromptSessionManager> prompt_sessions;
+    // Phase 30A: declared (and therefore destroyed) before `memory`,
+    // `inference`, `cache`, and `prompt_sessions` themselves so its
+    // background thread always stops -- see ~MemorySweeper()'s join --
+    // before any object it might still be calling into is torn down.
+    std::unique_ptr<MemorySweeper> memory_sweeper;
+    std::uint32_t runner_idle_unload_seconds{600U};
     // Phase 19: nullable exactly like `inference`/`downloads` above --
     // calibration requires a real RunnerSupervisor to load a model against,
     // so it only exists when inference.llamaServerExecutable is configured.
@@ -2553,6 +3012,10 @@ HttpServer::HttpServer(std::string host, const std::uint16_t port)
       }()) {}
 
 HttpServer::HttpServer(AppConfig configuration)
+    : HttpServer(std::move(configuration), std::filesystem::path{}) {}
+
+HttpServer::HttpServer(AppConfig configuration,
+                       std::filesystem::path settings_file)
     : host_(configuration.host), port_(configuration.port),
       configuration_(std::move(configuration)) {
     ConfigurationManager::validate(configuration_);
@@ -2567,7 +3030,7 @@ HttpServer::HttpServer(AppConfig configuration)
         throw std::runtime_error("WSAStartup failed");
     }
 #endif
-    state_ = std::make_unique<State>(configuration_);
+    state_ = std::make_unique<State>(configuration_, std::move(settings_file));
 }
 
 HttpServer::~HttpServer() {

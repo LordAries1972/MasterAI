@@ -519,15 +519,24 @@ std::string WorkloadHttpController::load_model(
                 // through this endpoint should not be the one path that
                 // never touches VRAM for a compatible model/GPU pair.
                 LaunchTuning tuning;
-                tuning.gpu_layers = select_gpu_layers(
-                    probe_hardware(state_->configuration.models_root),
-                    model.manifest.required_gpu_backend,
-                    model.manifest.model_size_bytes);
+                // Phase 30A: this manual-load path built its own tuning
+                // directly from select_gpu_layers() rather than going
+                // through CalibrationService::resolve(), so it must repeat
+                // the cpu_only guard here rather than relying on resolve()
+                // to have already applied it.
+                tuning.gpu_layers =
+                    state_->configuration.accelerator_policy == "cpu_only"
+                        ? 0U
+                        : select_gpu_layers(
+                              probe_hardware(state_->configuration.models_root),
+                              model.manifest.required_gpu_backend,
+                              model.manifest.model_size_bytes);
                 state_->inference->load(
                     model,
                     static_cast<unsigned int>(
                         root.required("contextLength").as_integer()),
-                    state_->configuration.runner_port, 30U, 1U, tuning);
+                    state_->configuration.runner_port, 30U, 1U, tuning,
+                    state_->configuration.accelerator_policy);
                 state_->audit.append("model.load", user.id, "success", id);
                 return response(200, "OK", "{\"state\":\"ready\"}");
             }

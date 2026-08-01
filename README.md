@@ -194,6 +194,41 @@ The current source includes native implementations for:
   always-safe CPU-only default is kept rather than guessing a partial layer
   count. Applied automatically to every chat auto-load and manual model
   load, not only after an administrator runs an explicit calibration.
+- Phase 30A: CPU-only/GPU-disabled low-memory operation. A strict
+  `hardware.acceleratorPolicy` config (`auto` / `cpu_only` / `gpu_allowed`,
+  default `auto`). Under `cpu_only`, every runner launch is forced to zero
+  GPU layers -- `CalibrationService` never recommends GPU offload, a stale
+  persisted profile that does is rejected rather than silently zeroed, and
+  `LlamaCppAdapter::build_launch_spec()` refuses to launch at all if a
+  nonzero GPU-layer request reaches it. The runner process is also launched
+  with GPU-visibility environment overrides (`CUDA_VISIBLE_DEVICES=-1` and
+  equivalents) so a backend library cannot enumerate or initialize a GPU
+  even if it ignores the launch flags. Before that runner process is ever
+  started, `admit_runner_weights()` reserves a `MemoryCategory::
+  runner_weights` budget lease sized from the model's real weight bytes plus
+  compute-buffer/KV heuristics, rejecting an oversized model with a concrete
+  reason instead of letting it map/load first and fail later; a released
+  lease on every unload path keeps the next model's admission check
+  accurate. `MemoryPolicy::maximum_active_inference` (one request under the
+  minimal/cpu_only profile) is enforced on every chat request instead of
+  being a validated-but-unread field. A background `MemorySweeper` thread
+  unloads an idle runner once past its calibrated idle-unload seconds
+  (unconditionally under a profile that does not keep a warm idle model by
+  default, otherwise once real memory pressure appears) and trims bounded
+  caches under sustained pressure. `GET /api/v1/system/resources` reports
+  the effective `acceleratorPolicy`; `GET /api/v1/runner/status` adds
+  requested-vs-actual GPU layers and an unload countdown; `GET /api/v1/
+  system/memory` adds pagefile/swap headroom (`totalVirtualMemoryMiB`/
+  `availableVirtualMemoryMiB`, already pagefile-inclusive via Windows
+  `GlobalMemoryStatusEx`), process commit bytes, and hard-fault count.
+  Reconfiguring the OS pagefile itself is out of scope -- MasterAI reports
+  virtual-memory/pagefile state, it never changes it. An administrator-only
+  `GET`/`POST /api/v1/admin/config` reads and writes the live `settings.json`
+  (surfaced in the web UI's Settings -> System configuration panel), applying
+  every field a live request path already re-reads immediately and reporting
+  which changed fields need a restart. The one remaining deliverable is the
+  matched `auto`-vs-`cpu_only` real-model benchmark matrix, which needs a
+  pinned local GGUF and dedicated hardware run.
 - A framework-only registry for optional advanced-throughput candidates
   (continuous batching, speculative decoding, NUMA affinity, storage
   prefetch, multiple warm runners, GPU/CPU KV placement), every one
@@ -229,6 +264,30 @@ The current source includes native implementations for:
   `TokenSpan`/`PromptSegment`, a debug-poison-checked `RequestArena`, and a
   `FixedSizePool<T>` bridged into `MemoryBudgetManager` accounting, plus a
   zero-copy write path for streamed chat tokens.
+- A "PageFile" storage setting (`storage.pageFileRoot`, restart required):
+  redirects MasterAI's own disk-backed, per-category, key-indexed cache
+  (`CacheManager` -- tokenization, prompt/retrieval, model manifests, and
+  more) to an administrator-chosen directory instead of the default
+  `runtime_root/cache`, so that disk activity can be pointed at a faster
+  drive or away from the drive backing the real Windows pagefile, with no
+  admin privilege required and no data outside MasterAI's own use. Left
+  empty, behavior is unchanged. Configurable in the web UI's Settings ->
+  System configuration panel; resolved via `resolve_page_file_root()`.
+- A "System Report" (web UI: Report -> System Report, administrator-only,
+  `GET /api/v1/system/report`): one consolidated read of hardware (RAM, GPU
+  memory, CPU/NUMA), the real Windows pagefile's commit headroom,
+  `MemoryBudgetManager` pressure, this process's resident/commit memory, the
+  configured PageFile location's drive capacity/free space and MasterAI's
+  own used/capacity bytes there, and which optional features (retrieval,
+  cache, session reuse, automatic calibration, project-file watching,
+  local-password/OS sign-in) are currently enabled.
+- A stall watchdog on live generation requests (`inference.stallTimeoutSeconds`,
+  default 120s, hot-reloadable): `RunnerSupervisor::generate()`'s wait on the
+  runner's `/completion` stream now has a deadline measured from the last
+  byte actually received, so a runner that stalls mid-request (most likely
+  on a cold model's first prompt) surfaces as a timeout error instead of
+  hanging the request indefinitely; a still-streaming generation is never
+  cut off since the deadline resets on every byte received.
 
 Implementation does not automatically mean operational certification. The next
 section records the distinction.

@@ -200,7 +200,7 @@ int main(int argc, char* argv[]) {
                 settings, supported_environment());
             std::signal(SIGINT, handle_signal);
             std::signal(SIGTERM, handle_signal);
-            masterai::HttpServer server(configuration);
+            masterai::HttpServer server(configuration, settings);
             return server.run(stop_requested) ? 0 : 1;
         }
         if (command == "mcp-stdio") {
@@ -685,7 +685,8 @@ int main(int argc, char* argv[]) {
             const auto backend_hash =
                 masterai::sha256_file_hex(configuration.llama_server_executable);
             masterai::CalibrationService calibration(
-                inference, store, hardware, backend_hash, "masterai-0.1.0");
+                inference, store, hardware, backend_hash, "masterai-0.1.0",
+                configuration.accelerator_policy);
             const auto profile = calibration.calibrate(
                 *found, argv[4], configuration.runner_port, stop_requested);
             std::cout << std::fixed << std::setprecision(2);

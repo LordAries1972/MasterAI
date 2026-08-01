@@ -390,15 +390,21 @@ CalibrationService::CalibrationService(RunnerSupervisor& inference,
                                        TuningProfileStore& store,
                                        HardwareInfo hardware,
                                        std::string backend_hash,
-                                       std::string build_id)
+                                       std::string build_id,
+                                       std::string accelerator_policy)
     : inference_(inference),
       store_(store),
       hardware_(std::move(hardware)),
       backend_hash_(std::move(backend_hash)),
-      build_id_(std::move(build_id)) {
+      build_id_(std::move(build_id)),
+      accelerator_policy_(std::move(accelerator_policy)) {
     if (backend_hash_.empty() || build_id_.empty()) {
         throw std::invalid_argument(
             "calibration requires a non-empty backend hash and build id");
+    }
+    if (accelerator_policy_ != "auto" && accelerator_policy_ != "cpu_only" &&
+        accelerator_policy_ != "gpu_allowed") {
+        throw std::invalid_argument("accelerator policy is outside policy");
     }
 }
 
@@ -415,12 +421,26 @@ TuningProfile CalibrationService::resolve(
             store_.find(host_hash(), model_sha256, backend_hash_, build_id_)) {
         // A persisted profile already reflects a real measurement -- evidence
         // passed to this call never overrides it, only fills the gap when
-        // there isn't one yet (see the safe-default branch below).
+        // there isn't one yet (see the safe-default branch below). Phase
+        // 30A: a persisted profile calibrated under a GPU-permitting policy
+        // that recommends a nonzero GPU layer count is rejected outright
+        // under cpu_only rather than silently returned with GPU layers
+        // zeroed out -- the administrator's cpu_only choice must never be
+        // silently overridden by stale evidence.
+        if (accelerator_policy_ == "cpu_only" &&
+            found->recommended_gpu_layers > 0U) {
+            throw std::runtime_error(
+                "persisted tuning profile recommends GPU offload but "
+                "hardware.acceleratorPolicy is cpu_only; recalibrate or "
+                "delete the stale profile before loading this model");
+        }
         return *found;
     }
     TuningProfile profile = safe_default_profile(requested_profile);
     profile.recommended_gpu_layers =
-        select_gpu_layers(hardware_, required_gpu_backend, model_size_bytes);
+        accelerator_policy_ == "cpu_only"
+            ? 0U
+            : select_gpu_layers(hardware_, required_gpu_backend, model_size_bytes);
     if (storage != nullptr) {
         profile.recommended_load_mode =
             select_load_mode(*storage, available_ram_bytes, model_size_bytes);
@@ -462,8 +482,10 @@ TuningProfile CalibrationService::calibrate(
     profile.backend_hash = backend_hash_;
     profile.build_id = build_id_;
     profile.recommended_gpu_layers =
-        select_gpu_layers(hardware_, model.manifest.required_gpu_backend,
-                          model.manifest.model_size_bytes);
+        accelerator_policy_ == "cpu_only"
+            ? 0U
+            : select_gpu_layers(hardware_, model.manifest.required_gpu_backend,
+                                model.manifest.model_size_bytes);
     const auto tuning = launch_tuning_from_profile(profile);
 
     std::atomic_bool sampling{true};
@@ -484,7 +506,8 @@ TuningProfile CalibrationService::calibrate(
         const auto before = probe_process_resources();
         const auto load_start = std::chrono::steady_clock::now();
         inference_.load(model, profile.recommended_context_length, port, 120U,
-                        profile.recommended_parallel_slots, tuning);
+                        profile.recommended_parallel_slots, tuning,
+                        accelerator_policy_);
         profile.cold_load_microseconds = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - load_start)

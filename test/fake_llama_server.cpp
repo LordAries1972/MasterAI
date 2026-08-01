@@ -84,9 +84,17 @@ int main(int argc, char* argv[]) {
         } else if (request.rfind("POST /tokenize ", 0U) == 0U) {
             body = "{\"tokens\":[1,2,3]}";
         } else if (request.rfind("POST /completion ", 0U) == 0U) {
+            // Real llama.cpp servers stream /completion as Server-Sent
+            // Events ("data: <json>" lines) -- see inference.cpp's
+            // local_http()/dispatch_lines(), which only forwards lines with
+            // that exact "data: " prefix (and silently drops anything else,
+            // matching the SSE spec) so a mid-stream keep-alive comment line
+            // never reaches parse_json(). This fixture must match that
+            // framing or every streamed chunk below is dropped before
+            // RunnerSupervisor::generate() ever sees it.
             body =
-                "{\"content\":\"return \",\"tokens_evaluated\":3}\n"
-                "{\"content\":\"value;\",\"tokens_predicted\":2}\n";
+                "data: {\"content\":\"return \",\"tokens_evaluated\":3}\n"
+                "data: {\"content\":\"value;\",\"tokens_predicted\":2}\n";
         } else {
             body = "{\"error\":\"not_found\"}";
         }

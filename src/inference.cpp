@@ -5,6 +5,7 @@
 #include "masterai.hpp"
 #include "json.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <fstream>
@@ -22,6 +23,7 @@
 #elif defined(__linux__)
 #include <arpa/inet.h>
 #include <csignal>
+#include <cstdlib>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -106,6 +108,51 @@ std::wstring widen(const std::string& value) {
     return result;
 }
 
+// Phase 30A: merges the current process's inherited environment with
+// `overrides` (overrides win on name collision, case-insensitively as
+// Windows environment blocks require) into the null-string-terminated,
+// double-null-terminated wide block CreateProcessW's lpEnvironment expects
+// when launched with CREATE_UNICODE_ENVIRONMENT. Returns an empty vector
+// when there are no overrides, so the caller can pass nullptr and fully
+// reproduce pre-Phase-30A behavior (full, unmodified inheritance) exactly.
+std::vector<wchar_t> build_environment_block(
+    const std::map<std::string, std::string>& overrides) {
+    if (overrides.empty()) return {};
+    LPWCH inherited = GetEnvironmentStringsW();
+    if (inherited == nullptr) {
+        throw std::runtime_error("runner environment could not be read");
+    }
+    std::map<std::wstring, std::wstring, std::less<>> merged;
+    for (const wchar_t* cursor = inherited; *cursor != L'\0';) {
+        const std::wstring entry(cursor);
+        cursor += entry.size() + 1U;
+        const auto separator = entry.find(L'=');
+        // Windows environment blocks legitimately contain entries starting
+        // with '=' (per-drive current directory pseudo-variables); skip
+        // anything where '=' isn't a real name/value separator.
+        if (separator == std::wstring::npos || separator == 0U) continue;
+        std::wstring name = entry.substr(0U, separator);
+        std::transform(name.begin(), name.end(), name.begin(), ::towupper);
+        merged[name] = entry.substr(separator + 1U);
+    }
+    FreeEnvironmentStringsW(inherited);
+    for (const auto& [name, value] : overrides) {
+        std::wstring wide_name = widen(name);
+        std::transform(wide_name.begin(), wide_name.end(), wide_name.begin(),
+                       ::towupper);
+        merged[wide_name] = widen(value);
+    }
+    std::vector<wchar_t> block;
+    for (const auto& [name, value] : merged) {
+        block.insert(block.end(), name.begin(), name.end());
+        block.push_back(L'=');
+        block.insert(block.end(), value.begin(), value.end());
+        block.push_back(L'\0');
+    }
+    block.push_back(L'\0');
+    return block;
+}
+
 std::wstring quote_windows_argument(const std::string& argument) {
     const auto input = widen(argument);
     if (input.find_first_of(L" \t\n\v\"") == std::wstring::npos) return input;
@@ -151,7 +198,12 @@ HttpResult local_http(
     const unsigned int port, const std::string& method,
     const std::string& target, const std::string& body,
     const std::function<void(const std::string&)>& on_line,
-    const std::atomic_bool* cancellation = nullptr) {
+    const std::atomic_bool* cancellation = nullptr,
+    // Watchdog against a runner that accepts the connection and then never
+    // answers (e.g. deadlocks building its first inference graph on a cold
+    // model): measured from the last byte actually received, not from
+    // connection start, so a slow-but-streaming generation never trips it.
+    std::chrono::milliseconds stall_timeout = std::chrono::seconds(120)) {
 #if defined(_WIN32)
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
@@ -256,6 +308,7 @@ HttpResult local_http(
         }
     };
     std::array<char, 8192> buffer{};
+    auto last_activity = std::chrono::steady_clock::now();
     while (true) {
         if (cancellation != nullptr && cancellation->load()) break;
         fd_set readable;
@@ -270,7 +323,17 @@ HttpResult local_http(
 #else
             select(socket_value + 1, &readable, nullptr, nullptr, &timeout);
 #endif
-        if (selected == 0) continue;
+        if (selected == 0) {
+            if (std::chrono::steady_clock::now() - last_activity > stall_timeout) {
+                close_socket(socket_value);
+#if defined(_WIN32)
+                WSACleanup();
+#endif
+                throw std::runtime_error("runner IPC stalled: no response received "
+                                          "within the stall timeout");
+            }
+            continue;
+        }
         if (selected < 0) {
             close_socket(socket_value);
 #if defined(_WIN32)
@@ -281,6 +344,7 @@ HttpResult local_http(
         const auto received =
             recv(socket_value, buffer.data(), static_cast<int>(buffer.size()), 0);
         if (received <= 0) break;
+        last_activity = std::chrono::steady_clock::now();
         if (!headers_parsed) {
             raw.append(buffer.data(), static_cast<std::size_t>(received));
             const auto header_end = raw.find("\r\n\r\n");
@@ -512,14 +576,32 @@ public:
         startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
         PROCESS_INFORMATION process{};
         const auto working = widen(specification.working_directory.string());
+        auto environment_block = build_environment_block(specification.environment);
+        const DWORD creation_flags =
+            CREATE_NO_WINDOW |
+            (environment_block.empty() ? 0U
+                                       : static_cast<DWORD>(
+                                             CREATE_UNICODE_ENVIRONMENT));
         const BOOL created = CreateProcessW(
             application.c_str(), mutable_command.data(), nullptr, nullptr, TRUE,
-            CREATE_NO_WINDOW, nullptr, working.c_str(), &startup, &process);
+            creation_flags,
+            environment_block.empty() ? nullptr : environment_block.data(),
+            working.c_str(), &startup, &process);
         CloseHandle(log);
         if (!created) throw std::runtime_error("runner process launch failed");
         CloseHandle(process.hThread);
         handle_ = process.hProcess;
         process_id_ = process.dwProcessId;
+        // Model warm-up (weight mmap/IO plus backend init) is CPU/IO-heavy
+        // enough on a cold load to starve the rest of the OS scheduler if it
+        // runs at the same NORMAL_PRIORITY_CLASS as everything else on the
+        // box -- that starvation is what surfaced as the whole system (not
+        // just this app) freezing while a model warmed up. Dropping the
+        // runner one notch below normal keeps it a background-friendly
+        // neighbor without materially slowing the load itself. Best-effort:
+        // a failure here just leaves the process at its inherited default
+        // priority, which is what every prior build already did.
+        SetPriorityClass(handle_, BELOW_NORMAL_PRIORITY_CLASS);
 #else
         const int log = open(log_path.c_str(), O_CREAT | O_WRONLY | O_APPEND, 0600);
         if (log < 0) throw std::runtime_error("runner log could not be opened");
@@ -535,6 +617,16 @@ public:
                 _exit(126);
             }
             close(log);
+            // Same reasoning as the Windows BELOW_NORMAL_PRIORITY_CLASS call
+            // above: a cold model load is CPU/IO-heavy enough to starve the
+            // rest of the system at the default niceness. Best-effort --
+            // ignore failure (e.g. if the OS clamps it) and keep launching.
+            [[maybe_unused]] const int nice_result = nice(5);
+            // Phase 30A: applied only in the forked child, so this never
+            // mutates the parent (control-plane) process's environment.
+            for (const auto& [name, value] : specification.environment) {
+                setenv(name.c_str(), value.c_str(), 1);
+            }
             std::vector<std::string> values;
             values.push_back(specification.executable.string());
             values.insert(values.end(), specification.arguments.begin(),
@@ -686,7 +778,8 @@ void RunnerSupervisor::load(const ModelRecord& model,
                             const unsigned int port,
                             const std::uint32_t startup_timeout_seconds,
                             const unsigned int parallel_slots,
-                            const LaunchTuning& tuning) {
+                            const LaunchTuning& tuning,
+                            const std::string& accelerator_policy) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (metrics_.state != RunnerState::unloaded &&
         metrics_.state != RunnerState::failed) {
@@ -695,6 +788,8 @@ void RunnerSupervisor::load(const ModelRecord& model,
     metrics_ = {};
     metrics_.state = RunnerState::starting;
     metrics_.model_id = model.manifest.id;
+    metrics_.requested_gpu_layers = tuning.gpu_layers;
+    metrics_.accelerator_policy = accelerator_policy;
     port_ = port;
     // Phase 26: LoadingMetadata -- manifest/model record already validated
     // by the caller, launch spec about to be built. Legal from Cold
@@ -707,8 +802,9 @@ void RunnerSupervisor::load(const ModelRecord& model,
     // model file always tokenizes the same text the same way.
     model_sha256_ = model.manifest.model_sha256;
     try {
-        const auto spec = adapter_.build_launch_spec(model, context_length, port,
-                                                      parallel_slots, tuning);
+        const auto spec = adapter_.build_launch_spec(
+            model, context_length, port, parallel_slots, tuning,
+            accelerator_policy);
         // Phase 26: MappingWeights -- the backend process is about to start
         // reading/mapping the model file per LaunchTuning::load_mode.
         warm_tracker_.enter(WarmModelState::MappingWeights);
@@ -906,7 +1002,8 @@ std::uint64_t RunnerSupervisor::tokenize(const std::string& text) {
 GenerationResult RunnerSupervisor::generate(
     const std::string& prompt, const GenerationOptions& options,
     const std::function<void(const std::string&)>& on_chunk,
-    const std::atomic_bool& cancellation) {
+    const std::atomic_bool& cancellation,
+    const std::uint32_t stall_timeout_seconds) {
     if (prompt.empty() || prompt.size() > 16U * 1024U * 1024U ||
         options.max_tokens == 0U || options.max_tokens > 32768U ||
         options.temperature < 0.0 || options.temperature > 2.0 ||
@@ -964,7 +1061,7 @@ GenerationResult RunnerSupervisor::generate(
                         tokens_predicted->as_integer());
                 }
             },
-            &cancellation);
+            &cancellation, std::chrono::seconds(stall_timeout_seconds));
         if (result.status != 200 && !cancellation.load()) {
             throw std::runtime_error("runner generation request failed");
         }
@@ -1002,12 +1099,30 @@ GenerationResult RunnerSupervisor::generate(
 }
 
 RunnerMetrics RunnerSupervisor::metrics() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto result = metrics_;
-    result.resident_memory_bytes = process_->resident_memory();
-    // Phase 26: layered warm-state view alongside the RunnerState above --
-    // purely additive, see the RunnerMetrics comment in masterai.hpp.
+    // load() holds mutex_ for its *entire* body, including the readiness-poll
+    // loop that can run for the whole startup_timeout_seconds window on a
+    // cold multi-gigabyte model. metrics() backs GET /api/v1/runner/status,
+    // which the web UI polls continuously to show warm-up progress, and
+    // ensure_model_loaded() calls it on every chat send before deciding
+    // whether to (re)load -- a blocking lock() here therefore froze status
+    // polling and chat for the whole warm-up, not just the load() caller.
+    // try_to_lock lets metrics() return immediately instead: when the lock
+    // is free it reports the exact same snapshot as before; when a load()
+    // (or unload()/generate()) is in flight it falls back to warm_tracker_
+    // alone, which keeps its own independent mutex (see WarmModelTracker in
+    // masterai.hpp) and is therefore always safe and fast to read here.
+    std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+    if (lock.owns_lock()) {
+        auto result = metrics_;
+        result.resident_memory_bytes = process_->resident_memory();
+        result.warm_state = warm_tracker_.current();
+        result.last_activity_epoch_seconds = warm_tracker_.last_activity_epoch_seconds();
+        return result;
+    }
+    RunnerMetrics result;
+    result.state = RunnerState::starting;
     result.warm_state = warm_tracker_.current();
+    result.last_activity_epoch_seconds = warm_tracker_.last_activity_epoch_seconds();
     return result;
 }
 

@@ -81,13 +81,30 @@ struct AppConfig {
     unsigned int minimum_free_ram_percent{15U};
     unsigned int critical_memory_percent{92U};
     std::string resource_profile{"balanced"};
+    // Phase 30A: strict accelerator policy. "auto" keeps existing VRAM-based
+    // select_gpu_layers() behavior; "cpu_only" forces zero GPU layers, CPU
+    // KV placement, and a GPU-hiding runner process environment (see
+    // LaunchSpec::environment / build_launch_spec()); "gpu_allowed" is the
+    // same as "auto" today, kept distinct so a future stricter "always
+    // offload" policy has a name that does not collide with "auto".
+    std::string accelerator_policy{"auto"};
     std::filesystem::path llama_server_executable;
     std::filesystem::path curl_executable;
+    // "PageFile" setting: an administrator-chosen substitute location for
+    // MasterAI's own disk-backed cache/scratch area (see
+    // resolve_page_file_root()). Empty means "use the existing default"
+    // (runtime_root/"cache"), not the real Windows pagefile.
+    std::filesystem::path page_file_root;
     std::uint16_t runner_port{7081};
     // Previously hardcoded to 30 seconds at the RunnerSupervisor::load() call
     // site, which was too short for large models (e.g. DeepSeek-class) to
     // finish cold-loading before readiness was declared timed out.
     std::uint32_t runner_startup_timeout_seconds{120U};
+    // Watchdog for RunnerSupervisor::generate(): how long to wait between
+    // bytes from the runner during a live generation before treating it as
+    // hung instead of blocking forever. Resets on every byte received, so a
+    // slow-but-streaming generation is never cut off.
+    std::uint32_t runner_stall_timeout_seconds{120U};
     // On by default: a native ProjectWatcher observes every catalog project's
     // root for file saves and `.git/HEAD` branch switches and forwards them
     // into ProjectIndexService::request_update automatically. Off disables
@@ -143,6 +160,12 @@ public:
                             const std::filesystem::path& settings);
     static std::string serialize(const AppConfig& configuration);
 };
+
+// Resolves the effective directory for MasterAI's "PageFile" disk-backed
+// cache/scratch area: `configuration.page_file_root` if set, otherwise the
+// existing default of `runtime_root/"cache"`. Centralised here so every
+// caller (CacheManager construction, the System Report) agrees.
+std::filesystem::path resolve_page_file_root(const AppConfig& configuration);
 
 class RecordStore final {
 public:
@@ -1377,6 +1400,15 @@ struct LaunchSpec {
     std::filesystem::path executable;
     std::vector<std::string> arguments;
     std::filesystem::path working_directory;
+    // Phase 30A: additional environment variables merged on top of the
+    // current process's inherited environment before launch. Populated by
+    // build_launch_spec() with GPU-visibility-hiding variables
+    // (CUDA_VISIBLE_DEVICES etc.) when the effective accelerator policy is
+    // cpu_only, so a backend library cannot enumerate/initialize a GPU even
+    // if it ignores --n-gpu-layers 0. Empty for every other launch, which
+    // reproduces the pre-Phase-30A behavior of a fully inherited
+    // environment exactly (see RunnerSupervisor::Process::start()).
+    std::map<std::string, std::string> environment;
 };
 
 // Phase 26: explicit model-weight load mode. "direct" (raw unbuffered I/O)
@@ -1487,11 +1519,18 @@ public:
     // ids to address with cache_prompt/id_slot requests. Defaulted to 1
     // (today's pre-Phase-18 behavior) so existing callers that don't pass it
     // are unaffected.
+    // accelerator_policy is AppConfig::accelerator_policy. "cpu_only"
+    // throws if tuning.gpu_layers != 0 (belt-and-suspenders: the caller's
+    // CalibrationService should already have resolved gpu_layers to 0 --
+    // see CalibrationService::resolve()/calibrate() -- so this only ever
+    // fires if a caller bypasses calibration) and populates the returned
+    // LaunchSpec::environment with GPU-visibility-hiding variables.
     LaunchSpec build_launch_spec(const ModelRecord& model,
                                  unsigned int context_length,
                                  unsigned int port,
                                  unsigned int parallel_slots = 1U,
-                                 const LaunchTuning& tuning = {}) const;
+                                 const LaunchTuning& tuning = {},
+                                 const std::string& accelerator_policy = "auto") const;
 
 private:
     std::filesystem::path approved_backend_;
@@ -1613,6 +1652,14 @@ struct RunnerMetrics {
     // above (see WarmModelTracker). Every pre-Phase-26 caller reading only
     // `state` is unaffected -- this field is purely additive.
     WarmModelState warm_state{WarmModelState::Cold};
+    // Phase 30A administration visibility (docs/PLAN.md Phase 30A
+    // deliverable 5): what the last load() call actually asked for, so
+    // GET /api/v1/runner/status can show requested-vs-actual GPU layers and
+    // the accelerator policy that launch was validated under, rather than an
+    // administrator having to infer it from launch-arg logs.
+    unsigned int requested_gpu_layers{0U};
+    std::string accelerator_policy;
+    std::uint64_t last_activity_epoch_seconds{0U};
 };
 
 class RunnerSupervisor final {
@@ -1626,7 +1673,8 @@ public:
     void load(const ModelRecord& model, unsigned int context_length,
               unsigned int port, std::uint32_t startup_timeout_seconds = 30,
               unsigned int parallel_slots = 1U,
-              const LaunchTuning& tuning = {});
+              const LaunchTuning& tuning = {},
+              const std::string& accelerator_policy = "auto");
     void unload(std::uint32_t grace_seconds = 10) noexcept;
     std::uint64_t tokenize(const std::string& text);
     // Phase 23: opt-in tokenization cache. When set, tokenize() first looks
@@ -1640,10 +1688,16 @@ public:
     // served a token count computed under the old policy.
     void set_tokenization_cache(CacheManager* cache,
                                 std::string special_token_policy = "default");
+    // stall_timeout_seconds bounds how long generate() will wait between
+    // bytes from the runner before treating it as hung (e.g. a deadlock
+    // building the first inference graph on a cold model) rather than
+    // blocking forever; it resets on every byte received, so a slow-but-
+    // still-streaming generation is never cut off by it.
     GenerationResult generate(
         const std::string& prompt, const GenerationOptions& options,
         const std::function<void(const std::string&)>& on_chunk,
-        const std::atomic_bool& cancellation);
+        const std::atomic_bool& cancellation,
+        std::uint32_t stall_timeout_seconds = 120U);
     RunnerMetrics metrics() const;
     // Phase 26: applies WarmModelTracker::apply_idle_timeout() against this
     // supervisor's own tracker -- see that method's contract. Intended to be
@@ -2053,9 +2107,15 @@ private:
 // whether/when to load a model with the resulting LaunchTuning.
 class CalibrationService final {
 public:
+    // accelerator_policy is AppConfig::accelerator_policy ("auto"/
+    // "cpu_only"/"gpu_allowed"). "cpu_only" forces every resolve()/
+    // calibrate() result to recommended_gpu_layers == 0 and rejects (throws)
+    // rather than silently drops a persisted profile that recommends a
+    // nonzero value -- see the Phase 30A comment on resolve() below.
     CalibrationService(RunnerSupervisor& inference, TuningProfileStore& store,
                        HardwareInfo hardware, std::string backend_hash,
-                       std::string build_id);
+                       std::string build_id,
+                       std::string accelerator_policy = "auto");
 
     TuningProfile calibrate(const ModelRecord& model,
                             const std::string& requested_profile,
@@ -2081,6 +2141,13 @@ public:
     // whether `storage` is supplied -- a caller that only knows the model's
     // size still gets a real GPU-offload recommendation instead of always
     // being stuck at the pre-GPU-support default of 0.
+    // Phase 30A: when the constructed accelerator_policy is "cpu_only", the
+    // returned profile always has recommended_gpu_layers == 0. If a
+    // *persisted* profile (found in store_) recommends a nonzero value --
+    // meaning it was calibrated under a different, GPU-permitting policy --
+    // this throws instead of silently returning it with GPU layers zeroed
+    // out, because a caller receiving a silently-modified profile could
+    // launch with settings that no longer match what was measured/saved.
     TuningProfile resolve(const std::string& model_sha256,
                          const std::string& requested_profile,
                          const StorageLatencyProfile* storage = nullptr,
@@ -2089,6 +2156,7 @@ public:
                          const std::string& required_gpu_backend = std::string()) const;
 
     std::string host_hash() const;
+    const std::string& accelerator_policy() const noexcept { return accelerator_policy_; }
 
 private:
     RunnerSupervisor& inference_;
@@ -2096,6 +2164,7 @@ private:
     HardwareInfo hardware_;
     std::string backend_hash_;
     std::string build_id_;
+    std::string accelerator_policy_;
 };
 
 // Derives a LaunchTuning from a TuningProfile's recommendations so a caller
@@ -2791,6 +2860,12 @@ public:
     MemoryStatus sample();
     MemoryStatus status() const;
     bool permits_background_work() const;
+    // Phase 30A: read-only access to the resolved policy (in particular
+    // maximum_active_inference/maximum_queued_inference) so callers that
+    // need to enforce the configured concurrency ceiling -- e.g.
+    // send_chat_message()'s one-slot-under-cpu_only admission gate -- do not
+    // have to keep a second copy of it in sync by hand.
+    MemoryPolicy policy() const;
     static MemoryPolicy policy_for(ResourceProfile profile,
                                    const HardwareInfo& hardware,
                                    std::uint64_t hard_limit_bytes = 0U);
@@ -3612,6 +3687,41 @@ private:
     std::unique_ptr<State> state_;
 };
 
+// Phase 30A deliverable 4 (docs/PLAN.md Phase 30A, implementation-order item
+// 4): the one background sweep that turns the already-built idle-unload and
+// pressure-action primitives into something that actually runs
+// unattended -- WarmModelTracker::apply_idle_timeout()/
+// RunnerSupervisor::apply_idle_timeout() (Phase 26) and
+// MemoryBudgetManager::sample()'s active_pressure_actions (Phase 14) were
+// both callable but had no periodic caller before this. Mirrors
+// ProjectWatcher's pimpl/worker-thread shape (src/project_watcher.cpp)
+// rather than inventing a third background-thread idiom. Every dependency is
+// an existing pointer/reference into HttpServer::State's already-owned
+// objects -- this class owns none of them and creates no second memory
+// authority or inference pipeline.
+class MemorySweeper final {
+public:
+    // `inference`, `cache`, and `prompt_sessions` are all nullable exactly
+    // like their HttpServer::State counterparts (no configured runner/cache
+    // means nothing to sweep for that concern). `on_idle_unload` is invoked
+    // immediately after an idle-timeout-triggered unload()/reset() so the
+    // caller can release whatever runner_weights budget lease it is holding
+    // (MemorySweeper itself has no visibility into that lease -- it lives in
+    // HttpServer::State, see admit_runner_weights()/
+    // release_runner_weights_lease()).
+    MemorySweeper(MemoryBudgetManager& memory, RunnerSupervisor* inference,
+                 CacheManager* cache, PromptSessionManager* prompt_sessions,
+                 std::uint32_t idle_unload_seconds,
+                 std::function<void()> on_idle_unload = {});
+    ~MemorySweeper();
+    MemorySweeper(const MemorySweeper&) = delete;
+    MemorySweeper& operator=(const MemorySweeper&) = delete;
+
+private:
+    class State;
+    std::unique_ptr<State> state_;
+};
+
 // Phase 23: compiled per-architecture chat-wrap template plus segmented
 // prompt assembly built over shared immutable literal buffers, instead of
 // server.cpp's previous repeated std::string += concatenation. Implemented
@@ -3934,6 +4044,14 @@ class HttpServer final {
 public:
     HttpServer(std::string host, std::uint16_t port);
     explicit HttpServer(AppConfig configuration);
+    // Phase 30A: `settings_file` is the on-disk settings.json path the admin
+    // configuration API (GET/PUT /api/v1/admin/config) round-trips through
+    // ConfigurationManager::save_atomic() -- see State::settings_file below.
+    // Left empty by the single-argument constructor above (and by the
+    // host/port convenience constructor), in which case the admin
+    // configuration API is unavailable rather than silently writing to a
+    // path nobody chose.
+    HttpServer(AppConfig configuration, std::filesystem::path settings_file);
     ~HttpServer();
     HttpServer(const HttpServer&) = delete;
     HttpServer& operator=(const HttpServer&) = delete;

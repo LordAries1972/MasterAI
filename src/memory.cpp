@@ -7,12 +7,21 @@
 #include "json.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace masterai {
 namespace {
+
+std::uint64_t sweeper_epoch_seconds() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+}
 
 constexpr std::uint64_t mib = 1024ULL * 1024ULL;
 
@@ -228,6 +237,11 @@ bool MemoryBudgetManager::permits_background_work() const {
     return state_->current.pressure < MemoryPressure::high;
 }
 
+MemoryPolicy MemoryBudgetManager::policy() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->policy;
+}
+
 MemoryPolicy MemoryBudgetManager::policy_for(
     const ResourceProfile profile, const HardwareInfo& hardware,
     const std::uint64_t hard_limit_bytes) {
@@ -361,5 +375,109 @@ std::uint64_t BoundedWorkQueue::payload_bytes() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return payload_bytes_;
 }
+
+class MemorySweeper::State final {
+public:
+    State(MemoryBudgetManager& memory, RunnerSupervisor* inference,
+         CacheManager* cache, PromptSessionManager* prompt_sessions,
+         std::uint32_t idle_unload_seconds,
+         std::function<void()> on_idle_unload)
+        : memory_(memory), inference_(inference), cache_(cache),
+          prompt_sessions_(prompt_sessions),
+          idle_unload_seconds_(idle_unload_seconds),
+          on_idle_unload_(std::move(on_idle_unload)),
+          worker_([this]() { run(); }) {}
+
+    ~State() {
+        stopping_.store(true);
+        if (worker_.joinable()) worker_.join();
+    }
+
+    State(const State&) = delete;
+    State& operator=(const State&) = delete;
+
+private:
+    // Polling granularity: fine enough that apply_idle_timeout() (whose own
+    // threshold is idle_unload_seconds, typically minutes) fires within a
+    // few seconds of actually going idle, without spinning.
+    static constexpr std::chrono::milliseconds kPollInterval{2000};
+
+    // "no persistent idle runner by default" (docs/PLAN.md Phase 30A): under
+    // a profile that already asked for no idle model retention
+    // (keep_idle_model=false -- minimal/cpu_only-shaped profiles), the idle
+    // timeout unloads unconditionally. Under a profile that does want to
+    // keep a warm idle model (balanced/performance default), the same
+    // timeout still applies once real memory pressure appears, so an idle
+    // runner never outlives actual contention for the RAM it's holding.
+    void apply_idle_unload(const MemoryPolicy& policy,
+                           const MemoryStatus& status) {
+        if (inference_ == nullptr) return;
+        if (policy.keep_idle_model && status.pressure < MemoryPressure::elevated) {
+            return;
+        }
+        if (!inference_->apply_idle_timeout(sweeper_epoch_seconds(),
+                                            idle_unload_seconds_)) {
+            return;
+        }
+        inference_->unload();
+        if (prompt_sessions_ != nullptr) prompt_sessions_->reset();
+        if (on_idle_unload_) on_idle_unload_();
+    }
+
+    void sleep_one_poll_interval() {
+        auto remaining = kPollInterval;
+        while (remaining > std::chrono::milliseconds::zero() &&
+              !stopping_.load()) {
+            const auto step =
+                std::min(remaining, std::chrono::milliseconds(200));
+            std::this_thread::sleep_for(step);
+            remaining -= step;
+        }
+    }
+
+    void run() {
+        while (!stopping_.load()) {
+            const auto policy = memory_.policy();
+            const auto status = memory_.sample();
+            apply_idle_unload(policy, status);
+            // Memory-pressure release cascade (docs/PLAN.md Phase 30A
+            // deliverable "memory reduction actions applied before load and
+            // between requests"): trims CacheManager's bounded categories
+            // down to their configured capacity -- the same forced eviction
+            // an administrator can trigger by hand via
+            // POST /api/v1/system/cache/trim -- once reservation usage or
+            // physical availability crosses the "high" pressure threshold.
+            // KV-slot eviction (KvCacheManager::evict_one()) and per-request
+            // RequestArena::reset() are already invoked at their own natural
+            // request-scoped boundaries (Phase 27/30) and need no sweep-level
+            // duplicate; this loop only ever forces the standing,
+            // non-request-scoped caches down.
+            if (cache_ != nullptr && status.pressure >= MemoryPressure::high) {
+                cache_->trim();
+            }
+            sleep_one_poll_interval();
+        }
+    }
+
+    MemoryBudgetManager& memory_;
+    RunnerSupervisor* inference_;
+    CacheManager* cache_;
+    PromptSessionManager* prompt_sessions_;
+    std::uint32_t idle_unload_seconds_;
+    std::function<void()> on_idle_unload_;
+    std::atomic_bool stopping_{false};
+    std::thread worker_;
+};
+
+MemorySweeper::MemorySweeper(MemoryBudgetManager& memory,
+                             RunnerSupervisor* inference, CacheManager* cache,
+                             PromptSessionManager* prompt_sessions,
+                             std::uint32_t idle_unload_seconds,
+                             std::function<void()> on_idle_unload)
+    : state_(std::make_unique<State>(memory, inference, cache,
+                                     prompt_sessions, idle_unload_seconds,
+                                     std::move(on_idle_unload))) {}
+
+MemorySweeper::~MemorySweeper() = default;
 
 }  // namespace masterai

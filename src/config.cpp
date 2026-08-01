@@ -102,6 +102,9 @@ void apply_values(AppConfig& config,
         } else if (item.first == "curlExecutable" ||
                    item.first == "MASTERAI_CURL") {
             config.curl_executable = item.second;
+        } else if (item.first == "acceleratorPolicy" ||
+                   item.first == "MASTERAI_ACCELERATOR_POLICY") {
+            config.accelerator_policy = item.second;
         } else {
             throw std::runtime_error("unsupported configuration override: " +
                                      item.first);
@@ -158,8 +161,8 @@ AppConfig ConfigurationManager::load(
         const auto root = parse_json(read_file(settings));
         require_only(root, {"schemaVersion", "server", "tls", "auth",
                             "workspace", "models", "inference", "downloads",
-                            "memory", "indexing", "retrieval", "cache",
-                            "session", "performance"}, "");
+                            "memory", "hardware", "indexing", "retrieval",
+                            "cache", "session", "performance", "storage"}, "");
         config.schema_version =
             static_cast<int>(root.required("schemaVersion").as_integer());
 
@@ -229,6 +232,23 @@ AppConfig ConfigurationManager::load(
         config.models_root =
             resolve_workspace_path(workspace.required("modelsRoot").as_string());
 
+        // Phase: "PageFile" -- a MasterAI-scoped substitute for spilling to
+        // the system's own pagefile/temp drive. Left empty (the default),
+        // resolve_page_file_root() falls back to runtime_root/"cache", the
+        // same disk-cache location MasterAI has always used, so an unset
+        // pageFileRoot changes nothing about existing installs. Set, it
+        // redirects that same disk-backed, per-category, key-indexed cache
+        // (CacheManager -- already the quick-lookup, MasterAI-only store for
+        // tokenization/prompt/model-manifest data) to live at the
+        // administrator's chosen location instead, with no admin privilege
+        // required since it is an ordinary directory, not a real Windows
+        // pagefile.
+        if (const auto* storage = root.optional("storage")) {
+            require_only(*storage, {"pageFileRoot"}, "storage.");
+            const auto raw = storage->required("pageFileRoot").as_string();
+            if (!raw.empty()) config.page_file_root = resolve_workspace_path(raw);
+        }
+
         const auto& models = root.required("models");
         require_only(models, {"memoryReserveMiB"}, "models.");
         config.memory_reserve_mib =
@@ -247,11 +267,17 @@ AppConfig ConfigurationManager::load(
             config.resource_profile = memory->required("profile").as_string();
         }
 
+        if (const auto* hardware = root.optional("hardware")) {
+            require_only(*hardware, {"acceleratorPolicy"}, "hardware.");
+            config.accelerator_policy =
+                hardware->required("acceleratorPolicy").as_string();
+        }
+
         if (const auto* inference = root.optional("inference")) {
             require_only(*inference,
                          {"llamaServerExecutable", "runnerPort",
                           "chatMaxReplyTokens", "chatContextLength",
-                          "startupTimeoutSeconds"},
+                          "startupTimeoutSeconds", "stallTimeoutSeconds"},
                          "inference.");
             config.llama_server_executable =
                 inference->required("llamaServerExecutable").as_string();
@@ -269,6 +295,11 @@ AppConfig ConfigurationManager::load(
                 config.runner_startup_timeout_seconds =
                     static_cast<std::uint32_t>(
                         positive(*inference, "startupTimeoutSeconds", 3600U));
+            }
+            if (inference->optional("stallTimeoutSeconds") != nullptr) {
+                config.runner_stall_timeout_seconds =
+                    static_cast<std::uint32_t>(
+                        positive(*inference, "stallTimeoutSeconds", 3600U));
             }
         }
 
@@ -378,6 +409,11 @@ void ConfigurationManager::validate(const AppConfig& config) {
          config.resource_profile != "performance")) {
         throw std::runtime_error("memory profile is outside policy");
     }
+    if (config.accelerator_policy != "auto" &&
+        config.accelerator_policy != "cpu_only" &&
+        config.accelerator_policy != "gpu_allowed") {
+        throw std::runtime_error("accelerator policy is outside policy");
+    }
     for (const auto& executable :
          {config.llama_server_executable, config.curl_executable}) {
         if (!executable.empty() &&
@@ -390,6 +426,18 @@ void ConfigurationManager::validate(const AppConfig& config) {
     if (config.runner_port < 1024U || config.runner_port == config.port) {
         throw std::runtime_error("runner IPC port is outside policy");
     }
+    if (!config.page_file_root.empty() &&
+        std::filesystem::exists(config.page_file_root) &&
+        !std::filesystem::is_directory(config.page_file_root)) {
+        throw std::runtime_error(
+            "configured page file location is not a directory");
+    }
+}
+
+std::filesystem::path resolve_page_file_root(const AppConfig& configuration) {
+    return configuration.page_file_root.empty()
+               ? configuration.runtime_root / "cache"
+               : configuration.page_file_root;
 }
 
 std::string ConfigurationManager::serialize(const AppConfig& c) {
@@ -417,6 +465,8 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         (c.allow_os_identity_accounts ? "true" : "false") + "},\n"
         "  \"workspace\":{\"runtimeRoot\":" + quote(c.runtime_root.string()) +
         ",\"modelsRoot\":" + quote(c.models_root.string()) + "},\n"
+        "  \"storage\":{\"pageFileRoot\":" +
+        quote(c.page_file_root.string()) + "},\n"
         "  \"models\":{\"memoryReserveMiB\":" +
         std::to_string(c.memory_reserve_mib) + "},\n"
         "  \"memory\":{\"hardLimitMiB\":" +
@@ -426,6 +476,8 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         ",\"criticalPressurePercent\":" +
         std::to_string(c.critical_memory_percent) +
         ",\"profile\":" + quote(c.resource_profile) + "},\n"
+        "  \"hardware\":{\"acceleratorPolicy\":" +
+        quote(c.accelerator_policy) + "},\n"
         "  \"inference\":{\"llamaServerExecutable\":" +
         quote(c.llama_server_executable.string()) +
         ",\"runnerPort\":" + std::to_string(c.runner_port) +
@@ -433,6 +485,8 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         ",\"chatContextLength\":" + std::to_string(c.chat_context_length) +
         ",\"startupTimeoutSeconds\":" +
         std::to_string(c.runner_startup_timeout_seconds) +
+        ",\"stallTimeoutSeconds\":" +
+        std::to_string(c.runner_stall_timeout_seconds) +
         "},\n"
         "  \"downloads\":{\"curlExecutable\":" +
         quote(c.curl_executable.string()) + "},\n"

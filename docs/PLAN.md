@@ -389,6 +389,37 @@ Current phase status:
   concatenating a throwaway JSON string, removing at least one copy from the
   identified runner-buffer-to-socket chain (not every copy in that chain is
   eliminated). Priority A.
+- Phase 30A: Implemented (2026-08-02) — explicit CPU-only/GPU-disabled
+  low-memory operation, as an integration/hardening pass over the existing
+  Phase 14/19/21/26/27/30 controls rather than a second memory manager or
+  inference pipeline. `hardware.acceleratorPolicy` (`auto`/`cpu_only`/
+  `gpu_allowed`) is validated end to end with fail-closed launch (zero GPU
+  layers, CPU KV placement, GPU-hiding runner environment variables;
+  `CalibrationService` rejects rather than silently zeroes a stale
+  GPU-offload profile under `cpu_only`). A `MemoryCategory::runner_weights`
+  admission check (`ensure_model_loaded()`'s `admit_runner_weights()`) rejects
+  a model with a concrete `assess_model()`-backed reason before the runner
+  process is ever started, and releases its lease on every unload path.
+  `MemoryPolicy::maximum_active_inference` is now a real admission gate on
+  `send_chat_message()` instead of a validated-but-unread field. The new
+  `MemorySweeper` background thread (mirroring `ProjectWatcher`'s pimpl/
+  worker-thread shape) periodically applies `RunnerSupervisor::
+  apply_idle_timeout()` (unconditionally under a profile with
+  `keep_idle_model=false`, otherwise once pressure reaches `elevated`) and
+  `CacheManager::trim()` once pressure reaches `high`. Administration
+  visibility was added to `GET /api/v1/runner/status` (requested-vs-actual
+  GPU layers, load-time accelerator policy, unload countdown) and
+  `GET /api/v1/system/memory` (pagefile/swap headroom, process commit bytes,
+  hard-fault count, configured idle-unload seconds), and an
+  administrator-only `GET`/`POST /api/v1/admin/config` round-trips the live
+  `settings.json` through the existing `ConfigurationManager` (surfaced in
+  the web UI's Settings → System configuration panel). Real-model benchmark
+  evidence (`auto` vs `cpu_only` cold/warm load, TTFT, peak resident/commit,
+  page faults, pagefile/swap, cancellation latency, idle steady state) is the
+  one deliverable still outstanding — it requires a pinned local GGUF model
+  and dedicated hardware run, consistent with every other real-model exit
+  criterion in this project (Phases 4-7) that remains open for the same
+  reason. Priority A.
 - Phase 31: Planned — storage tiering, `ScratchVolumeManager`, and
   storage-aware model/index placement (no RAM-drive placement for durable
   data). Priority A/B.
@@ -496,14 +527,20 @@ Current phase status:
   project/model/dataset delete, model state change, and dataset approval
   request 404 regardless of a valid id.
 
-Priority note: segmented prompt assembly (Phase 23), tokenization caching
-(Phase 23), lazy retrieval-content materialization (Phase 24), immutable
-shared buffers (Phase 30), native asynchronous index reads (Phase 21), and
-storage-aware model mapping (Phase 26) are the immediate near-term targets —
-they improve latency and memory without the hardware-dependent complexity of
-speculative decoding (Phase 32) or distributed runners (Phase 33), which
-remain explicitly deferred until the Priority A/B phases have measured
-evidence.
+Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
+implemented (2026-08-02)**, closing the integration/validation gap that
+turned the previously separate Phase 14/19/21/26/27/30 controls into a
+coherent CPU-only operating mode: no GPU allocation attempts under
+`cpu_only`, a pre-load `runner_weights` admission check, one-slot admission
+via `MemoryPolicy::maximum_active_inference`, an unattended idle-release/
+pressure-trim sweep, and administration visibility/configuration for all of
+it. Only the matched real-model benchmark matrix (`auto` vs `cpu_only` on a
+pinned local GGUF) remains outstanding, on the same footing as every other
+real-model exit criterion in this project (Phases 4-7) that stays open until
+that hardware run happens. Speculative decoding (Phase 32), distributed
+runners (Phase 33), and multiple warm runners remain explicitly deferred
+until that benchmark evidence and the remaining Priority A/B phases (Phase 31
+storage tiering, then Phase 34/35/36) are addressed.
 
 Status policy:
 
@@ -2346,14 +2383,26 @@ The strict schema may add these versioned domains during their owning phase:
     "interactiveDeadlineMs": 2000,
     "preferLowTimeToFirstToken": true,
     "backgroundWorkDuringInference": "throttle",
-    "autoTune": true
+    "autoTune": true,
+    "preferMemoryEfficiency": true
   },
   "memory": {
     "policy": "adaptive",
     "hardLimitMiB": 0,
     "minimumOsReserveMiB": 2048,
     "minimumFreePercent": 15,
-    "criticalPressurePercent": 92
+    "criticalPressurePercent": 92,
+    "cpuOnlyHardLimitMiB": 0,
+    "maximumTransientRequestMiB": 256,
+    "maximumMappedModelMiB": 0,
+    "trimWorkingSetAfterUnload": true,
+    "releaseIdlePoolsSeconds": 120
+  },
+  "hardware": {
+    "acceleratorPolicy": "auto",
+    "allowGpu": true,
+    "requireCpuFallback": true,
+    "failIfGpuRequestedWhileDisabled": true
   },
   "inference": {
     "maxActiveRequests": 1,
@@ -2362,7 +2411,17 @@ The strict schema may add these versioned domains during their owning phase:
     "loadMode": "auto",
     "warmup": "minimal",
     "continuousBatching": "auto",
-    "speculativeDecoding": false
+    "speculativeDecoding": false,
+    "cpuOnlyMaxActiveRequests": 1,
+    "cpuOnlyContextTokens": 2048,
+    "cpuOnlyMaxReplyTokens": 2048,
+    "cpuOnlyBatchTokens": 128,
+    "cpuOnlyMicroBatchTokens": 64,
+    "cpuOnlyThreads": 0,
+    "cpuOnlyUseMmap": true,
+    "cpuOnlyUseMlock": false,
+    "cpuOnlyKvPlacement": "cpu",
+    "cpuOnlyGpuLayers": 0
   },
   "context": {
     "defaultTokens": 4096,
@@ -2396,9 +2455,15 @@ The strict schema may add these versioned domains during their owning phase:
 }
 ```
 
-`hardLimitMiB: 0` means derive a safe limit, never unlimited. Unknown fields
-remain rejected. Backend-specific controls stay within validated adapter
-namespaces instead of leaking across the general configuration surface.
+`hardLimitMiB: 0`, `cpuOnlyHardLimitMiB: 0`, and
+`maximumMappedModelMiB: 0` mean derive safe host-specific limits, never
+unlimited. `hardware.acceleratorPolicy` accepts only `auto`, `cpu_only`, or
+`gpu_allowed`; `cpu_only` forces zero GPU layers, CPU KV placement, no GPU
+backend initialization, and rejection of any adapter setting that would attempt
+a GPU allocation. `cpuOnlyThreads: 0` means use a calibrated safe value rather
+than every logical processor. Unknown fields remain rejected. Backend-specific
+controls stay within validated adapter namespaces instead of leaking across the
+general configuration surface.
 
 ### 25.9 API and UI surface
 
@@ -2471,14 +2536,20 @@ memory, page faults, quality, and power/thermal notes.
 
 Degradation order is deterministic:
 
-1. Stop speculative prefetch and optional advanced features.
-2. Pause or reduce background indexing.
-3. Trim file, retrieval, and prompt caches.
-4. Reduce retrieval chunks and request context.
-5. Reduce parallel sequences.
-6. Unload the embedding model.
-7. Unload idle generation runners.
-8. Reject new work with a safe, actionable diagnostic.
+1. Stop speculative prefetch, warm-up, and optional advanced features.
+2. In CPU-only mode, prevent new background CPU work and collapse inference to
+   one active sequence before any additional allocation.
+3. Pause or reduce background indexing, downloads, compaction, and ML jobs.
+4. Trim file, retrieval, tokenization, prompt, embedding, and inactive pool
+   caches, releasing empty allocator blocks where supported.
+5. Reduce retrieval chunks, reply allowance, and request context; rebuild the
+   request estimate before admission.
+6. Reduce parallel sequences to one and refuse creation of extra KV slots.
+7. Unload the embedding model and nonessential helper/router models.
+8. Unload idle generation runners, close mapped views, and request working-set
+   trimming only after owned buffers and mappings are released.
+9. Reject new work with a safe, actionable diagnostic rather than permitting
+   destructive paging.
 
 Slow storage reduces random-read fan-out and avoids rescans; thermal decline
 reduces background workers and uses measured inference-thread settings. No
@@ -2492,6 +2563,12 @@ The performance expansion is complete only when:
 - Every queue, cache, worker pool, context, and transient buffer has an enforced
   ceiling and cancellation path.
 - Low-memory mode operates with one indexing worker and no persistent model.
+- CPU-only mode performs no GPU discovery-to-allocation transition, launches
+  the backend with zero GPU layers and CPU KV placement, and reports zero
+  MasterAI-attributed GPU allocation attempts.
+- CPU-only admission accounts for mapped/resident model pages, CPU compute
+  buffers, KV cache, tokenizer state, prompt/retrieval materialization,
+  allocator/pool reserve, pagefile/swap commitment, and the OS safety reserve.
 - Project indexes are incremental, disk-backed, checksummed, and recoverable.
 - Retrieval returns compact, disclosed, authorized context within a deadline.
 - Repeated requests benefit from safe cache/prefix reuse where compatible.
@@ -2511,7 +2588,7 @@ item below already has an owning phase.
 | Work-order stage | Owning phase(s) |
 | --- | --- |
 | Stage 1 — attribute latency, direct-runner comparison, Qwen 3B record | Phase 13, Phase 19 |
-| Stage 2 — safe low-memory defaults, one slot, OS reserve, destructive-paging detection | Phase 14, Phase 19, Phase 27 |
+| Stage 2 — safe low-memory defaults, explicit CPU-only/GPU-disabled mode, one slot, OS reserve, destructive-paging detection | Phase 14, Phase 19, Phase 27, Phase 30A |
 | Stage 3 — calibrated runner tuning matrix (threads/batch/ubatch/GPU layers/context/KV) | Phase 19 |
 | Stage 4 — prompt-prefix reuse, tokenization/template caching, staged retrieval, compaction | Phase 18, Phase 23, Phase 24 |
 | Stage 5 — model routing and tiering wired into the live request path | Phase 29 |
@@ -2529,6 +2606,16 @@ faster, and no component is blamed without the attribution evidence Phase 13
 requires.
 
 ## 26. Phased Implementation Roadmap
+
+### Implementation priority override — memory-first CPU-only operation
+
+**Phase 30A is implemented (2026-08-02)**; only its real-model benchmark
+matrix remains outstanding (see the priority note above). Phase 31 storage
+tiering is the next Priority A/B target; Phases 32–35 must not become the
+primary implementation target until Phase 30A's benchmark evidence and Phase
+31 are addressed. Existing completed phases are extended rather than
+replaced, and no completed validation status is retroactively claimed for
+requirements that still need real-model/hardware evidence.
 
 ### Phase 0 — Requirements and decisions
 
@@ -3942,6 +4029,141 @@ Exit criteria:
 - No dangling views or use-after-free defects occur under sanitizer/debug
   testing; pool memory is included in the central memory budget.
 
+### Phase 30A — CPU-only and GPU-disabled low-memory operation
+
+Status: Implemented (2026-08-02), except the real-model benchmark matrix
+(deliverable/implementation-order item 6's benchmark half) which remains
+outstanding pending a pinned local GGUF and dedicated hardware run — the same
+open-until-measured status every other real-model exit criterion in this
+project (Phases 4-7) carries. This phase is an integration and hardening
+phase over the existing Phase 14, 19, 21–27, and 30 controls; it does not
+create a second memory manager or a second inference pipeline. Implementation
+notes:
+
+- Deliverable 1 (config schema/precedence/fail-closed launch):
+  `AppConfig::accelerator_policy`, `CalibrationService`, and
+  `LlamaCppAdapter::build_launch_spec()` — see `test_phase_thirty_a_cpu_only_
+  accelerator_policy` in `test/tests.cpp`.
+- Deliverable 2 (CPU-only admission estimator): `HttpServer::State::
+  admit_runner_weights()` (`src/server.cpp`) reserves
+  `MemoryCategory::runner_weights` against `MemoryBudgetManager` before
+  `RunnerSupervisor::load()` is ever called, consulting `assess_model()` for
+  a concrete rejection reason first — see
+  `test_phase_thirty_a_runner_weights_admission`.
+- Deliverable "one active request" (implementation-order item 3):
+  `MemoryPolicy::maximum_active_inference` is enforced by
+  `HttpServer::State::try_admit_inference_slot()` on every
+  `send_chat_message()` call. Reduced context/KV/cache defaults and worker
+  threading were already delivered by Phase 14/19's `MemoryPolicy`/
+  `CalibrationService`; this phase's job was making the concurrency ceiling
+  they define actually load-bearing, which it now is.
+- Deliverable 4 (deterministic unload and pressure recovery): the new
+  `MemorySweeper` class (`src/masterai.hpp`/`src/memory.cpp`) periodically
+  applies `RunnerSupervisor::apply_idle_timeout()` and
+  `CacheManager::trim()` — see `test_phase_thirty_a_memory_sweeper_idle_
+  unload`. KV-slot eviction and request-arena reset remain at their existing
+  Phase 27/30 per-request boundaries rather than duplicated into the sweep.
+- Deliverable 5 (administration visibility): `GET /api/v1/runner/status`
+  (requested-vs-actual GPU layers, load-time accelerator policy, unload
+  countdown) and `GET /api/v1/system/memory` (pagefile/swap headroom,
+  process commit bytes, hard-fault count, configured idle-unload seconds).
+  An administrator-only `GET`/`POST /api/v1/admin/config`
+  (`admin_config_get()`/`admin_config_put()` in `src/server.cpp`) round-trips
+  the live `settings.json` through `ConfigurationManager`, applying the
+  subset of fields every request path already re-reads live (accelerator
+  policy, context/reply-token limits, retrieval/cache/session-reuse toggles,
+  rate/body limits, allow-lists, sign-in toggles) immediately and reporting
+  `restartRequired` for the rest; surfaced in the web UI's
+  Settings → System configuration panel (administrator-only, `src/web_ui.cpp`).
+
+Purpose:
+
+- Allow an administrator to disable GPU use completely while keeping local
+  inference, indexing, retrieval, chat, MCP, and administration usable within
+  a strict RAM/commit/pagefile budget.
+- Reduce steady-state and peak memory when GPU offload is unavailable,
+  unreliable, undesirable, or explicitly disabled in configuration.
+
+Dependencies:
+
+- Phase 14 central memory authority and pressure states.
+- Phase 19 launch tuning and host/model/backend fingerprints.
+- Phase 21/26 storage-aware reads and mapped model loading.
+- Phase 23/24/27/30 prompt, retrieval, KV, shared-buffer, arena, and pool
+  accounting.
+
+Deliverables:
+
+- A strict `hardware.acceleratorPolicy` with `auto`, `cpu_only`, and
+  `gpu_allowed`. In `cpu_only`, backend launch arguments force zero GPU layers,
+  CPU KV placement, and no GPU-specific attention/kernel option; conflicting
+  saved, CLI, API, environment, or calibrated settings are rejected instead of
+  silently overriding the administrator's choice.
+- A GPU-disabled startup path that may enumerate hardware for diagnostics but
+  must not load CUDA, Vulkan, HIP, SYCL, Metal, DirectML, OpenCL, or vendor
+  management libraries, create GPU contexts, reserve VRAM, or start a runner
+  that reports an accelerator allocation. The selected backend executable and
+  its reported devices are recorded in the query/run trace.
+- A CPU-only admission estimator that separately accounts for mapped model
+  bytes, expected resident model pages, backend graph/compute buffers,
+  tokenizer state, KV bytes per slot, prompt/retrieval buffers, cache/pool
+  reserves, runner process overhead, concurrent control-plane work, commit
+  charge, pagefile/swap headroom, and the existing OS safety reserve.
+- CPU-only safe defaults: one active request, one KV slot, 2,048-token default
+  context, bounded reply allowance, small batch/micro-batch, calibrated worker
+  threads rather than all logical processors, `mmap` preferred when validated,
+  `mlock` disabled, minimal warm-up, no persistent idle runner by default, and
+  background indexing/ML/download work paused or throttled during inference.
+- Memory reduction actions applied before load and between requests: compact
+  prompt/retrieval materialization, lazy attachment reads, no duplicate model
+  verification buffers, bounded tokenizer/prompt caches, request-arena reset,
+  empty pool-block release, expired session/KV eviction, mapped-view closure on
+  unload, and process working-set trimming only after owned allocations are
+  released.
+- A CPU-only model suitability result that can recommend a smaller
+  quantization/model tier, lower context, fewer reply tokens, or no-load
+  operation. A model is rejected before runner start when projected active
+  pages or commit would cross the hard ceiling or OS reserve.
+- Configuration/UI/API support exposing the effective accelerator policy,
+  requested versus actual GPU layers, mapped/resident/committed bytes, runner
+  and control-plane memory, KV/cache/pool/arena use, pagefile/swap headroom,
+  hard-fault rate, unload countdown, and the exact degradation/rejection reason.
+- Tests covering configuration precedence, conflicting GPU settings, zero-GPU
+  launch arguments, no GPU backend initialization, CPU-only model admission,
+  one-slot enforcement, cache/pool trimming, unload/reload, cancellation,
+  repeated requests, memory-pressure recovery, and clean shutdown.
+- A matched benchmark matrix for at least one compact GGUF across `auto` and
+  `cpu_only` on the same host: cold/warm load, TTFT, prompt/generation rate,
+  peak resident and commit memory, mapped bytes, page faults, pagefile/swap,
+  output quality, cancellation latency, unload release, and idle steady state.
+
+Implementation order inside Phase 30A:
+
+1. Configuration schema, precedence, validation, and fail-closed backend launch.
+2. CPU-only memory estimator and pre-load/pre-request admission.
+3. One-slot/context/batch/thread/cache defaults and background-work throttling.
+4. Deterministic unload, mapping closure, pool/arena/cache release, and pressure
+   recovery.
+5. Administration visibility and actionable diagnostics.
+6. Debug/Release tests and real-model benchmark evidence.
+
+Exit criteria:
+
+- With `acceleratorPolicy=cpu_only`, every validated runner launch uses zero GPU
+  layers and CPU KV placement, and instrumentation records no MasterAI-caused
+  GPU allocation attempt.
+- Peak resident memory and commit remain within the configured CPU-only ceiling
+  and OS reserve during cold load, generation, cancellation, unload, repeated
+  requests, and simultaneous permitted background activity.
+- After idle unload and cache/pool expiry, memory returns to a documented
+  bounded steady-state range; no request-sized allocation remains retained
+  without an identified cache or pool owner and byte ceiling.
+- A model that would cause destructive paging is downgraded or rejected before
+  runner start, with a concrete recommended model/context/profile change.
+- CPU-only output passes the same correctness/quality checks as the matched
+  baseline within the configured tolerance, and shutdown remains reliable
+  under High/Critical pressure.
+
 ### Phase 31 — Storage tiering, virtual drives, and scratch-volume management
 
 Status: Planned. Priority A/B — the `ScratchVolumeManager` and storage-aware
@@ -4187,8 +4409,8 @@ Deliverables:
   hit/miss, KV-prefix reuse/no-reuse, context sizes from 512 tokens to the
   safe host limit, single/multiple compatible/incompatible concurrent
   requests, active indexing/download, cache/memory pressure, cancellation,
-  disconnect, queue saturation, HDD/SATA SSD/NVMe, CPU-only/GPU-offloaded,
-  and each resident profile.
+  disconnect, queue saturation, HDD/SATA SSD/NVMe, CPU-only/GPU-disabled/
+  GPU-offloaded, and each resident profile.
 - Recorded metrics per run: cold/warm load time, TTFT, queue wait,
   retrieval/prompt-assembly/tokenization latency, prompt and generation
   throughput, total request time, peak resident/commit memory, mapped
@@ -4204,8 +4426,9 @@ Deliverables:
   comparison.
 - Explicit regression test groups, each independently gating a release:
   runner-attribution tests (direct-runner-vs-MasterAI parity, control-plane
-  overhead bound, requested-vs-actual GPU settings recorded, cold/warm runs
-  never mixed); low-memory tests (rejection before destructive paging, OS
+  overhead bound, requested-vs-actual GPU settings recorded, CPU-only launches
+  proving zero accelerator allocation, cold/warm runs never mixed); low-memory
+  tests (rejection before destructive paging, OS
   reserve never consumed by admission, per-slot KV reservation, cache
   trimming never invalidating an active request's buffers, recovery from
   Critical pressure); prompt-cache tests (prefix reuse on exact match,

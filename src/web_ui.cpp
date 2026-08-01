@@ -118,7 +118,7 @@ std::string application_script() {
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
-        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls]=await Promise.all([api('/api/v1/users/me'),"
+        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,cfg,report]=await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
         "api('/api/v1/models').catch(()=>({models:[]})),"
@@ -135,7 +135,14 @@ std::string application_script() {
         "api('/api/v1/ml/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/ml/models').catch(()=>({models:[]})),"
         "api('/api/v1/ml/datasets').catch(()=>({datasets:[]})),"
-        "api('/api/v1/ml/subjects').catch(()=>({subjects:[]}))]);"
+        "api('/api/v1/ml/subjects').catch(()=>({subjects:[]})),"
+        // 403/503 for anyone who isn't an administrator, or when no
+        // settings.json path is known to the running server -- both are
+        // quiet, expected no-ops here exactly like the ml.* fetches above.
+        "api('/api/v1/admin/config').catch(()=>null),"
+        // 403 for anyone who isn't an administrator -- quiet no-op like the
+        // ml.*/admin.config fetches above.
+        "api('/api/v1/system/report').catch(()=>null)]);"
         "q('#who').textContent=me.displayName+' ('+me.role+')';"
         // A viewer's sidebar renders none of the settings pages, so these
         // elements legitimately don't exist -- guard every write instead of
@@ -144,7 +151,8 @@ std::string application_script() {
         "renderBenchmarks(b.benchmarks);renderDownloads(d.downloads);"
         "renderUsers(u.users);renderMlDashboard(ml);renderMlProjects(mlp.projects);"
         "renderMlModels(mlm.models);renderMlDatasets(mld.datasets);"
-        "renderMlSubjects(mls.subjects);"
+        "renderMlSubjects(mls.subjects);renderSystemConfig(cfg);"
+        "renderSystemReport(report);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
         // Chat offers every downloaded, verified model whose backend/format
         // and required CPU/GPU features this machine actually has (state
@@ -168,7 +176,16 @@ std::string application_script() {
         "else if(q('#chatEmpty')){q('#chatEmpty').hidden=!ready.length;"
         "if(!ready.length)q('#chatEmpty').textContent="
         "'No downloaded models are ready for this machine yet. Ask an "
-        "administrator or developer to download one from Settings.';}}"
+        "administrator or developer to download one from Settings.';"
+        // A brand-new chat's model picker otherwise just falls back to
+        // whatever option the browser puts first. Prefer the model that's
+        // already warm in the runner (reusing it avoids paying another
+        // load/warm-up cycle) and only fall back to the most recent chat's
+        // model -- the "last known model used" -- when nothing is warm right
+        // now (e.g. right after server start). Both candidates are checked
+        // against the ready list since a warm or previously-used model can
+        // have since been removed or gone stale.
+        "await selectDefaultChatModel(ready,c.chats);}}"
         "catch(x){location.href='/';}}"
         // Renders the sidebar's chat list as real links to each chat's own
         // URL -- clicking one is a normal page navigation, not a client-side
@@ -460,6 +477,122 @@ std::string application_script() {
         "el.innerHTML=users.length?table(['User','Display name','Role'],"
         "users.map(x=>[esc(x.username),esc(x.displayName),esc(x.role)])):"
         "'<p>No users visible, or administrator access is required.</p>';}"
+        // Phase 30A system-configuration editor: reads/writes settings.json
+        // fields by dotted path (matching each input's data-path attribute)
+        // instead of one hand-written getter/setter pair per field --
+        // cfgGet/cfgSet below are the only place that indirection lives.
+        "function cfgGet(obj,path){return path.split('.').reduce("
+        "(v,k)=>(v==null?v:v[k]),obj);}"
+        "function cfgSet(obj,path,value){const keys=path.split('.');"
+        "let node=obj;for(let i=0;i<keys.length-1;i++)node=node[keys[i]];"
+        "node[keys[keys.length-1]]=value;}"
+        // Keeps the full document last loaded from the server so submit can
+        // overlay only the fields this form actually exposes back onto it --
+        // fields the form never shows (host/port, TLS material, storage
+        // roots, allow-lists, ...) are round-tripped unchanged instead of
+        // being reconstructed (and possibly gotten wrong) client-side.
+        "let systemConfigDocument=null;"
+        "function renderSystemConfig(cfg){const form=q('#systemConfigForm');"
+        "if(!form)return;if(!cfg){"
+        "q('#systemConfigStatus').textContent="
+        "'System configuration is unavailable (administrator access, or a "
+        "running settings.json path, is required).';return;}"
+        "systemConfigDocument=cfg;"
+        "form.querySelectorAll('[data-path]').forEach(input=>{"
+        "const value=cfgGet(cfg,input.dataset.path);if(value===undefined)return;"
+        "if(input.dataset.type==='bool')input.checked=!!value;"
+        "else input.value=value;});}"
+        "async function submitSystemConfig(e){e.preventDefault();"
+        "const status=q('#systemConfigStatus');status.textContent='Saving...';"
+        "try{if(!systemConfigDocument)"
+        "throw new Error('configuration was not loaded');"
+        "const updated=JSON.parse(JSON.stringify(systemConfigDocument));"
+        "q('#systemConfigForm').querySelectorAll('[data-path]').forEach("
+        "input=>{const value=input.dataset.type==='bool'?input.checked:"
+        "(input.type==='number'?Number(input.value):input.value);"
+        "cfgSet(updated,input.dataset.path,value);});"
+        "const result=await api('/api/v1/admin/config','POST',updated);"
+        "systemConfigDocument=result.configuration;"
+        "status.textContent=result.restartRequired?"
+        "'Saved. Some changed fields only take effect after MasterAI is "
+        "restarted.':'Saved and applied.';}"
+        "catch(x){showSystemError('Could not save configuration: '+x.message);"
+        "status.textContent='';}}"
+        // System Report (Report sidebar): renders the single consolidated
+        // read from GET /api/v1/system/report. Early-returns when the
+        // target element is absent (any non-administrator page load, and
+        // any page other than the report itself) rather than assuming this
+        // section is always present -- same convention as every other
+        // render*() helper here.
+        "function mib(x){return Number(x).toLocaleString()+' MiB';}"
+        "function gib(mibValue){return (Number(mibValue)/1024).toFixed(1)+"
+        "' GiB';}"
+        "function bytesGib(x){return (Number(x)/1073741824).toFixed(2)+"
+        "' GiB';}"
+        "function renderSystemReport(report){const el=q('#systemReport');"
+        "if(!el)return;if(!report){el.textContent="
+        "'System Report is unavailable (administrator access is required).';"
+        "return;}"
+        "const h=report.hardware,p=report.process,mem=report.memory,"
+        "spf=report.systemPageFile,pf=report.pageFile,f=report.features;"
+        "const row=(label,value)=>'<tr><td class=\"reportLabel\">'+esc(label)+"
+        "'</td><td class=\"reportValue\">'+value+'</td></tr>';"
+        "const section=(title,rows)=>'<div class=\"reportSection\">"
+        "<h3>'+esc(title)+'</h3><table><tbody>'+rows.join('')+"
+        "'</tbody></table></div>';"
+        "el.innerHTML="
+        "section('Hardware',["
+        "row('Platform / architecture',esc(h.platform)+' / '+esc(h.architecture)),"
+        "row('CPUs',h.physicalCpus+' physical / '+h.logicalCpus+' logical, '+"
+        "h.numaNodes+' NUMA node(s)'),"
+        "row('System RAM',gib(h.totalRamMiB)+' total, '+gib(h.availableRamMiB)+"
+        "' available'),"
+        "row('GPU memory',h.gpuMemoryMiB?gib(h.gpuMemoryMiB):'none detected'),"
+        "row('GPU backends',h.gpuBackends.length?h.gpuBackends.map(esc)."
+        "join(', '):'none')"
+        "])+"
+        "section('System pagefile',["
+        "row('Commit limit (RAM + system pagefile)',gib(spf.totalVirtualMemoryMiB)),"
+        "row('Available',gib(spf.availableVirtualMemoryMiB))"
+        "])+"
+        "section('MasterAI PageFile (virtual pagefile substitute)',["
+        "row('Location',esc(pf.location)+(pf.usingDefault?"
+        "' (default -- set Storage &gt; PageFile location in System "
+        "configuration to move it)':' (custom location)')),"
+        // Spelled out as total/used/free rather than "capacity / free" --
+        // that paired phrasing read as "used / free" at a glance, making an
+        // almost-empty drive (e.g. 40 GiB total, 39.9 GiB free) look like it
+        // had consumed nearly all of its own capacity.
+        "row('Drive (total / used / free)',gib(pf.driveCapacityMiB)+' / '+"
+        "gib(pf.driveCapacityMiB-pf.driveFreeMiB)+' / '+gib(pf.driveFreeMiB)),"
+        "row('MasterAI usage (used / capacity)',bytesGib(pf.usedBytes)+' / '+"
+        "bytesGib(pf.capacityBytes))"
+        "])+"
+        "section('Memory pressure',["
+        "row('Pressure level',esc(mem.pressure||'')),"
+        "row('Reserved',bytesGib(mem.reservedBytes||0))"
+        "])+"
+        "section('Process',["
+        "row('Resident / private memory',bytesGib(p.residentMemoryBytes)+"
+        "' / '+bytesGib(p.privateMemoryBytes)),"
+        "row('Commit',bytesGib(p.commitBytes)),"
+        "row('Page faults',Number(p.pageFaults).toLocaleString())"
+        "])+"
+        "section('Enabled features',["
+        "row('Accelerator policy',esc(f.acceleratorPolicy)),"
+        "row('Retrieval',f.retrievalEnabled?'enabled':'disabled'),"
+        "row('Cache',f.cacheEnabled?'enabled':'disabled'),"
+        "row('Session reuse',f.sessionReuseEnabled?'enabled':'disabled'),"
+        "row('Automatic calibration',f.performanceAutoTune?'enabled':"
+        "'disabled'),"
+        "row('Project file watching',f.watchProjectFiles?'enabled':"
+        "'disabled'),"
+        "row('Local password accounts',f.allowLocalPasswordAccounts?"
+        "'allowed':'not allowed'),"
+        "row('OS-integrated sign-in',f.allowOsIdentityAccounts?'allowed':"
+        "'not allowed'),"
+        "row('TLS mode',esc(f.tlsMode))"
+        "]);}"
         // Renders the Machine Learning foundation page: an acknowledgement
         // line, the (currently always zero) dashboard counts, and the full
         // interface roadmap with each entry tagged available/planned -- see
@@ -1307,6 +1440,23 @@ std::string application_script() {
         "const card=document.createElement('div');"
         "card.className='chatMsg chatMsg-modelChange';card.textContent=text;"
         "box.append(card);box.scrollTop=box.scrollHeight;}"
+        // Picks the model a brand-new chat's picker starts on: whatever the
+        // runner already has warm (Ready state) takes priority, since
+        // reusing it avoids a fresh load/warm-up cycle; otherwise falls back
+        // to the model the most recent chat used. Leaves the picker's
+        // browser-default selection alone if neither candidate is in the
+        // ready list (e.g. a fresh install with nothing warm and no chat
+        // history yet).
+        "async function selectDefaultChatModel(ready,chats){"
+        "const picker=q('#chatModel');if(!picker||!ready.length)return;"
+        "let defaultId=null;"
+        "try{const st=await api('/api/v1/runner/status');"
+        "if(st.warmState==='Ready'&&st.modelId&&"
+        "ready.some(x=>x.id===st.modelId))defaultId=st.modelId;}catch(x){}"
+        "if(!defaultId){"
+        "const lastChat=chats.find(x=>x.modelId&&ready.some(r=>r.id===x.modelId));"
+        "if(lastChat)defaultId=lastChat.modelId;}"
+        "if(defaultId)picker.value=defaultId;}"
         // Polls GET /api/v1/runner/status (see server.cpp) so the chat page
         // can announce once, inline, the moment the backend actually
         // finishes loading -- not just the initial 'Using model X' choice.
@@ -1405,6 +1555,8 @@ std::string application_script() {
         "q('#applyGithubSource').addEventListener('click',applyGithubSource);"
         "q('#applyMsSource').addEventListener('click',applyMsSource);}"
         "if(q('#newUser'))q('#newUser').addEventListener('submit',createUser);"
+        "if(q('#systemConfigForm'))q('#systemConfigForm').addEventListener("
+        "'submit',submitSystemConfig);"
         "if(q('#newMlProject'))q('#newMlProject').addEventListener('submit',"
         "e=>submit(e,'/api/v1/ml/projects',()=>({name:q('#mlProjectName').value,"
         "description:q('#mlProjectDescription').value,"
@@ -1801,6 +1953,136 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<h2>Subject packages</h2>"
             "<div id=\"mlSubjectsList\">Loading...</div>"
             "</div></section>";
+    } else if (section == "settings-config") {
+        // Phase 30A: administrator-only local-configuration editor backed by
+        // GET/POST /api/v1/admin/config (server.cpp's admin_config_get()/
+        // admin_config_put()) -- the same settings.json `masterai configure`
+        // writes. Every input carries data-path="section.field" matching
+        // that JSON document's own shape; application_script()'s
+        // renderSystemConfig()/submitSystemConfig() read/write by that path
+        // instead of one hand-written line per field. Fields not shown here
+        // (host/port, TLS material, storage roots, allow-lists, ...) are
+        // preserved unchanged -- the submit handler overlays only the
+        // visible fields onto the full document it originally loaded.
+        body =
+            "<section id=\"panel-settings-config\" class=\"panel\">"
+            "<div><h2>System configuration</h2>"
+            "<p>Local server configuration. Changes are written to "
+            "settings.json immediately; fields marked (restart required) "
+            "only take effect the next time MasterAI is started.</p>"
+            "<form id=\"systemConfigForm\">"
+            "<h3>Hardware</h3>"
+            "<label>Accelerator policy"
+            "<select id=\"cfgAcceleratorPolicy\" "
+            "data-path=\"hardware.acceleratorPolicy\">"
+            "<option value=\"auto\">auto (use GPU when available)</option>"
+            "<option value=\"cpu_only\">cpu_only (no GPU allocation)</option>"
+            "<option value=\"gpu_allowed\">gpu_allowed</option>"
+            "</select></label>"
+            "<h3>Memory (restart required)</h3>"
+            "<label>Resource profile"
+            "<select id=\"cfgResourceProfile\" data-path=\"memory.profile\">"
+            "<option value=\"minimal\">minimal (one request, smallest "
+            "footprint)</option>"
+            "<option value=\"balanced\">balanced</option>"
+            "<option value=\"performance\">performance</option>"
+            "</select></label>"
+            "<label>Hard memory limit, MiB (0 = automatic)"
+            "<input id=\"cfgMemoryHardLimitMiB\" type=\"number\" min=\"0\" "
+            "data-path=\"memory.hardLimitMiB\"></label>"
+            "<label>Minimum free RAM percent"
+            "<input id=\"cfgMinimumFreePercent\" type=\"number\" min=\"0\" "
+            "max=\"50\" data-path=\"memory.minimumFreePercent\"></label>"
+            "<label>Critical pressure percent"
+            "<input id=\"cfgCriticalPercent\" type=\"number\" min=\"80\" "
+            "max=\"99\" data-path=\"memory.criticalPressurePercent\"></label>"
+            "<h3>Inference</h3>"
+            "<label>Chat context length, tokens"
+            "<input id=\"cfgChatContextLength\" type=\"number\" min=\"1\" "
+            "data-path=\"inference.chatContextLength\"></label>"
+            "<label>Chat maximum reply tokens"
+            "<input id=\"cfgChatMaxReplyTokens\" type=\"number\" min=\"1\" "
+            "data-path=\"inference.chatMaxReplyTokens\"></label>"
+            "<label>Runner startup timeout, seconds (restart required)"
+            "<input id=\"cfgStartupTimeout\" type=\"number\" min=\"1\" "
+            "data-path=\"inference.startupTimeoutSeconds\"></label>"
+            "<label>Runner stall timeout, seconds"
+            "<input id=\"cfgStallTimeout\" type=\"number\" min=\"1\" "
+            "data-path=\"inference.stallTimeoutSeconds\"></label>"
+            "<h3>Storage</h3>"
+            "<label>PageFile location (restart required) &mdash; a folder "
+            "MasterAI uses instead of the system pagefile/temp area for its "
+            "own disk-backed cache and model data; leave empty to use the "
+            "default cache folder"
+            "<input id=\"cfgPageFileRoot\" type=\"text\" "
+            "placeholder=\"(default cache folder)\" "
+            "data-path=\"storage.pageFileRoot\"></label>"
+            "<h3>Retrieval</h3>"
+            "<label class=\"checkboxLabel\"><input id=\"cfgRetrievalEnabled\" "
+            "type=\"checkbox\" data-path=\"retrieval.enabled\" "
+            "data-type=\"bool\"> Retrieval enabled</label>"
+            "<label>Retrieval deadline, milliseconds"
+            "<input id=\"cfgRetrievalDeadline\" type=\"number\" min=\"1\" "
+            "data-path=\"retrieval.deadlineMilliseconds\"></label>"
+            "<label>Retrieval maximum context, bytes"
+            "<input id=\"cfgRetrievalMaxContext\" type=\"number\" min=\"1\" "
+            "data-path=\"retrieval.maximumContextBytes\"></label>"
+            "<label>Retrieval maximum chunks per source"
+            "<input id=\"cfgRetrievalMaxChunksPerSource\" type=\"number\" "
+            "min=\"1\" data-path=\"retrieval.maximumChunksPerSource\"></label>"
+            "<label>Retrieval maximum total chunks"
+            "<input id=\"cfgRetrievalMaxTotalChunks\" type=\"number\" "
+            "min=\"1\" data-path=\"retrieval.maximumTotalChunks\"></label>"
+            "<h3>Cache</h3>"
+            "<label class=\"checkboxLabel\"><input id=\"cfgCacheEnabled\" "
+            "type=\"checkbox\" data-path=\"cache.enabled\" "
+            "data-type=\"bool\"> Retrieval/prompt cache enabled</label>"
+            "<h3>Session reuse</h3>"
+            "<label class=\"checkboxLabel\"><input id=\"cfgSessionEnabled\" "
+            "type=\"checkbox\" data-path=\"session.enabled\" "
+            "data-type=\"bool\"> Prompt-prefix/KV session reuse enabled"
+            "</label>"
+            "<label>Maximum reusable slots (restart required)"
+            "<input id=\"cfgSessionMaxSlots\" type=\"number\" min=\"1\" "
+            "data-path=\"session.maxSlots\"></label>"
+            "<label>Idle retention, seconds (restart required)"
+            "<input id=\"cfgSessionIdleRetention\" type=\"number\" min=\"1\" "
+            "data-path=\"session.idleRetentionSeconds\"></label>"
+            "<h3>Performance</h3>"
+            "<label class=\"checkboxLabel\"><input id=\"cfgAutoTune\" "
+            "type=\"checkbox\" data-path=\"performance.autoTune\" "
+            "data-type=\"bool\"> Automatic calibration enabled</label>"
+            "<h3>Sign-in</h3>"
+            "<label class=\"checkboxLabel\"><input "
+            "id=\"cfgAllowLocalPasswordAccounts\" type=\"checkbox\" "
+            "data-path=\"auth.allowLocalPasswordAccounts\" "
+            "data-type=\"bool\"> Allow locally stored password accounts"
+            "</label>"
+            "<label class=\"checkboxLabel\"><input "
+            "id=\"cfgAllowOsIdentityAccounts\" type=\"checkbox\" "
+            "data-path=\"auth.allowOsIdentityAccounts\" data-type=\"bool\"> "
+            "Allow OS-integrated sign-in</label>"
+            "<h3>Server</h3>"
+            "<label>Rate limit, requests per minute"
+            "<input id=\"cfgRateLimit\" type=\"number\" min=\"1\" "
+            "data-path=\"server.rateLimitPerMinute\"></label>"
+            "<label>Maximum request size, bytes"
+            "<input id=\"cfgMaxRequestBytes\" type=\"number\" min=\"1024\" "
+            "data-path=\"server.maxRequestBytes\"></label>"
+            "<button>Save configuration</button>"
+            "</form>"
+            "<p id=\"systemConfigStatus\" role=\"status\"></p>"
+            "</div></section>";
+    } else if (section == "report-system") {
+        body =
+            "<section id=\"panel-report-system\" class=\"panel\">"
+            "<div><h2>System Report</h2>"
+            "<p>A consolidated, point-in-time read of this MasterAI "
+            "instance: hardware, memory pressure, the system pagefile, the "
+            "MasterAI-scoped virtual PageFile, and which features are "
+            "currently enabled.</p>"
+            "<div id=\"systemReport\">Loading...</div>"
+            "</div></section>";
     } else if (section == "admin-create") {
         body =
             "<section id=\"panel-admin-create\" class=\"panel\">"
@@ -1837,37 +2119,54 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<details id=\"chatHistorySection\" hidden><summary>History</summary>"
             "<div id=\"chatHistoryList\"></div></details>");
     if (can_manage_settings) {
+        // Administrator-only entries (system configuration, user
+        // management) are appended to this same Settings group instead of
+        // their own separate "Admin" sidebar section -- Settings is already
+        // gated to developer+administrator, so it needed a permission
+        // boundary inside the group either way, and one settings-shaped
+        // destination is easier for an administrator to find than two
+        // sibling groups that both hold configuration. Every entry still
+        // enforces its own server-side permission check regardless of what
+        // this sidebar renders (see the route handlers), so a developer who
+        // guesses one of these URLs directly still gets redirected/403'd.
+        std::string settings_links =
+            nav_link("/app/models/inventory", "Model inventory",
+                     section == "models-inventory") +
+            nav_link("/app/models/download", "Download a model",
+                     section == "models-download") +
+            nav_link("/app/models/benchmarks", "Benchmarks",
+                     section == "models-benchmarks");
+        if (is_administrator) {
+            settings_links +=
+                nav_link("/app/settings/config", "System configuration",
+                         section == "settings-config") +
+                nav_link("/app/admin/create", "Create user",
+                         section == "admin-create") +
+                nav_link("/app/admin/users", "User list",
+                         section == "admin-users");
+        }
         sidebar_links +=
             sidebar_section("workspace", "Workspace",
                             nav_link("/app/projects", "Projects",
                                      section == "projects")) +
-            sidebar_section(
-                "settings", "Settings",
-                nav_link("/app/models/inventory", "Model inventory",
-                         section == "models-inventory") +
-                    nav_link("/app/models/download", "Download a model",
-                             section == "models-download") +
-                    nav_link("/app/models/benchmarks", "Benchmarks",
-                             section == "models-benchmarks"));
+            sidebar_section("settings", "Settings", settings_links);
     }
     if (is_administrator) {
-        sidebar_links +=
-            sidebar_section(
-                "ml", "Machine Learning",
-                nav_link("/app/ml", "Dashboard", section == "ml-dashboard") +
-                    nav_link("/app/ml/projects", "Projects",
-                             section == "ml-projects") +
-                    nav_link("/app/ml/models", "Model Registry",
-                             section == "ml-models") +
-                    nav_link("/app/ml/datasets", "Dataset Manager",
-                             section == "ml-datasets") +
-                    nav_link("/app/ml/subjects", "Subject Knowledge Manager",
-                             section == "ml-subjects")) +
-            sidebar_section("admin", "Admin",
-                            nav_link("/app/admin/create", "Create user",
-                                     section == "admin-create") +
-                                nav_link("/app/admin/users", "User list",
-                                         section == "admin-users"));
+        sidebar_links += sidebar_section(
+            "report", "Report",
+            nav_link("/app/report/system", "System Report",
+                     section == "report-system"));
+        sidebar_links += sidebar_section(
+            "ml", "Machine Learning",
+            nav_link("/app/ml", "Dashboard", section == "ml-dashboard") +
+                nav_link("/app/ml/projects", "Projects",
+                         section == "ml-projects") +
+                nav_link("/app/ml/models", "Model Registry",
+                         section == "ml-models") +
+                nav_link("/app/ml/datasets", "Dataset Manager",
+                         section == "ml-datasets") +
+                nav_link("/app/ml/subjects", "Subject Knowledge Manager",
+                         section == "ml-subjects"));
     }
 
     return html_response(
@@ -2091,6 +2390,26 @@ std::string application_page(const UserRecord& user, const std::string& section,
         ".stateTag-staging{background:#3a2f0d;color:#f2c96d}"
         "#hfFields,#githubFields{border:1px solid var(--panel-border);"
         "border-radius:.5rem;padding:.5rem .75rem;margin-top:.5rem}"
+        // System Report: each section is its own bordered card with a fixed
+        // label-column width shared across every card, so values line up
+        // in a single straight column instead of each section's table
+        // sizing its own first column independently off whatever labels
+        // happen to be longest in that section.
+        "#systemReport{display:flex;flex-direction:column;gap:1rem}"
+        "#systemReport .reportSection{background:var(--panel);"
+        "border:1px solid var(--panel-border);border-radius:.6rem;"
+        "padding:.9rem 1.1rem}"
+        "#systemReport .reportSection h3{margin:0 0 .4rem;font-size:.75rem;"
+        "font-weight:600;text-transform:uppercase;letter-spacing:.05em;"
+        "color:var(--muted)}"
+        "#systemReport table{table-layout:fixed}"
+        "#systemReport td{border-bottom:1px solid var(--panel-border);"
+        "vertical-align:top}"
+        "#systemReport tr:last-child td{border-bottom:none}"
+        "#systemReport td.reportLabel{width:18rem;color:var(--muted)}"
+        "#systemReport td.reportValue{font-variant-numeric:tabular-nums}"
+        "@media (max-width:640px){"
+        "#systemReport td.reportLabel{width:9rem}}"
         "</style></head><body>"
         "<div id=\"shell\" data-role=\"" + role_attr + "\"><nav id=\"sidebar\">"
         "<h1>MasterAI</h1><p id=\"who\">" +

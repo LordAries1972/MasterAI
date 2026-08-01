@@ -640,9 +640,20 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
                                               const unsigned int context_length,
                                               const unsigned int port,
                                               const unsigned int parallel_slots,
-                                              const LaunchTuning& tuning) const {
+                                              const LaunchTuning& tuning,
+                                              const std::string& accelerator_policy) const {
     if (!available()) {
         throw std::runtime_error("approved llama.cpp server executable is unavailable");
+    }
+    const bool cpu_only = accelerator_policy == "cpu_only";
+    if (cpu_only && tuning.gpu_layers != 0U) {
+        // Fail closed: the administrator's cpu_only choice is never silently
+        // overridden. A nonzero gpu_layers reaching this point means a
+        // caller bypassed CalibrationService::resolve()/calibrate(), which
+        // already force gpu_layers to 0 under cpu_only.
+        throw std::runtime_error(
+            "refusing to launch a runner with GPU layers requested while "
+            "hardware.acceleratorPolicy is cpu_only");
     }
     if (model.state != ModelState::ready) {
         throw std::runtime_error(
@@ -713,7 +724,20 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
     // calibration actually reasoned about.
     arguments.emplace_back("--ctx-checkpoints");
     arguments.emplace_back("2");
-    return LaunchSpec{approved_backend_, std::move(arguments), model.directory};
+    std::map<std::string, std::string> environment;
+    if (cpu_only) {
+        // Hide every GPU from the runner process at the library level, so a
+        // backend that ignores --n-gpu-layers 0 still cannot enumerate or
+        // initialize a device. -1/"" are each backend's own documented
+        // "no devices visible" sentinel.
+        environment["CUDA_VISIBLE_DEVICES"] = "-1";
+        environment["HIP_VISIBLE_DEVICES"] = "-1";
+        environment["ROCR_VISIBLE_DEVICES"] = "-1";
+        environment["GGML_VK_VISIBLE_DEVICES"] = "-1";
+        environment["SYCL_VISIBLE_DEVICES"] = "";
+    }
+    return LaunchSpec{approved_backend_, std::move(arguments), model.directory,
+                      std::move(environment)};
 }
 
 // Phase 26: use-prediction signal recording. See the ModelUsagePredictor

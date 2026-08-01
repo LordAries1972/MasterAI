@@ -2179,6 +2179,278 @@ void test_phase_nineteen_calibration() {
     require(unknown_rejected, "an unknown calibration profile name was accepted");
 }
 
+// Phase 30A: hardware.acceleratorPolicy round-trips through save/load,
+// rejects an unknown value, forces CalibrationService::resolve()/calibrate()
+// to recommend zero GPU layers under cpu_only even with a capable GPU
+// present, rejects a stale persisted profile that recommends GPU offload,
+// and makes build_launch_spec() both refuse a nonzero gpu_layers request and
+// populate the GPU-hiding runner environment.
+void test_phase_thirty_a_cpu_only_accelerator_policy() {
+    TemporaryDirectory temporary;
+    const auto settings = temporary.path() / "settings.json";
+    auto configuration = masterai::ConfigurationManager::safe_defaults();
+    configuration.runtime_root = temporary.path() / "runtime";
+    configuration.models_root = temporary.path() / "models";
+    configuration.accelerator_policy = "cpu_only";
+    masterai::ConfigurationManager::save_atomic(configuration, settings);
+    const auto loaded = masterai::ConfigurationManager::load(settings);
+    require(loaded.accelerator_policy == "cpu_only",
+            "acceleratorPolicy did not round-trip through save/load");
+
+    auto bad = configuration;
+    bad.accelerator_policy = "not_a_real_policy";
+    bool policy_rejected = false;
+    try {
+        masterai::ConfigurationManager::validate(bad);
+    } catch (const std::exception&) {
+        policy_rejected = true;
+    }
+    require(policy_rejected, "an unknown accelerator policy value was accepted");
+
+    // A capable GPU host, but resolve()/calibrate() must still recommend
+    // zero GPU layers end to end when the service was constructed cpu_only.
+    masterai::HardwareInfo cuda_host;
+    cuda_host.platform = "test-platform";
+    cuda_host.architecture = "x86_64";
+    cuda_host.logical_cpu_count = 8U;
+    cuda_host.gpu_backends = {"cuda"};
+    cuda_host.gpu_memory_mib = 24U * 1024U;
+
+    const auto model_directory = temporary.path() / "model";
+    const auto model_file = model_directory / "model.gguf";
+    write_text(model_file, "GGUF-phase30a-fixture");
+    masterai::ModelRecord model;
+    model.directory = model_directory;
+    model.state = masterai::ModelState::ready;
+    model.manifest.id = "phase30a-fixture";
+    model.manifest.model_file = "model.gguf";
+    model.manifest.model_size_bytes = std::filesystem::file_size(model_file);
+    model.manifest.model_sha256 = masterai::sha256_file_hex(model_file);
+
+    const auto backend = fake_llama_executable();
+    require(std::filesystem::is_regular_file(backend),
+            "fake llama runner fixture is unavailable");
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::TuningProfileStore store(records);
+    masterai::RunnerSupervisor supervisor(backend, temporary.path() / "runtime");
+
+    bool invalid_construction_rejected = false;
+    try {
+        masterai::CalibrationService bad_service(
+            supervisor, store, cuda_host, "backend-hash-cpu-only", "build-one",
+            "not_a_real_policy");
+    } catch (const std::exception&) {
+        invalid_construction_rejected = true;
+    }
+    require(invalid_construction_rejected,
+            "CalibrationService accepted an unknown accelerator policy");
+
+    masterai::CalibrationService cpu_only_calibration(
+        supervisor, store, cuda_host, "backend-hash-cpu-only", "build-one",
+        "cpu_only");
+    const auto resolved = cpu_only_calibration.resolve(
+        model.manifest.model_sha256, "balanced", nullptr, 0U,
+        model.manifest.model_size_bytes, "");
+    require(resolved.recommended_gpu_layers == 0U,
+            "cpu_only resolve() recommended nonzero GPU layers on a capable "
+            "GPU host");
+
+    std::atomic_bool cancellation{false};
+    const auto calibrated = cpu_only_calibration.calibrate(
+        model, "balanced", 18190U, cancellation);
+    require(calibrated.recommended_gpu_layers == 0U,
+            "cpu_only calibrate() measured and recommended nonzero GPU "
+            "layers on a capable GPU host");
+
+    // A profile persisted under an auto/GPU-permitting policy that
+    // recommends GPU offload must be rejected, not silently zeroed, when
+    // resolved again under cpu_only.
+    masterai::CalibrationService auto_calibration(
+        supervisor, store, cuda_host, "backend-hash-auto", "build-one",
+        "auto");
+    const auto auto_calibrated = auto_calibration.calibrate(
+        model, "balanced", 18191U, cancellation);
+    require(auto_calibrated.recommended_gpu_layers > 0U,
+            "auto-policy calibration on a capable GPU host did not "
+            "recommend GPU offload");
+    masterai::CalibrationService cpu_only_same_backend(
+        supervisor, store, cuda_host, "backend-hash-auto", "build-one",
+        "cpu_only");
+    bool stale_gpu_profile_rejected = false;
+    try {
+        static_cast<void>(cpu_only_same_backend.resolve(
+            model.manifest.model_sha256, "balanced"));
+    } catch (const std::exception&) {
+        stale_gpu_profile_rejected = true;
+    }
+    require(stale_gpu_profile_rejected,
+            "resolve() silently returned a persisted GPU-offload profile "
+            "under cpu_only instead of rejecting it");
+
+    // build_launch_spec(): cpu_only with a nonzero gpu_layers request throws
+    // (belt-and-suspenders fail-closed), and a zero-gpu_layers cpu_only
+    // launch never emits --n-gpu-layers and always carries the GPU-hiding
+    // environment overrides.
+    masterai::LlamaCppAdapter adapter(backend);
+    masterai::LaunchTuning gpu_tuning;
+    gpu_tuning.gpu_layers = masterai::kGpuLayersOffloadAll;
+    bool nonzero_gpu_rejected = false;
+    try {
+        static_cast<void>(adapter.build_launch_spec(
+            model, 2048U, 18192U, 1U, gpu_tuning, "cpu_only"));
+    } catch (const std::exception&) {
+        nonzero_gpu_rejected = true;
+    }
+    require(nonzero_gpu_rejected,
+            "build_launch_spec() launched with GPU layers requested under "
+            "cpu_only instead of refusing");
+
+    masterai::LaunchTuning cpu_tuning;
+    const auto cpu_spec = adapter.build_launch_spec(model, 2048U, 18193U, 1U,
+                                                     cpu_tuning, "cpu_only");
+    require(std::find(cpu_spec.arguments.begin(), cpu_spec.arguments.end(),
+                      "--n-gpu-layers") == cpu_spec.arguments.end(),
+            "cpu_only launch spec emitted --n-gpu-layers");
+    require(cpu_spec.environment.count("CUDA_VISIBLE_DEVICES") == 1U &&
+                cpu_spec.environment.at("CUDA_VISIBLE_DEVICES") == "-1",
+            "cpu_only launch spec did not hide CUDA devices from the runner "
+            "process environment");
+    require(cpu_spec.environment.count("HIP_VISIBLE_DEVICES") == 1U,
+            "cpu_only launch spec did not hide HIP devices from the runner "
+            "process environment");
+
+    // The default ("auto") policy reproduces pre-Phase-30A behavior exactly:
+    // no environment overrides are added.
+    const auto auto_spec = adapter.build_launch_spec(model, 2048U, 18194U, 1U,
+                                                      cpu_tuning);
+    require(auto_spec.environment.empty(),
+            "the default accelerator policy added runner environment "
+            "overrides that did not exist before Phase 30A");
+}
+
+// Phase 30A deliverable 2: exercises the same MemoryBudgetManager primitive
+// admit_runner_weights() (server.cpp) is built from -- a
+// MemoryCategory::runner_weights reservation sized from model weight bytes
+// plus the fixed compute-buffer/KV heuristics -- confirming a model whose
+// weights alone would blow the configured ceiling is rejected with a
+// concrete diagnostic before any runner process would ever be started, and
+// that a model comfortably inside the ceiling is admitted and later
+// releasable. Also covers assess_model()'s RAM-only suitability triage,
+// which admit_runner_weights() consults first as a fast-fail check.
+void test_phase_thirty_a_runner_weights_admission() {
+    auto hardware = masterai::probe_hardware(std::filesystem::current_path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware,
+        512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+
+    masterai::MemoryEstimate oversized;
+    oversized.weights_bytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+    oversized.runtime_buffer_bytes = 256ULL * 1024ULL * 1024ULL;
+    oversized.kv_bytes_per_sequence = 128ULL * 1024ULL * 1024ULL;
+    oversized.sequences = 1U;
+    oversized.safety_margin_bytes = 32ULL * 1024ULL * 1024ULL;
+    const auto rejected = memory.reserve(
+        masterai::MemoryCategory::runner_weights, oversized, true);
+    require(!rejected.admitted && !rejected.diagnostic.empty(),
+            "an oversized model's weights were admitted past the configured "
+            "ceiling");
+
+    masterai::MemoryEstimate small;
+    small.weights_bytes = 64ULL * 1024ULL * 1024ULL;
+    small.runtime_buffer_bytes = 256ULL * 1024ULL * 1024ULL;
+    small.kv_bytes_per_sequence = 128ULL * 1024ULL * 1024ULL;
+    small.sequences = 1U;
+    small.safety_margin_bytes = 32ULL * 1024ULL * 1024ULL;
+    const auto admitted = memory.reserve(
+        masterai::MemoryCategory::runner_weights, small, true);
+    require(admitted.admitted && !admitted.lease_id.empty(),
+            "a comfortably-sized model was rejected before runner start");
+    memory.release(admitted.lease_id);
+    require(memory.status().reserved_bytes == 0U,
+            "releasing the runner_weights lease on unload did not restore "
+            "headroom for the next model");
+
+    masterai::ModelManifest manifest;
+    manifest.minimum_ram_mib = hardware.total_ram_mib * 4U;
+    manifest.recommended_ram_mib = hardware.total_ram_mib * 4U;
+    const auto suitability =
+        masterai::assess_model(manifest, hardware, 0U);
+    require(suitability.rating == masterai::Suitability::unsupported,
+            "assess_model() did not flag a model far exceeding host RAM as "
+            "unsupported");
+}
+
+// Phase 30A deliverable 4: MemorySweeper is the one background thread that
+// turns Phase 26's WarmModelTracker::apply_idle_timeout()/
+// RunnerSupervisor::apply_idle_timeout() and Phase 14's
+// MemoryBudgetManager::sample() pressure actions into something that
+// actually runs unattended (see masterai.hpp's MemorySweeper comment).
+// Confirms a loaded runner left idle past idle_unload_seconds is unloaded
+// automatically, the caller's on_idle_unload callback fires exactly once so
+// it can release its own runner_weights lease, and prompt session state is
+// reset alongside it.
+void test_phase_thirty_a_memory_sweeper_idle_unload() {
+    TemporaryDirectory temporary;
+    const auto model_directory = temporary.path() / "model";
+    const auto model_file = model_directory / "model.gguf";
+    write_text(model_file, "GGUF-sweeper-fixture");
+    masterai::ModelRecord model;
+    model.directory = model_directory;
+    model.state = masterai::ModelState::ready;
+    model.manifest.id = "sweeper-fixture";
+    model.manifest.model_file = "model.gguf";
+    model.manifest.model_size_bytes = std::filesystem::file_size(model_file);
+    model.manifest.model_sha256 = masterai::sha256_file_hex(model_file);
+
+    const auto backend = fake_llama_executable();
+    require(std::filesystem::is_regular_file(backend),
+            "fake llama runner fixture is unavailable");
+    masterai::RunnerSupervisor supervisor(backend, temporary.path() / "runtime");
+    supervisor.load(model, 4096U, 18195U, 5U);
+    require(supervisor.metrics().state == masterai::RunnerState::ready,
+            "sweeper fixture runner did not become ready");
+
+    auto hardware = masterai::probe_hardware(std::filesystem::current_path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware,
+        512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    // keep_idle_model=false on the minimal profile (see policy_for()) is
+    // exactly the "no persistent idle runner by default" behavior this test
+    // exercises -- the sweep unloads on idle timeout unconditionally rather
+    // than only once real memory pressure appears.
+    require(!policy.keep_idle_model,
+            "test assumes the minimal profile does not keep an idle model "
+            "warm by default");
+    masterai::MemoryBudgetManager memory(policy, hardware);
+    masterai::PromptSessionManager prompt_sessions(4U, 300U);
+
+    std::atomic<unsigned int> idle_unload_calls{0U};
+    {
+        // idle_unload_seconds=0: the very first sweep tick after the load
+        // above already satisfies "idle for at least 0 seconds".
+        masterai::MemorySweeper sweeper(
+            memory, &supervisor, nullptr, &prompt_sessions, 0U,
+            [&idle_unload_calls]() { ++idle_unload_calls; });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (supervisor.metrics().state != masterai::RunnerState::unloaded &&
+              std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    }
+    require(supervisor.metrics().state == masterai::RunnerState::unloaded,
+            "MemorySweeper did not unload a runner idle past "
+            "idle_unload_seconds");
+    require(idle_unload_calls.load() == 1U,
+            "MemorySweeper's on_idle_unload callback did not fire exactly "
+            "once");
+    require(prompt_sessions.active_sessions() == 0U,
+            "MemorySweeper's idle unload did not reset prompt session state");
+}
+
 void test_phase_twenty_advanced_optimizations_disabled() {
     masterai::AdvancedOptimizationRegistry registry;
     const auto features = registry.features();
@@ -4438,6 +4710,12 @@ int main() {
         run("prompt-prefix session reuse",
             test_phase_eighteen_prompt_session_reuse);
         run("adaptive calibration", test_phase_nineteen_calibration);
+        run("cpu_only accelerator policy fail-closed launch",
+            test_phase_thirty_a_cpu_only_accelerator_policy);
+        run("runner_weights pre-load admission",
+            test_phase_thirty_a_runner_weights_admission);
+        run("MemorySweeper idle unload",
+            test_phase_thirty_a_memory_sweeper_idle_unload);
         run("weighted-fair scheduler and backpressure",
             test_phase_twentyfive_scheduler_weighted_fairness_and_backpressure);
         run("KV-cache accounting and deterministic eviction",
