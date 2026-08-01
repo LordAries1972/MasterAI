@@ -702,6 +702,17 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
         arguments.emplace_back("--ubatch-size");
         arguments.emplace_back(std::to_string(tuning.ubatch_tokens));
     }
+    // llama-server's prompt-cache "context checkpoints" each hold a full
+    // extra copy of the KV cache, on the *same device* the KV cache lives
+    // on (GPU, when gpu_layers > 0). Its own default of 32 checkpoints
+    // silently multiplies GPU KV-cache memory 32x on top of what
+    // select_gpu_layers() budgeted for (which only accounts for model
+    // weights, not this), reliably OOM-crashing the runner on small-VRAM
+    // cards even though the model itself fits comfortably. Capping this
+    // low keeps the rewind feature usable without blowing the VRAM budget
+    // calibration actually reasoned about.
+    arguments.emplace_back("--ctx-checkpoints");
+    arguments.emplace_back("2");
     return LaunchSpec{approved_backend_, std::move(arguments), model.directory};
 }
 

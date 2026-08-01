@@ -203,7 +203,18 @@ HttpResult local_http(
             std::string line = line_buffer.substr(0U, line_end);
             line_buffer.erase(0U, line_end + 1U);
             if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.rfind("data: ", 0U) == 0U) line.erase(0U, 6U);
+            // SSE frames a stream as "data: <payload>" lines plus other
+            // field types (":" comments used as keep-alive pings during a
+            // slow prompt eval, "event:"/"id:"/"retry:") that are not
+            // payload at all. Forwarding every non-empty line regardless of
+            // its field name -- as this used to -- hands parse_json() a
+            // bare keep-alive comment the moment a runner is slow enough to
+            // emit one mid-stream, which fails immediately as invalid JSON.
+            // Only actual "data:" lines are payload; everything else is
+            // silently dropped, matching the SSE spec.
+            const bool is_data_line = line.rfind("data: ", 0U) == 0U;
+            if (!is_data_line) continue;
+            line.erase(0U, 6U);
             if (on_line && !line.empty() && line != "[DONE]") on_line(line);
         }
     };
@@ -308,8 +319,12 @@ HttpResult local_http(
     if (on_line && !line_buffer.empty()) {
         auto line = line_buffer;
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.rfind("data: ", 0U) == 0U) line.erase(0U, 6U);
-        if (!line.empty() && line != "[DONE]") on_line(line);
+        // Same "data:"-only rule as dispatch_lines() above, applied to
+        // whatever's left in the buffer once the connection has closed.
+        if (line.rfind("data: ", 0U) == 0U) {
+            line.erase(0U, 6U);
+            if (!line.empty() && line != "[DONE]") on_line(line);
+        }
     }
     return result;
 }

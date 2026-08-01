@@ -8,7 +8,7 @@ Current phase status:
 
 - Phase 0: Complete — ADR-0003 pins every release-1 platform, hardware,
   backend, TLS, secret, attachment, voice, MCP, licensing, dataset, and metric
-  decision formerly open in Section 27.
+  decision formerly open in Section 28.
 - Phase 1: Complete — schema-versioned strict configuration, precedence,
   atomic persistence/backup, first-run/reset wizard, checksummed record
   journal, migration metadata, recovery/checkpoint/backup, lifecycle scripts,
@@ -28,29 +28,53 @@ Current phase status:
   suitability controls Ready promotion, CPU features and GPU libraries are
   probed, the actual load command rechecks integrity, and authenticated JSON
   plus native HTML inventories are implemented.
-- Phase 4: Implemented, exit validation pending — the `llama.cpp` runner is
+- Phase 4: Complete (validated 2026-08-02) — the `llama.cpp` runner is
   process-isolated and supervised; readiness, loopback IPC tokenization,
   incremental generation, caller/disconnect cancellation, unload, logs, and
   resident-memory/request metrics are implemented. The isolated fake-runner
-  integration test passes; the exit criterion still requires a verified real
-  programming GGUF on the pinned `llama.cpp` build.
-- Phase 5: Implemented, exit validation pending — authenticated native login
-  and workspace pages, durable projects/chats, Ready-model selection,
-  auto-load, live NDJSON responses, browser cancellation, bounded UTF-8
-  attachments, ownership/integrity rechecks, prompt context assembly, and the
-  transcription adapter boundary are implemented. Real-model browser and
-  optional whisper.cpp operational validation remain.
+  integration test passes, and the exit criterion is now also backed by a
+  real run: `qwen25-coder-3b-q4km` (Qwen2.5-Coder-3B-Instruct Q4_K_M) loaded
+  on the pinned `llama.cpp` build (`llama-server.exe`, ADR-0003's
+  `b10156`/`91f8c9c`) and answered an authenticated `POST
+  /api/v1/chats/{id}/messages` request end to end — 23 prompt tokens, 28
+  generated tokens, streamed NDJSON tokens, no model memory resident in the
+  main `masterai.exe` process (`runtime/logs/runner-qwen25-coder-3b-q4km.log`
+  shows the runner as a separate process with its own CUDA/CPU device log).
+- Phase 5: Implemented, exit validation partially recorded (2026-08-02) —
+  authenticated native login and workspace pages, durable projects/chats,
+  Ready-model selection, auto-load, live NDJSON responses, browser
+  cancellation, bounded UTF-8 attachments, ownership/integrity rechecks,
+  prompt context assembly, and the transcription adapter boundary are
+  implemented. The end-to-end authenticated chat path is now real-model
+  validated at the API level: login (local password account), project
+  creation, chat creation against `qwen25-coder-3b-q4km`, and a real streamed
+  reply all completed through the live server (see Phase 4). Two real-model
+  UI bugs surfaced and were fixed during this validation pass:
+  `src/inference.cpp`'s SSE line parser was forwarding every non-empty line
+  instead of only `data:` payload lines, which broke on the runner's
+  keep-alive comment frames during slow prompt evaluation; and
+  `src/web_ui.cpp` picked up a `Query` title on user bubbles and layout
+  fixes matching the existing `Response` title styling. Visually confirming
+  the same exchange renders correctly in an actual browser session, and the
+  optional whisper.cpp transcription path, remain outstanding.
 - Phase 6: Implemented, exit validation pending — immutable Hugging Face and
   GitHub Release URL policy, explicit licenses, persistent resumable jobs,
   pinned curl process isolation, journaled progress, SHA-256 promotion or
   quarantine, model-tree registration integration, CLI/API operations, and
   hardware recommendations are implemented. A deliberately interrupted real
   HTTPS transfer still must certify the exit criterion.
-- Phase 7: Implemented, exit validation pending — quick, standard, and extended
+- Phase 7: Complete (validated 2026-08-02) — quick, standard, and extended
   executable suites, exact prompt/settings capture, timing/token/memory and
   quality metrics, durable compatible comparisons, quality-then-speed
   recommendations, CLI/API operations, and browser results are implemented.
-  Same-host real-model comparison remains the operational exit check.
+  The same-host comparison exit check now has recorded evidence: `masterai
+  benchmark-model` ran the quick suite against two real candidate GGUFs on
+  the same host/hardware id — `qwen25-coder-3b-q4km` (2/2 cases passed, 400
+  generated tokens) and `llama32-3b-instruct-q4km` (2/2 cases passed, 499
+  generated tokens) — both against the same pinned prompt suite hash
+  (`a1231a94ff8b786ea9b400f3bcc14bac7dd431b913d88a0da9a6e86d6a63fdee`),
+  confirming reproducibility, and both persisted via `BenchmarkStore` in the
+  runtime record store for later comparison-UI/CLI retrieval.
 - Phase 8: Implemented, exit validation pending — the pinned `2025-11-25`
   JSON-RPC dispatcher, authenticated/project-bound tools and resources,
   newline-delimited `stdio`, Streamable HTTP POST, cancellation notification,
@@ -133,7 +157,7 @@ Current phase status:
   administrator-only status/trim/clear routes exist alongside
   `GET /api/v1/system/memory`. A formal representative-query latency
   benchmark remains outstanding.
-- Phase 18: Implemented, exit validation pending — a `PromptSessionManager`
+- Phase 18: Complete (validated 2026-08-02) — a `PromptSessionManager`
   (`src/session_cache.cpp`) tracks, per chat, whether the llama.cpp runner's
   own internal KV-cache slot from the previous turn can be resumed for the
   next one. Reuse requires an exact `SessionFingerprint` match (model
@@ -154,29 +178,42 @@ Current phase status:
   consults the manager. Memory admission
   (`HttpServer::State::send_chat_message`) now reserves KV bytes for the full
   configured slot count, matching how llama.cpp itself preallocates KV cache
-  for every `--parallel` slot at load time. The whole feature defaults off
-  (`session.enabled=false`) until real-model validation is recorded, matching
-  how other real-model exit criteria in this project (Phases 4-7) remain
-  outstanding until a pinned backend/model is exercised. New
+  for every `--parallel` slot at load time — a real run against this
+  project's own 4 GiB-VRAM `qwen25-coder-3b-q4km` host with the previously
+  planned `session.maxSlots=4` default and a 131072-token
+  `inference.chatContextLength` was rejected outright by that admission
+  check (`generation_failed: request exceeds the active RAM ceiling or OS
+  safety reserve`) before the runner even loaded, confirming the reservation
+  is real and enforced, not advisory; the run that produced the exit
+  evidence below used `session.maxSlots=1`. New
   `test_phase_eighteen_prompt_session_reuse` covers: no fabricated reuse for
   a chat with no prior turn; reuse granted for an identical-fingerprint,
   prefix-extending turn; reuse refused on fingerprint mismatch; reuse refused
   on a non-prefix (edited-turn) change; least-recently-used eviction once the
   slot pool is full; a released (cancelled-turn) session never being offered
   back; `reset()` clearing every entry; and the launch spec actually exposing
-  the configured slot count via `--parallel`. The exit criterion — a
-  same-host repeated-turn benchmark on a real pinned model/backend showing
-  reduced prompt-evaluation time and TTFT without incorrect output, stale
-  policy, memory-cap violation, or cross-boundary reuse — still requires that
-  real backend/model and remains outstanding, consistent with how Phases 4-7
-  already record that limitation. Chat reply length and context length also
+  the configured slot count via `--parallel`. Complete (validated
+  2026-08-02): the same-host repeated-turn exit criterion now has real
+  evidence — two authenticated turns sent to the same chat against
+  `qwen25-coder-3b-q4km` with `session.enabled=true`, `session.maxSlots=1`.
+  The API reported the second turn's full templated prompt at 68 tokens, but
+  `runtime/logs/runner-qwen25-coder-3b-q4km.log` shows the runner's own
+  `prompt eval time` line evaluated only 25 tokens for that turn (`n_tokens =
+  97` after, versus `n_tokens = 43` after the first turn) — the prior turn's
+  43-token prefix was served from the reused KV-cache slot instead of being
+  re-evaluated, matching the byte-prefix-match design exactly. Output was
+  correct and coherent on both turns, no stale policy or cross-boundary reuse
+  occurred (single chat, single owner), and the memory-cap enforcement above
+  demonstrates the reservation path is not bypassed. Chat reply length and
+  context length also
   moved off hardcoded constants in this change: the previous unconfigurable
   512-token reply cap (well below the runner's own 32768-token policy
   ceiling) cut long replies off before the model's own end-of-turn token;
   `inference.chatMaxReplyTokens` (default 8192) and
   `inference.chatContextLength` (default 4096, matching the prior constant)
   are now configurable.
-- Phase 19: Implemented, exit validation pending — a `CalibrationService`
+- Phase 19: Implemented, exit validation partially recorded (2026-08-02) —
+  a `CalibrationService`
   (`src/calibration.cpp`) drives a real `RunnerSupervisor` through a cold
   load and two `generate()` calls (near-zero-token for prompt-evaluation
   timing, a short generation for generation timing) and persists the result
@@ -185,7 +222,7 @@ Current phase status:
   hashing convention), model SHA-256, backend executable digest, and build
   id. Any change to that identity makes the stored profile unreachable, so
   `CalibrationService::resolve()` falls back to `safe_default_profile()`
-  (the minimal/balanced/performance starting points from section 31.2)
+  (the minimal/balanced/performance starting points from section 25.2)
   instead of ever reusing stale evidence — the same structural-invalidation
   approach Phase 17's `CacheManager` already uses. `LlamaCppAdapter::build_launch_spec`
   gained an optional `LaunchTuning` (GPU layers, mmap/mlock, thread count,
@@ -205,17 +242,24 @@ Current phase status:
   pre-existing Phase 13 `/api/v1/performance/baseline` route under the same
   prefix. GPU utilization and thermal-trend probing are not implemented —
   no vendor SDK (NVML/ADL) is an approved dependency per ADR-0003 — and
-  remain forward work, as does the exit criterion itself: a real-hardware-
-  class benchmark showing the selected profile outperforms safe defaults or
-  reduces peak memory without unacceptable quality regression, consistent
-  with how Phases 4–7 already leave their own real-model exit criteria
-  outstanding until a pinned backend/model is exercised on real hardware.
+  remain forward work. `masterai calibrate config/settings.json
+  qwen25-coder-3b-q4km balanced` was run against the real GTX 960M/
+  `qwen25-coder-3b-q4km` host and produced a persisted `TuningProfile`: cold
+  load 43.11 s, prompt-evaluation 2.48 s, generation 6.12 s, peak resident
+  memory ~2.14 GiB, 2,958 page faults, 9.62% average CPU. This establishes
+  the required calibration record for at least one Qwen-class 3B GGUF and
+  confirms the pipeline runs end to end on real hardware without CPU
+  fallback or an admission failure at the `balanced` profile. The remaining
+  half of the exit criterion — demonstrating the selected profile
+  outperforms safe defaults or reduces peak memory without unacceptable
+  quality regression, which needs a second calibration run at a different
+  profile/tuning to compare against — has not yet been produced.
 - Phase 20: Planned and gated, scaffolding only — an
   `AdvancedOptimizationRegistry` (`src/optimization_registry.cpp`) declares
-  the six candidate features from section 25 (continuous batching,
+  the six candidate features from section 26 (continuous batching,
   speculative decoding, NUMA affinity, storage prefetch, multiple warm
   runners, GPU/CPU KV placement) and an `AdvancedOptimizationEvidence`
-  schema matching section 31.11's required fields, exposed read-only via
+  schema matching section 25.11's required fields, exposed read-only via
   `GET /api/v1/performance/advanced-optimizations`. Every feature defaults
   to `enabled=false`, and no code path — including `record_evidence()` —
   can ever set it to `true`: recording evidence is structurally separate
@@ -509,7 +553,7 @@ Validation evidence recorded on 2026-08-01:
 - Phase 20 implemented as scaffolding only:
   `AdvancedOptimizationRegistry`/`AdvancedOptimizationEvidence`
   (`src/optimization_registry.cpp`) declare the six candidate features from
-  section 25, every one defaulting to `enabled=false` with no code path able
+  section 26, every one defaulting to `enabled=false` with no code path able
   to change that, exposed read-only via
   `GET /api/v1/performance/advanced-optimizations`. New
   `test_phase_twenty_advanced_optimizations_disabled` covers: every
@@ -2104,7 +2148,387 @@ Never log passwords, session tokens, API tokens, private prompts under restricti
 - Lost network during MCP call.
 - Forced shutdown.
 
-## 25. Phased Implementation Roadmap
+## 25. Performance, Retrieval, Caching, and Low-Memory Architecture
+
+### 25.1 Planning boundary and optimization rule
+
+Phases 13–20 extend the original Phase 12 measurement discipline. They do not
+reopen completed security or lifecycle boundaries, authorize a custom
+transformer engine, or make `llama.cpp` part of the control-plane foundation.
+Backend-specific functionality remains optional, isolated, version-pinned, and
+replaceable.
+
+An optimization is accepted only when evidence identifies which independent
+outcome improved and what trade-off was introduced:
+
+1. Time to first token.
+2. Prompt-evaluation throughput.
+3. Generation throughput.
+4. Retrieval quality and preparation latency.
+5. Peak resident memory and commit/pagefile pressure.
+6. Output quality and correctness.
+
+Every queue, cache, buffer pool, context window, index operation, retrieval
+result, attachment job, and background worker must have an enforced resource
+limit. Virtual address space, a pagefile, swap, or a RAM-backed drive must never
+be presented as equivalent to sufficient physical RAM.
+
+### 25.2 Hardware profiles and initial defaults
+
+The service derives a profile but permits an administrator to choose a stricter
+one:
+
+| Profile | Intended host | Default behaviour |
+|---|---|---|
+| Minimal | Older/low-memory CPU-only host | No idle model unless configured; one inference request; 2,048–4,096 context; 8–20 compact chunks; one index worker; background work pauses during inference |
+| Balanced | Mainstream desktop/laptop | One warm model; one generation with a bounded queue; 4,096–8,192 context; bounded prefix/retrieval caches; two to four measured indexing workers |
+| Performance | Ample RAM/VRAM | Multiple slots or warm runners only when measured; larger context/cache budgets; optional batching and GPU-resident KV |
+
+Recommended first performance-focused defaults are:
+
+| Control | Initial value |
+|---|---|
+| Binding | Loopback |
+| Loaded generation models | Maximum 1 |
+| Active/queued inference | 1 / 8 |
+| Default context and generation reserve | 4,096 / 1,024 tokens |
+| Retrieval chunks | Maximum 16 |
+| Background/interactive index workers | 1 / maximum 2 |
+| Model load | `auto`, prefer compatible memory mapping |
+| Memory lock | Disabled |
+| Continuous batching/speculative decoding | Disabled |
+| Prompt/retrieval/file-content cache | 256 / 128 / 128 MiB maximum |
+| OS reserve | At least 2,048 MiB and 15% free physical RAM |
+| Network-hosted models | Denied by default |
+| Indexing during inference | Throttled or paused by pressure/profile |
+
+These are safe starting points, not performance claims. Phase 19 calibration
+may lower or raise them within the hard administrator limits.
+
+### 25.3 End-to-end query pipeline
+
+```text
+Client
+  -> HTTP/MCP admission and authentication
+  -> authorization and request normalization
+  -> prompt classification and context budget
+  -> retrieval plan
+  -> bounded parallel retrieval
+  -> ranking, fusion, and deduplication
+  -> segmented prompt assembly and token estimate
+  -> runner admission and compatible-prefix check
+  -> prompt evaluation
+  -> immediately streamed generation
+  -> incremental persistence and cache update
+  -> deterministic resource release
+```
+
+Every stage has a monotonic timer, cancellation point, byte/task limit, and
+sanitized diagnostic. The coordinator allocates a total deadline instead of
+allowing each stage to consume an independent unbounded timeout. When retrieval
+expires, it uses the strongest authorized evidence already available only when
+safe to do so.
+
+Large text stays in immutable reference-counted buffers or bounded views.
+Request bodies, downloads, conversations, and generated output are streamed or
+persisted incrementally. Prompt assembly should use segmented buffers where the
+adapter permits it; full logits and duplicate token/text copies are not retained
+without an explicit measured requirement.
+
+### 25.4 Runtime components and responsibility boundaries
+
+`QueryCoordinator` owns request deadlines, profile selection, context budgets,
+child cancellation, backpressure, streaming state, and per-stage metrics. It
+owns only lightweight metadata.
+
+`RetrievalPlanner` selects the lowest-cost sufficient retrieval strategy.
+`RetrievalWorkerPool` runs bounded independent tasks with interactive priority.
+`ContextBudgeter` reserves generation space and admits only the highest-value
+authorized context. `ResultReranker` fuses and deduplicates evidence.
+
+`InferenceScheduler` separates IDE completion, interactive chat, IDE analysis,
+user-triggered background work, benchmarks, and maintenance. Weighted fairness
+may delay low-priority work but must prevent permanent starvation.
+
+`MemoryBudgetManager` is the sole authority for process-wide budget categories
+and pressure actions. Individual caches and workers report usage to it and may
+not invent independent unlimited reserves.
+
+`CacheManager` applies byte quotas, identity/version keys, invalidation,
+pressure trimming, metrics, and corruption quarantine consistently.
+
+`CalibrationService` records exact reproducible evidence and persists tuning
+profiles. It cannot override security policy, model integrity, authorization,
+or the administrator's memory ceiling.
+
+### 25.5 Model loading, eviction, virtual memory, and scratch storage
+
+Compatible GGUF adapters should prefer mapped weights in `auto` mode so the OS
+can demand-page and reclaim clean file-backed pages. Mapping does not make an
+oversized model practical: predicted destructive paging is rejected or
+downgraded with an explicit warning.
+
+Adapter-neutral load controls are:
+
+```json
+{
+  "loadMode": "auto",
+  "allowMemoryMap": true,
+  "allowMemoryLock": false,
+  "allowDirectIo": false,
+  "prefetchMode": "adaptive",
+  "warmup": "minimal"
+}
+```
+
+Model states are `Cold`, `Loading`, `Warm`, `Busy`, `Idle`, `Draining`, and
+`Unloaded`. Pressure eviction removes low-value retrieval/file caches first,
+then idle embedding models, then the least-recently-used unpinned generation
+model. Active runners are drained rather than killed except to enforce a hard
+safety limit.
+
+Ordinary local SSD storage plus the OS file cache is the default. RAM-backed
+drives are allowed only for small ephemeral artifacts when sufficient physical
+RAM remains; they are prohibited for durable chats/audit logs, resumable
+downloads, or duplicated full models on constrained hosts. Scratch uses unique
+per-job directories, a byte ceiling, cleanup records, and atomic publication.
+The UI must not promise secure deletion on SSDs; encryption at rest and short
+retention are the dependable controls.
+
+### 25.6 Index and retrieval storage design
+
+Index storage consists of compact metadata and string tables, disk-backed
+posting lists/vector blocks, small bounded hot tables, immutable mapped
+segments, a mutable delta journal, and an atomic generation manifest.
+Compaction produces a new verified generation before swapping the manifest.
+Corrupt segments are quarantined individually and the last valid generation
+remains readable.
+
+Parallel reading happens across independent paths or batches, lexical versus
+semantic work, symbol/diagnostic lookups, or attachment versus repository work.
+It must not create threads per file, split small files into competing reads, or
+parse/hash the same revision repeatedly.
+
+The embedding engine is a smaller replaceable adapter, loaded on demand,
+batching background chunks, caching by content hash, operating on CPU when
+necessary, and unloading under pressure.
+
+### 25.7 Cache and authorization design
+
+Cache identity is a correctness and security boundary. Where applicable, keys
+include user, tenant, project, membership/policy generation, file/chunk digest,
+index generation, parser/chunker/embedding/tokenizer versions, model/backend
+fingerprints, prompt template, and inference settings.
+
+Performance features must never:
+
+- Share prompt, KV, retrieval, or decrypted state across unauthorized users or
+  projects.
+- Bypass canonical path authorization, attachment quarantine, model
+  verification, audit, cancellation, or request limits.
+- Reuse cached results after membership, policy, model, backend, or source
+  changes.
+- Expose private paths through cache keys, metrics, or timing diagnostics.
+- Use unvalidated writable shared memory across trust boundaries.
+- Leave sensitive temporary data broadly readable.
+
+Authorization is always evaluated from authoritative current state. Cache
+corruption triggers bounded quarantine/rebuild and safe uncached operation.
+
+### 25.8 Configuration surface
+
+The strict schema may add these versioned domains during their owning phase:
+
+```json
+{
+  "performance": {
+    "profile": "auto",
+    "interactiveDeadlineMs": 2000,
+    "preferLowTimeToFirstToken": true,
+    "backgroundWorkDuringInference": "throttle",
+    "autoTune": true
+  },
+  "memory": {
+    "policy": "adaptive",
+    "hardLimitMiB": 0,
+    "minimumOsReserveMiB": 2048,
+    "minimumFreePercent": 15,
+    "criticalPressurePercent": 92
+  },
+  "inference": {
+    "maxActiveRequests": 1,
+    "maxQueuedRequests": 8,
+    "idleUnloadSeconds": 600,
+    "loadMode": "auto",
+    "warmup": "minimal",
+    "continuousBatching": "auto",
+    "speculativeDecoding": false
+  },
+  "context": {
+    "defaultTokens": 4096,
+    "maximumTokens": 8192,
+    "generationReserveTokens": 1024,
+    "retrievalMaximumChunks": 16,
+    "retrievalMaximumTokens": 4096
+  },
+  "cache": {
+    "fileMetadataMiB": 64,
+    "fileContentMiB": 128,
+    "retrievalMiB": 128,
+    "embeddingMiB": 256,
+    "tokenizationMiB": 64,
+    "promptMiB": 256,
+    "allowDiskPromptCache": false
+  },
+  "indexing": {
+    "enabled": true,
+    "interactiveWorkers": 2,
+    "backgroundWorkers": 1,
+    "pauseAtMemoryPressure": "high",
+    "publishPartialIndex": true
+  },
+  "storage": {
+    "scratchPath": "./runtime/tmp",
+    "scratchLimitMiB": 1024,
+    "allowNetworkModels": false,
+    "preferMemoryMappedIndexes": true
+  }
+}
+```
+
+`hardLimitMiB: 0` means derive a safe limit, never unlimited. Unknown fields
+remain rejected. Backend-specific controls stay within validated adapter
+namespaces instead of leaking across the general configuration surface.
+
+### 25.9 API and UI surface
+
+Authenticated routes, introduced only by their owning phase, are:
+
+```text
+GET  /api/v1/system/resources
+GET  /api/v1/system/memory
+GET  /api/v1/performance/profile
+POST /api/v1/performance/calibrate
+GET  /api/v1/performance/recommendations
+GET  /api/v1/cache/status
+POST /api/v1/cache/trim
+POST /api/v1/cache/clear
+GET  /api/v1/projects/{id}/index
+POST /api/v1/projects/{id}/index/rebuild
+POST /api/v1/projects/{id}/index/cancel
+POST /api/v1/models/{id}/suitability
+GET  /api/v1/requests/{id}/metrics
+```
+
+Administrative mutations require CSRF/host/origin/role/scope enforcement and
+audit. Clearing or trimming may detach only unused entries and cannot invalidate
+buffers held by active requests.
+
+The UI shows actual process/model/KV/cache memory, context use and remaining
+tokens, queue position, TTFT, prompt/generation throughput, retrieval sources,
+cache reuse, and low-memory recommendations. Simple actions are `Reduce memory
+use`, `Optimize for speed`, and `Run calibration`; backend flags remain in an
+expert-only view.
+
+### 25.10 Proposed ISO C++17 source boundaries
+
+```text
+src/
+├── performance/  performance_profile, calibration_service, latency_budget,
+│                 resource_sampler, tuning_profile_store
+├── memory/       memory_budget_manager, memory_pressure_monitor, buffer_pool,
+│                 mapped_region
+├── retrieval/    query_coordinator, retrieval_planner, retrieval_worker_pool,
+│                 lexical_retriever, semantic_retriever, symbol_retriever,
+│                 graph_expander, result_reranker, context_budgeter
+├── cache/        cache_manager, segmented_lru, file_metadata_cache,
+│                 embedding_cache, retrieval_cache, tokenization_cache,
+│                 prompt_cache_registry
+├── indexing/     discovery_pipeline, index_generation, segment_reader,
+│                 segment_writer, delta_index, index_compactor
+└── io/           async_file_reader, windows_iocp_reader,
+                  linux_io_uring_reader, worker_pread_reader, storage_probe
+```
+
+These are responsibility boundaries, not permission to create parallel systems.
+Before implementation, the owning phase must inspect and extend the existing
+`src/performance.*`, inference, storage, workflow, HTTP, and platform paths.
+New units follow the top-of-file and function-flow documentation rule, compile
+as strict ISO C++17, and keep platform-specific code behind conditional native
+adapters.
+
+### 25.11 Expanded benchmark and degradation matrix
+
+Performance validation covers cold/warm OS cache, cold/warm runner, cached and
+uncached prefix, context sizes from 512 through 8,192 tokens where the host can
+fit them, exact/lexical/semantic/hybrid retrieval, incremental index updates,
+mapped-index cold/warm reads, one/two compatible requests, indexing/download
+contention, cancellation, disconnect, and queue saturation.
+
+Each accepted optimization records baseline, changed setting, host, model and
+backend hashes, TTFT, prompt and generation throughput, peak resident/commit
+memory, page faults, quality, and power/thermal notes.
+
+Degradation order is deterministic:
+
+1. Stop speculative prefetch and optional advanced features.
+2. Pause or reduce background indexing.
+3. Trim file, retrieval, and prompt caches.
+4. Reduce retrieval chunks and request context.
+5. Reduce parallel sequences.
+6. Unload the embedding model.
+7. Unload idle generation runners.
+8. Reject new work with a safe, actionable diagnostic.
+
+Slow storage reduces random-read fan-out and avoids rescans; thermal decline
+reduces background workers and uses measured inference-thread settings. No
+degradation step weakens security, integrity, authorization, or audit controls.
+
+### 25.12 Completion acceptance
+
+The performance expansion is complete only when:
+
+- The control plane remains small and never loads model weights.
+- Every queue, cache, worker pool, context, and transient buffer has an enforced
+  ceiling and cancellation path.
+- Low-memory mode operates with one indexing worker and no persistent model.
+- Project indexes are incremental, disk-backed, checksummed, and recoverable.
+- Retrieval returns compact, disclosed, authorized context within a deadline.
+- Repeated requests benefit from safe cache/prefix reuse where compatible.
+- A model predicted to cause destructive paging is rejected or downgraded.
+- Background work yields to interactive inference.
+- Calibration never overrides the hard RAM cap.
+- Advanced optimizations have independent switches, evidence, and safe
+  fallbacks.
+
+### 25.13 Limited-hardware investigation: stage mapping and diagnostic order
+
+This subsection closes the loop between the Limited-Hardware Inference
+Performance Investigation and Optimization work order and the phase roadmap
+in section 26: no new parallel performance subsystem is authorized, and every
+item below already has an owning phase.
+
+| Work-order stage | Owning phase(s) |
+| --- | --- |
+| Stage 1 — attribute latency, direct-runner comparison, Qwen 3B record | Phase 13, Phase 19 |
+| Stage 2 — safe low-memory defaults, one slot, OS reserve, destructive-paging detection | Phase 14, Phase 19, Phase 27 |
+| Stage 3 — calibrated runner tuning matrix (threads/batch/ubatch/GPU layers/context/KV) | Phase 19 |
+| Stage 4 — prompt-prefix reuse, tokenization/template caching, staged retrieval, compaction | Phase 18, Phase 23, Phase 24 |
+| Stage 5 — model routing and tiering wired into the live request path | Phase 29 |
+| Stage 6 — storage classification, async reads, cold/warm load benchmarking | Phase 21, Phase 26, Phase 31 |
+| Stage 7 — bounded adaptive tuning and the Performance administration sidebar | Phase 34, Phase 35 |
+| Stage 8 — full benchmark matrix, regression thresholds, release gating | Phase 36 |
+
+Every stage-1 latency question is answered in the fixed order defined in
+Phase 13: queue wait, then retrieval/prompt assembly, then cold-load time,
+then prompt-evaluation rate, then generation throughput, then — only after
+those are ruled out — the direct-runner comparison decides whether the
+remaining cost sits in `llama-server.exe`/the model/the hardware or in
+MasterAI's own control plane. No stage may be skipped to reach a conclusion
+faster, and no component is blamed without the attribution evidence Phase 13
+requires.
+
+## 26. Phased Implementation Roadmap
 
 ### Phase 0 — Requirements and decisions
 
@@ -2180,8 +2604,11 @@ Exit criteria:
 
 ### Phase 4 — First inference adapter
 
-Status: Implemented; real pinned-backend/model exit validation pending
-(2026-07-28).
+Status: Complete (validated 2026-08-02) — real pinned-backend/model exit
+validation recorded: `qwen25-coder-3b-q4km` answered an authenticated API
+chat request through the pinned `llama.cpp` runner, isolated in its own
+supervised process. See the Phase 4 entry in Document Status above for
+details.
 
 Deliverables:
 
@@ -2196,8 +2623,10 @@ Exit criteria:
 
 ### Phase 5 — Chat and project web application
 
-Status: Implemented; real-model browser and optional transcription exit
-validation pending (2026-07-28).
+Status: Implemented; exit validation partially recorded (2026-08-02) — the
+end-to-end authenticated chat path is real-model validated at the API level
+(see the Phase 5 entry in Document Status above). Visual confirmation in an
+actual browser session and the optional transcription path remain pending.
 
 Deliverables:
 
@@ -2235,8 +2664,10 @@ Exit criteria:
 
 ### Phase 7 — Benchmarking
 
-Status: Implemented; same-host real-model comparison exit validation pending
-(2026-07-28).
+Status: Complete (validated 2026-08-02) — same-host real-model comparison
+exit validation recorded: `qwen25-coder-3b-q4km` and `llama32-3b-instruct-q4km`
+both ran the quick benchmark suite on the same host and hardware id. See the
+Phase 7 entry in Document Status above for details.
 
 Deliverables:
 
@@ -2403,10 +2834,43 @@ Deliverables:
 - Real streamed status states: `accepted`, `retrieving`, `queued`,
   `evaluating_prompt`, and `generating`; no simulated progress.
 
+Extended evidence required (limited-hardware inference performance work
+order, folded into this phase rather than a parallel subsystem):
+
+- Every `QueryTrace` also records model SHA-256/architecture/quantization/
+  GGUF size, backend executable SHA-256 and `llama.cpp` build id, GPU
+  backend/device, requested versus actually-offloaded GPU layers, CPU thread
+  count, batch/micro-batch size, context length, parallel-slot count,
+  prompt-cache/retrieval-cache/tokenization-cache hit state, runner warm/cold
+  state, OS file-cache warm/cold state, available RAM/VRAM before load and
+  before generation, process private/resident bytes, commit size, and
+  page-fault counts, alongside the existing stage timers — closing the field
+  list this phase's evidence must carry so a slow request can be attributed
+  to a single stage rather than reported as one undifferentiated latency.
+- A diagnostic mode that captures the exact fully templated prompt and
+  active generation settings MasterAI sent for a query, replays the same
+  prompt directly against the same pinned `llama-server.exe` (same model
+  hash, context, GPU layers, threads, batch/micro-batch, parallel slots, KV
+  settings, prompt-cache setting, sampling settings, and seed), and reports
+  the stage-by-stage delta between the direct-runner run and the
+  MasterAI-mediated run, so control-plane overhead can be distinguished from
+  inference-plane cost with evidence instead of assumption.
+- A terminal diagnostic conclusion (`Primary bottleneck: …`,
+  `MasterAI overhead: N% of pre-generation latency`) attached to the trace,
+  produced by walking the fixed decision tree: queue wait, then
+  retrieval/prompt assembly, then cold-load time, then prompt-evaluation
+  rate (token count, prefix reuse, batch/ubatch, threads, actual GPU
+  offload, page faults, context/parallel KV allocation), then generation
+  tokens/second (quantization/backend/offload, thermal/power state, stream
+  buffering), before ever naming `llama-server.exe`, the model, or MasterAI
+  itself as the cause.
+
 Installation/completion outcome:
 
 - The installed service exposes authenticated request/resource metrics and can
   produce a baseline report without enabling any speculative optimization.
+- An administrator can ask "why was this response slow?" and receive the
+  stage-attributed answer above instead of a single elapsed-time number.
 
 Exit criteria:
 
@@ -2414,6 +2878,9 @@ Exit criteria:
   stage timing and peak-memory evidence.
 - Debug and Release correctness results remain unchanged, and instrumentation
   overhead is measured and bounded.
+- A same-host direct-runner-versus-MasterAI comparison and a real Qwen-class
+  3B GGUF benchmark record (see Phase 19's benchmark-matrix deliverable) are
+  on file, matching this phase's own real-model exit-validation pattern.
 
 ### Phase 14 — Bounded-memory foundation
 
@@ -2731,7 +3198,8 @@ Exit criteria:
 
 ### Phase 18 — Runner prompt-prefix and KV/session reuse
 
-Status: Planned.
+Status: Complete (validated 2026-08-02) — see the Phase 18 entry in Document
+Status above for the real-model repeated-turn evidence.
 
 Purpose:
 
@@ -2807,6 +3275,27 @@ Deliverables:
   power-mode changes and a safe-default fallback for stale/corrupt profiles.
 - API/UI controls to run calibration, explain recommendations, compare evidence,
   reduce memory use, or optimize for speed.
+- A bounded calibration matrix, not a single guessed configuration: CPU
+  threads (physical-cores-minus-one, physical cores, logical cores, and
+  calibrated thermal-limited alternatives), batch size (128/256/512/1024
+  where admitted), micro-batch size (backend-supported values no larger than
+  the chosen batch), GPU-layer offload (CPU-only baseline through the
+  largest safely admitted partial offload up to full offload, each reserving
+  VRAM for KV cache, compute buffers, backend overhead, and a configurable
+  safety margin), and context length (2,048 initially, 4,096 after
+  admission, larger only with explicit calibration evidence) — the largest
+  or most parallel value is never assumed fastest; the matrix records which
+  candidates were rejected and why (VRAM exceeded, CPU fallback triggered,
+  paging observed, allocation failure).
+- A per-model benchmark report recording the best accepted profile (GPU
+  layers, CPU threads, batch, micro-batch, context, parallel slots, KV
+  placement, prompt-cache setting, load mode) alongside its measured cold
+  load time, cold/warm prompt tokens/second, generation tokens/second, TTFT,
+  peak runner RSS, peak commit, hard page faults, approximate VRAM use, and
+  quality result, plus every rejected profile and its rejection reason —
+  produced for any model under investigation (a Qwen-class 3B GGUF is the
+  first required case per this phase's exit criterion) using the Phase 13
+  query-trace fields and direct-runner comparison.
 
 Installation/completion outcome:
 
@@ -2818,6 +3307,12 @@ Exit criteria:
 - On supported hardware classes, the selected profile either outperforms safe
   defaults or reduces peak memory without unacceptable quality regression and
   never exceeds the configured RAM cap.
+- A same-host benchmark matrix and best-accepted-profile report exist for at
+  least one Qwen-class 3B GGUF model, confirming actual GPU layers offloaded
+  (not merely requested), ruling out CPU fallback on unsupported operators,
+  and confirming prompt-evaluation throughput is within the accepted range
+  for the host's GPU class before any launch-configuration change is
+  credited with a fix.
 
 ### Phase 20 — Optional advanced throughput
 
@@ -3639,6 +4134,27 @@ Deliverables:
   enabled state, required backend capability, memory cost, measured
   benefit/regression, hardware/model/backend fingerprint, last validation
   date, and fallback status — never a single opaque "turbo" toggle.
+- An Overview page showing current profile, loaded model, runner state,
+  total/available RAM, control-plane/runner/KV/cache memory, mapped model
+  bytes, approximate VRAM, queue depth, current query stage, TTFT, prompt
+  and generation tokens/second, page-fault warnings, and the primary
+  detected bottleneck from the Phase 13 decision-tree diagnostic.
+- A Query Traces page exposing every Phase 13 stage timing for a selected
+  request plus its terminal conclusion (`Primary bottleneck`,
+  `Secondary bottleneck`, `Recommended action`, `Expected trade-off`,
+  `Evidence confidence`) and, where run, its direct-runner comparison.
+- A Calibration page exposing quick/standard/extended calibration runs (see
+  Phase 19), a current-vs-safe-defaults comparison, apply/restore controls,
+  and sanitized evidence export.
+- A Runner Configuration page (expert-only) listing every backend launch
+  setting — GPU layers, CPU threads, batch, micro-batch, context, parallel
+  slots, mmap, mlock, KV type/placement, attention/kernel options, model-load
+  mode — each with current value, recommended value, supporting evidence,
+  memory impact, speed impact, compatibility, and whether a restart is
+  required.
+- A Model Comparison page benchmarking multiple models on the same host and
+  prompt suite (quality, load time, TTFT, prompt/generation throughput, peak
+  RAM/VRAM, recommended profile, suitability for the current machine).
 
 Exit criteria:
 
@@ -3646,6 +4162,10 @@ Exit criteria:
   automated benchmarking, not a separately maintained display-only value.
 - Every destructive or resource-reducing action is authorized, audited, and
   reversible or clearly explained.
+- An administrator can select any traced query and receive the same
+  stage-attributed "why was this slow" answer defined in Phase 13's exit
+  criteria, sourced from the same underlying trace data shown elsewhere in
+  this sidebar.
 
 ### Phase 36 — Full performance certification and regression gates
 
@@ -3682,6 +4202,22 @@ Deliverables:
   matched host/model/backend/settings/prompt-suite/index-generation/power
   fingerprints — mismatched environments are never presented as a direct
   comparison.
+- Explicit regression test groups, each independently gating a release:
+  runner-attribution tests (direct-runner-vs-MasterAI parity, control-plane
+  overhead bound, requested-vs-actual GPU settings recorded, cold/warm runs
+  never mixed); low-memory tests (rejection before destructive paging, OS
+  reserve never consumed by admission, per-slot KV reservation, cache
+  trimming never invalidating an active request's buffers, recovery from
+  Critical pressure); prompt-cache tests (prefix reuse on exact match,
+  refusal on edited history/model change/index-generation change/settings
+  change, no cross-chat/user/project reuse, cancelled turns never recorded
+  reusable, measured TTFT improvement on accepted repeated-turn cases);
+  calibration tests (exact-identity-only profile restore, invalidation on
+  backend/model/storage/power-profile change, safe fallback on a corrupt
+  profile, hard RAM cap always overriding a recommendation); model-routing
+  tests (smallest capable model chosen for simple tasks, safe pins honoured,
+  unsafe pins actionably refused, no multiple large resident models under
+  Minimal profile).
 
 Exit criteria:
 
@@ -5837,7 +6373,7 @@ Administrators will be able to:
 * Improve models through reviewed and versioned development cycles.
 * Maintain ownership and control over private data, training assets, model versions, and deployment infrastructure.
 
-## 26. Release Gates
+## 27. Release Gates
 
 No release may be called production-ready until it passes:
 
@@ -5853,7 +6389,7 @@ No release may be called production-ready until it passes:
 - Licensing and model provenance gate.
 - Documentation gate.
 
-## 27. Decisions Gated Before Their Relevant Phase Can Exit
+## 28. Decisions Gated Before Their Relevant Phase Can Exit
 
 | # | Decision | Audit state |
 |---|---|---|
@@ -5878,7 +6414,7 @@ All release-1 high-risk decisions are closed. Later expansion requires a new
 ADR and compatibility/security validation rather than silently reopening this
 baseline.
 
-## 28. Non-Goals for Initial Release
+## 29. Non-Goals for Initial Release
 
 - Training foundation models.
 - Hosting unrelated generation categories.
@@ -5890,7 +6426,7 @@ baseline.
 - Automatic execution of model-proposed commands without policy and approval.
 - Replacing mature optimized inference kernels before profiling proves a need.
 
-## 29. Reference Standards and Upstream Documentation
+## 30. Reference Standards and Upstream Documentation
 
 The implementation team should pin and periodically review these primary references:
 
@@ -5904,361 +6440,9 @@ The implementation team should pin and periodically review these primary referen
 - Hugging Face Hub download guide: https://huggingface.co/docs/huggingface_hub/en/guides/download
 - Hugging Face CLI guide: https://huggingface.co/docs/huggingface_hub/en/guides/cli
 
-## 30. Final Planning Outcome
+## 31. Final Planning Outcome
 
 The recommended implementation is a native, modular, programming-focused AI host with strict loopback defaults, deliberate intranet enablement, real authentication, process-isolated inference, categorized model storage, resumable verified downloads, hardware-aware recommendations, reproducible benchmarks, a complete development-oriented web interface, and bidirectional MCP support.
 
 The implementation should proceed phase by phase. Security, lifecycle correctness, and observability must be established before advanced agent capabilities or aggressive performance optimization are introduced.
 
-## 31. Performance, Retrieval, Caching, and Low-Memory Architecture
-
-### 31.1 Planning boundary and optimization rule
-
-Phases 13–20 extend the original Phase 12 measurement discipline. They do not
-reopen completed security or lifecycle boundaries, authorize a custom
-transformer engine, or make `llama.cpp` part of the control-plane foundation.
-Backend-specific functionality remains optional, isolated, version-pinned, and
-replaceable.
-
-An optimization is accepted only when evidence identifies which independent
-outcome improved and what trade-off was introduced:
-
-1. Time to first token.
-2. Prompt-evaluation throughput.
-3. Generation throughput.
-4. Retrieval quality and preparation latency.
-5. Peak resident memory and commit/pagefile pressure.
-6. Output quality and correctness.
-
-Every queue, cache, buffer pool, context window, index operation, retrieval
-result, attachment job, and background worker must have an enforced resource
-limit. Virtual address space, a pagefile, swap, or a RAM-backed drive must never
-be presented as equivalent to sufficient physical RAM.
-
-### 31.2 Hardware profiles and initial defaults
-
-The service derives a profile but permits an administrator to choose a stricter
-one:
-
-| Profile | Intended host | Default behaviour |
-|---|---|---|
-| Minimal | Older/low-memory CPU-only host | No idle model unless configured; one inference request; 2,048–4,096 context; 8–20 compact chunks; one index worker; background work pauses during inference |
-| Balanced | Mainstream desktop/laptop | One warm model; one generation with a bounded queue; 4,096–8,192 context; bounded prefix/retrieval caches; two to four measured indexing workers |
-| Performance | Ample RAM/VRAM | Multiple slots or warm runners only when measured; larger context/cache budgets; optional batching and GPU-resident KV |
-
-Recommended first performance-focused defaults are:
-
-| Control | Initial value |
-|---|---|
-| Binding | Loopback |
-| Loaded generation models | Maximum 1 |
-| Active/queued inference | 1 / 8 |
-| Default context and generation reserve | 4,096 / 1,024 tokens |
-| Retrieval chunks | Maximum 16 |
-| Background/interactive index workers | 1 / maximum 2 |
-| Model load | `auto`, prefer compatible memory mapping |
-| Memory lock | Disabled |
-| Continuous batching/speculative decoding | Disabled |
-| Prompt/retrieval/file-content cache | 256 / 128 / 128 MiB maximum |
-| OS reserve | At least 2,048 MiB and 15% free physical RAM |
-| Network-hosted models | Denied by default |
-| Indexing during inference | Throttled or paused by pressure/profile |
-
-These are safe starting points, not performance claims. Phase 19 calibration
-may lower or raise them within the hard administrator limits.
-
-### 31.3 End-to-end query pipeline
-
-```text
-Client
-  -> HTTP/MCP admission and authentication
-  -> authorization and request normalization
-  -> prompt classification and context budget
-  -> retrieval plan
-  -> bounded parallel retrieval
-  -> ranking, fusion, and deduplication
-  -> segmented prompt assembly and token estimate
-  -> runner admission and compatible-prefix check
-  -> prompt evaluation
-  -> immediately streamed generation
-  -> incremental persistence and cache update
-  -> deterministic resource release
-```
-
-Every stage has a monotonic timer, cancellation point, byte/task limit, and
-sanitized diagnostic. The coordinator allocates a total deadline instead of
-allowing each stage to consume an independent unbounded timeout. When retrieval
-expires, it uses the strongest authorized evidence already available only when
-safe to do so.
-
-Large text stays in immutable reference-counted buffers or bounded views.
-Request bodies, downloads, conversations, and generated output are streamed or
-persisted incrementally. Prompt assembly should use segmented buffers where the
-adapter permits it; full logits and duplicate token/text copies are not retained
-without an explicit measured requirement.
-
-### 31.4 Runtime components and responsibility boundaries
-
-`QueryCoordinator` owns request deadlines, profile selection, context budgets,
-child cancellation, backpressure, streaming state, and per-stage metrics. It
-owns only lightweight metadata.
-
-`RetrievalPlanner` selects the lowest-cost sufficient retrieval strategy.
-`RetrievalWorkerPool` runs bounded independent tasks with interactive priority.
-`ContextBudgeter` reserves generation space and admits only the highest-value
-authorized context. `ResultReranker` fuses and deduplicates evidence.
-
-`InferenceScheduler` separates IDE completion, interactive chat, IDE analysis,
-user-triggered background work, benchmarks, and maintenance. Weighted fairness
-may delay low-priority work but must prevent permanent starvation.
-
-`MemoryBudgetManager` is the sole authority for process-wide budget categories
-and pressure actions. Individual caches and workers report usage to it and may
-not invent independent unlimited reserves.
-
-`CacheManager` applies byte quotas, identity/version keys, invalidation,
-pressure trimming, metrics, and corruption quarantine consistently.
-
-`CalibrationService` records exact reproducible evidence and persists tuning
-profiles. It cannot override security policy, model integrity, authorization,
-or the administrator's memory ceiling.
-
-### 31.5 Model loading, eviction, virtual memory, and scratch storage
-
-Compatible GGUF adapters should prefer mapped weights in `auto` mode so the OS
-can demand-page and reclaim clean file-backed pages. Mapping does not make an
-oversized model practical: predicted destructive paging is rejected or
-downgraded with an explicit warning.
-
-Adapter-neutral load controls are:
-
-```json
-{
-  "loadMode": "auto",
-  "allowMemoryMap": true,
-  "allowMemoryLock": false,
-  "allowDirectIo": false,
-  "prefetchMode": "adaptive",
-  "warmup": "minimal"
-}
-```
-
-Model states are `Cold`, `Loading`, `Warm`, `Busy`, `Idle`, `Draining`, and
-`Unloaded`. Pressure eviction removes low-value retrieval/file caches first,
-then idle embedding models, then the least-recently-used unpinned generation
-model. Active runners are drained rather than killed except to enforce a hard
-safety limit.
-
-Ordinary local SSD storage plus the OS file cache is the default. RAM-backed
-drives are allowed only for small ephemeral artifacts when sufficient physical
-RAM remains; they are prohibited for durable chats/audit logs, resumable
-downloads, or duplicated full models on constrained hosts. Scratch uses unique
-per-job directories, a byte ceiling, cleanup records, and atomic publication.
-The UI must not promise secure deletion on SSDs; encryption at rest and short
-retention are the dependable controls.
-
-### 31.6 Index and retrieval storage design
-
-Index storage consists of compact metadata and string tables, disk-backed
-posting lists/vector blocks, small bounded hot tables, immutable mapped
-segments, a mutable delta journal, and an atomic generation manifest.
-Compaction produces a new verified generation before swapping the manifest.
-Corrupt segments are quarantined individually and the last valid generation
-remains readable.
-
-Parallel reading happens across independent paths or batches, lexical versus
-semantic work, symbol/diagnostic lookups, or attachment versus repository work.
-It must not create threads per file, split small files into competing reads, or
-parse/hash the same revision repeatedly.
-
-The embedding engine is a smaller replaceable adapter, loaded on demand,
-batching background chunks, caching by content hash, operating on CPU when
-necessary, and unloading under pressure.
-
-### 31.7 Cache and authorization design
-
-Cache identity is a correctness and security boundary. Where applicable, keys
-include user, tenant, project, membership/policy generation, file/chunk digest,
-index generation, parser/chunker/embedding/tokenizer versions, model/backend
-fingerprints, prompt template, and inference settings.
-
-Performance features must never:
-
-- Share prompt, KV, retrieval, or decrypted state across unauthorized users or
-  projects.
-- Bypass canonical path authorization, attachment quarantine, model
-  verification, audit, cancellation, or request limits.
-- Reuse cached results after membership, policy, model, backend, or source
-  changes.
-- Expose private paths through cache keys, metrics, or timing diagnostics.
-- Use unvalidated writable shared memory across trust boundaries.
-- Leave sensitive temporary data broadly readable.
-
-Authorization is always evaluated from authoritative current state. Cache
-corruption triggers bounded quarantine/rebuild and safe uncached operation.
-
-### 31.8 Configuration surface
-
-The strict schema may add these versioned domains during their owning phase:
-
-```json
-{
-  "performance": {
-    "profile": "auto",
-    "interactiveDeadlineMs": 2000,
-    "preferLowTimeToFirstToken": true,
-    "backgroundWorkDuringInference": "throttle",
-    "autoTune": true
-  },
-  "memory": {
-    "policy": "adaptive",
-    "hardLimitMiB": 0,
-    "minimumOsReserveMiB": 2048,
-    "minimumFreePercent": 15,
-    "criticalPressurePercent": 92
-  },
-  "inference": {
-    "maxActiveRequests": 1,
-    "maxQueuedRequests": 8,
-    "idleUnloadSeconds": 600,
-    "loadMode": "auto",
-    "warmup": "minimal",
-    "continuousBatching": "auto",
-    "speculativeDecoding": false
-  },
-  "context": {
-    "defaultTokens": 4096,
-    "maximumTokens": 8192,
-    "generationReserveTokens": 1024,
-    "retrievalMaximumChunks": 16,
-    "retrievalMaximumTokens": 4096
-  },
-  "cache": {
-    "fileMetadataMiB": 64,
-    "fileContentMiB": 128,
-    "retrievalMiB": 128,
-    "embeddingMiB": 256,
-    "tokenizationMiB": 64,
-    "promptMiB": 256,
-    "allowDiskPromptCache": false
-  },
-  "indexing": {
-    "enabled": true,
-    "interactiveWorkers": 2,
-    "backgroundWorkers": 1,
-    "pauseAtMemoryPressure": "high",
-    "publishPartialIndex": true
-  },
-  "storage": {
-    "scratchPath": "./runtime/tmp",
-    "scratchLimitMiB": 1024,
-    "allowNetworkModels": false,
-    "preferMemoryMappedIndexes": true
-  }
-}
-```
-
-`hardLimitMiB: 0` means derive a safe limit, never unlimited. Unknown fields
-remain rejected. Backend-specific controls stay within validated adapter
-namespaces instead of leaking across the general configuration surface.
-
-### 31.9 API and UI surface
-
-Authenticated routes, introduced only by their owning phase, are:
-
-```text
-GET  /api/v1/system/resources
-GET  /api/v1/system/memory
-GET  /api/v1/performance/profile
-POST /api/v1/performance/calibrate
-GET  /api/v1/performance/recommendations
-GET  /api/v1/cache/status
-POST /api/v1/cache/trim
-POST /api/v1/cache/clear
-GET  /api/v1/projects/{id}/index
-POST /api/v1/projects/{id}/index/rebuild
-POST /api/v1/projects/{id}/index/cancel
-POST /api/v1/models/{id}/suitability
-GET  /api/v1/requests/{id}/metrics
-```
-
-Administrative mutations require CSRF/host/origin/role/scope enforcement and
-audit. Clearing or trimming may detach only unused entries and cannot invalidate
-buffers held by active requests.
-
-The UI shows actual process/model/KV/cache memory, context use and remaining
-tokens, queue position, TTFT, prompt/generation throughput, retrieval sources,
-cache reuse, and low-memory recommendations. Simple actions are `Reduce memory
-use`, `Optimize for speed`, and `Run calibration`; backend flags remain in an
-expert-only view.
-
-### 31.10 Proposed ISO C++17 source boundaries
-
-```text
-src/
-├── performance/  performance_profile, calibration_service, latency_budget,
-│                 resource_sampler, tuning_profile_store
-├── memory/       memory_budget_manager, memory_pressure_monitor, buffer_pool,
-│                 mapped_region
-├── retrieval/    query_coordinator, retrieval_planner, retrieval_worker_pool,
-│                 lexical_retriever, semantic_retriever, symbol_retriever,
-│                 graph_expander, result_reranker, context_budgeter
-├── cache/        cache_manager, segmented_lru, file_metadata_cache,
-│                 embedding_cache, retrieval_cache, tokenization_cache,
-│                 prompt_cache_registry
-├── indexing/     discovery_pipeline, index_generation, segment_reader,
-│                 segment_writer, delta_index, index_compactor
-└── io/           async_file_reader, windows_iocp_reader,
-                  linux_io_uring_reader, worker_pread_reader, storage_probe
-```
-
-These are responsibility boundaries, not permission to create parallel systems.
-Before implementation, the owning phase must inspect and extend the existing
-`src/performance.*`, inference, storage, workflow, HTTP, and platform paths.
-New units follow the top-of-file and function-flow documentation rule, compile
-as strict ISO C++17, and keep platform-specific code behind conditional native
-adapters.
-
-### 31.11 Expanded benchmark and degradation matrix
-
-Performance validation covers cold/warm OS cache, cold/warm runner, cached and
-uncached prefix, context sizes from 512 through 8,192 tokens where the host can
-fit them, exact/lexical/semantic/hybrid retrieval, incremental index updates,
-mapped-index cold/warm reads, one/two compatible requests, indexing/download
-contention, cancellation, disconnect, and queue saturation.
-
-Each accepted optimization records baseline, changed setting, host, model and
-backend hashes, TTFT, prompt and generation throughput, peak resident/commit
-memory, page faults, quality, and power/thermal notes.
-
-Degradation order is deterministic:
-
-1. Stop speculative prefetch and optional advanced features.
-2. Pause or reduce background indexing.
-3. Trim file, retrieval, and prompt caches.
-4. Reduce retrieval chunks and request context.
-5. Reduce parallel sequences.
-6. Unload the embedding model.
-7. Unload idle generation runners.
-8. Reject new work with a safe, actionable diagnostic.
-
-Slow storage reduces random-read fan-out and avoids rescans; thermal decline
-reduces background workers and uses measured inference-thread settings. No
-degradation step weakens security, integrity, authorization, or audit controls.
-
-### 31.12 Completion acceptance
-
-The performance expansion is complete only when:
-
-- The control plane remains small and never loads model weights.
-- Every queue, cache, worker pool, context, and transient buffer has an enforced
-  ceiling and cancellation path.
-- Low-memory mode operates with one indexing worker and no persistent model.
-- Project indexes are incremental, disk-backed, checksummed, and recoverable.
-- Retrieval returns compact, disclosed, authorized context within a deadline.
-- Repeated requests benefit from safe cache/prefix reuse where compatible.
-- A model predicted to cause destructive paging is rejected or downgraded.
-- Background work yields to interactive inference.
-- Calibration never overrides the hard RAM cap.
-- Advanced optimizations have independent switches, evidence, and safe
-  fallbacks.

@@ -279,14 +279,14 @@ std::string application_script() {
         "p.className='chatMsg chatMsg-'+role;"
         "if(role==='system'){p.textContent='system: '+content;}"
         "else{p.dataset.raw=content;"
-        // Assistant replies get a 'Response' title, matching the error
-        // card's own title row -- the copy button (added below) shares
-        // that row's top-right corner via .msgCopyBtn's absolute
-        // positioning, same as it already does for the error card and
-        // every other bubble. User messages don't need a label: the
-        // bubble's side and color already say who's speaking.
-        "if(role==='assistant'){const title=document.createElement('div');"
-        "title.className='chatMsg-responseTitle';title.textContent='Response';"
+        // Assistant replies get a 'Response' title and user messages get a
+        // 'Query' title, matching the error card's own title row -- the
+        // copy button (added below) shares that row's top-right corner via
+        // .msgCopyBtn's absolute positioning, same as it already does for
+        // the error card and every other bubble.
+        "if(role==='assistant'||role==='user'){const title=document.createElement('div');"
+        "title.className='chatMsg-responseTitle';"
+        "title.textContent=role==='assistant'?'Response':'Query';"
         "p.append(title);}"
         // Rendered content lives in its own .msgBody child rather than
         // directly in p -- streamMessage() rewrites just that child's
@@ -1949,7 +1949,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "justify-content:center;text-align:center}"
         "#chatEmpty{flex:1}"
         "#chatEmpty h1{font-size:1.8rem}"
-        "#chatMessages{flex:1;overflow-y:auto;padding:.25rem 0;"
+        "#chatMessages{flex:1;overflow-y:auto;padding:.25rem .6rem;"
         "display:flex;flex-direction:column;gap:.35rem}"
         "#chatMessages:empty{flex:0}"
         ".chatMsg{position:relative;max-width:80%;margin:0;padding:.45rem .8rem;"
@@ -1964,8 +1964,9 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "background:rgba(0,0,0,.25);color:inherit;opacity:0;"
         "transition:opacity .15s}"
         ".chatMsg:hover>.msgCopyBtn,.msgCopyBtn:focus{opacity:1}"
-        ".chatMsg-user>.msgCopyBtn{background:rgba(0,0,0,.2);color:#fff}"
-        ".chatMsg-user{margin-left:auto;background:var(--accent);color:#fff}"
+        ".chatMsg-user>.msgCopyBtn{background:rgba(0,0,0,.25);color:#fff}"
+        ".chatMsg-user{margin-left:auto;margin-right:.6rem;background:#3a3a3e;"
+        "border:1px solid #505055;color:#fff}"
         ".chatMsg-assistant{margin-right:auto;background:var(--panel);"
         "border:1px solid var(--panel-border);color:#8fe6c9}"
         ".chatMsg-responseTitle{font-weight:800;letter-spacing:.03em;"
