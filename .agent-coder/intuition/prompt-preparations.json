@@ -508,5 +508,101 @@
     ],
     "estimatedTokens": 108,
     "preparedAt": "2026-07-30T23:40:00.108Z"
+  },
+  {
+    "requestId": "d7575850-5ec8-4909-afa9-7782326dcea1",
+    "taskType": "ask-about-file",
+    "strategyId": "verified-default",
+    "strategyVersion": 1,
+    "questionType": "generate_tests",
+    "appliedRuleIds": [],
+    "conflictCount": 0,
+    "componentSources": [
+      {
+        "id": "acceptance_criteria",
+        "source": "question builder",
+        "estimatedTokens": 40
+      },
+      {
+        "id": "constraints",
+        "source": "confirmed request and project governance",
+        "estimatedTokens": 1
+      },
+      {
+        "id": "stop_conditions",
+        "source": "question builder and safety policy",
+        "estimatedTokens": 19
+      },
+      {
+        "id": "validation_rules",
+        "source": "question builder",
+        "estimatedTokens": 18
+      },
+      {
+        "id": "current_state",
+        "source": "agent lifecycle",
+        "estimatedTokens": 13
+      },
+      {
+        "id": "response_format",
+        "source": "question builder",
+        "estimatedTokens": 24
+      },
+      {
+        "id": "token_limit",
+        "source": "token ceiling",
+        "estimatedTokens": 1
+      }
+    ],
+    "estimatedTokens": 116,
+    "preparedAt": "2026-08-01T22:22:59.153Z"
+  },
+  {
+    "requestId": "98442049-17ce-44e3-86a5-9909a5ebed59",
+    "taskType": "ask-about-project",
+    "strategyId": "verified-default",
+    "strategyVersion": 1,
+    "questionType": "generate_tests",
+    "appliedRuleIds": [],
+    "conflictCount": 0,
+    "componentSources": [
+      {
+        "id": "acceptance_criteria",
+        "source": "question builder",
+        "estimatedTokens": 40
+      },
+      {
+        "id": "constraints",
+        "source": "confirmed request and project governance",
+        "estimatedTokens": 1
+      },
+      {
+        "id": "stop_conditions",
+        "source": "question builder and safety policy",
+        "estimatedTokens": 19
+      },
+      {
+        "id": "validation_rules",
+        "source": "question builder",
+        "estimatedTokens": 18
+      },
+      {
+        "id": "current_state",
+        "source": "agent lifecycle",
+        "estimatedTokens": 13
+      },
+      {
+        "id": "response_format",
+        "source": "question builder",
+        "estimatedTokens": 24
+      },
+      {
+        "id": "token_limit",
+        "source": "token ceiling",
+        "estimatedTokens": 2
+      }
+    ],
+    "estimatedTokens": 117,
+    "preparedAt": "2026-08-01T22:25:33.012Z"
   }
 ]

@@ -1,16 +1,376 @@
 {
   "version": 2,
-  "capturedAtMs": 1785363313578,
+  "capturedAtMs": 1785623648809,
   "findings": [
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "$schema",
+      "startLine": 2,
+      "endLine": 2,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "$id",
+      "startLine": 3,
+      "endLine": 3,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "title",
+      "startLine": 4,
+      "endLine": 4,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "additionalProperties",
+      "startLine": 6,
+      "endLine": 6,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "required",
+      "startLine": 7,
+      "endLine": 7,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "properties",
+      "startLine": 8,
+      "endLine": 8,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "schemaVersion",
+      "startLine": 9,
+      "endLine": 9,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "server",
+      "startLine": 10,
+      "endLine": 10,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "tls",
+      "startLine": 29,
+      "endLine": 29,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "$comment",
+      "startLine": 37,
+      "endLine": 37,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "auth",
+      "startLine": 39,
+      "endLine": 39,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "enabled",
+      "startLine": 43,
+      "endLine": 43,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "workspace",
+      "startLine": 50,
+      "endLine": 50,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "storage",
+      "startLine": 58,
+      "endLine": 58,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "models",
+      "startLine": 66,
+      "endLine": 66,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "inference",
+      "startLine": 73,
+      "endLine": 73,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "downloads",
+      "startLine": 86,
+      "endLine": 86,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "indexing",
+      "startLine": 93,
+      "endLine": 93,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "retrieval",
+      "startLine": 100,
+      "endLine": 100,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "cache",
+      "startLine": 112,
+      "endLine": 112,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "session",
+      "startLine": 120,
+      "endLine": 120,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "performance",
+      "startLine": 129,
+      "endLine": 129,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "memory",
+      "startLine": 136,
+      "endLine": 136,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "docs/architecture/config.schema.json",
+      "functionName": "hardware",
+      "startLine": 146,
+      "endLine": 146,
+      "score": 12,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 1,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
     {
       "filePath": ".vscode/settings.json",
       "functionName": "agentCoder.integration.languageModelToolsEnabled",
       "startLine": 2,
       "endLine": 2,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -22,10 +382,10 @@
       "functionName": "agentCoder.integration.languageModelChatProviderEnabled",
       "startLine": 3,
       "endLine": 3,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -37,10 +397,10 @@
       "functionName": "agentCoder.integration.mcpClientEnabled",
       "startLine": 4,
       "endLine": 4,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -52,10 +412,10 @@
       "functionName": "agentCoder.integration.approvalPromptsEnabled",
       "startLine": 5,
       "endLine": 5,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -67,10 +427,10 @@
       "functionName": "agentCoder.integration.adaptiveRoutingEnabled",
       "startLine": 6,
       "endLine": 6,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -82,10 +442,10 @@
       "functionName": "agentCoder.integration.defaultStrategy",
       "startLine": 7,
       "endLine": 7,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -97,10 +457,10 @@
       "functionName": "agentCoder.integration.headlessReadOnlyEnabled",
       "startLine": 8,
       "endLine": 8,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -112,10 +472,10 @@
       "functionName": "agentCoder.integration.auditRetentionDays",
       "startLine": 9,
       "endLine": 9,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -127,10 +487,10 @@
       "functionName": "agentCoder.liveContext.enabled",
       "startLine": 10,
       "endLine": 10,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -142,10 +502,10 @@
       "functionName": "agentCoder.liveValidation.continuous",
       "startLine": 11,
       "endLine": 11,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -157,10 +517,10 @@
       "functionName": "agentCoder.liveValidation.debounceMs",
       "startLine": 12,
       "endLine": 12,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -172,10 +532,10 @@
       "functionName": "agentCoder.liveValidation.publishDiagnostics",
       "startLine": 13,
       "endLine": 13,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -187,10 +547,10 @@
       "functionName": "agentCoder.liveValidation.persistHistory",
       "startLine": 14,
       "endLine": 14,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -202,10 +562,10 @@
       "functionName": "agentCoder.liveAI.enabled",
       "startLine": 15,
       "endLine": 15,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -217,10 +577,10 @@
       "functionName": "agentCoder.liveAI.cooldownMs",
       "startLine": 16,
       "endLine": 16,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -232,10 +592,10 @@
       "functionName": "agentCoder.liveAI.maximumInputTokens",
       "startLine": 17,
       "endLine": 17,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -247,10 +607,10 @@
       "functionName": "agentCoder.slopGuard.liveMonitoring",
       "startLine": 18,
       "endLine": 18,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -262,10 +622,10 @@
       "functionName": "agentCoder.slopGuard.statusBar",
       "startLine": 19,
       "endLine": 19,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -277,10 +637,1660 @@
       "functionName": "cmake.sourceDirectory",
       "startLine": 20,
       "endLine": 20,
-      "score": 4,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 2,
+        "churn": 4,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".vscode/settings.json",
+      "functionName": "agentCoder.documenter.defaultFormat",
+      "startLine": 21,
+      "endLine": 21,
+      "score": 8,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".vscode/settings.json",
+      "functionName": "agentCoder.documenter.includeGeneratedFiles",
+      "startLine": 22,
+      "endLine": 22,
+      "score": 8,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".vscode/settings.json",
+      "functionName": "agentCoder.documenter.useAIOverview",
+      "startLine": 23,
+      "endLine": 23,
+      "score": 8,
+      "signals": {
+        "complexity": 0,
+        "churn": 4,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "projectName",
+      "startLine": 2,
+      "endLine": 2,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "languages",
+      "startLine": 3,
+      "endLine": 3,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "protectedPaths",
+      "startLine": 4,
+      "endLine": 4,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "excludedPaths",
+      "startLine": 5,
+      "endLine": 5,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "allowedCommands",
+      "startLine": 6,
+      "endLine": 6,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "requiresApprovalForEdits",
+      "startLine": 11,
+      "endLine": 11,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumFilesPerTask",
+      "startLine": 12,
+      "endLine": 12,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumRepairAttempts",
+      "startLine": 13,
+      "endLine": 13,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "preservePublicInterfaces",
+      "startLine": 14,
+      "endLine": 14,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "allowNewDependencies",
+      "startLine": 15,
+      "endLine": 15,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "tokenBudget",
+      "startLine": 16,
+      "endLine": 16,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumInputTokens",
+      "startLine": 17,
+      "endLine": 17,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumOutputTokens",
+      "startLine": 18,
+      "endLine": 18,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "reservedForRepair",
+      "startLine": 19,
+      "endLine": 19,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "reservedForValidation",
+      "startLine": 20,
+      "endLine": 20,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "validationPolicy",
+      "startLine": 22,
+      "endLine": 22,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "enabled",
+      "startLine": 23,
+      "endLine": 23,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "minimumLevel",
+      "startLine": 24,
+      "endLine": 24,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "requireBuildTool",
+      "startLine": 25,
+      "endLine": 25,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "requireTestTool",
+      "startLine": 26,
+      "endLine": 26,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "failCommandOnValidationFailure",
+      "startLine": 27,
+      "endLine": 27,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "reportCommandCompletionToChat",
+      "startLine": 28,
+      "endLine": 28,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "liveActionFeedEnabled",
+      "startLine": 30,
+      "endLine": 30,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "tokenCeilings",
+      "startLine": 31,
+      "endLine": 31,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "classification",
+      "startLine": 32,
+      "endLine": 32,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "errorExplanation",
+      "startLine": 36,
+      "endLine": 36,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "symbolExplanation",
+      "startLine": 40,
+      "endLine": 40,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "singleSymbolEdit",
+      "startLine": 44,
+      "endLine": 44,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "multiFilePlanning",
+      "startLine": 48,
+      "endLine": 48,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "architectureAnalysisBounded",
+      "startLine": 52,
+      "endLine": 52,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "finalImplementationPatch",
+      "startLine": 55,
+      "endLine": 55,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "finalImplementationPatchMultiFile",
+      "startLine": 58,
+      "endLine": 58,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "adversarialReview",
+      "startLine": 61,
+      "endLine": 61,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "designDocument",
+      "startLine": 65,
+      "endLine": 65,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "hourlyRate",
+      "startLine": 69,
+      "endLine": 69,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "currency",
+      "startLine": 70,
+      "endLine": 70,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "featureAreas",
+      "startLine": 71,
+      "endLine": 71,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "decisionIntelligence",
+      "startLine": 72,
+      "endLine": 72,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "governance",
+      "startLine": 73,
+      "endLine": 73,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "changeImpactAnalysis",
+      "startLine": 74,
+      "endLine": 74,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "testIntelligence",
+      "startLine": 75,
+      "endLine": 75,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "securityScanning",
+      "startLine": 76,
+      "endLine": 76,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "toolchainAwareness",
+      "startLine": 77,
+      "endLine": 77,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "gitSafety",
+      "startLine": 78,
+      "endLine": 78,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "costOptimization",
+      "startLine": 80,
+      "endLine": 80,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "projectMemory",
+      "startLine": 81,
+      "endLine": 81,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "debuggingIntelligence",
+      "startLine": 82,
+      "endLine": 82,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "domainValidation",
+      "startLine": 83,
+      "endLine": 83,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "provenanceTracking",
+      "startLine": 84,
+      "endLine": 84,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "controlledAutonomy",
+      "startLine": 85,
+      "endLine": 85,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "operationalDiagnostics",
+      "startLine": 86,
+      "endLine": 86,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "dashboardsAndVisualizations",
+      "startLine": 87,
+      "endLine": 87,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "learningAndTeachingMode",
+      "startLine": 88,
+      "endLine": 88,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "designAndSimulation",
+      "startLine": 89,
+      "endLine": 89,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "pairProgrammerAndGoals",
+      "startLine": 90,
+      "endLine": 90,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "consensusAndDebateMode",
+      "startLine": 91,
+      "endLine": 91,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "answerVerification",
+      "startLine": 92,
+      "endLine": 92,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "contextInspectorAndMissingInfoGate",
+      "startLine": 93,
+      "endLine": 93,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "promptReplayAndMemoryBrowser",
+      "startLine": 94,
+      "endLine": 94,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "promptChainWorkflowAndLifecycle",
+      "startLine": 95,
+      "endLine": 95,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "aiHealthDashboardAndAdaptiveRouting",
+      "startLine": 96,
+      "endLine": 96,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "engineeringSessionRecorder",
+      "startLine": 97,
+      "endLine": 97,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "answerOrchestrator",
+      "startLine": 98,
+      "endLine": 98,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "projectDigitalTwin",
+      "startLine": 99,
+      "endLine": 99,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "projectTimeMachine",
+      "startLine": 100,
+      "endLine": 100,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "bugProbabilityHeatmap",
+      "startLine": 101,
+      "endLine": 101,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "engineeringCostEstimator",
+      "startLine": 102,
+      "endLine": 102,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "knowledgePreservationEngine",
+      "startLine": 103,
+      "endLine": 103,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "projectHealthForecast",
+      "startLine": 104,
+      "endLine": 104,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "architectureEvolutionSimulator",
+      "startLine": 105,
+      "endLine": 105,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "namingConventionAdvisor",
+      "startLine": 106,
+      "endLine": 106,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "apiEvolutionTracker",
+      "startLine": 107,
+      "endLine": 107,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "releaseReadiness",
+      "startLine": 108,
+      "endLine": 108,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "documentationDriftDetector",
+      "startLine": 109,
+      "endLine": 109,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "architectureMentor",
+      "startLine": 110,
+      "endLine": 110,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "legacyCodeRescueMode",
+      "startLine": 111,
+      "endLine": 111,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "codeArchaeologist",
+      "startLine": 112,
+      "endLine": 112,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "liveCodingCoach",
+      "startLine": 113,
+      "endLine": 113,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "engineeringKpiDashboard",
+      "startLine": 114,
+      "endLine": 114,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "refactorConfidenceSimulator",
+      "startLine": 115,
+      "endLine": 115,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "featureCompletionPredictor",
+      "startLine": 116,
+      "endLine": 116,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "pluginMarketplace",
+      "startLine": 117,
+      "endLine": 117,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "industryCompliancePacks",
+      "startLine": 118,
+      "endLine": 118,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "engineeringIntelligenceNetwork",
+      "startLine": 119,
+      "endLine": 119,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "engineeringRoadmap",
+      "startLine": 120,
+      "endLine": 120,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "personalEngineeringProfile",
+      "startLine": 121,
+      "endLine": 121,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "innovationAssistant",
+      "startLine": 122,
+      "endLine": 122,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "professionalCommandFramework",
+      "startLine": 123,
+      "endLine": 123,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "localTestLaboratory",
+      "startLine": 124,
+      "endLine": 124,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "problemSolvingContainer",
+      "startLine": 125,
+      "endLine": 125,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "liveEngineeringContext",
+      "startLine": 126,
+      "endLine": 126,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "slopGuard",
+      "startLine": 127,
+      "endLine": 127,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "autonomousTaskBudget",
+      "startLine": 129,
+      "endLine": 129,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumDurationMs",
+      "startLine": 130,
+      "endLine": 130,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumAIRequests",
+      "startLine": 131,
+      "endLine": 131,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumFilesRead",
+      "startLine": 134,
+      "endLine": 134,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumFilesModified",
+      "startLine": 135,
+      "endLine": 135,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumCommands",
+      "startLine": 136,
+      "endLine": 136,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "tokenPolicy",
+      "startLine": 139,
+      "endLine": 139,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "mode",
+      "startLine": 140,
+      "endLine": 140,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumTokensPerRequest",
+      "startLine": 141,
+      "endLine": 141,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumTokensPerTask",
+      "startLine": 142,
+      "endLine": 142,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumRequestsPerTask",
+      "startLine": 143,
+      "endLine": 143,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "maximumExpensiveModelCallsPerTask",
+      "startLine": 144,
+      "endLine": 144,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "warnAtBudgetPercentage",
+      "startLine": 145,
+      "endLine": 145,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "requireApprovalAtBudgetPercentage",
+      "startLine": 146,
+      "endLine": 146,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".agent-coder.json",
+      "functionName": "hardStopAtBudgetPercentage",
+      "startLine": 147,
+      "endLine": 147,
+      "score": 6,
+      "signals": {
+        "complexity": 0,
+        "churn": 3,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -310,1371 +2320,6 @@
       "score": 4,
       "signals": {
         "complexity": 1,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "projectName",
-      "startLine": 2,
-      "endLine": 2,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "languages",
-      "startLine": 3,
-      "endLine": 3,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "protectedPaths",
-      "startLine": 4,
-      "endLine": 4,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "excludedPaths",
-      "startLine": 5,
-      "endLine": 5,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "allowedCommands",
-      "startLine": 6,
-      "endLine": 6,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "requiresApprovalForEdits",
-      "startLine": 11,
-      "endLine": 11,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "maximumFilesPerTask",
-      "startLine": 12,
-      "endLine": 12,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "maximumRepairAttempts",
-      "startLine": 13,
-      "endLine": 13,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "preservePublicInterfaces",
-      "startLine": 14,
-      "endLine": 14,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "allowNewDependencies",
-      "startLine": 15,
-      "endLine": 15,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "tokenBudget",
-      "startLine": 16,
-      "endLine": 16,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "maximumInputTokens",
-      "startLine": 17,
-      "endLine": 17,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "maximumOutputTokens",
-      "startLine": 18,
-      "endLine": 18,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "reservedForRepair",
-      "startLine": 19,
-      "endLine": 19,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "reservedForValidation",
-      "startLine": 20,
-      "endLine": 20,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "liveActionFeedEnabled",
-      "startLine": 22,
-      "endLine": 22,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "tokenCeilings",
-      "startLine": 23,
-      "endLine": 23,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "hourlyRate",
-      "startLine": 24,
-      "endLine": 24,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "currency",
-      "startLine": 25,
-      "endLine": 25,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "featureAreas",
-      "startLine": 26,
-      "endLine": 26,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "decisionIntelligence",
-      "startLine": 27,
-      "endLine": 27,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "governance",
-      "startLine": 28,
-      "endLine": 28,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "changeImpactAnalysis",
-      "startLine": 29,
-      "endLine": 29,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "testIntelligence",
-      "startLine": 30,
-      "endLine": 30,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "securityScanning",
-      "startLine": 31,
-      "endLine": 31,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "toolchainAwareness",
-      "startLine": 32,
-      "endLine": 32,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "gitSafety",
-      "startLine": 33,
-      "endLine": 33,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "adversarialReview",
-      "startLine": 34,
-      "endLine": 34,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "costOptimization",
-      "startLine": 35,
-      "endLine": 35,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "projectMemory",
-      "startLine": 36,
-      "endLine": 36,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "debuggingIntelligence",
-      "startLine": 37,
-      "endLine": 37,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "domainValidation",
-      "startLine": 38,
-      "endLine": 38,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "provenanceTracking",
-      "startLine": 39,
-      "endLine": 39,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "controlledAutonomy",
-      "startLine": 40,
-      "endLine": 40,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "operationalDiagnostics",
-      "startLine": 41,
-      "endLine": 41,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "dashboardsAndVisualizations",
-      "startLine": 42,
-      "endLine": 42,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "learningAndTeachingMode",
-      "startLine": 43,
-      "endLine": 43,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "designAndSimulation",
-      "startLine": 44,
-      "endLine": 44,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "pairProgrammerAndGoals",
-      "startLine": 45,
-      "endLine": 45,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "consensusAndDebateMode",
-      "startLine": 46,
-      "endLine": 46,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "answerVerification",
-      "startLine": 47,
-      "endLine": 47,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "contextInspectorAndMissingInfoGate",
-      "startLine": 48,
-      "endLine": 48,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "promptReplayAndMemoryBrowser",
-      "startLine": 49,
-      "endLine": 49,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "promptChainWorkflowAndLifecycle",
-      "startLine": 50,
-      "endLine": 50,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "aiHealthDashboardAndAdaptiveRouting",
-      "startLine": 51,
-      "endLine": 51,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "engineeringSessionRecorder",
-      "startLine": 52,
-      "endLine": 52,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "answerOrchestrator",
-      "startLine": 53,
-      "endLine": 53,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "projectDigitalTwin",
-      "startLine": 54,
-      "endLine": 54,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "projectTimeMachine",
-      "startLine": 55,
-      "endLine": 55,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "bugProbabilityHeatmap",
-      "startLine": 56,
-      "endLine": 56,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "engineeringCostEstimator",
-      "startLine": 57,
-      "endLine": 57,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "knowledgePreservationEngine",
-      "startLine": 58,
-      "endLine": 58,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "projectHealthForecast",
-      "startLine": 59,
-      "endLine": 59,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "architectureEvolutionSimulator",
-      "startLine": 60,
-      "endLine": 60,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "namingConventionAdvisor",
-      "startLine": 61,
-      "endLine": 61,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "apiEvolutionTracker",
-      "startLine": 62,
-      "endLine": 62,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "releaseReadiness",
-      "startLine": 63,
-      "endLine": 63,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "documentationDriftDetector",
-      "startLine": 64,
-      "endLine": 64,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "architectureMentor",
-      "startLine": 65,
-      "endLine": 65,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "legacyCodeRescueMode",
-      "startLine": 66,
-      "endLine": 66,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "codeArchaeologist",
-      "startLine": 67,
-      "endLine": 67,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "liveCodingCoach",
-      "startLine": 68,
-      "endLine": 68,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "engineeringKpiDashboard",
-      "startLine": 69,
-      "endLine": 69,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "refactorConfidenceSimulator",
-      "startLine": 70,
-      "endLine": 70,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "featureCompletionPredictor",
-      "startLine": 71,
-      "endLine": 71,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "pluginMarketplace",
-      "startLine": 72,
-      "endLine": 72,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "industryCompliancePacks",
-      "startLine": 73,
-      "endLine": 73,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "engineeringIntelligenceNetwork",
-      "startLine": 74,
-      "endLine": 74,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "engineeringRoadmap",
-      "startLine": 75,
-      "endLine": 75,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "personalEngineeringProfile",
-      "startLine": 76,
-      "endLine": 76,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "innovationAssistant",
-      "startLine": 77,
-      "endLine": 77,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "professionalCommandFramework",
-      "startLine": 78,
-      "endLine": 78,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "localTestLaboratory",
-      "startLine": 79,
-      "endLine": 79,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "problemSolvingContainer",
-      "startLine": 80,
-      "endLine": 80,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "liveEngineeringContext",
-      "startLine": 81,
-      "endLine": 81,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".agent-coder.json",
-      "functionName": "slopGuard",
-      "startLine": 82,
-      "endLine": 82,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "$schema",
-      "startLine": 2,
-      "endLine": 2,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "$id",
-      "startLine": 3,
-      "endLine": 3,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "title",
-      "startLine": 4,
-      "endLine": 4,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "additionalProperties",
-      "startLine": 6,
-      "endLine": 6,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "required",
-      "startLine": 7,
-      "endLine": 7,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "properties",
-      "startLine": 8,
-      "endLine": 8,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "schemaVersion",
-      "startLine": 9,
-      "endLine": 9,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "server",
-      "startLine": 10,
-      "endLine": 10,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "tls",
-      "startLine": 29,
-      "endLine": 29,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "auth",
-      "startLine": 38,
-      "endLine": 38,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "enabled",
-      "startLine": 42,
-      "endLine": 42,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "workspace",
-      "startLine": 46,
-      "endLine": 46,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "models",
-      "startLine": 54,
-      "endLine": 54,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "inference",
-      "startLine": 61,
-      "endLine": 61,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "downloads",
-      "startLine": 69,
-      "endLine": 69,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
         "churn": 1,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
@@ -1931,6 +2576,246 @@
       "signals": {
         "complexity": 0,
         "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "schemaVersion",
+      "startLine": 2,
+      "endLine": 2,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "server",
+      "startLine": 3,
+      "endLine": 3,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "tls",
+      "startLine": 4,
+      "endLine": 4,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "auth",
+      "startLine": 5,
+      "endLine": 5,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "workspace",
+      "startLine": 6,
+      "endLine": 6,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "storage",
+      "startLine": 7,
+      "endLine": 7,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "models",
+      "startLine": 8,
+      "endLine": 8,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "memory",
+      "startLine": 9,
+      "endLine": 9,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "hardware",
+      "startLine": 10,
+      "endLine": 10,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "inference",
+      "startLine": 11,
+      "endLine": 11,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "downloads",
+      "startLine": 12,
+      "endLine": 12,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "indexing",
+      "startLine": 13,
+      "endLine": 13,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "retrieval",
+      "startLine": 14,
+      "endLine": 14,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "cache",
+      "startLine": 15,
+      "endLine": 15,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "session",
+      "startLine": 16,
+      "endLine": 16,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": "config/settings.json",
+      "functionName": "performance",
+      "startLine": 17,
+      "endLine": 17,
+      "score": 0,
+      "signals": {
+        "complexity": 0,
+        "churn": 0,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,

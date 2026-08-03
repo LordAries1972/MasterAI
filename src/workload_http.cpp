@@ -432,7 +432,10 @@ std::string WorkloadHttpController::notify_index(
         }
         trigger = *parsed;
         if (trigger == IndexTrigger::save || trigger == IndexTrigger::watcher) {
-            for (const auto& path : root.required("paths").as_array()) {
+            const auto& paths = root.required("paths").as_array();
+            // as_array() returns a reference, so the size is known upfront.
+            changed_paths.reserve(paths.size());
+            for (const auto& path : paths) {
                 changed_paths.emplace_back(path.as_string());
             }
         }

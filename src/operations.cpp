@@ -145,6 +145,9 @@ std::vector<ManifestEntry> parse_manifest(const std::string& manifest) {
     }
     std::set<std::string> paths;
     std::vector<ManifestEntry> entries;
+    // One line per entry, so a newline count gives an exact upfront capacity.
+    entries.reserve(static_cast<std::size_t>(
+        std::count(manifest.begin(), manifest.end(), '\n')));
     while (std::getline(input, line)) {
         if (line.empty()) continue;
         const auto first = line.find('\t');
@@ -233,6 +236,10 @@ void atomic_replace(const std::filesystem::path& source,
 // Splits one receipt line with an exact field count.
 std::vector<std::string> split_tabs(const std::string& line) {
     std::vector<std::string> fields;
+    // Field count is exactly the tab count plus one; reserve avoids growth.
+    fields.reserve(
+        static_cast<std::size_t>(std::count(line.begin(), line.end(), '\t')) +
+        1U);
     std::size_t start = 0U;
     while (true) {
         const auto end = line.find('\t', start);

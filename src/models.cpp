@@ -57,6 +57,39 @@ bool valid_sha256(const std::string& digest) {
            });
 }
 
+// Shared by ModelRegistry::scan() and ::verify(): both walk the same
+// category/model directory structure and skip the same things (a
+// non-directory or symlinked category, a category outside
+// allowed_categories, a non-directory or symlinked model directory, and a
+// model directory with no manifest.json -- create_download() always writes
+// one before a transfer starts, so a directory without one was never a
+// tracked model at all). What each does with a surviving model directory
+// differs, so only the walk itself is shared.
+void for_each_model_directory(
+    const std::filesystem::path& root,
+    const std::function<void(const std::string& category,
+                             const std::filesystem::directory_entry& model_entry)>&
+        visit) {
+    for (const auto& category_entry : std::filesystem::directory_iterator(root)) {
+        if (!category_entry.is_directory() || category_entry.is_symlink()) {
+            continue;
+        }
+        const std::string category = category_entry.path().filename().string();
+        if (allowed_categories.find(category) == allowed_categories.end()) {
+            continue;
+        }
+        for (const auto& model_entry :
+             std::filesystem::directory_iterator(category_entry.path())) {
+            if (!model_entry.is_directory() || model_entry.is_symlink() ||
+                !std::filesystem::is_regular_file(model_entry.path() /
+                                                   "manifest.json")) {
+                continue;
+            }
+            visit(category, model_entry);
+        }
+    }
+}
+
 std::string read_bounded_file(const std::filesystem::path& path) {
     std::error_code error;
     const auto size = std::filesystem::file_size(path, error);
@@ -377,30 +410,9 @@ std::vector<ModelRecord> ModelRegistry::scan() const {
     // below skip.
     const auto verified = read_verification_cache(root);
 
-    for (const auto& category_entry : std::filesystem::directory_iterator(root)) {
-        if (!category_entry.is_directory() || category_entry.is_symlink()) {
-            continue;
-        }
-        const std::string category = category_entry.path().filename().string();
-        if (allowed_categories.find(category) == allowed_categories.end()) {
-            continue;
-        }
-        for (const auto& model_entry :
-             std::filesystem::directory_iterator(category_entry.path())) {
-            if (!model_entry.is_directory() || model_entry.is_symlink()) {
-                continue;
-            }
-            // A directory with no manifest.json was never a tracked
-            // download or model at all -- most commonly leftover litter from
-            // an earlier, invalid session (a stray folder, an aborted
-            // experiment). create_download() always writes the manifest
-            // before a transfer starts, so any real, known model always has
-            // one; skip anything that doesn't instead of surfacing it as a
-            // confusing "invalid" inventory row.
-            if (!std::filesystem::is_regular_file(model_entry.path() /
-                                                   "manifest.json")) {
-                continue;
-            }
+    for_each_model_directory(root, [&](const std::string& category,
+                                       const std::filesystem::directory_entry&
+                                           model_entry) {
             ModelRecord record;
             record.directory = model_entry.path();
             try {
@@ -421,7 +433,7 @@ std::vector<ModelRecord> ModelRegistry::scan() const {
                         "'.\\scripts\\rehash.ps1' to verify it and make it "
                         "available.";
                     records.push_back(std::move(record));
-                    continue;
+                    return;
                 }
                 bool features_available = true;
                 for (const auto& feature : record.manifest.required_cpu_features) {
@@ -473,8 +485,7 @@ std::vector<ModelRecord> ModelRegistry::scan() const {
                 record.diagnostic = exception.what();
             }
             records.push_back(std::move(record));
-        }
-    }
+        });
     return records;
 }
 
@@ -500,21 +511,9 @@ std::size_t ModelRegistry::verify(
     // match again anyway.
     std::set<std::string> seen_ids;
 
-    for (const auto& category_entry : std::filesystem::directory_iterator(root)) {
-        if (!category_entry.is_directory() || category_entry.is_symlink()) {
-            continue;
-        }
-        const std::string category = category_entry.path().filename().string();
-        if (allowed_categories.find(category) == allowed_categories.end()) {
-            continue;
-        }
-        for (const auto& model_entry :
-             std::filesystem::directory_iterator(category_entry.path())) {
-            if (!model_entry.is_directory() || model_entry.is_symlink() ||
-                !std::filesystem::is_regular_file(model_entry.path() /
-                                                   "manifest.json")) {
-                continue;
-            }
+    for_each_model_directory(root, [&](const std::string& category,
+                                       const std::filesystem::directory_entry&
+                                           model_entry) {
             const auto directory = model_entry.path();
             const std::string id = directory.filename().string();
             seen_ids.insert(id);
@@ -538,7 +537,7 @@ std::size_t ModelRegistry::verify(
                     already_verified->second.size_bytes ==
                         cheap_manifest.model_size_bytes) {
                     if (progress) progress(id, true, "");
-                    continue;
+                    return;
                 }
                 // Reported at each 10% step reached, and only for files
                 // large enough (256 MiB+) that hashing them takes long
@@ -577,8 +576,7 @@ std::size_t ModelRegistry::verify(
                 cache.erase(id);
                 if (progress) progress(id, false, exception.what());
             }
-        }
-    }
+        });
     // Drop any cache entry for a model id that no longer exists on disk
     // (directory removed/renamed, or its manifest.json deleted) instead of
     // letting it linger indefinitely -- it can never be matched by scan()

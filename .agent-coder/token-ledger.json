@@ -105,5 +105,37 @@
     "failed": false,
     "usageAvailable": true,
     "id": "b3308258-3d83-4e42-b38a-f91c5906ed16"
+  },
+  {
+    "taskType": "ask-about-project",
+    "requestId": "98442049-17ce-44e3-86a5-9909a5ebed59",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "estimatedInputTokens": 6267,
+    "latencyMs": 70090,
+    "recordedAtMs": 1785623203135,
+    "files": [
+      "docs/PLAN.md",
+      "src/cache.cpp",
+      "src/kv_cache.cpp",
+      ".agent-coder.json",
+      "docs/architecture/config.schema.json",
+      "docs/performance/phase-15-incremental-indexing.md",
+      "models/.verified-cache.json",
+      "src/session_cache.cpp",
+      "config/settings.json",
+      "docs/architecture/configuration.md",
+      "docs/operations/phase-4-7-operations.md",
+      "docs/ide/integration-contract.md",
+      "docs/architecture/ADR-0001-cpp17-native-architecture.md"
+    ],
+    "callKind": "primary",
+    "actualInputTokens": 11790,
+    "actualOutputTokens": 6402,
+    "schemaValid": true,
+    "estimatedCostUsd": 0.13140000000000002,
+    "failed": false,
+    "usageAvailable": true,
+    "id": "797a1513-d1fe-4e36-9fc2-d574ed27ab40"
   }
 ]

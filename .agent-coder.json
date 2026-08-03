@@ -15,7 +15,7 @@
   "allowNewDependencies": true,
   "tokenBudget": {
     "maximumInputTokens": 30000,
-    "maximumOutputTokens": 8000,
+    "maximumOutputTokens": 15000,
     "reservedForRepair": 5000,
     "reservedForValidation": 2000
   },
@@ -30,14 +30,20 @@
   "liveActionFeedEnabled": true,
   "tokenCeilings": {
     "classification": {
-      "maximumInputTokens": 4000,
-      "maximumOutputTokens": 2000
+      "maximumInputTokens": 8000,
+      "maximumOutputTokens": 4000
     },
     "errorExplanation": {
-      "maximumOutputTokens": 2000
+      "maximumInputTokens": 8000,
+      "maximumOutputTokens": 4000
+    },
+    "symbolExplanation": {
+      "maximumInputTokens": 8000,
+      "maximumOutputTokens": 6000
     },
     "singleSymbolEdit": {
-      "maximumOutputTokens": 4000
+      "maximumInputTokens": 16000,
+      "maximumOutputTokens": 8000
     },
     "multiFilePlanning": {
       "maximumInputTokens": 20000,

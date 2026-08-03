@@ -270,6 +270,10 @@ public:
         : configuration(value), records(value.runtime_root / "database"),
           audit(value.runtime_root / "audit" / "audit.log"),
           settings_file(std::move(settings_file_path)) {
+        // request_times is a self-pruning sliding window capped at the
+        // configured rate limit; reserving its steady-state size upfront
+        // avoids reallocation churn as it fills on the first hot minute.
+        request_times.reserve(value.rate_limit_per_minute);
         records.open();
         const auto hardware = probe_hardware(value.runtime_root);
         const auto profile =
@@ -1005,10 +1009,7 @@ public:
         // class comment in masterai.hpp.
         if (request.method == "GET" &&
             request.target == "/api/v1/ml/dashboard") {
-            if (!role_allows(user->role, "ml.dashboard.view")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.dashboard.view")) return *denied;
             return response(200, "OK",
                             machine_learning_dashboard_json(
                                 machine_learning.dashboard(*ml_projects,
@@ -1019,20 +1020,14 @@ public:
         // fields -- see MLProjectStore's class comment in masterai.hpp.
         if (request.method == "GET" &&
             request.target == "/api/v1/ml/projects") {
-            if (!role_allows(user->role, "ml.projects.view")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.projects.view")) return *denied;
             return response(200, "OK",
                             "{\"projects\":" +
                                 ml_projects_json(ml_projects->list()) + "}");
         }
         if (request.method == "POST" &&
             request.target == "/api/v1/ml/projects") {
-            if (!role_allows(user->role, "ml.projects.create")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.projects.create")) return *denied;
             try {
                 auto root = parse_json(request.body);
                 const auto name = root.required("name").as_string();
@@ -1061,10 +1056,7 @@ public:
             request.target.size() > 7U &&
             request.target.compare(request.target.size() - 7U, 7U,
                                    "/delete") == 0) {
-            if (!role_allows(user->role, "ml.projects.delete")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.projects.delete")) return *denied;
             const auto id = request.target.substr(
                 20U, request.target.size() - 20U - 7U);
             if (!ml_projects->remove(id)) {
@@ -1079,10 +1071,7 @@ public:
         // fields -- see ModelRegistryStore's class comment in masterai.hpp.
         if (request.method == "GET" &&
             request.target == "/api/v1/ml/models") {
-            if (!role_allows(user->role, "ml.models.view")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.models.view")) return *denied;
             return response(200, "OK",
                             "{\"models\":" +
                                 model_registry_entries_json(ml_models->list()) +
@@ -1090,10 +1079,7 @@ public:
         }
         if (request.method == "POST" &&
             request.target == "/api/v1/ml/models") {
-            if (!role_allows(user->role, "ml.models.import")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.models.import")) return *denied;
             try {
                 auto root = parse_json(request.body);
                 const auto name = root.required("name").as_string();
@@ -1119,10 +1105,7 @@ public:
             request.target.size() > 6U &&
             request.target.compare(request.target.size() - 6U, 6U,
                                    "/state") == 0) {
-            if (!role_allows(user->role, "ml.models.approve")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.models.approve")) return *denied;
             const auto id = request.target.substr(
                 18U, request.target.size() - 18U - 6U);
             try {
@@ -1146,10 +1129,7 @@ public:
             request.target.size() > 7U &&
             request.target.compare(request.target.size() - 7U, 7U,
                                    "/delete") == 0) {
-            if (!role_allows(user->role, "ml.models.delete")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.models.delete")) return *denied;
             const auto id = request.target.substr(
                 18U, request.target.size() - 18U - 7U);
             if (!ml_models->remove(id)) {
@@ -1164,20 +1144,14 @@ public:
         // fields -- see DatasetStore's class comment in masterai.hpp.
         if (request.method == "GET" &&
             request.target == "/api/v1/ml/datasets") {
-            if (!role_allows(user->role, "ml.datasets.view")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.datasets.view")) return *denied;
             return response(200, "OK",
                             "{\"datasets\":" +
                                 datasets_json(ml_datasets->list()) + "}");
         }
         if (request.method == "POST" &&
             request.target == "/api/v1/ml/datasets") {
-            if (!role_allows(user->role, "ml.datasets.import")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.datasets.import")) return *denied;
             try {
                 auto root = parse_json(request.body);
                 const auto name = root.required("name").as_string();
@@ -1203,10 +1177,7 @@ public:
             request.target.size() > 8U &&
             request.target.compare(request.target.size() - 8U, 8U,
                                    "/approve") == 0) {
-            if (!role_allows(user->role, "ml.datasets.approve")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.datasets.approve")) return *denied;
             const auto id = request.target.substr(
                 20U, request.target.size() - 20U - 8U);
             try {
@@ -1231,10 +1202,7 @@ public:
             request.target.size() > 7U &&
             request.target.compare(request.target.size() - 7U, 7U,
                                    "/delete") == 0) {
-            if (!role_allows(user->role, "ml.datasets.delete")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.datasets.delete")) return *denied;
             const auto id = request.target.substr(
                 20U, request.target.size() - 20U - 7U);
             if (!ml_datasets->remove(id)) {
@@ -1251,10 +1219,7 @@ public:
         // Knowledge Ingestion Pipeline phase.
         if (request.method == "GET" &&
             request.target == "/api/v1/ml/subjects") {
-            if (!role_allows(user->role, "ml.subjects.view")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.subjects.view")) return *denied;
             return response(200, "OK",
                             "{\"subjects\":" +
                                 subject_packages_json(ml_subjects->list()) +
@@ -1262,10 +1227,7 @@ public:
         }
         if (request.method == "POST" &&
             request.target == "/api/v1/ml/subjects") {
-            if (!role_allows(user->role, "ml.subjects.create")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.subjects.create")) return *denied;
             try {
                 auto root = parse_json(request.body);
                 const auto name = root.required("name").as_string();
@@ -1290,10 +1252,7 @@ public:
             request.target.size() > 14U &&
             request.target.compare(request.target.size() - 14U, 14U,
                                    "/review-status") == 0) {
-            if (!role_allows(user->role, "ml.subjects.review")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.subjects.review")) return *denied;
             const auto id = request.target.substr(
                 20U, request.target.size() - 20U - 14U);
             try {
@@ -1318,10 +1277,7 @@ public:
             request.target.size() > 7U &&
             request.target.compare(request.target.size() - 7U, 7U,
                                    "/delete") == 0) {
-            if (!role_allows(user->role, "ml.subjects.delete")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "ml.subjects.delete")) return *denied;
             const auto id = request.target.substr(
                 20U, request.target.size() - 20U - 7U);
             if (!ml_subjects->remove(id)) {
@@ -1430,9 +1386,7 @@ public:
         }
         if (request.method == "POST" &&
             request.target == "/api/v1/projects") {
-            if (!role_allows(user->role, "projects.write")) {
-                return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "projects.write")) return *denied;
             return workloads->create_project(request, *user);
         }
         if (request.method == "GET" &&
@@ -1484,9 +1438,7 @@ public:
             return get_chat_messages(request, *user);
         }
         if (request.method == "POST" && request.target == "/api/v1/chats") {
-            if (!role_allows(user->role, "chats.write")) {
-                return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "chats.write")) return *denied;
             return create_chat(request, *user);
         }
         // Client-driven warm trigger -- see the comment on warm_runner()
@@ -1511,9 +1463,7 @@ public:
             request.target.size() > 20U &&
             request.target.compare(request.target.size() - 6U, 6U,
                                    "/model") == 0) {
-            if (!role_allows(user->role, "chats.write")) {
-                return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "chats.write")) return *denied;
             return set_chat_model(request, *user);
         }
         // Deletes a chat and its full message history. A POST-with-suffix
@@ -1526,17 +1476,12 @@ public:
             request.target.size() > 21U &&
             request.target.compare(request.target.size() - 7U, 7U,
                                    "/delete") == 0) {
-            if (!role_allows(user->role, "chats.write")) {
-                return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "chats.write")) return *denied;
             return delete_chat(request, *user);
         }
         if (request.method == "POST" &&
             request.target == "/api/v1/attachments") {
-            if (!role_allows(user->role, "attachments.write")) {
-                return response(403, "Forbidden",
-                                "{\"error\":\"permission_denied\"}");
-            }
+            if (auto denied = forbidden_unless(user->role, "attachments.write")) return *denied;
             return workloads->create_attachment(request, *user);
         }
         if (request.method == "POST" &&
@@ -1629,6 +1574,15 @@ private:
         throw std::runtime_error("requested role is invalid");
     }
 
+    // Shared by every role-gated route below: returns the 403 response to
+    // return immediately if `role` lacks `permission`, or nullopt to
+    // continue handling the request.
+    static std::optional<std::string> forbidden_unless(const UserRole role,
+                                                        const char* permission) {
+        if (role_allows(role, permission)) return std::nullopt;
+        return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+    }
+
     // Parses a first-admin setup body (setupToken/username/password/
     // displayName), wipes the raw JSON, and checks the one-time token.
     // Shared by setup() and setup_local(), which differ only in how they
@@ -1658,6 +1612,27 @@ private:
         return {std::move(username), std::move(password), std::move(display_name)};
     }
 
+    // Shared by setup() and setup_local(): both parse the setup body, run
+    // their own credential-specific body, and must fail the same way on a
+    // stale/invalid setup token or any other malformed-request exception
+    // (wiping the raw request body either way so a password never lingers
+    // in memory longer than needed).
+    template <typename Body>
+    std::string run_setup_request(Request& request, Body&& body) {
+        try {
+            auto fields = parse_setup_fields(request);
+            return body(fields);
+        } catch (const InvalidSetupToken&) {
+            audit.append("setup.first_admin", "anonymous", "denied",
+                         "invalid setup token");
+            return response(403, "Forbidden", "{\"error\":\"setup_token_invalid\"}");
+        } catch (const std::exception&) {
+            std::fill(request.body.begin(), request.body.end(), '\0');
+            request.body.clear();
+            return response(400, "Bad Request", "{\"error\":\"invalid_setup_request\"}");
+        }
+    }
+
     std::string setup(Request& request) {
         if (!configuration.allow_os_identity_accounts) {
             return response(403, "Forbidden", "{\"error\":\"os_accounts_disabled\"}");
@@ -1665,8 +1640,7 @@ private:
         if (!users->setup_required()) {
             return response(409, "Conflict", "{\"error\":\"setup_complete\"}");
         }
-        try {
-            auto fields = parse_setup_fields(request);
+        return run_setup_request(request, [&](SetupFields& fields) {
             const auto result = OsIdentityProvider().authenticate(
                 fields.username, fields.password);
             if (!result.authenticated()) {
@@ -1685,15 +1659,7 @@ private:
             audit.append("setup.first_admin", user.id, "success",
                          "administrator mapped to OS principal");
             return response(201, "Created", "{\"status\":\"configured\"}");
-        } catch (const InvalidSetupToken&) {
-            audit.append("setup.first_admin", "anonymous", "denied",
-                         "invalid setup token");
-            return response(403, "Forbidden", "{\"error\":\"setup_token_invalid\"}");
-        } catch (const std::exception&) {
-            std::fill(request.body.begin(), request.body.end(), '\0');
-            request.body.clear();
-            return response(400, "Bad Request", "{\"error\":\"invalid_setup_request\"}");
-        }
+        });
     }
 
     // Creates the first administrator as a MasterAI-hashed local account
@@ -1707,8 +1673,7 @@ private:
         if (!users->setup_required()) {
             return response(409, "Conflict", "{\"error\":\"setup_complete\"}");
         }
-        try {
-            auto fields = parse_setup_fields(request);
+        return run_setup_request(request, [&](SetupFields& fields) {
             if (fields.password.size() < 8U) {
                 std::fill(fields.password.begin(), fields.password.end(), '\0');
                 return response(400, "Bad Request", "{\"error\":\"password_too_short\"}");
@@ -1724,15 +1689,7 @@ private:
             audit.append("setup.first_admin", user.id, "success",
                          "administrator created with a local password");
             return response(201, "Created", "{\"status\":\"configured\"}");
-        } catch (const InvalidSetupToken&) {
-            audit.append("setup.first_admin", "anonymous", "denied",
-                         "invalid setup token");
-            return response(403, "Forbidden", "{\"error\":\"setup_token_invalid\"}");
-        } catch (const std::exception&) {
-            std::fill(request.body.begin(), request.body.end(), '\0');
-            request.body.clear();
-            return response(400, "Bad Request", "{\"error\":\"invalid_setup_request\"}");
-        }
+        });
     }
 
     std::string login(Request& request) {
@@ -1787,9 +1744,7 @@ private:
     }
 
     std::string list_users(const UserRecord& admin) const {
-        if (!role_allows(admin.role, "users.manage")) {
-            return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
-        }
+        if (auto denied = forbidden_unless(admin.role, "users.manage")) return *denied;
         std::string body{"{\"users\":["};
         bool first = true;
         for (const auto& item : users->all()) {
@@ -1812,9 +1767,7 @@ private:
         if (!configuration.allow_local_password_accounts) {
             return response(403, "Forbidden", "{\"error\":\"local_accounts_disabled\"}");
         }
-        if (!role_allows(admin.role, "users.manage")) {
-            return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
-        }
+        if (auto denied = forbidden_unless(admin.role, "users.manage")) return *denied;
         try {
             auto root = parse_json(request.body);
             std::fill(request.body.begin(), request.body.end(), '\0');
@@ -1852,9 +1805,7 @@ private:
     // requiring shell access to the host. Never exposed to developer/viewer
     // roles -- see the Admin/Settings sidebar in web_ui.cpp.
     std::string admin_config_get(const UserRecord& admin) const {
-        if (!role_allows(admin.role, "settings.manage")) {
-            return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
-        }
+        if (auto denied = forbidden_unless(admin.role, "settings.manage")) return *denied;
         if (settings_file.empty()) {
             return response(503, "Service Unavailable",
                             "{\"error\":\"admin_configuration_unavailable\"}");
@@ -1876,9 +1827,7 @@ private:
     // server startup -- is saved for the next restart and reported back in
     // "restartRequired" rather than silently pretended to be live.
     std::string admin_config_put(Request& request, const UserRecord& admin) {
-        if (!role_allows(admin.role, "settings.manage")) {
-            return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
-        }
+        if (auto denied = forbidden_unless(admin.role, "settings.manage")) return *denied;
         if (settings_file.empty()) {
             return response(503, "Service Unavailable",
                             "{\"error\":\"admin_configuration_unavailable\"}");
@@ -2090,18 +2039,7 @@ private:
                 return response(404, "Not Found",
                                 "{\"error\":\"project_not_found\"}");
             }
-            bool model_ready = false;
-            const auto hardware = probe_hardware(configuration.models_root);
-            for (const auto& model :
-                 ModelRegistry(configuration.models_root, hardware,
-                               configuration.memory_reserve_mib).scan()) {
-                if (model.manifest.id == model_id &&
-                    model.state == ModelState::ready) {
-                    model_ready = true;
-                    break;
-                }
-            }
-            if (!model_ready) {
+            if (!is_model_ready(model_id)) {
                 return response(409, "Conflict",
                                 "{\"error\":\"model_not_ready\"}");
             }
@@ -2131,18 +2069,7 @@ private:
             if (!chat) {
                 return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
             }
-            bool model_ready = false;
-            const auto hardware = probe_hardware(configuration.models_root);
-            for (const auto& model :
-                 ModelRegistry(configuration.models_root, hardware,
-                               configuration.memory_reserve_mib).scan()) {
-                if (model.manifest.id == model_id &&
-                    model.state == ModelState::ready) {
-                    model_ready = true;
-                    break;
-                }
-            }
-            if (!model_ready) {
+            if (!is_model_ready(model_id)) {
                 return response(409, "Conflict",
                                 "{\"error\":\"model_not_ready\"}");
             }
@@ -2186,6 +2113,14 @@ private:
             if (model.manifest.id == model_id) return model;
         }
         return std::nullopt;
+    }
+
+    // Shared by create_chat() and set_chat_model(): both must reject a
+    // chat-model assignment unless the target model is actually Ready,
+    // so neither route accepts a model id that would fail to load.
+    bool is_model_ready(const std::string& model_id) const {
+        const auto model = find_model(model_id);
+        return model && model->state == ModelState::ready;
     }
 
     // Best-effort pre-warm: starts the same load ensure_model_loaded() would

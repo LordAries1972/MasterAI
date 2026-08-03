@@ -142,5 +142,17 @@
     "failed": false,
     "id": "802e71c1-395f-4108-9dda-1236d9fa994e",
     "recordedAt": "2026-07-30T23:40:20.111Z"
+  },
+  {
+    "requestId": "98442049-17ce-44e3-86a5-9909a5ebed59",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "taskShape": "architectureAnalysisBounded",
+    "latencyMs": 70090,
+    "inputTokens": 11790,
+    "outputTokens": 6402,
+    "failed": false,
+    "id": "031ade15-f45a-4342-9aa4-fed1b4284f47",
+    "recordedAt": "2026-08-01T22:26:43.490Z"
   }
 ]

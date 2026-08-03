@@ -37,6 +37,31 @@ void raise_atomic_maximum(std::atomic<std::uint64_t>& target,
     }
 }
 
+// Shared by the benchmark-model and calibrate commands: both need the probed
+// hardware (for a runner or hardware-id string) plus the single named model
+// record, and both fail the same way if the id doesn't match anything ready
+// to run.
+struct ResolvedModel {
+    masterai::HardwareInfo hardware;
+    masterai::ModelRecord model;
+};
+
+ResolvedModel resolve_model_or_throw(const masterai::AppConfig& configuration,
+                                     const std::string& model_id,
+                                     const char* not_found_message) {
+    auto hardware = masterai::probe_hardware(configuration.models_root);
+    auto models = masterai::ModelRegistry(configuration.models_root, hardware,
+                                          configuration.memory_reserve_mib)
+                      .scan();
+    auto found = std::find_if(
+        models.begin(), models.end(),
+        [&](const auto& model) { return model.manifest.id == model_id; });
+    if (found == models.end()) {
+        throw std::runtime_error(not_found_message);
+    }
+    return ResolvedModel{std::move(hardware), std::move(*found)};
+}
+
 const char* model_state_name(const masterai::ModelState state) noexcept {
     switch (state) {
         case masterai::ModelState::discovered: return "discovered";
@@ -609,23 +634,14 @@ int main(int argc, char* argv[]) {
                                   ? masterai::BenchmarkProfile::extended
                                   : throw std::runtime_error(
                                         "benchmark profile is invalid")));
-            const auto hardware =
-                masterai::probe_hardware(configuration.models_root);
-            const auto models =
-                masterai::ModelRegistry(configuration.models_root, hardware,
-                                        configuration.memory_reserve_mib)
-                    .scan();
-            const auto found = std::find_if(
-                models.begin(), models.end(), [&](const auto& model) {
-                    return model.manifest.id == argv[3];
-                });
-            if (found == models.end()) {
-                throw std::runtime_error("benchmark model was not found");
-            }
+            const auto resolved = resolve_model_or_throw(
+                configuration, argv[3], "benchmark model was not found");
+            const auto& hardware = resolved.hardware;
+            const auto& found = resolved.model;
             masterai::RunnerSupervisor inference(
                 configuration.llama_server_executable,
                 configuration.runtime_root);
-            inference.load(*found, 4096U, configuration.runner_port);
+            inference.load(found, 4096U, configuration.runner_port);
             masterai::RecordStore records(configuration.runtime_root / "database");
             records.open();
             masterai::BenchmarkStore store(records);
@@ -663,19 +679,10 @@ int main(int argc, char* argv[]) {
                 throw std::runtime_error(
                     "inference.llamaServerExecutable is not configured");
             }
-            const auto hardware =
-                masterai::probe_hardware(configuration.models_root);
-            const auto models =
-                masterai::ModelRegistry(configuration.models_root, hardware,
-                                        configuration.memory_reserve_mib)
-                    .scan();
-            const auto found = std::find_if(
-                models.begin(), models.end(), [&](const auto& model) {
-                    return model.manifest.id == argv[3];
-                });
-            if (found == models.end()) {
-                throw std::runtime_error("calibration model was not found");
-            }
+            const auto resolved = resolve_model_or_throw(
+                configuration, argv[3], "calibration model was not found");
+            const auto& hardware = resolved.hardware;
+            const auto& found = resolved.model;
             masterai::RunnerSupervisor inference(
                 configuration.llama_server_executable,
                 configuration.runtime_root);
@@ -688,7 +695,7 @@ int main(int argc, char* argv[]) {
                 inference, store, hardware, backend_hash, "masterai-0.1.0",
                 configuration.accelerator_policy);
             const auto profile = calibration.calibrate(
-                *found, argv[4], configuration.runner_port, stop_requested);
+                found, argv[4], configuration.runner_port, stop_requested);
             std::cout << std::fixed << std::setprecision(2);
             std::cout << "hostHash\t" << profile.host_hash << '\n'
                       << "profileName\t" << profile.profile_name << '\n'

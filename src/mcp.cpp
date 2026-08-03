@@ -129,8 +129,12 @@ std::string tools_catalogue() {
 // Materializes the token-visible project subset once for tools and resources.
 std::vector<ProjectRecord> authorized_projects(
     ProjectCatalog& projects, const McpIdentity& identity) {
+    const auto catalog = projects.list();
     std::vector<ProjectRecord> result;
-    for (const auto& project : projects.list()) {
+    // Upper-bounded by the full catalog size, so reserving it avoids
+    // reallocation growth while filtering down to the token's subset.
+    result.reserve(catalog.size());
+    for (const auto& project : catalog) {
         if (identity.project_ids.find(project.id) !=
             identity.project_ids.end()) {
             result.push_back(project);

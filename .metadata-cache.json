@@ -1,0 +1,278 @@
+{
+  "projectName": "MasterAI",
+  "projectType": "cmake-native",
+  "rootPath": "f:\\Projects\\C++\\MasterAI",
+  "analyzeAtMs": 1785625707297,
+  "tags": [
+    "high-complexity",
+    "no-tests"
+  ],
+  "customMetadata": {},
+  "dependencies": {
+    "directDependencies": [],
+    "transitiveDependencies": [],
+    "statistics": {
+      "totalDependencies": 0,
+      "directCount": 0,
+      "devCount": 0,
+      "outdatedCount": 0,
+      "unusedCount": 0
+    },
+    "circularDependencies": [],
+    "dependencyTree": []
+  },
+  "configurations": [
+    {
+      "relativePath": ".agent-coder.json",
+      "configType": "agent-coder-config",
+      "configuration": {
+        "projectName": "",
+        "languages": [],
+        "protectedPaths": [],
+        "excludedPaths": [],
+        "allowedCommands": [
+          "npm",
+          "npx",
+          "tsc"
+        ],
+        "requiresApprovalForEdits": true,
+        "maximumFilesPerTask": 10,
+        "maximumRepairAttempts": 3,
+        "preservePublicInterfaces": true,
+        "allowNewDependencies": true,
+        "tokenBudget": {
+          "maximumInputTokens": 30000,
+          "maximumOutputTokens": 15000,
+          "reservedForRepair": 5000,
+          "reservedForValidation": 2000
+        },
+        "validationPolicy": {
+          "enabled": true,
+          "minimumLevel": "V0",
+          "requireBuildTool": false,
+          "requireTestTool": false,
+          "failCommandOnValidationFailure": false,
+          "reportCommandCompletionToChat": true
+        },
+        "liveActionFeedEnabled": true,
+        "tokenCeilings": {
+          "classification": {
+            "maximumInputTokens": 8000,
+            "maximumOutputTokens": 4000
+          },
+          "errorExplanation": {
+            "maximumInputTokens": 8000,
+            "maximumOutputTokens": 4000
+          },
+          "symbolExplanation": {
+            "maximumInputTokens": 8000,
+            "maximumOutputTokens": 6000
+          },
+          "singleSymbolEdit": {
+            "maximumInputTokens": 16000,
+            "maximumOutputTokens": 8000
+          },
+          "multiFilePlanning": {
+            "maximumInputTokens": 20000,
+            "maximumOutputTokens": 10000
+          },
+          "architectureAnalysisBounded": {
+            "maximumOutputTokens": 15000
+          },
+          "finalImplementationPatch": {
+            "maximumOutputTokens": 10000
+          },
+          "finalImplementationPatchMultiFile": {
+            "maximumOutputTokens": 14000
+          },
+          "adversarialReview": {
+            "maximumInputTokens": 15000,
+            "maximumOutputTokens": 8000
+          },
+          "designDocument": {
+            "maximumOutputTokens": 10000
+          }
+        },
+        "hourlyRate": 50,
+        "currency": "AUD",
+        "featureAreas": {
+          "decisionIntelligence": true,
+          "governance": true,
+          "changeImpactAnalysis": true,
+          "testIntelligence": true,
+          "securityScanning": true,
+          "toolchainAwareness": true,
+          "gitSafety": true,
+          "adversarialReview": true,
+          "costOptimization": true,
+          "projectMemory": true,
+          "debuggingIntelligence": true,
+          "domainValidation": true,
+          "provenanceTracking": true,
+          "controlledAutonomy": true,
+          "operationalDiagnostics": true,
+          "dashboardsAndVisualizations": true,
+          "learningAndTeachingMode": true,
+          "designAndSimulation": true,
+          "pairProgrammerAndGoals": true,
+          "consensusAndDebateMode": true,
+          "answerVerification": true,
+          "contextInspectorAndMissingInfoGate": true,
+          "promptReplayAndMemoryBrowser": true,
+          "promptChainWorkflowAndLifecycle": true,
+          "aiHealthDashboardAndAdaptiveRouting": true,
+          "engineeringSessionRecorder": true,
+          "answerOrchestrator": true,
+          "projectDigitalTwin": true,
+          "projectTimeMachine": true,
+          "bugProbabilityHeatmap": true,
+          "engineeringCostEstimator": true,
+          "knowledgePreservationEngine": true,
+          "projectHealthForecast": true,
+          "architectureEvolutionSimulator": true,
+          "namingConventionAdvisor": true,
+          "apiEvolutionTracker": true,
+          "releaseReadiness": true,
+          "documentationDriftDetector": true,
+          "architectureMentor": true,
+          "legacyCodeRescueMode": true,
+          "codeArchaeologist": true,
+          "liveCodingCoach": true,
+          "engineeringKpiDashboard": true,
+          "refactorConfidenceSimulator": true,
+          "featureCompletionPredictor": true,
+          "pluginMarketplace": true,
+          "industryCompliancePacks": true,
+          "engineeringIntelligenceNetwork": true,
+          "engineeringRoadmap": true,
+          "personalEngineeringProfile": true,
+          "innovationAssistant": true,
+          "professionalCommandFramework": true,
+          "localTestLaboratory": true,
+          "problemSolvingContainer": true,
+          "liveEngineeringContext": true,
+          "slopGuard": true
+        },
+        "autonomousTaskBudget": {
+          "maximumDurationMs": 600000,
+          "maximumAIRequests": 20,
+          "maximumInputTokens": 200000,
+          "maximumOutputTokens": 40000,
+          "maximumFilesRead": 30,
+          "maximumFilesModified": 15,
+          "maximumCommands": 30,
+          "maximumRepairAttempts": 5
+        },
+        "tokenPolicy": {
+          "mode": "balanced",
+          "maximumTokensPerRequest": 24000,
+          "maximumTokensPerTask": 100000,
+          "maximumRequestsPerTask": 8,
+          "maximumExpensiveModelCallsPerTask": 2,
+          "warnAtBudgetPercentage": 75,
+          "requireApprovalAtBudgetPercentage": 90,
+          "hardStopAtBudgetPercentage": 100
+        }
+      },
+      "status": "valid",
+      "lastModifiedMs": 1785623114000
+    },
+    {
+      "relativePath": ".gitattributes",
+      "configType": "git-attributes",
+      "status": "valid",
+      "lastModifiedMs": 1785278754000
+    },
+    {
+      "relativePath": ".gitignore",
+      "configType": "git-ignore",
+      "status": "valid",
+      "lastModifiedMs": 1785365012000
+    },
+    {
+      "relativePath": "README.md",
+      "configType": "documentation",
+      "status": "valid",
+      "lastModifiedMs": 1785618076000
+    }
+  ],
+  "compilerInfo": {},
+  "metrics": {
+    "totalLinesOfCode": 245958,
+    "sourceFileCount": 246,
+    "testFileCount": 0,
+    "averageFileSizeBytes": 740989,
+    "codeToTestRatio": 246,
+    "complexityScore": 95,
+    "technicalDebtMarkers": 4,
+    "collectedAtMs": 1785625712532
+  },
+  "security": {
+    "vulnerabilities": [],
+    "securityTools": [],
+    "configFiles": []
+  },
+  "architecture": {
+    "pattern": "layered",
+    "publicApis": [
+      "docs/api/version-policy.md"
+    ],
+    "modules": [
+      {
+        "name": "docs",
+        "description": "Module with 25 files",
+        "dependencies": []
+      },
+      {
+        "name": "models",
+        "description": "Module with 28 files",
+        "dependencies": []
+      },
+      {
+        "name": "scripts",
+        "description": "Module with 20 files",
+        "dependencies": []
+      },
+      {
+        "name": "src",
+        "description": "Module with 48 files",
+        "dependencies": []
+      },
+      {
+        "name": "rules",
+        "description": "Module with 1 files",
+        "dependencies": []
+      },
+      {
+        "name": "test",
+        "description": "Module with 6 files",
+        "dependencies": []
+      },
+      {
+        "name": ".vscode",
+        "description": "Module with 1 files",
+        "dependencies": []
+      },
+      {
+        "name": "config",
+        "description": "Module with 2 files",
+        "dependencies": []
+      },
+      {
+        "name": "runtime",
+        "description": "Module with 107 files",
+        "dependencies": []
+      },
+      {
+        "name": ".claude",
+        "description": "Module with 1 files",
+        "dependencies": []
+      },
+      {
+        "name": "tools",
+        "description": "Module with 1 files",
+        "dependencies": []
+      }
+    ]
+  }
+}
