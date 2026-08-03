@@ -137,5 +137,41 @@
     "failed": false,
     "usageAvailable": true,
     "id": "797a1513-d1fe-4e36-9fc2-d574ed27ab40"
+  },
+  {
+    "taskType": "decompose-task",
+    "requestId": "692ac462-5359-40f3-b179-19145fac590c",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "estimatedInputTokens": 8187,
+    "latencyMs": 79430,
+    "recordedAtMs": 1785768369635,
+    "files": [],
+    "callKind": "primary",
+    "actualInputTokens": 13132,
+    "actualOutputTokens": 7364,
+    "schemaValid": true,
+    "estimatedCostUsd": 0.149856,
+    "failed": false,
+    "usageAvailable": true,
+    "id": "8bc22709-f9f9-4cb0-b3bc-d97a1716798b"
+  },
+  {
+    "taskType": "extract-requirements",
+    "requestId": "5e4805a2-0935-4731-af8b-e64db3ffbfa5",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "estimatedInputTokens": 1352,
+    "latencyMs": 30562,
+    "recordedAtMs": 1785768400335,
+    "files": [],
+    "callKind": "primary",
+    "actualInputTokens": 724,
+    "actualOutputTokens": 2684,
+    "schemaValid": true,
+    "estimatedCostUsd": 0.042432000000000004,
+    "failed": false,
+    "usageAvailable": true,
+    "id": "4ab86ba6-31dd-4a53-8f83-d0a56d9148c1"
   }
 ]

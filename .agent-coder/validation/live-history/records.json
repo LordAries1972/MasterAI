@@ -2,17 +2,6 @@
   {
     "relativePath": "src/web_ui.cpp",
     "languageId": "cpp",
-    "contentHash": "d2cff6559345fc90df98543d7a84b0babbd174e7c8cb2ab4b7d4c728d53c976d",
-    "documentVersion": 91,
-    "timestampMs": 1785469084408,
-    "outcome": "tool-unavailable",
-    "toolIdentity": "g++/clang++/cl",
-    "durationMs": 0,
-    "diagnosticFingerprints": []
-  },
-  {
-    "relativePath": "src/web_ui.cpp",
-    "languageId": "cpp",
     "contentHash": "365a026d25647cc87a8bef71bc881250b0ad96cd1da088bda6080f3bf57afe9f",
     "documentVersion": 92,
     "timestampMs": 1785469093394,
@@ -5487,6 +5476,17 @@
     "timestampMs": 1785624727442,
     "outcome": "tool-unavailable",
     "toolIdentity": "g++/clang++/cl",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "docs/PLAN.md",
+    "languageId": "markdown",
+    "contentHash": "1b507c706504a2a016151ed4dd11fc76a6658ae55d91e1d1ac148a5f9fee245d",
+    "documentVersion": 3,
+    "timestampMs": 1785769250510,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
     "durationMs": 0,
     "diagnosticFingerprints": []
   }
