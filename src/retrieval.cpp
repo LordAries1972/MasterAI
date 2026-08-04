@@ -412,6 +412,55 @@ RetrievalOutcome RetrievalPlanner::retrieve(
     return outcome;
 }
 
+RetrievalEvaluationReport evaluate_retrieval_quality(
+    ProjectIndexService& indexes, const RetrievalPlanner& planner,
+    RetrievalRequest request,
+    const std::vector<RetrievalEvaluationCase>& cases) {
+    RetrievalEvaluationReport report;
+    report.cases = cases.size();
+    for (const auto& item : cases) {
+        request.query_text = item.query_text;
+        const auto started = std::chrono::steady_clock::now();
+        const auto hybrid = planner.retrieve(request);
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        if (elapsed > request.deadline + std::chrono::milliseconds(100)) {
+            ++report.deadline_violations;
+        }
+        if (hybrid.context_text.size() > request.maximum_context_bytes + 4096U) {
+            ++report.context_budget_violations;
+        }
+        bool hybrid_hit =
+            hybrid.context_text.find(item.expected_context_marker) !=
+            std::string::npos;
+        if (hybrid_hit) {
+            hybrid_hit = std::any_of(
+                hybrid.disclosure.begin(), hybrid.disclosure.end(),
+                [&](const RetrievalDisclosureEntry& entry) {
+                    return entry.included &&
+                           entry.relative_path == item.expected_relative_path;
+                });
+        }
+        if (hybrid_hit) ++report.hybrid_hits;
+
+        const auto baseline = indexes.search_text(
+            request.project.id, item.query_text,
+            static_cast<std::size_t>(request.maximum_total_chunks));
+        const bool baseline_hit = std::any_of(
+            baseline.chunks.begin(), baseline.chunks.end(),
+            [&](const IndexChunk& chunk) {
+                return chunk.relative_path == item.expected_relative_path &&
+                       chunk.text.find(item.expected_context_marker) !=
+                           std::string::npos;
+            });
+        if (baseline_hit) ++report.full_text_hits;
+    }
+    report.improved = report.cases > 0U &&
+                      report.hybrid_hits > report.full_text_hits &&
+                      report.deadline_violations == 0U &&
+                      report.context_budget_violations == 0U;
+    return report;
+}
+
 // Chooses the least expensive sufficient strategy across an explicit staged
 // list: stage 1 (interactive priority) is exact symbol matches on
 // identifier-shaped tokens, the cheapest, highest-precision probe; stage 2

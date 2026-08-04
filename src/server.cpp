@@ -275,6 +275,8 @@ public:
         // avoids reallocation churn as it fills on the first hot minute.
         request_times.reserve(value.rate_limit_per_minute);
         records.open();
+        advanced_optimizations =
+            std::make_unique<AdvancedOptimizationRegistry>(records);
         const auto hardware = probe_hardware(value.runtime_root);
         const auto profile =
             value.resource_profile == "minimal"
@@ -561,6 +563,14 @@ public:
             } else if (request.method == "POST" &&
                        request.target == "/api/v1/performance/baseline") {
                 required_scope = "metrics.write";
+            } else if (request.method == "GET" &&
+                       request.target ==
+                           "/api/v1/performance/advanced-optimizations") {
+                required_scope = "metrics.read";
+            } else if (request.method == "POST" &&
+                       request.target ==
+                           "/api/v1/performance/advanced-optimizations") {
+                required_scope = "settings.manage";
             } else if (request.method == "POST" &&
                        request.target == "/api/v1/projects") {
                 required_scope = "projects.write";
@@ -1013,9 +1023,10 @@ public:
                                 "{\"error\":\"calibration_failed\"}");
             }
         }
-        // Phase 20: framework-only listing -- every feature reports
-        // enabled=false; see docs/PLAN.md section 25 and
-        // AdvancedOptimizationRegistry.
+        // Phase 20: durable evidence/admission registry. GET is read-only;
+        // POST records evidence, explicitly admits a validated implemented
+        // capability, or disables it without changing the safe Phase 19
+        // profile.
         if (request.method == "GET" &&
             request.target == "/api/v1/performance/advanced-optimizations") {
             if (user->role != UserRole::administrator) {
@@ -1026,8 +1037,88 @@ public:
                 200, "OK",
                 "{\"features\":" +
                     advanced_optimization_registry_json(
-                        advanced_optimizations.features()) +
-                    "}");
+                        advanced_optimizations->features()) +
+                    ",\"safeProfileAvailable\":true}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/performance/advanced-optimizations") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                const auto root = parse_json(request.body);
+                const auto feature = root.required("feature").as_string();
+                const auto action = root.required("action").as_string();
+                if (action == "record-evidence") {
+                    if (root.as_object().size() != 3U) {
+                        throw std::invalid_argument("unexpected evidence field");
+                    }
+                    const auto& value = root.required("evidence");
+                    if (value.as_object().size() != 13U) {
+                        throw std::invalid_argument("unexpected evidence field");
+                    }
+                    const auto peak =
+                        value.required("peakResidentMemoryBytes").as_integer();
+                    if (peak <= 0) {
+                        throw std::invalid_argument("invalid peak memory");
+                    }
+                    AdvancedOptimizationEvidence evidence;
+                    evidence.feature_name = feature;
+                    evidence.baseline_description =
+                        value.required("baselineDescription").as_string();
+                    evidence.changed_setting =
+                        value.required("changedSetting").as_string();
+                    evidence.host_hash = value.required("hostHash").as_string();
+                    evidence.model_sha256 =
+                        value.required("modelSha256").as_string();
+                    evidence.backend_hash =
+                        value.required("backendHash").as_string();
+                    evidence.time_to_first_token_ms =
+                        value.required("timeToFirstTokenMs").as_double();
+                    evidence.prompt_throughput_tokens_per_second =
+                        value.required("promptThroughputTokensPerSecond")
+                            .as_double();
+                    evidence.generation_throughput_tokens_per_second =
+                        value.required("generationThroughputTokensPerSecond")
+                            .as_double();
+                    evidence.peak_resident_memory_bytes =
+                        static_cast<std::uint64_t>(peak);
+                    evidence.quality_notes =
+                        value.required("qualityNotes").as_string();
+                    evidence.power_thermal_notes =
+                        value.required("powerThermalNotes").as_string();
+                    evidence.regression_detected =
+                        value.required("regressionDetected").as_boolean();
+                    evidence.fallback_verified =
+                        value.required("fallbackVerified").as_boolean();
+                    advanced_optimizations->record_evidence(feature, evidence);
+                } else {
+                    if (root.as_object().size() != 2U) {
+                        throw std::invalid_argument("unexpected action field");
+                    }
+                    if (action == "admit") {
+                        advanced_optimizations->admit(feature);
+                    } else if (action == "disable") {
+                        advanced_optimizations->disable(feature);
+                    } else {
+                        throw std::invalid_argument("unknown action");
+                    }
+                }
+                audit.append("performance.advanced-optimization", user->id,
+                             "success", feature + ":" + action);
+                return response(
+                    200, "OK", "{\"features\":" +
+                        advanced_optimization_registry_json(
+                            advanced_optimizations->features()) +
+                        ",\"safeProfileAvailable\":true}");
+            } catch (const std::exception&) {
+                audit.append("performance.advanced-optimization", user->id,
+                             "denied", "invalid-or-unadmitted");
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"advanced_optimization_rejected\"}");
+            }
         }
         // Machine Learning foundation phase: Dashboard is the only real
         // interface behind this route so far -- see MachineLearningRegistry's
@@ -4100,11 +4191,17 @@ private:
     // failure to the user.
     void warm_model_async(const std::string& model_id) const {
         if (inference == nullptr) return;
+        bool expected = false;
+        if (!model_warm_in_progress.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel)) {
+            return;
+        }
         std::thread([this, model_id]() {
             try {
                 ensure_model_loaded(model_id);
-            } catch (const std::exception&) {
+            } catch (...) {
             }
+            model_warm_in_progress.store(false, std::memory_order_release);
         }).detach();
     }
 
@@ -4198,6 +4295,13 @@ private:
     }
 
     void ensure_model_loaded(const std::string& model_id) const {
+        // A background pre-warm and the first foreground message can reach
+        // this boundary at the same time. The first caller owns the bounded
+        // load; later callers wait here, then re-read the final runner state
+        // instead of rejecting RunnerState::starting as "not available".
+        // This also prevents two load attempts from racing the single runner
+        // and its one authoritative memory lease.
+        std::lock_guard<std::mutex> load_lock(model_load_mutex);
         const auto current = inference->metrics();
         if (current.state == RunnerState::ready &&
             current.model_id == model_id) {
@@ -4876,9 +4980,15 @@ private:
     std::unique_ptr<BenchmarkStore> benchmarks;
     std::unique_ptr<server_internal::WorkloadHttpController> workloads;
     std::unique_ptr<MemoryBudgetManager> memory;
-    // Phase 30A: guards runner_weights_lease_id against ensure_model_loaded()
-    // being entered concurrently (warm_model_async() detaches a background
-    // thread that races the synchronous send_chat_message() call path).
+    // Serializes the complete single-runner load/unload decision. A browser
+    // message arriving during best-effort pre-warm waits for that same
+    // bounded load rather than observing `starting` and failing immediately.
+    mutable std::mutex model_load_mutex;
+    // Coalesces repeated page-open/chat-create/model-change warm requests;
+    // foreground ensure_model_loaded() calls still wait on model_load_mutex.
+    mutable std::atomic_bool model_warm_in_progress{false};
+    // Phase 30A: guards the runner weight lease itself. Kept separate from
+    // model_load_mutex because release paths outside load also use it.
     mutable std::mutex runner_admission_mutex;
     mutable std::string runner_weights_lease_id;
     // Phase 30A deliverable 3 (docs/PLAN.md Phase 30A): enforces
@@ -4908,9 +5018,9 @@ private:
     // so it only exists when inference.llamaServerExecutable is configured.
     std::unique_ptr<TuningProfileStore> tuning_profiles;
     std::unique_ptr<CalibrationService> calibration;
-    // Phase 20: framework-only registry, always constructible (no runner
-    // dependency, no persistence) -- see docs/PLAN.md section 25.
-    AdvancedOptimizationRegistry advanced_optimizations;
+    // Phase 20: durable, administrator-controlled evidence/admission state.
+    // Declared after records, which outlives it; constructed after open().
+    std::unique_ptr<AdvancedOptimizationRegistry> advanced_optimizations;
     // Machine Learning foundation phase: same shape as
     // advanced_optimizations above -- always constructible, no persistence,
     // administrator-only. See docs/PLAN.md "Machine Learning Abilities".

@@ -229,11 +229,14 @@ The current source includes native implementations for:
   which changed fields need a restart. The one remaining deliverable is the
   matched `auto`-vs-`cpu_only` real-model benchmark matrix, which needs a
   pinned local GGUF and dedicated hardware run.
-- A framework-only registry for optional advanced-throughput candidates
-  (continuous batching, speculative decoding, NUMA affinity, storage
-  prefetch, multiple warm runners, GPU/CPU KV placement), every one
-  disabled by default with no code path able to enable it until its own
-  evidence is produced.
+- A durable, administrator-controlled Phase 20 registry for optional
+  advanced-throughput candidates (continuous batching, speculative decoding,
+  NUMA affinity, storage prefetch, multiple warm runners, GPU/CPU KV
+  placement). Evidence records are strictly validated and restart-safe;
+  recording evidence never enables a feature; admission additionally requires
+  a wired implementation, no recorded regression, and a verified fallback;
+  every admitted feature remains independently disableable. The safe Phase 19
+  profile is always retained. No optional candidate is currently admitted.
 - A native asynchronous storage and prefetch engine (`IAsyncFileReader`):
   IOCP-backed overlapped reads on Windows and a bounded worker-pool `pread`
   fallback on POSIX, adjacent-request read coalescing, an adaptive
@@ -324,22 +327,22 @@ Status below reflects the evidence recorded in
 | 2 | Identity and security baseline | Complete |
 | 3 | Model registry and hardware assessment | Complete |
 | 4 | First isolated inference adapter | Complete; real pinned backend/GGUF path validated |
-| 5 | Chat and project web application | Implemented; browser visual and optional voice checks pending |
-| 6 | Secure resumable downloads | Implemented; interrupted real HTTPS transfer check pending |
+| 5 | Chat and project web application | Complete; actual-browser real-model chat validated |
+| 6 | Secure resumable downloads | Complete; interrupted immutable HTTPS resume and digest promotion validated |
 | 7 | Reproducible benchmarking | Complete; same-host real-model comparison validated |
-| 8 | Inbound MCP | Implemented; live supported IDE/inspector connection pending |
+| 8 | Inbound MCP | Complete; live project-bound independent-inspector connection validated |
 | 9 | Outbound MCP | Complete |
-| 10 | IDE integrations | Native boundary implemented; host packaging and live-IDE checks pending |
+| 10 | IDE integrations | Complete; VS Code and Visual Studio 2022 hosts live-validated |
 | 11 | Operations hardening | Complete |
 | 12 | Measured control-plane optimization | Complete for measured native scope |
 | 13 | Query measurement and resource baseline | Complete |
 | 14 | Bounded-memory foundation | Complete |
 | 15 | Incremental disk-backed indexing | Complete; deeper symbol extraction remains a forward enhancement |
-| 16 | Deadline-bound hybrid retrieval | Implemented; authored retrieval-quality evaluation set pending |
-| 17 | Security-partitioned cache hierarchy | Implemented; representative-query latency benchmark pending |
+| 16 | Deadline-bound hybrid retrieval | Complete; authored hybrid-vs-full-text evaluation passes |
+| 17 | Security-partitioned cache hierarchy | Complete; representative cache latency benchmark passes |
 | 18 | Prompt-prefix and KV/session reuse | Complete; real repeated-turn prefix reuse validated |
-| 19 | Hardware/model calibration | Implemented; comparative tuning evidence still pending |
-| 20 | Optional advanced throughput | Scaffolding only; every candidate remains disabled and unimplemented |
+| 19 | Hardware/model calibration | Comparative Qwen 3B offload/throughput matrix validated; broader semantic-quality scoring remains forward work |
+| 20 | Optional advanced throughput | Complete admission layer; all candidates remain disabled by default |
 | 21 | Native asynchronous storage and prefetch engine | Implemented at a scoped-down level; no Linux `io_uring` adapter |
 | 22 | Hierarchical content and model-data caching | Implemented at a scoped-down level |
 | 23 | Tokenization, template, and prompt-fragment caching | Implemented at a scoped-down level |
@@ -383,6 +386,11 @@ Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
 WSL. Release packaging certification on the pinned Ubuntu 24.04 and Debian 13
 hosts is still outstanding.
+
+Phase 1 was revalidated on the current tree on 5 August 2026 without an
+additional rebuild: the Windows Debug native suite passed, both loopback health
+endpoints returned HTTP 200 on port 7070, and the documented graceful-stop path
+completed successfully.
 
 Phase 15 has a bounded native indexing service, affected-path updates,
 typed/coalesced trigger admission, disk-generation recovery tests, a native
@@ -749,6 +757,9 @@ MASTERAI_LLAMA_SERVER
 MASTERAI_CURL
 ```
 
+These approved overrides are resolved consistently by the service and every
+settings-backed operational CLI command.
+
 Unknown fields are rejected unless they belong to an explicitly approved
 extension namespace. Changes are written through temporary files and atomic
 replacement.
@@ -837,7 +848,9 @@ The native service provides browser workflows for:
 - Ready-model selection and loading, with best-effort background model
   pre-warming triggered the moment a chat is opened, created, or its model
   is switched — instead of only starting the cold load once the first
-  message is sent — so the runner has a head start on the wait
+  message is sent — so the runner has a head start on the wait. Concurrent
+  first-message loads wait on that same bounded operation, and duplicate
+  background warm requests are coalesced
 - Incrementally streamed responses and cancellation
 - Bounded UTF-8 source/text attachments
 - Model inventory and suitability, including a cached verification state so
@@ -933,10 +946,12 @@ See:
 - [Visual Studio integration](docs/ide/visual-studio.md)
 - [IDE integration contract](docs/ide/integration-contract.md)
 
-The native contracts are implemented. JavaScript/TypeScript VS Code packaging
-and managed Visual Studio VSIX glue are outside the project's current
-C++17/Assembly language authorization, and live-host exit validation remains
-pending.
+The native contracts and narrowly authorized host adapters are implemented.
+The VS Code extension under `integrations/vscode` stores its token in VS Code
+`SecretStorage`; the Visual Studio 2022 VSIX under `integrations/visual-studio`
+uses current-user DPAPI. Both launch the native `mcp-stdio` profile without a
+shell or plaintext credential and were live-validated on 5 August 2026 against
+protocol `2025-11-25`, discovering four project-bound tools.
 
 ## Command-line interface
 
@@ -1094,9 +1109,16 @@ compatible prompt/KV reuse, and host-specific calibration are now
 implemented on top of that foundation (Phases 16–19 in the status table
 above). Phase 18's real-model repeated-turn reuse check is complete; Phases
 16, 17, and 19 retain the evaluation or comparative evidence listed in the
-status table. Optional advanced-throughput features (Phase 20) exist only as
-a disabled-by-default registry scaffold — no candidate's optimization logic
-is implemented.
+status table. Phase 20 now provides durable evidence review, explicit
+admission, independent disable, implementation-availability checks, audit,
+and safe-profile fallback through `GET`/`POST
+`/api/v1/performance/advanced-optimizations`. The optional candidates remain
+disabled until their individual measurements satisfy that gate. The POST
+contract accepts `record-evidence`, `admit`, or `disable`; evidence recording
+requires the baseline/change, host/model/backend SHA-256 identities, TTFT,
+prompt and generation throughput, peak resident memory, quality and
+power/thermal notes, regression decision, and fallback result. Admission is a
+separate action and cannot succeed without a wired native implementation.
 
 A further, scoped-down layer (Phases 21–30) adds asynchronous storage and
 prefetch, hierarchical content caching, tokenization/prompt-fragment caching,
@@ -1146,6 +1168,7 @@ MasterAI/
 ├── scripts/    CMake, build, test, lifecycle, clean, and service automation
 ├── src/        Native ISO C++17 production source
 ├── test/       Native test cases and isolated fixtures
+├── integrations/ Thin, authorized VS Code and Visual Studio host glue
 ├── .gitignore  Generated binary, build, model, archive, and editor exclusions
 ├── LICENSE     MIT license
 └── README.md   Current GitHub project overview
@@ -1199,9 +1222,9 @@ Near-term work is:
 3. Complete the Phase 19 comparative calibration evidence and the Phase 30A
    matched `auto`-versus-`cpu_only` real-model benchmark matrix; add GPU
    utilization/thermal-trend probing only if an approved vendor SDK is adopted.
-4. Evaluate Phase 20 throughput options independently, each with its own
-   baseline and evidence, and only after all prerequisite gates pass — the
-   registry scaffold does not pre-approve any candidate.
+4. Evaluate Phase 20 throughput options independently after prerequisite
+   evidence closes; use the durable admission API and never enable an
+   unavailable, regressing, or fallback-unverified candidate.
 5. Longer term: evaluate deeper language-aware symbol extraction for
    Phase 15.
 6. Close the documented scope trims across Phases 21–30, including Linux
@@ -1217,13 +1240,10 @@ Near-term work is:
 
 Outstanding operational certification also includes:
 
-- Real-model browser rendering and generation cancellation validation
-- A deliberately interrupted and resumed real HTTPS model transfer
-- Live inbound MCP connection from a supported IDE or independent inspector
-- Live IDE-host validation
+- Real-model browser generation-cancellation validation
 - Ubuntu 24.04 and Debian 13 packaging-host certification
 - Optional pinned `whisper.cpp` integration, if enabled
-- Phase 19 comparative calibration evidence
+- Broader Phase 19 semantic-quality scoring beyond the fixed successful calibration workload
 - Phase 30A matched `auto`-versus-`cpu_only` real-model benchmark matrix
 
 The detailed roadmap, deliverables, dependencies, installation outcomes, and

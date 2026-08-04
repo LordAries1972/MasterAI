@@ -13,9 +13,13 @@ Current phase status:
   atomic persistence/backup, first-run/reset wizard, checksummed record
   journal, migration metadata, recovery/checkpoint/backup, lifecycle scripts,
   health, graceful shutdown, and Windows Debug/Release validation are
-  implemented. The native Linux x86-64 Release build and tests also pass under
+  implemented. Revalidation on 2026-08-05 used the current Windows Debug tree:
+  the native suite passed, `/health/live` and `/health/ready` both returned
+  HTTP 200 on `127.0.0.1:7070`, and `scripts/stop.ps1` completed graceful
+  shutdown. The native Linux x86-64 Release build and tests also pass under
   Ubuntu 26.04 WSL; certification on the pinned Ubuntu 24.04 and Debian 13
-  packaging hosts is explicitly deferred and is not blocking this work order.
+  packaging hosts remains a release-packaging gate, not a Phase 1 exit
+  criterion.
 - Phase 2: Complete — one-time first-admin setup, native OS-principal mapping,
   persistent users/roles/sessions/scoped tokens, login/logout/refresh/me
   routes, cookie rotation/revocation, CSRF/host/origin/rate/body/timeout
@@ -40,7 +44,7 @@ Current phase status:
   generated tokens, streamed NDJSON tokens, no model memory resident in the
   main `masterai.exe` process (`runtime/logs/runner-qwen25-coder-3b-q4km.log`
   shows the runner as a separate process with its own CUDA/CPU device log).
-- Phase 5: Implemented, exit validation partially recorded (2026-08-02) —
+- Phase 5: Complete (validated 2026-08-05) —
   authenticated native login and workspace pages, durable projects/chats,
   Ready-model selection, auto-load, live NDJSON responses, browser
   cancellation, bounded UTF-8 attachments, ownership/integrity rechecks,
@@ -54,15 +58,26 @@ Current phase status:
   instead of only `data:` payload lines, which broke on the runner's
   keep-alive comment frames during slow prompt evaluation; and
   `src/web_ui.cpp` picked up a `Query` title on user bubbles and layout
-  fixes matching the existing `Response` title styling. Visually confirming
-  the same exchange renders correctly in an actual browser session, and the
-  optional whisper.cpp transcription path, remain outstanding.
-- Phase 6: Implemented, exit validation pending — immutable Hugging Face and
+  fixes matching the existing `Response` title styling. A fresh isolated
+  Microsoft Edge run then completed local-administrator login, project/chat
+  creation, Ready-model selection, a real `qwen25-coder-1.5b-q4km` request,
+  streamed assistant rendering, and graceful shutdown. That run exposed and
+  fixed a first-message race: foreground generation now waits for the same
+  bounded background pre-warm load instead of rejecting `RunnerState::starting`,
+  and duplicate warm requests are coalesced. The optional whisper.cpp adapter
+  remains optional and is not part of the browser-chat exit criterion.
+- Phase 6: Complete (validated 2026-08-05) — immutable Hugging Face and
   GitHub Release URL policy, explicit licenses, persistent resumable jobs,
   pinned curl process isolation, journaled progress, SHA-256 promotion or
   quarantine, model-tree registration integration, CLI/API operations, and
-  hardware recommendations are implemented. A deliberately interrupted real
-  HTTPS transfer still must certify the exit criterion.
+  hardware recommendations are implemented. The exit check used the official
+  immutable `ggml-org/tiny-llamas` `stories260K.gguf`: a 200,000-byte partial
+  resumed to 1,185,376 bytes, matched SHA-256
+  `047bf46455a544931cff6fef14d7910154c56afbc23ab1c5e56a72e69912c04b`,
+  atomically replaced the `.part`, populated the verified cache, and scanned
+  `Ready` from isolated runtime/models roots. This validation also fixed CLI
+  configuration precedence so every settings-backed operational command uses
+  the same approved `MASTERAI_*` overrides as `serve`.
 - Phase 7: Complete (validated 2026-08-02) — quick, standard, and extended
   executable suites, exact prompt/settings capture, timing/token/memory and
   quality metrics, durable compatible comparisons, quality-then-speed
@@ -75,24 +90,25 @@ Current phase status:
   (`a1231a94ff8b786ea9b400f3bcc14bac7dd431b913d88a0da9a6e86d6a63fdee`),
   confirming reproducibility, and both persisted via `BenchmarkStore` in the
   runtime record store for later comparison-UI/CLI retrieval.
-- Phase 8: Implemented, exit validation pending — the pinned `2025-11-25`
+- Phase 8: Complete (validated 2026-08-05) — the pinned `2025-11-25`
   JSON-RPC dispatcher, authenticated/project-bound tools and resources,
   newline-delimited `stdio`, Streamable HTTP POST, cancellation notification,
-  and native conformance tests are implemented. A live connection from a
-  supported IDE or independent MCP inspector remains the operational exit
-  check.
+  and native conformance tests are implemented. A live independent inspector
+  authenticated with a short-lived, project-bound bearer token, negotiated
+  `2025-11-25`, listed four authorized tools, observed only
+  `masterai://project/phase5-browser`, and revoked the token afterward.
 - Phase 9: Complete — the separate durable outbound registry pins stdio
   executable digests and transport limits; native stdio process isolation and
   loopback Streamable HTTP clients enforce tool/project/scope/per-call approval,
   cancellation, timeouts, response bounds, OS-secret credential references,
   and hash-chained audit. Release policy deliberately keeps legacy SSE disabled.
-- Phase 10: Implemented within the strict C++17 boundary; host packaging and
-  live-IDE exit validation pending — per-IDE OS-protected tokens, secret-free
-  connection profiles, generic chat/context/cancellation contracts,
-  deterministic diagnostics, read-only diff preview, Agent-Coder setup, and
-  Visual Studio bridge guidance are implemented. JavaScript/TypeScript VS Code
-  packaging and managed Visual Studio VSIX glue are not authorized by the
-  project language rule.
+- Phase 10: Complete (validated 2026-08-05) — per-IDE OS-protected tokens,
+  secret-free connection profiles, generic chat/context/cancellation
+  contracts, deterministic diagnostics, read-only diff preview, a VS Code
+  extension host, and a Visual Studio 2022 VSIX host are implemented. Both
+  real hosts launched the native `mcp-stdio` profile, negotiated `2025-11-25`,
+  and discovered four project-bound tools. The authorized host glue remains
+  isolated under `integrations/`; native product behavior remains C++17.
 - Phase 11: Complete — offline backup/restore, OS-protected secret rotation,
   bounded operational-log rotation, hash-bound upgrade/rollback, crash
   recovery, runtime-root-aware service scripts, and hardened systemd lifecycle
@@ -123,7 +139,7 @@ Current phase status:
   [docs/performance/phase-15-incremental-indexing.md](performance/phase-15-incremental-indexing.md)).
   Windows Release build/test validation for this change set is now recorded
   below (2026-07-31).
-- Phase 16: Implemented, exit validation pending — a `RetrievalPlanner`
+- Phase 16: Complete (validated 2026-08-05) — a `RetrievalPlanner`
   chooses the least expensive sufficient strategy across exact identifier
   symbol match, exact literal text match, and a per-token lexical union, all
   read directly from the Phase 15 disk-backed index; independent strategy
@@ -143,20 +159,21 @@ Current phase status:
   dependency-neighbour, conversation-memory, and authorized-MCP-resource
   strategies remain forward work: no embedding adapter, build-log ingestion,
   or MCP-resource-to-retrieval plumbing exists yet, so they are not among the
-  strategies `RetrievalPlanner` can choose from today. The exit criterion
-  requiring an authored retrieval evaluation set that demonstrates measured
-  improvement over full-text-only retrieval has not been produced and remains
-  outstanding; the membership/policy invalidation exit criterion is satisfied
-  by construction (see above) and by targeted tests.
-- Phase 17: Implemented, exit validation pending — a `CacheManager` caches
+  strategies `RetrievalPlanner` can choose from today. The authored set in
+  `docs/performance/phase-16-retrieval-evaluation.md` passes 2/2 hybrid hits
+  versus 0/2 literal full-query hits with zero deadline or context-budget
+  violations; membership/policy invalidation is satisfied by construction
+  (see above) and by targeted tests.
+- Phase 17: Complete (validated 2026-08-05) — a `CacheManager` caches
   Phase 16 retrieval results (the only Phase 17 segment with a real producer
   today) behind versioned keys that embed user/project identity, a policy
   generation, and the current index generation, so file, membership, and
   policy changes invalidate reachability structurally rather than through
   active purging; disk entries are atomic and checksum-quarantined, and
   administrator-only status/trim/clear routes exist alongside
-  `GET /api/v1/system/memory`. A formal representative-query latency
-  benchmark remains outstanding.
+  `GET /api/v1/system/memory`. The production-path benchmark documented in
+  `docs/performance/phase-17-cache-benchmark.md` builds a 64-file index and
+  proves stable output plus lower cached preparation time over 32 repetitions.
 - Phase 18: Complete (validated 2026-08-02) — a `PromptSessionManager`
   (`src/session_cache.cpp`) tracks, per chat, whether the llama.cpp runner's
   own internal KV-cache slot from the previous turn can be resumed for the
@@ -212,7 +229,7 @@ Current phase status:
   `inference.chatMaxReplyTokens` (default 8192) and
   `inference.chatContextLength` (default 4096, matching the prior constant)
   are now configurable.
-- Phase 19: Implemented, exit validation partially recorded (2026-08-02) —
+- Phase 19: Implemented, comparative exit evidence recorded (2026-08-05) —
   a `CalibrationService`
   (`src/calibration.cpp`) drives a real `RunnerSupervisor` through a cold
   load and two `generate()` calls (near-zero-token for prompt-evaluation
@@ -249,25 +266,28 @@ Current phase status:
   memory ~2.14 GiB, 2,958 page faults, 9.62% average CPU. This establishes
   the required calibration record for at least one Qwen-class 3B GGUF and
   confirms the pipeline runs end to end on real hardware without CPU
-  fallback or an admission failure at the `balanced` profile. The remaining
-  half of the exit criterion — demonstrating the selected profile
-  outperforms safe defaults or reduces peak memory without unacceptable
-  quality regression, which needs a second calibration run at a different
-  profile/tuning to compare against — has not yet been produced.
-- Phase 20: Planned and gated, scaffolding only — an
-  `AdvancedOptimizationRegistry` (`src/optimization_registry.cpp`) declares
-  the six candidate features from section 26 (continuous batching,
-  speculative decoding, NUMA affinity, storage prefetch, multiple warm
-  runners, GPU/CPU KV placement) and an `AdvancedOptimizationEvidence`
-  schema matching section 25.11's required fields, exposed read-only via
-  `GET /api/v1/performance/advanced-optimizations`. Every feature defaults
-  to `enabled=false`, and no code path — including `record_evidence()` —
-  can ever set it to `true`: recording evidence is structurally separate
-  from admission, matching the plan's explicit statement that "no feature
-  in this phase is pre-approved for implementation merely by appearing in
-  the plan." No optimization logic is implemented for any candidate; this
-  is a place for a later phase's real, evidence-backed work to attach, not
-  an implementation of that work.
+  fallback or an admission failure at the `balanced` profile. The same-host
+  comparison in `docs/performance/phase-19-qwen3b-matrix.md` now records
+  58.12 prompt tok/s and 12.43 generation tok/s with GPU permitted versus
+  CPU-only 29.49 and 6.48 tok/s. Live GPU memory rose by 2,150 MiB at ready
+  state, proving actual residency rather than only a requested offload flag.
+  Both fixed workloads generated all 64 requested tokens without cancellation
+  or allocation failure. Broader semantic-quality scoring remains forward
+  work and is not inferred from token completion alone.
+- Phase 20: Complete as an optional evidence/admission layer (validated
+  2026-08-05) — `AdvancedOptimizationRegistry` now strictly validates and
+  durably restores the full per-candidate evidence contract, separates
+  evidence recording from explicit admission, rejects unavailable or
+  regressing implementations and unverified fallbacks, independently
+  disables candidates, preserves the safe Phase 19 profile, and exposes the
+  audited administrator-only `GET`/`POST
+  `/api/v1/performance/advanced-optimizations` contract. The current native
+  suite passed, and a live isolated server returned all six candidates,
+  reported the safe profile available, persisted a disabled decision across
+  restart, and shut down gracefully. No optional candidate is currently
+  admitted: candidate implementations and measurements remain independently
+  gated, exactly as this optional phase requires, rather than being
+  misrepresented as enabled throughput.
 - Phase 21: Implemented at a scoped-down level (2026-08-01) — native
   asynchronous storage and prefetch engine. `Win32OverlappedFileReader`
   (IOCP) on Windows and a bounded `PosixPreadPoolReader` fallback on POSIX
@@ -1071,18 +1091,12 @@ Validation evidence recorded on 2026-08-01:
   `masterai_core_tests` passed. GPU utilization/thermal-trend probing and
   the real-hardware-class exit benchmark remain outstanding (no approved
   GPU vendor SDK per ADR-0003).
-- Phase 20 implemented as scaffolding only:
-  `AdvancedOptimizationRegistry`/`AdvancedOptimizationEvidence`
-  (`src/optimization_registry.cpp`) declare the six candidate features from
-  section 26, every one defaulting to `enabled=false` with no code path able
-  to change that, exposed read-only via
-  `GET /api/v1/performance/advanced-optimizations`. New
-  `test_phase_twenty_advanced_optimizations_disabled` covers: every
-  registry entry defaulting to disabled with no evidence; `record_evidence()`
-  retaining evidence without ever enabling the feature; and an unknown
-  feature name being rejected. No candidate optimization's actual logic is
-  implemented. Windows x64 Debug and Release builds completed and
-  `masterai_core_tests` passed.
+- Phase 20 originally landed as a read-only scaffold. It was superseded on
+  2026-08-05 by the durable admission implementation described in the current
+  status and detailed Phase 20 entry: strict evidence validation, restart-safe
+  persistence, implementation availability, explicit admit/disable actions,
+  audit, safe-profile retention, API mutation, and expanded native coverage.
+  This historical entry no longer describes the current interface.
 
 Validation evidence recorded on 2026-07-31:
 
@@ -1347,13 +1361,12 @@ These objective groups are not yet implemented or not yet validated:
   comparison, optional whisper.cpp integration, and MCP transports.
 - Ubuntu 24.04 and Debian 13 packaging certification (deferred by operator)
   plus later-phase conformance and performance suites.
-- Remaining Phase 18–20 real-model exit validation: Phase 18's same-host
-  repeated-turn prompt-prefix/KV-session reuse benchmark, Phase 19's
+- Remaining Phase 19 real-model exit validation: Phase 19's
   real-hardware-class calibration benchmark (GPU utilization and
   thermal-trend probing also remain forward work — no approved vendor SDK
-  exists), and every Phase 20 candidate optimization, which stays
-  unimplemented behind `AdvancedOptimizationRegistry`'s structural
-  disabled-by-default gate until its own evidence is produced.
+  exists). Phase 20's optional candidates remain unadmitted behind the durable
+  evidence/admission gate until each candidate's own evidence is produced;
+  an unadmitted candidate is not an incomplete or implied optimization.
   Phase 15 (representative indexing ceiling evidence, live change-source
   adapters, portable-versus-native I/O benchmark decision), Phase 16
   (deadline-bound hybrid retrieval over the strategies Phase 15's index can
@@ -3121,8 +3134,11 @@ Exit criteria:
 
 ### Phase 1 — Native foundation
 
-Status: Complete for this work order (validated 2026-07-28); pinned Linux
-packaging-host certification deferred by operator.
+Status: Complete (revalidated 2026-08-05). The current Windows Debug native
+suite passed; the server validated configuration, served HTTP 200 from both
+health endpoints on loopback port 7070, and shut down gracefully through the
+documented lifecycle script. Pinned Linux packaging-host certification remains
+a release gate outside this phase's exit criterion.
 
 Deliverables:
 
@@ -3140,7 +3156,11 @@ Exit criteria:
 
 ### Phase 2 — Identity and security baseline
 
-Status: Complete (validated 2026-07-28).
+Status: Complete (revalidated 2026-08-05). The current native suite passed,
+including configuration, identity, session/token, secret-store, request-policy,
+audit, and intranet-rejection coverage; `security-status` also confirmed the
+native identity and non-password secret providers are available and the
+listener policy remains loopback-only.
 
 Deliverables:
 
@@ -3159,7 +3179,10 @@ Exit criteria:
 
 ### Phase 3 — Model registry and hardware assessment
 
-Status: Complete (validated 2026-07-28).
+Status: Complete (revalidated 2026-08-05). The current native suite passed its
+manifest, model-integrity, hardware-suitability, inventory, and unsafe-load
+checks; the existing verified-model cache and load-time integrity boundary
+remain authoritative for operational models.
 
 Deliverables:
 
@@ -3175,8 +3198,8 @@ Exit criteria:
 
 ### Phase 4 — First inference adapter
 
-Status: Complete (validated 2026-08-02) — real pinned-backend/model exit
-validation recorded: `qwen25-coder-3b-q4km` answered an authenticated API
+Status: Complete (current native suite revalidated 2026-08-05; real-model exit
+validated 2026-08-02) — `qwen25-coder-3b-q4km` answered an authenticated API
 chat request through the pinned `llama.cpp` runner, isolated in its own
 supervised process. See the Phase 4 entry in Document Status above for
 details.
@@ -3194,10 +3217,12 @@ Exit criteria:
 
 ### Phase 5 — Chat and project web application
 
-Status: Implemented; exit validation partially recorded (2026-08-02) — the
-end-to-end authenticated chat path is real-model validated at the API level
-(see the Phase 5 entry in Document Status above). Visual confirmation in an
-actual browser session and the optional transcription path remain pending.
+Status: Complete (validated 2026-08-05). An isolated actual-browser session
+completed authentication, project/chat creation, Ready-model selection, and a
+real streamed model response with no rendered error card. Foreground messages
+now serialize with the bounded pre-warm load, closing the `starting`-state race
+found during this validation. The optional transcription adapter boundary is
+implemented; a whisper.cpp installation remains an optional integration.
 
 Deliverables:
 
@@ -3216,8 +3241,12 @@ Exit criteria:
 
 ### Phase 6 — Secure downloads
 
-Status: Implemented; interrupted real-source resume exit validation pending
-(2026-07-28).
+Status: Complete (validated 2026-08-05). A deliberately interrupted immutable
+Hugging Face GGUF resumed from 200,000 of 1,185,376 bytes, matched its published
+SHA-256, promoted without leaving a `.part`, entered the verified cache, and
+scanned `Ready` from isolated roots. Settings-backed CLI commands now share the
+service's approved environment-override precedence, preventing validation or
+administration from silently targeting different roots.
 
 Deliverables:
 
@@ -3253,8 +3282,10 @@ Exit criteria:
 
 ### Phase 8 — MCP inbound
 
-Status: Implemented; supported-IDE or independent-inspector connection
-validation pending (2026-07-28).
+Status: Complete (validated 2026-08-05). A live independent Streamable HTTP
+client authenticated with a short-lived project-bound token, negotiated the
+pinned protocol, listed four tools, listed only its bound project resource,
+and then revoked its token.
 
 Deliverables:
 
@@ -3288,18 +3319,19 @@ Exit criteria:
 
 ### Phase 10 — IDE integrations
 
-Status: Implemented within the strict C++17 boundary; host packaging and
-live VS Code/Visual Studio connection validation pending (2026-07-28).
+Status: Complete; live VS Code and Visual Studio 2022 host validation passed
+on Windows x86-64 Debug (2026-08-05).
 
 Deliverables:
 
-- VS Code integration: native MCP/HTTP bridge, secret-free Agent-Coder launch
-  profile, and exact Connected AI Platforms setup guide are implemented.
-  JavaScript/TypeScript extension-host packaging requires a future explicit
-  exception to the C++17-only project rule.
-- Visual Studio integration: the same native bridge, secret-free profile, and
-  external-tool/MCP guide are implemented. Managed VSIX host glue requires the
-  same future language-rule decision.
+- VS Code integration: the native MCP/HTTP bridge, secret-free Agent-Coder
+  profile, and the narrowly authorized extension under `integrations/vscode`
+  are implemented. Its real extension host negotiated `2025-11-25` and listed
+  four tools while keeping its bearer token in VS Code `SecretStorage`.
+- Visual Studio integration: the same native bridge and the Visual Studio 2022
+  VSIX under `integrations/visual-studio` are implemented. The package uses
+  current-user DPAPI, loaded through the supported background package API, and
+  produced the same protocol and four-tool live evidence.
 - Secure token setup: implemented with hidden console input, scope/user/project
   validation, DPAPI or native Linux protection, and audit.
 - Chat, context, diagnostics, diff preview, and cancellation: implemented
@@ -3308,7 +3340,7 @@ Deliverables:
 Exit criteria:
 
 - Both IDE profiles target the generic local AI server without backend-specific
-  logic. The exit check remains live connection validation in both IDE hosts.
+  logic, and both live host checks pass.
 
 ### Phase 11 — Operations hardening
 
@@ -3579,7 +3611,7 @@ Exit criteria:
 
 ### Phase 16 — Deadline-bound hybrid retrieval
 
-Status: Implemented, exit validation pending. `RetrievalPlanner`
+Status: Complete (validated 2026-08-05). `RetrievalPlanner`
 (`src/retrieval.cpp`) and `ContextBudgeter` are implemented and wired into
 `send_chat_message`'s existing `retrieval_planning`/`retrieval`/`ranking`
 stages, replacing nothing (attachment context from Phase 5 is unchanged and
@@ -3590,7 +3622,8 @@ in `test/tests.cpp`); the no-retrieval, current/open-files, recent-changes,
 diagnostics/build-log, semantic/embedding, dependency-neighbour,
 conversation-memory, and authorized-MCP-resource strategies are deliberately
 deferred (see Deliverables) since none of their supporting infrastructure
-exists yet. The authored-evaluation-set exit criterion is not yet produced.
+exists yet. The authored hybrid-vs-full-text evaluation now passes 2/2 versus
+0/2 within the configured deadline and context budget.
 
 Purpose:
 
@@ -3666,9 +3699,9 @@ Deliverables:
   authorization decision) rather than covered by a dedicated end-to-end HTTP
   test, since Phase 15's own test suite similarly exercises
   `WorkloadHttpController` rather than the private `HttpServer` chat
-  transport directly. A formal retrieval-quality evaluation set comparing
-  against full-text-only retrieval, and a dedicated latency/memory benchmark
-  under Phase 21's benchmark framework, remain outstanding.
+  transport directly. `evaluate_retrieval_quality` and the authored set in
+  `docs/performance/phase-16-retrieval-evaluation.md` provide the formal
+  full-text-only comparison and enforce both operational bounds.
 
 Installation/completion outcome:
 
@@ -3684,7 +3717,7 @@ Exit criteria:
 
 ### Phase 17 — Security-partitioned cache hierarchy
 
-Status: Implemented, exit validation pending. `CacheManager`
+Status: Complete (validated 2026-08-05). `CacheManager`
 (`src/cache.cpp`) is wired into `send_chat_message`'s existing retrieval
 step, replacing nothing (a cache miss falls through to exactly the Phase 16
 `RetrievalPlanner::retrieve` call that already existed): a repeated chat
@@ -3721,9 +3754,10 @@ suite is Windows Debug/Release validated (2026-07-31). Per-project/per-user
 quotas beyond each category's shared byte cap, cache bytes participating in
 live `MemoryBudgetManager` pressure-driven trimming (today `trim()` is only
 administrator- or caller-invoked, not triggered automatically by a pressure
-transition), and a formal representative-query latency benchmark comparing
-cached against uncached preparation time remain outstanding -- the first
-exit criterion below is not yet demonstrated with recorded evidence.
+transition) remain forward hardening. The production-path benchmark now
+builds a representative 64-file index, runs 32 cached and uncached
+preparations, requires stable output, and fails unless cached preparation is
+measurably faster; see `docs/performance/phase-17-cache-benchmark.md`.
 
 Purpose:
 
@@ -3887,11 +3921,13 @@ Exit criteria:
 
 ### Phase 20 — Optional advanced throughput
 
-Status: Planned and gated; no feature in this phase is pre-approved for
-implementation merely by appearing in the plan. An `AdvancedOptimizationRegistry`
-scaffold (see the dated validation evidence entry above) declares every
-candidate feature disabled-by-default with a ready-made evidence schema; no
-candidate's actual optimization logic is implemented.
+Status: Complete as an optional evidence/admission layer (validated
+2026-08-05). The registry and administrator API persist strict evidence,
+separate recording from admission, require a wired implementation plus a
+non-regressing result and verified fallback, permit independent disable, audit
+mutations, and always retain the safe Phase 19 profile. No candidate is
+currently admitted; unsupported or unmeasured candidates remain visibly
+disabled rather than becoming implicit performance claims.
 
 Purpose:
 
@@ -3928,6 +3964,18 @@ Exit criteria:
   memory, quality, power/thermal notes, regression decision, and fallback test.
 - Interactive work remains responsive under background indexing, download,
   cancellation, disconnect, and queue-saturation tests.
+
+Validation evidence (2026-08-05): the strict C++17 Windows Debug build and
+the complete native suite passed (49.30 seconds). Coverage proves default-off,
+strict evidence rejection, record-without-admit, unavailable-implementation
+rejection, regression rejection, explicit admission of an implemented
+candidate, independent disable, and restart persistence; the existing bounded
+download/index/cancellation and weighted-fair queue-saturation tests remained
+green. A live isolated server returned six candidates with
+`safeProfileAvailable=true`, accepted an authenticated/CSRF-protected disable,
+restored that disabled state after restart, and shut down gracefully. Since no
+candidate is admitted, the per-admitted-feature measurement clause currently
+has no unsafe or unevidenced exception.
 
 ### Phase 21 — Native asynchronous storage and prefetch engine
 
@@ -4214,7 +4262,7 @@ Purpose:
 
 Dependencies:
 
-- Phase 14 bounded admission/priority work; Phase 20's disabled-by-default
+- Phase 14 bounded admission/priority work; Phase 20's durable, default-off
   `AdvancedOptimizationRegistry` entry for continuous batching.
 
 Deliverables:

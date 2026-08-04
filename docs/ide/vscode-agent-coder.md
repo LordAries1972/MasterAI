@@ -40,8 +40,9 @@ approve itself. Agent-Coder's authenticated prompt and policy still apply, and
 MasterAI independently enforces its registry, allow-list, project, scope, and
 per-call approval boundary.
 
-This implementation session prepared and validated the MasterAI side and
-confirmed Agent-Coder's MCP client and live validation settings are enabled. An
-interactive VS Code user must perform **Save & Start** because this API session
-cannot operate the extension UI.
-
+For a direct host, install the extension in `integrations/vscode`, set
+`masterai.serverUrl` and `masterai.executable`, then use **MasterAI: Store
+Scoped Token**. The adapter keeps the token in VS Code `SecretStorage` and
+offers diagnostics, read-only diff preview, chat, cancellation, and native MCP
+profile validation. Its real extension host was validated on 5 August 2026
+against MCP `2025-11-25` with four project-bound tools.

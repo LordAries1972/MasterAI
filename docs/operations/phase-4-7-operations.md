@@ -149,6 +149,7 @@ integrity, resumable download-job restoration and quarantine policy, and
 benchmark compatibility, persistence, and recommendation ordering.
 
 That fixture proves MasterAI orchestration behavior without claiming real-model
-quality or performance. Before release, run the same flows with the pinned
-`llama.cpp` build, a verified programming GGUF, an interrupted real HTTPS
-download, and the target host's quick/standard/extended benchmarks.
+quality or performance. The pinned `llama.cpp`/verified-programming-GGUF flow,
+same-host model comparison, and deliberately interrupted immutable HTTPS resume
+have current operational evidence in `docs/PLAN.md`. Repeat them on each target
+release host when backend, model, transport, or platform identity changes.

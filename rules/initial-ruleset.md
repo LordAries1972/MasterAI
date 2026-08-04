@@ -2,9 +2,11 @@
 
 These rules apply to the `F:\Projects\C++\MasterAI` project and all work produced for it.
 
-1. Project and produced code must use either Assembly or C++ Standard 17.
+1. Project and produced code must use either Assembly or C++ Standard 17,
+   except for the narrow Phase 10 host-glue exception in rule 27.
 2. Save all documents in `docs/`.
-3. Save all produced source code in `src/`.
+3. Save all native product source code in `src/`; rule 27's IDE-only host glue
+   lives under `integrations/` so it cannot be confused with the control plane.
 4. Always save all LLM/AI models in `models/`.
 5. Save test scripts, CMake compile scripts, and scripts used by the system in `scripts/`.
 6. Generated code must always be strictly optimal and secure, using proper syntax and formatting, including `#define` and `#ifdef` directives.
@@ -33,3 +35,9 @@ These rules apply to the `F:\Projects\C++\MasterAI` project and all work produce
 26. After any explicitly authorized Linux or WSL testing finishes, fails, or times out, always shut down the WSL service and verify that it is stopped before handoff. Never report WSL as stopped without confirmation.
 25. When MasterAI validation requires real model artifacts, approved testing models may be inspected and used from `F:\Projects\PhoenixAI\models\blobs`. Keep MasterAI manifests, runtime state, and any project-owned model artifacts in the MasterAI `models/` hierarchy; do not modify or relocate the shared PhoenixAI blobs as part of testing.
 26. Update the root `README.md` whenever a change implements or materially changes project behavior, capabilities, requirements, commands, limitations, or validation status. Explain the change accurately and keep the README synchronized with the implementation and `docs/PLAN.md` so it never claims functionality or readiness that current evidence does not support.
+27. The user authorized a narrow Phase 10 exception on 5 August 2026: thin IDE
+    host glue under `integrations/vscode/` may use JavaScript and thin Visual
+    Studio VSIX glue under `integrations/visual-studio/` may use C#. Inference,
+    authorization, policy, storage, and all other product logic remain strict
+    C++17 or approved Assembly and must be consumed through the generic API/MCP
+    contracts rather than duplicated in either IDE.

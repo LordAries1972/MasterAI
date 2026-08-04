@@ -130,6 +130,18 @@ std::map<std::string, std::string> supported_environment() {
     return values;
 }
 
+// Every operational command that accepts a settings file must resolve the
+// same documented precedence as `serve`: file values first, then the small
+// approved MASTERAI_* override set. Keeping this in one loader prevents a CLI
+// command from silently targeting different runtime/model roots than the
+// service launched from the same shell. The interactive configure wizard is
+// intentionally excluded because it edits the file itself.
+masterai::AppConfig load_operational_configuration(
+    const std::filesystem::path& settings) {
+    return masterai::ConfigurationManager::load(settings,
+                                                  supported_environment());
+}
+
 std::string prompt(const std::string& label, const std::string& fallback) {
     std::cout << label << " [" << fallback << "]: " << std::flush;
     std::string value;
@@ -221,8 +233,7 @@ int main(int argc, char* argv[]) {
                     "configuration is missing; run 'masterai configure' from "
                     "an interactive terminal before service startup");
             }
-            const auto configuration = masterai::ConfigurationManager::load(
-                settings, supported_environment());
+            const auto configuration = load_operational_configuration(settings);
             std::signal(SIGINT, handle_signal);
             std::signal(SIGTERM, handle_signal);
             masterai::HttpServer server(configuration, settings);
@@ -238,8 +249,7 @@ int main(int argc, char* argv[]) {
                           : std::filesystem::path("config/settings.json");
             const auto ide_client = masterai::parse_ide_client(
                 argc >= 4 ? argv[3] : "vscode");
-            const auto configuration =
-                masterai::ConfigurationManager::load(settings);
+            const auto configuration = load_operational_configuration(settings);
             masterai::RecordStore records(
                 configuration.runtime_root / "database");
             records.open();
@@ -294,7 +304,7 @@ int main(int argc, char* argv[]) {
             }
             const auto ide_client = masterai::parse_ide_client(argv[3]);
             const auto configuration =
-                masterai::ConfigurationManager::load(argv[2]);
+                load_operational_configuration(argv[2]);
             masterai::RecordStore records(
                 configuration.runtime_root / "database");
             records.open();
@@ -326,8 +336,7 @@ int main(int argc, char* argv[]) {
                     "ide-profile requires settings and IDE client");
             }
             const std::filesystem::path settings(argv[2]);
-            const auto configuration =
-                masterai::ConfigurationManager::load(settings);
+            const auto configuration = load_operational_configuration(settings);
             std::error_code error;
             auto executable =
                 std::filesystem::weakly_canonical(argv[0], error);
@@ -524,7 +533,7 @@ int main(int argc, char* argv[]) {
                     "minimum RAM MiB, recommended RAM MiB, and --accept-license");
             }
             const auto configuration =
-                masterai::ConfigurationManager::load(argv[2]);
+                load_operational_configuration(argv[2]);
             if (configuration.curl_executable.empty()) {
                 throw std::runtime_error(
                     "downloads.curlExecutable is not configured");
@@ -619,7 +628,7 @@ int main(int argc, char* argv[]) {
                     "benchmark-model requires settings, model ID, and profile");
             }
             const auto configuration =
-                masterai::ConfigurationManager::load(argv[2]);
+                load_operational_configuration(argv[2]);
             if (configuration.llama_server_executable.empty()) {
                 throw std::runtime_error(
                     "inference.llamaServerExecutable is not configured");
@@ -674,7 +683,7 @@ int main(int argc, char* argv[]) {
                     "(auto, minimal, balanced, or performance)");
             }
             const auto configuration =
-                masterai::ConfigurationManager::load(argv[2]);
+                load_operational_configuration(argv[2]);
             if (configuration.llama_server_executable.empty()) {
                 throw std::runtime_error(
                     "inference.llamaServerExecutable is not configured");

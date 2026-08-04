@@ -2173,14 +2173,10 @@ LaunchTuning launch_tuning_from_profile(const TuningProfile& profile);
 
 std::string tuning_profile_json(const TuningProfile& profile);
 
-// Phase 20: optional advanced throughput, explicitly gated (docs/PLAN.md
-// section 25 -- "no feature in this phase is pre-approved for implementation
-// merely by appearing in the plan"). AdvancedOptimizationRegistry is a
-// structural placeholder: every candidate feature defaults to disabled and
-// stays disabled regardless of configuration, because nothing in this
-// codebase yet produces the evidence PLAN.md section 31.11 requires before a
-// feature may be admitted. This is scaffolding for a later phase, not an
-// implementation of any of the candidate optimizations themselves.
+// Phase 20: evidence and admission record for optional advanced throughput.
+// The registry is deliberately separate from each backend implementation:
+// recording measurements cannot enable a feature, and admission succeeds only
+// after the complete evidence contract below passes validation.
 struct AdvancedOptimizationEvidence {
     std::string feature_name;
     std::string baseline_description;
@@ -2201,25 +2197,40 @@ struct AdvancedOptimizationEvidence {
 struct AdvancedOptimizationFeature {
     std::string name;
     std::string description;
-    // Always false. Recording evidence never flips this: whether a feature
-    // is ever admitted is a separate, later decision explicitly gated by
-    // docs/PLAN.md section 25, not something this registry can grant.
+    // Defaults false. Recording evidence never flips it; only a later
+    // explicit admit() after implementation/evidence/fallback checks can.
     bool enabled{false};
     bool requires_evidence{true};
+    // True only when the native implementation is wired into a production
+    // path. Evidence can be retained for an unavailable candidate, but it
+    // cannot be admitted until this boundary says the implementation exists.
+    bool implementation_available{false};
     std::optional<AdvancedOptimizationEvidence> evidence;
 };
 
 class AdvancedOptimizationRegistry final {
 public:
     AdvancedOptimizationRegistry();
+    explicit AdvancedOptimizationRegistry(RecordStore& records);
     std::vector<AdvancedOptimizationFeature> features() const;
     bool has_evidence(const std::string& feature_name) const;
-    // Stores an evidence record for later review. Cannot enable the
-    // feature; see AdvancedOptimizationFeature::enabled.
+    bool is_enabled(const std::string& feature_name) const;
+    // Stores validated evidence for later review. This never enables the
+    // feature: admission remains an explicit administrator action.
     void record_evidence(const std::string& feature_name,
                          const AdvancedOptimizationEvidence& evidence);
+    void admit(const std::string& feature_name);
+    void disable(const std::string& feature_name);
 
 private:
+    void initialize_features();
+    void restore();
+    void persist(const AdvancedOptimizationFeature& feature);
+    AdvancedOptimizationFeature& find_mutable(const std::string& feature_name);
+    const AdvancedOptimizationFeature& find(
+        const std::string& feature_name) const;
+    RecordStore* records_{nullptr};
+    mutable std::mutex mutex_;
     std::vector<AdvancedOptimizationFeature> features_;
 };
 
@@ -4689,6 +4700,31 @@ public:
                                   std::uint64_t maximum_total_chunks);
 };
 
+// Phase 16 exit evidence: an authored case names the natural-language query,
+// the source file that should be recovered, and a marker that must appear in
+// admitted context. The evaluator compares the hybrid planner with a literal
+// full-query text lookup against the same published index generation.
+struct RetrievalEvaluationCase {
+    std::string name;
+    std::string query_text;
+    std::string expected_relative_path;
+    std::string expected_context_marker;
+};
+
+struct RetrievalEvaluationReport {
+    std::uint64_t cases{0};
+    std::uint64_t hybrid_hits{0};
+    std::uint64_t full_text_hits{0};
+    std::uint64_t deadline_violations{0};
+    std::uint64_t context_budget_violations{0};
+    bool improved{false};
+};
+
+RetrievalEvaluationReport evaluate_retrieval_quality(
+    ProjectIndexService& indexes, const RetrievalPlanner& planner,
+    RetrievalRequest request,
+    const std::vector<RetrievalEvaluationCase>& cases);
+
 // Phase 17 declared one segment per kind of repeated work worth avoiding.
 // Phase 22 expands that to the full L0-L5 layering the plan calls for --
 // file-level, parsed/derived, retrieval/ranking, prompt-preparation, and
@@ -4820,6 +4856,21 @@ private:
     class State;
     std::unique_ptr<State> state_;
 };
+
+struct RetrievalCacheBenchmarkReport {
+    std::uint64_t iterations{0};
+    std::uint64_t uncached_microseconds{0};
+    std::uint64_t cached_microseconds{0};
+    bool output_stable{false};
+    bool latency_improved{false};
+};
+
+// Phase 17 exit evidence over the production serializer and CacheManager
+// path. The caller supplies an already-authorized request/key pair.
+RetrievalCacheBenchmarkReport benchmark_retrieval_cache(
+    CacheManager& cache, const RetrievalPlanner& planner,
+    const RetrievalRequest& request, const CacheKey& key,
+    std::uint64_t iterations);
 
 // Phase 18: in-process registry of llama.cpp server "slot" reuse eligibility
 // for prompt-prefix / KV-session reuse across chat turns. Unlike CacheManager

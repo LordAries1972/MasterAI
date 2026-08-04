@@ -20,5 +20,7 @@
     "cmake.sourceDirectory": "F:/Projects/C++/MasterAI/scripts",
     "agentCoder.documenter.defaultFormat": "markdown",
     "agentCoder.documenter.includeGeneratedFiles": true,
-    "agentCoder.documenter.useAIOverview": true
+    "agentCoder.documenter.useAIOverview": true,
+    "masterai.executable": "F:/Projects/C++/MasterAI/build/Windows-x64/Debug/masterai.exe",
+    "masterai.settingsFile": "F:/Projects/C++/MasterAI/runtime/validation/phase5-browser-20260805-2/settings.json"
 }

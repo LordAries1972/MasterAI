@@ -858,6 +858,52 @@ RetrievalOutcome deserialize_retrieval_outcome(const std::string& encoded) {
     return outcome;
 }
 
+RetrievalCacheBenchmarkReport benchmark_retrieval_cache(
+    CacheManager& cache, const RetrievalPlanner& planner,
+    const RetrievalRequest& request, const CacheKey& key,
+    const std::uint64_t iterations) {
+    if (iterations == 0U) {
+        throw std::invalid_argument("cache benchmark iterations must be positive");
+    }
+    RetrievalCacheBenchmarkReport report;
+    report.iterations = iterations;
+    RetrievalOutcome reference;
+    std::size_t observed_bytes = 0U;
+    const auto uncached_started = std::chrono::steady_clock::now();
+    for (std::uint64_t index = 0U; index < iterations; ++index) {
+        auto outcome = planner.retrieve(request);
+        observed_bytes += outcome.context_text.size();
+        if (index == 0U) reference = std::move(outcome);
+    }
+    report.uncached_microseconds = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - uncached_started).count());
+
+    cache.put(CacheCategory::retrieval_result, key,
+              serialize_retrieval_outcome(reference));
+    bool stable = true;
+    const auto cached_started = std::chrono::steady_clock::now();
+    for (std::uint64_t index = 0U; index < iterations; ++index) {
+        const auto encoded = cache.get(CacheCategory::retrieval_result, key);
+        if (!encoded) {
+            stable = false;
+            continue;
+        }
+        const auto outcome = deserialize_retrieval_outcome(*encoded);
+        observed_bytes += outcome.context_text.size();
+        stable = stable && outcome.context_text == reference.context_text &&
+                 outcome.strategy == reference.strategy &&
+                 outcome.disclosure.size() == reference.disclosure.size();
+    }
+    report.cached_microseconds = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - cached_started).count());
+    report.output_stable = stable && observed_bytes > 0U;
+    report.latency_improved = report.cached_microseconds <
+                              report.uncached_microseconds;
+    return report;
+}
+
 std::string CacheManager::to_json(const CacheStatus& status) {
     std::string body = "{\"categories\":{";
     bool first = true;

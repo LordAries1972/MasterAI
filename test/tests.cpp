@@ -1608,6 +1608,26 @@ void test_phase_sixteen_deadline_bound_retrieval() {
                     found.disclosure.front().index_generation,
             "retrieval read a stale index generation after an incremental update");
 
+    // Authored quality set: natural-language requests intentionally do not
+    // occur verbatim in source, so a full-query literal lookup is the honest
+    // full-text-only baseline. Identifier-aware hybrid retrieval must recover
+    // both expected markers within the same deadline and context cap.
+    const std::vector<masterai::RetrievalEvaluationCase> evaluation_set{
+        {"explain-primary", "Explain retrieval_marker_symbol behavior",
+         "src/one.cpp", "retrieval_marker_symbol"},
+        {"find-secondary", "Where is second_retrieval_marker declared",
+         "src/one.cpp", "second_retrieval_marker"}};
+    const auto evaluation = masterai::evaluate_retrieval_quality(
+        service, planner, request, evaluation_set);
+    require(evaluation.cases == evaluation_set.size() &&
+                evaluation.hybrid_hits == evaluation.cases &&
+                evaluation.full_text_hits < evaluation.hybrid_hits &&
+                evaluation.deadline_violations == 0U &&
+                evaluation.context_budget_violations == 0U &&
+                evaluation.improved,
+            "authored hybrid retrieval set did not improve over the literal "
+            "full-text-only baseline within its deadline and context budget");
+
     // Deadline-bound: an already-expired deadline must return quickly with
     // partial evidence rather than blocking on any strategy step.
     masterai::RetrievalRequest expired_request = request;
@@ -1844,6 +1864,58 @@ void test_phase_seventeen_security_partitioned_cache() {
                         small_policy.maximum_bytes_per_category &&
                     found->second.evictions > 0U,
                 "the cache category exceeded its configured byte cap");
+    }
+
+    // Representative-query benchmark over a real published Phase 15 index
+    // and the production retrieval serializer/cache path. Repeated cached
+    // preparation must preserve the outcome while reducing elapsed time.
+    {
+        const auto project_root = temporary.path() / "benchmark-project";
+        std::filesystem::create_directories(project_root / "src");
+        for (unsigned int index = 0U; index < 64U; ++index) {
+            write_text(project_root / "src" /
+                           ("unit_" + std::to_string(index) + ".cpp"),
+                       "int representative_cache_symbol_" +
+                           std::to_string(index) + " = " +
+                           std::to_string(index) + ";\n");
+        }
+        masterai::ProjectRecord project{
+            "phase17-benchmark", "Phase 17 benchmark", project_root};
+        masterai::ProjectIndexService indexes(
+            temporary.path() / "benchmark-index", memory, 2U);
+        require(indexes.request_rebuild(project),
+                "cache benchmark index rebuild was not admitted");
+        std::optional<masterai::IndexServiceStatus> index_status;
+        for (unsigned int attempt = 0U; attempt < 300U; ++attempt) {
+            index_status = indexes.status(project.id);
+            if (index_status &&
+                index_status->state == masterai::IndexJobState::ready) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        require(index_status &&
+                    index_status->state == masterai::IndexJobState::ready,
+                "cache benchmark index did not become ready");
+        masterai::RetrievalPlanner benchmark_planner(indexes);
+        masterai::RetrievalRequest benchmark_request;
+        benchmark_request.project = project;
+        benchmark_request.requester_id = "user-a";
+        benchmark_request.query_text =
+            "Explain representative_cache_symbol_63";
+        benchmark_request.deadline = std::chrono::milliseconds(1500);
+        masterai::CacheKey benchmark_key = base_key;
+        benchmark_key.project_id = project.id;
+        benchmark_key.canonical_identity = benchmark_request.query_text;
+        benchmark_key.index_generation = index_status->index.generation;
+        masterai::CacheManager benchmark_cache(
+            temporary.path() / "benchmark-cache", memory, cache_policy);
+        const auto benchmark = masterai::benchmark_retrieval_cache(
+            benchmark_cache, benchmark_planner, benchmark_request,
+            benchmark_key, 32U);
+        require(benchmark.output_stable && benchmark.latency_improved &&
+                    benchmark.cached_microseconds <
+                        benchmark.uncached_microseconds,
+                "representative retrieval cache did not preserve output and "
+                "measurably reduce preparation latency");
     }
 }
 
@@ -2452,8 +2524,15 @@ void test_phase_thirty_a_memory_sweeper_idle_unload() {
             "MemorySweeper's idle unload did not reset prompt session state");
 }
 
-void test_phase_twenty_advanced_optimizations_disabled() {
-    masterai::AdvancedOptimizationRegistry registry;
+// Phase 20 validates the complete fail-closed lifecycle: evidence is strict
+// and durable, recording never admits, unavailable implementations cannot be
+// admitted, accepted implemented features can be independently disabled, and
+// a restart restores the exact decision.
+void test_phase_twenty_advanced_optimization_admission() {
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::AdvancedOptimizationRegistry registry(records);
     const auto features = registry.features();
     require(!features.empty(), "the advanced-optimization registry was empty");
     for (const auto& feature : features) {
@@ -2472,7 +2551,14 @@ void test_phase_twenty_advanced_optimizations_disabled() {
     evidence.changed_setting = "draft-model speculative decoding enabled";
     evidence.host_hash = std::string(64U, 'a');
     evidence.model_sha256 = std::string(64U, 'b');
-    evidence.backend_hash = "backend-hash";
+    evidence.backend_hash = std::string(64U, 'c');
+    evidence.time_to_first_token_ms = 40.0;
+    evidence.prompt_throughput_tokens_per_second = 80.0;
+    evidence.generation_throughput_tokens_per_second = 20.0;
+    evidence.peak_resident_memory_bytes = 1024U * 1024U;
+    evidence.quality_notes = "parity suite passed";
+    evidence.power_thermal_notes = "no thermal throttle observed";
+    evidence.fallback_verified = true;
     registry.record_evidence("speculative_decoding", evidence);
     require(registry.has_evidence("speculative_decoding"),
             "recorded evidence was not retained");
@@ -2481,12 +2567,67 @@ void test_phase_twenty_advanced_optimizations_disabled() {
         after.begin(), after.end(), [](const auto& feature) {
             return feature.name == "speculative_decoding";
         });
-    require(found != after.end() && !found->enabled,
+    require(found != after.end() && !found->enabled &&
+                !found->implementation_available,
             "recording evidence enabled a Phase 20 feature; admission must "
             "remain a separate, later decision");
 
+    bool unavailable_rejected = false;
+    try {
+        registry.admit("speculative_decoding");
+    } catch (const std::exception&) {
+        unavailable_rejected = true;
+    }
+    require(unavailable_rejected,
+            "an unavailable advanced implementation was admitted");
+
+    evidence.feature_name = "storage_prefetch";
+    evidence.changed_setting = "bounded native prefetch enabled";
+    registry.record_evidence("storage_prefetch", evidence);
+    require(!registry.is_enabled("storage_prefetch"),
+            "recording evidence implicitly admitted storage prefetch");
+    registry.admit("storage_prefetch");
+    require(registry.is_enabled("storage_prefetch"),
+            "complete accepted evidence did not admit an implemented feature");
+    {
+        masterai::AdvancedOptimizationRegistry restored(records);
+        require(restored.is_enabled("storage_prefetch") &&
+                    restored.has_evidence("storage_prefetch"),
+                "advanced optimization decision did not survive restart");
+        restored.disable("storage_prefetch");
+    }
+    {
+        masterai::AdvancedOptimizationRegistry restored(records);
+        require(!restored.is_enabled("storage_prefetch"),
+                "independent advanced optimization disable was not durable");
+    }
+
+    evidence.regression_detected = true;
+    registry.record_evidence("storage_prefetch", evidence);
+    bool regression_rejected = false;
+    try {
+        registry.admit("storage_prefetch");
+    } catch (const std::exception&) {
+        regression_rejected = true;
+    }
+    require(regression_rejected,
+            "evidence reporting a regression was admitted");
+
+    auto incomplete = evidence;
+    incomplete.regression_detected = false;
+    incomplete.time_to_first_token_ms = 0.0;
+    bool incomplete_rejected = false;
+    try {
+        registry.record_evidence("storage_prefetch", incomplete);
+    } catch (const std::exception&) {
+        incomplete_rejected = true;
+    }
+    require(incomplete_rejected,
+            "incomplete advanced optimization evidence was persisted");
+
     bool unknown_rejected = false;
     try {
+        evidence.feature_name = "nonexistent_feature";
         registry.record_evidence("nonexistent_feature", evidence);
     } catch (const std::exception&) {
         unknown_rejected = true;
@@ -6526,8 +6667,8 @@ int main() {
             test_phase_twentyeight_topology_and_placement_recommendation);
         run("model tiering, routing, and cascade inference",
             test_phase_twentynine_model_tiering_and_cascade);
-        run("advanced optimizations gated",
-            test_phase_twenty_advanced_optimizations_disabled);
+        run("advanced optimization admission",
+            test_phase_twenty_advanced_optimization_admission);
         run("async storage coalescing", test_phase_twentyone_coalescing_merges_adjacent);
         run("async storage cancellation", test_phase_twentyone_cancellation_releases_buffer);
         run("async storage HDD queue depth", test_phase_twentyone_hdd_profile_stays_sequential);

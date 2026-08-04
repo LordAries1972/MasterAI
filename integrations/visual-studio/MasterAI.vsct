@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable">
+  <Extern href="stdidcmd.h"/><Extern href="vsshlids.h"/>
+  <Commands package="guidMasterAIPackage"><Groups><Group guid="guidMasterAICommands" id="MasterAIGroup" priority="0x0600"><Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS"/></Group></Groups><Buttons>
+    <Button guid="guidMasterAICommands" id="cmdidOpenChat" priority="0x0100" type="Button"><Parent guid="guidMasterAICommands" id="MasterAIGroup"/><Strings><ButtonText>MasterAI Chat</ButtonText></Strings></Button>
+    <Button guid="guidMasterAICommands" id="cmdidStoreToken" priority="0x0110" type="Button"><Parent guid="guidMasterAICommands" id="MasterAIGroup"/><Strings><ButtonText>MasterAI Store Scoped Token</ButtonText></Strings></Button>
+    <Button guid="guidMasterAICommands" id="cmdidValidate" priority="0x0120" type="Button"><Parent guid="guidMasterAICommands" id="MasterAIGroup"/><Strings><ButtonText>MasterAI Validate Connection</ButtonText></Strings></Button>
+    <Button guid="guidMasterAICommands" id="cmdidCancel" priority="0x0130" type="Button"><Parent guid="guidMasterAICommands" id="MasterAIGroup"/><Strings><ButtonText>MasterAI Cancel Active Request</ButtonText></Strings></Button>
+  </Buttons></Commands>
+  <Symbols><GuidSymbol name="guidMasterAIPackage" value="{5c063d0b-6938-43e7-aeca-4224344b6af2}"/><GuidSymbol name="guidMasterAICommands" value="{25d8e543-bc64-45fd-ab89-7b69b95c2be9}"><IDSymbol name="MasterAIGroup" value="0x1020"/><IDSymbol name="cmdidOpenChat" value="0x0100"/><IDSymbol name="cmdidStoreToken" value="0x0101"/><IDSymbol name="cmdidValidate" value="0x0102"/><IDSymbol name="cmdidCancel" value="0x0103"/></GuidSymbol></Symbols>
+</CommandTable>

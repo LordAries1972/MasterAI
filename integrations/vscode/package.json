@@ -1,0 +1,31 @@
+{
+  "name": "masterai-vscode",
+  "displayName": "MasterAI",
+  "description": "Thin, backend-neutral Visual Studio Code client for a local MasterAI server.",
+  "version": "0.1.0",
+  "publisher": "ultimaniumdesigns",
+  "engines": { "vscode": "^1.95.0" },
+  "categories": ["Machine Learning", "Other"],
+  "activationEvents": ["*"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "masterai.configureToken", "title": "MasterAI: Store Scoped Token" },
+      { "command": "masterai.validateConnection", "title": "MasterAI: Validate Connection" },
+      { "command": "masterai.validateMcpProfile", "title": "MasterAI: Validate Native MCP Profile" },
+      { "command": "masterai.openChat", "title": "MasterAI: Open Chat" },
+      { "command": "masterai.scanDiagnostics", "title": "MasterAI: Scan Current File" },
+      { "command": "masterai.previewDiff", "title": "MasterAI: Preview Current Unified Diff" },
+      { "command": "masterai.cancel", "title": "MasterAI: Cancel Active Request" }
+    ],
+    "configuration": {
+      "title": "MasterAI",
+      "properties": {
+        "masterai.serverUrl": { "type": "string", "default": "http://127.0.0.1:7070", "description": "Loopback MasterAI server URL." },
+        "masterai.projectId": { "type": "string", "default": "", "description": "Authorized MasterAI project ID for diagnostics and diff preview." },
+        "masterai.executable": { "type": "string", "default": "", "description": "Absolute path to masterai.exe for the secret-backed native MCP profile." },
+        "masterai.settingsFile": { "type": "string", "default": "", "description": "Absolute MasterAI settings path for the native MCP profile." }
+      }
+    }
+  }
+}
