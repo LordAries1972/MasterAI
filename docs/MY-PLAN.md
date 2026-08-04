@@ -814,6 +814,42 @@ Current phase status:
   roster as a whole. `test_machine_learning_vector_store_lifecycle` covers
   the same permission/lifecycle/reload/remove guarantees as Phase 48's
   test, plus `create()` rejecting an empty name.
+- Phase 50: Implemented at a scoped-down level (2026-08-05) — Retrieval-
+  Augmented Generation (section 22 below), scoped down to identity, a
+  free-text search strategy, an optional `vector_store_id` referencing a
+  `VectorStoreStore` entry, and the same three-state pending/approved/
+  rejected approval lifecycle (`RagConfig`/`RagConfigStore`, `src/ml.cpp`),
+  not the section's full configuration surface (query preprocessing, query
+  rewriting, hybrid-search weighting, retrieval count, relevance threshold,
+  metadata filters, reranking model, context-size limit, citation
+  requirements, response template, fallback behavior, source-priority
+  rules, restricted documents, cache behavior) or its retrieval-testing
+  surface (retrieved documents, retrieval relevance, missing information,
+  incorrect citations, context conflicts, response grounding, unsupported
+  claims, retrieval latency) that only mean something once a real
+  retrieval executor exists. `search_strategy` is free text -- section 22
+  lists "Search strategy" as a configurable operation without naming a
+  closed set, the same open-ended-list precedent `distance_metric` set
+  above. `vector_store_id` is optional -- a keyword-only retrieval
+  strategy needs no vector store -- and links to a `VectorStoreStore`
+  entry, the one real resource this phase can reference. Like Phase 49's
+  vector store, a RAG configuration is a standalone registered resource,
+  not a target-scoped content record, so it reuses the same three-state
+  pending/approved/rejected workflow rather than the five-state reviewer
+  workflow content records use. New administrator-only
+  `ml.ragconfigs.view`/`ml.ragconfigs.manage` permissions gate
+  `GET`/`POST /api/v1/ml/rag-configs`,
+  `POST /api/v1/ml/rag-configs/{id}/status`, and
+  `POST /api/v1/ml/rag-configs/{id}/delete`, and a new
+  "Retrieval-Augmented Generation" entry under the Machine Learning
+  sidebar (`/app/ml/rag-configs`) in `src/web_ui.cpp` lists, creates, and
+  moves configurations through status. The Machine Learning interface
+  roster still reports `retrieval-augmented-generation` as `planned` in
+  `/api/v1/ml/dashboard` -- matching every scoped-down phase's own roster
+  entry before it, so the roadmap tag change is deferred to whichever
+  later phase revisits that roster as a whole.
+  `test_machine_learning_rag_config_lifecycle` covers the same
+  permission/lifecycle/reload/remove guarantees as Phase 49's test.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -4831,11 +4867,22 @@ document-import/chunking/indexing pipeline exists; unlike Phases 47-48's
 target-scoped content records, a vector store is a standalone registered
 resource like Dataset Manager's own entries, so it reuses
 DatasetApprovalStatus's three-state workflow rather than the five-state
-reviewer workflow content records use. Every other capability in this
-section (Training Methods execution, Subject Examination, Hyperparameter
-Optimization, Retrieval-Augmented Generation, deployment, and everything
-else through section 51) remains `Planned`: no implementation has
-started.
+reviewer workflow content records use. Phase 50 implements Retrieval-
+Augmented Generation (section 22) at the same scoped-down level -- identity,
+a free-text search strategy, an optional vector_store_id referencing a
+VectorStoreStore entry, and the same three-state pending/approved/rejected
+approval lifecycle Phase 49 uses, not the section's full configuration
+surface (query preprocessing, query rewriting, hybrid-search weighting,
+retrieval count, relevance threshold, metadata filters, reranking model,
+context-size limit, citation requirements, response template, fallback
+behavior, source-priority rules, restricted documents, cache behavior) or
+its retrieval-testing surface that only mean something once a real
+retrieval executor exists; like Phase 49's vector store, a RAG
+configuration is a standalone registered resource, not a target-scoped
+content record. Every other capability in this section (Training Methods
+execution, Subject Examination, Hyperparameter Optimization, deployment,
+and everything else through section 51) remains `Planned`: no
+implementation has started.
 
 This section extends the plan with an administrator-only Machine Learning
 administration and model-development module, covering the full lifecycle

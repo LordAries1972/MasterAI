@@ -81,6 +81,21 @@ std::string application_script() {
         "const r=await fetch(path,{method,headers:h,body:body?JSON.stringify(body):undefined});"
         "const t=await r.text();if(!r.ok)throw new Error(t||r.status);"
         "return t?JSON.parse(t):{};}"
+        // Each workspace section is served at its own URL (see the /app
+        // route handlers in server.cpp), so only one section's own list/form
+        // elements ever exist in the DOM at a time. load() below still
+        // builds one shared Promise.all for every possible section, so
+        // fetchFor() skips the network round trip entirely -- resolving
+        // straight to the render function's own empty-state fallback --
+        // whenever this page doesn't contain the element that fetch's data
+        // would render into. Without this, every single page load (chat
+        // included) fired all ~20 Machine Learning list/dashboard requests
+        // regardless of which section (if any) was showing, which was
+        // enough on its own to trip the server's shared rate_limit_per_minute
+        // budget after a handful of page navigations.
+        "function fetchFor(elementId,path,fallback){"
+        "return q(elementId)?api(path).catch(()=>fallback):"
+        "Promise.resolve(fallback);}"
         // Every action-failure catch block across the app raises through
         // here instead of quietly setting the small #actionStatus line --
         // a fixed banner pinned to the very top of the viewport, maroon
@@ -118,7 +133,7 @@ std::string application_script() {
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
-        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,cfg,report]="
+        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,cfg,report]="
         "await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
@@ -126,38 +141,46 @@ std::string application_script() {
         "api('/api/v1/benchmarks').catch(()=>({benchmarks:[]})),"
         "api('/api/v1/model-downloads').catch(()=>({downloads:[]})),"
         "api('/api/v1/users').catch(()=>({users:[]})),"
-        // 403s for anyone who isn't an administrator (see role_allows'
-        // ml.dashboard.view) -- the catch keeps that a quiet, expected
-        // no-op rather than failing the whole page load for every role.
-        "api('/api/v1/ml/dashboard').catch("
-        "()=>({enabled:false,phase:'',activeProjects:0,modelsTraining:0,"
+        // Every ml.* fetch below is skipped (see fetchFor() above) unless
+        // this page actually renders that resource's list -- 403s for
+        // anyone who isn't an administrator (see role_allows'
+        // ml.dashboard.view) still fall back to the same empty state on the
+        // rare page that does render it.
+        "fetchFor('#mlAck','/api/v1/ml/dashboard',"
+        "{enabled:false,phase:'',activeProjects:0,modelsTraining:0,"
         "modelsAwaitingEvaluation:0,modelsAwaitingApproval:0,"
-        "deployedModels:0,failedTrainingJobs:0,interfaces:[]})),"
-        "api('/api/v1/ml/projects').catch(()=>({projects:[]})),"
-        "api('/api/v1/ml/models').catch(()=>({models:[]})),"
-        "api('/api/v1/ml/datasets').catch(()=>({datasets:[]})),"
-        "api('/api/v1/ml/subjects').catch(()=>({subjects:[]})),"
-        "api('/api/v1/ml/label-tasks').catch(()=>({labelTasks:[]})),"
-        "api('/api/v1/ml/prep-jobs').catch(()=>({prepJobs:[]})),"
-        "api('/api/v1/ml/training-jobs').catch(()=>({trainingJobs:[]})),"
-        "api('/api/v1/ml/evaluation-runs').catch(()=>({evaluationRuns:[]})),"
-        "api('/api/v1/ml/experiments').catch(()=>({experiments:[]})),"
-        "api('/api/v1/ml/fine-tuning-jobs').catch(()=>({fineTuningJobs:[]})),"
-        "api('/api/v1/ml/model-builder-configs').catch("
-        "()=>({modelBuilderConfigs:[]})),"
-        "api('/api/v1/ml/instruction-examples').catch("
-        "()=>({instructionExamples:[]})),"
-        "api('/api/v1/ml/synthetic-records').catch("
-        "()=>({syntheticRecords:[]})),"
-        "api('/api/v1/ml/vector-stores').catch("
-        "()=>({vectorStores:[]})),"
+        "deployedModels:0,failedTrainingJobs:0,interfaces:[]}),"
+        "fetchFor('#mlProjectsList','/api/v1/ml/projects',{projects:[]}),"
+        "fetchFor('#mlModelsList','/api/v1/ml/models',{models:[]}),"
+        "fetchFor('#mlDatasetsList','/api/v1/ml/datasets',{datasets:[]}),"
+        "fetchFor('#mlSubjectsList','/api/v1/ml/subjects',{subjects:[]}),"
+        "fetchFor('#mlLabelTasksList','/api/v1/ml/label-tasks',{labelTasks:[]}),"
+        "fetchFor('#mlPrepJobsList','/api/v1/ml/prep-jobs',{prepJobs:[]}),"
+        "fetchFor('#mlTrainingJobsList','/api/v1/ml/training-jobs',"
+        "{trainingJobs:[]}),"
+        "fetchFor('#mlEvaluationRunsList','/api/v1/ml/evaluation-runs',"
+        "{evaluationRuns:[]}),"
+        "fetchFor('#mlExperimentsList','/api/v1/ml/experiments',"
+        "{experiments:[]}),"
+        "fetchFor('#mlFineTuningJobsList','/api/v1/ml/fine-tuning-jobs',"
+        "{fineTuningJobs:[]}),"
+        "fetchFor('#mlModelBuilderConfigsList',"
+        "'/api/v1/ml/model-builder-configs',{modelBuilderConfigs:[]}),"
+        "fetchFor('#mlInstructionExamplesList',"
+        "'/api/v1/ml/instruction-examples',{instructionExamples:[]}),"
+        "fetchFor('#mlSyntheticRecordsList','/api/v1/ml/synthetic-records',"
+        "{syntheticRecords:[]}),"
+        "fetchFor('#mlVectorStoresList','/api/v1/ml/vector-stores',"
+        "{vectorStores:[]}),"
+        "fetchFor('#mlRagConfigsList','/api/v1/ml/rag-configs',"
+        "{ragConfigs:[]}),"
         // 403/503 for anyone who isn't an administrator, or when no
         // settings.json path is known to the running server -- both are
         // quiet, expected no-ops here exactly like the ml.* fetches above.
-        "api('/api/v1/admin/config').catch(()=>null),"
+        "fetchFor('#systemConfigForm','/api/v1/admin/config',null),"
         // 403 for anyone who isn't an administrator -- quiet no-op like the
         // ml.*/admin.config fetches above.
-        "api('/api/v1/system/report').catch(()=>null)]);"
+        "fetchFor('#systemReport','/api/v1/system/report',null)]);"
         "q('#who').textContent=me.displayName+' ('+me.role+')';"
         // A viewer's sidebar renders none of the settings pages, so these
         // elements legitimately don't exist -- guard every write instead of
@@ -176,6 +199,7 @@ std::string application_script() {
         "renderMlInstructionExamples(mlie.instructionExamples);"
         "renderMlSyntheticRecords(mlsr.syntheticRecords);"
         "renderMlVectorStores(mlvs.vectorStores);"
+        "renderMlRagConfigs(mlrag.ragConfigs);"
         "renderSystemConfig(cfg);"
         "renderSystemReport(report);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
@@ -1193,6 +1217,48 @@ std::string application_script() {
         "'/delete','POST');await load();}"
         "catch(x){showSystemError('Delete vector store failed: '+"
         "x.message);}});}}"
+        // Retrieval-Augmented Generation (docs/PLAN.md "Machine Learning
+        // Abilities" section 22): a RAG configuration is a standalone
+        // registered resource, not a target-scoped content record, so it
+        // reuses the same three-state pending/approved/rejected approval
+        // workflow as Vector Stores above.
+        "const RAG_CONFIG_STATUSES=['pending','approved','rejected'];"
+        "function renderMlRagConfigs(configs){"
+        "const el=q('#mlRagConfigsList');if(!el)return;"
+        "if(!configs.length){el.innerHTML='<p>No RAG configurations "
+        "registered yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Search strategy','Vector store',"
+        "'Status','Set status',''],"
+        "configs.map(x=>[esc(x.name),esc(x.searchStrategy),"
+        "esc(x.vectorStoreId),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-rag-config-status-for=\"'+x.id+'\">'+"
+        "RAG_CONFIG_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-rag-config-status=\"'+"
+        "x.id+'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-rag-config=\"'+"
+        "x.id+'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-rag-config-status]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applyRagConfigStatus;"
+        "const status=el.querySelector("
+        "'[data-rag-config-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/rag-configs/'+"
+        "encodeURIComponent(id)+'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update RAG config status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-rag-config]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/rag-configs/'+"
+        "encodeURIComponent(btn.dataset.deleteMlRagConfig)+"
+        "'/delete','POST');await load();}"
+        "catch(x){showSystemError('Delete RAG config failed: '+"
+        "x.message);}});}}"
         // Each row gets its own Start/resume, Pause, Stop, and Remove buttons
         // wired directly to that job's id -- nothing to hand-type, unlike the
         // old single manual 'Download job ID' field this replaces. The State
@@ -2104,7 +2170,14 @@ std::string application_script() {
         "()=>({name:q('#mlVectorStoreName').value,"
         "description:q('#mlVectorStoreDescription').value,"
         "embeddingModel:q('#mlVectorStoreEmbeddingModel').value,"
-        "distanceMetric:q('#mlVectorStoreDistanceMetric').value})));}});";
+        "distanceMetric:q('#mlVectorStoreDistanceMetric').value})));"
+        "if(q('#newMlRagConfig'))"
+        "q('#newMlRagConfig').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/rag-configs',"
+        "()=>({name:q('#mlRagConfigName').value,"
+        "description:q('#mlRagConfigDescription').value,"
+        "searchStrategy:q('#mlRagConfigSearchStrategy').value,"
+        "vectorStoreId:q('#mlRagConfigVectorStoreId').value})));}});";
 }
 
 // Presents the native OS account sign-in form without embedding credentials.
@@ -2780,6 +2853,37 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<h2>Vector stores</h2>"
             "<div id=\"mlVectorStoresList\">Loading...</div>"
             "</div></section>";
+    } else if (section == "ml-rag-configs") {
+        // Phase 50 (docs/PLAN.md "Machine Learning Abilities" section 22):
+        // register and list RAG configurations, and move them through the
+        // same three-state pending/approved/rejected approval workflow
+        // Vector Stores use, since a RAG configuration is a standalone
+        // registered resource rather than a target-scoped content record.
+        // Only the identity/search-strategy/vector-store-reference/status
+        // fields RagConfigStore actually persists are collected here -- see
+        // that class's comment in masterai.hpp for the retrieval-testing/
+        // reranking/citation fields deferred to the phase that actually
+        // generates retrieval results.
+        body =
+            "<section id=\"panel-ml-rag-configs\" class=\"panel\">"
+            "<div>"
+            "<h2>New RAG configuration</h2>"
+            "<form id=\"newMlRagConfig\">"
+            "<label>Name<input id=\"mlRagConfigName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Description<textarea "
+            "id=\"mlRagConfigDescription\" rows=\"2\"></textarea></label>"
+            "<label>Search strategy<input id=\"mlRagConfigSearchStrategy\" "
+            "placeholder=\"e.g. hybrid, vector_only, keyword_only\"></label>"
+            "<label>Vector store ID<input "
+            "id=\"mlRagConfigVectorStoreId\" "
+            "placeholder=\"optional -- id of a registered vector store\">"
+            "</label>"
+            "<button>Create RAG configuration</button></form>"
+            "</div><div>"
+            "<h2>RAG configurations</h2>"
+            "<div id=\"mlRagConfigsList\">Loading...</div>"
+            "</div></section>";
     } else if (section == "settings-config") {
         // Phase 30A: administrator-only local-configuration editor backed by
         // GET/POST /api/v1/admin/config (server.cpp's admin_config_get()/
@@ -3016,7 +3120,10 @@ std::string application_page(const UserRecord& user, const std::string& section,
                          section == "ml-synthetic-records") +
                 nav_link("/app/ml/vector-stores",
                          "Embeddings and Vector Stores",
-                         section == "ml-vector-stores"));
+                         section == "ml-vector-stores") +
+                nav_link("/app/ml/rag-configs",
+                         "Retrieval-Augmented Generation",
+                         section == "ml-rag-configs"));
     }
 
     return html_response(

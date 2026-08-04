@@ -2251,4 +2251,139 @@ std::string vector_stores_json(const std::vector<VectorStore>& stores) {
     return body + "]";
 }
 
+// Phase 50: docs/PLAN.md "Machine Learning Abilities" section 22
+// (Retrieval-Augmented Generation) -- see RagConfigStore's class comment in
+// masterai.hpp for the scoped-down field set and the rationale for reusing
+// the pending/approved/rejected approval workflow.
+std::string rag_config_status_name(const RagConfigStatus status) {
+    switch (status) {
+        case RagConfigStatus::pending: return "pending";
+        case RagConfigStatus::approved: return "approved";
+        case RagConfigStatus::rejected: return "rejected";
+    }
+    throw std::runtime_error("invalid rag config status");
+}
+
+RagConfigStatus parse_rag_config_status(const std::string& status) {
+    if (status == "pending") return RagConfigStatus::pending;
+    if (status == "approved") return RagConfigStatus::approved;
+    if (status == "rejected") return RagConfigStatus::rejected;
+    throw std::runtime_error("stored rag config status is invalid");
+}
+
+RagConfigStore::RagConfigStore(RecordStore& records) : records_(&records) {
+    restore();
+}
+
+void RagConfigStore::restore() {
+    for (const auto& item : records_->list("ml_rag_configs")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 6U) {
+            throw std::runtime_error(
+                "persisted rag config record field count is wrong");
+        }
+        RagConfig config;
+        config.id = item.first;
+        config.name = fields[0];
+        config.description = fields[1];
+        config.search_strategy = fields[2];
+        config.vector_store_id = fields[3];
+        config.owner_id = fields[4];
+        config.status = parse_rag_config_status(fields[5]);
+        configs_[config.id] = config;
+    }
+}
+
+void RagConfigStore::persist(const RagConfig& config) {
+    records_->put(
+        "ml_rag_configs", config.id,
+        pack({config.name, config.description, config.search_strategy,
+             config.vector_store_id, config.owner_id,
+             rag_config_status_name(config.status)}));
+}
+
+RagConfig RagConfigStore::create(const std::string& owner_id,
+                                 const std::string& name,
+                                 const std::string& description,
+                                 const std::string& search_strategy,
+                                 const std::string& vector_store_id) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("rag config name is invalid");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    RagConfig config;
+    config.id = random_id();
+    config.name = name;
+    config.description = description;
+    config.search_strategy = search_strategy;
+    config.vector_store_id = vector_store_id;
+    config.owner_id = owner_id;
+    config.status = RagConfigStatus::pending;
+    config.created_at_epoch_seconds = epoch_seconds();
+    config.updated_at_epoch_seconds = config.created_at_epoch_seconds;
+    configs_[config.id] = config;
+    if (records_) persist(config);
+    return config;
+}
+
+std::optional<RagConfig> RagConfigStore::find(const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = configs_.find(id);
+    return found != configs_.end() ? std::optional<RagConfig>(found->second)
+                                   : std::nullopt;
+}
+
+std::vector<RagConfig> RagConfigStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<RagConfig> result;
+    result.reserve(configs_.size());
+    for (const auto& item : configs_) result.push_back(item.second);
+    return result;
+}
+
+bool RagConfigStore::set_status(const std::string& id,
+                                const RagConfigStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = configs_.find(id);
+    if (found == configs_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool RagConfigStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = configs_.find(id);
+    if (found == configs_.end()) return false;
+    configs_.erase(found);
+    if (records_) records_->erase("ml_rag_configs", id);
+    return true;
+}
+
+std::string rag_config_json(const RagConfig& config) {
+    return "{\"id\":\"" + json_escape(config.id) + "\",\"name\":\"" +
+           json_escape(config.name) + "\",\"description\":\"" +
+           json_escape(config.description) + "\",\"searchStrategy\":\"" +
+           json_escape(config.search_strategy) + "\",\"vectorStoreId\":\"" +
+           json_escape(config.vector_store_id) + "\",\"ownerId\":\"" +
+           json_escape(config.owner_id) + "\",\"status\":\"" +
+           rag_config_status_name(config.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(config.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(config.updated_at_epoch_seconds) + "}";
+}
+
+std::string rag_configs_json(const std::vector<RagConfig>& configs) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& config : configs) {
+        if (!first) body += ",";
+        first = false;
+        body += rag_config_json(config);
+    }
+    return body + "]";
+}
+
 }  // namespace masterai

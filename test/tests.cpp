@@ -5485,6 +5485,78 @@ void test_machine_learning_vector_store_lifecycle() {
             "fields");
 }
 
+void test_machine_learning_rag_config_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.ragconfigs.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.ragconfigs.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.ragconfigs.view"),
+            "ml.ragconfigs.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::RagConfigStore rag_configs(records);
+    const auto config = rag_configs.create(
+        "administrator-1", "support-docs-rag",
+        "Retrieval configuration for support ticket answers.", "hybrid",
+        "vector-store-1");
+    require(!config.id.empty() && config.name == "support-docs-rag" &&
+                config.search_strategy == "hybrid" &&
+                config.vector_store_id == "vector-store-1" &&
+                config.status == masterai::RagConfigStatus::pending &&
+                config.owner_id == "administrator-1",
+            "a newly created RAG config must start pending with its "
+            "owner recorded");
+    require(rag_configs.list().size() == 1U,
+            "the created RAG config was not visible in list()");
+
+    bool rejected_empty_name = false;
+    try {
+        rag_configs.create("administrator-1", "", "", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_name = true;
+    }
+    require(rejected_empty_name,
+            "create() must reject a RAG config with no name");
+
+    require(rag_configs.set_status(config.id,
+                                   masterai::RagConfigStatus::approved),
+            "set_status() rejected a known RAG config id");
+    require(rag_configs.find(config.id)->status ==
+                masterai::RagConfigStatus::approved,
+            "set_status() did not persist the new status");
+    require(!rag_configs.set_status("nonexistent-rag-config",
+                                    masterai::RagConfigStatus::rejected),
+            "set_status() must no-op for an unknown RAG config id, not "
+            "throw");
+
+    masterai::RagConfigStore reloaded(records);
+    const auto reloaded_config = reloaded.find(config.id);
+    require(reloaded_config.has_value() &&
+                reloaded_config->name == "support-docs-rag" &&
+                reloaded_config->status == masterai::RagConfigStatus::approved,
+            "RagConfigStore did not restore a persisted RAG config after "
+            "reload");
+
+    require(rag_configs.remove(config.id),
+            "remove() rejected a known RAG config id");
+    require(rag_configs.list().size() == 0U,
+            "remove() did not delete the RAG config");
+    require(!rag_configs.remove(config.id),
+            "remove() must no-op for an already-removed RAG config id, "
+            "not throw");
+
+    const auto json = masterai::rag_config_json(config);
+    require(json.find("\"name\":\"support-docs-rag\"") != std::string::npos &&
+                json.find("\"searchStrategy\":\"hybrid\"") !=
+                    std::string::npos &&
+                json.find("\"vectorStoreId\":\"vector-store-1\"") !=
+                    std::string::npos,
+            "rag_config_json did not report the RAG config's own fields");
+}
+
 }  // namespace
 
 int main() {
@@ -5628,6 +5700,8 @@ int main() {
             test_machine_learning_synthetic_data_lifecycle);
         run("Machine Learning vector store lifecycle",
             test_machine_learning_vector_store_lifecycle);
+        run("Machine Learning RAG config lifecycle",
+            test_machine_learning_rag_config_lifecycle);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

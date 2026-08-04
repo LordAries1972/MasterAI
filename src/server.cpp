@@ -328,6 +328,7 @@ public:
         ml_instruction_examples = std::make_unique<InstructionExampleStore>(records);
         ml_synthetic_records = std::make_unique<SyntheticRecordStore>(records);
         ml_vector_stores = std::make_unique<VectorStoreStore>(records);
+        ml_rag_configs = std::make_unique<RagConfigStore>(records);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -2097,6 +2098,84 @@ public:
             audit.append("ml.vector_store.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
         }
+        // Phase 50: Retrieval-Augmented Generation (docs/PLAN.md "Machine
+        // Learning Abilities" section 22), scoped to identity/search-
+        // strategy/vector-store-reference/status fields -- see
+        // RagConfigStore's class comment in masterai.hpp for the
+        // retrieval-testing/reranking/citation fields deferred to the
+        // phase that actually generates retrieval results.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/rag-configs") {
+            if (auto denied = forbidden_unless(user->role, "ml.ragconfigs.view")) return *denied;
+            return response(200, "OK",
+                            "{\"ragConfigs\":" +
+                                rag_configs_json(ml_rag_configs->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/rag-configs") {
+            if (auto denied = forbidden_unless(user->role, "ml.ragconfigs.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto config = ml_rag_configs->create(
+                    user->id, name, text_field("description"),
+                    text_field("searchStrategy"), text_field("vectorStoreId"));
+                audit.append("ml.rag_config.create", user->id, "success",
+                             config.id);
+                return response(201, "Created", rag_config_json(config));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_rag_config\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/rag-configs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.ragconfigs.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_rag_config_status(
+                    root.required("status").as_string());
+                if (!ml_rag_configs->set_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_rag_config_not_found\"}");
+                }
+                audit.append("ml.rag_config.status", user->id, "success",
+                             id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_rag_config_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/rag-configs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.ragconfigs.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            if (!ml_rag_configs->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_rag_config_not_found\"}");
+            }
+            audit.append("ml.rag_config.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
         if (request.method == "GET" && request.target == "/models") {
             return workloads->model_inventory_page();
         }
@@ -2216,6 +2295,11 @@ public:
             if (target == "/app/ml/vector-stores") {
                 return is_administrator
                            ? application_page(*user, "ml-vector-stores")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/rag-configs") {
+                return is_administrator
+                           ? application_page(*user, "ml-rag-configs")
                            : response(302, "Found", "", {"Location: /app"});
             }
             if (target == "/app/report/system") {
@@ -3751,6 +3835,7 @@ private:
     std::unique_ptr<InstructionExampleStore> ml_instruction_examples;
     std::unique_ptr<SyntheticRecordStore> ml_synthetic_records;
     std::unique_ptr<VectorStoreStore> ml_vector_stores;
+    std::unique_ptr<RagConfigStore> ml_rag_configs;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
     std::unique_ptr<DownloadManager> downloads;

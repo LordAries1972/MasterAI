@@ -3310,6 +3310,68 @@ private:
 std::string vector_store_json(const VectorStore& store);
 std::string vector_stores_json(const std::vector<VectorStore>& stores);
 
+// Phase 50: docs/PLAN.md "Machine Learning Abilities" section 22
+// (Retrieval-Augmented Generation). Scoped down from the section's full
+// configuration surface (query preprocessing, query rewriting, hybrid-
+// search weighting, retrieval count, relevance threshold, metadata
+// filters, reranking model, context-size limit, citation requirements,
+// response template, fallback behavior, source-priority rules, restricted
+// documents, cache behavior, plus the section's whole retrieval-testing
+// surface) to identity, a free-text search_strategy field (section 22
+// lists "Search strategy" as a configurable operation without naming a
+// closed set, matching how VectorStore's distance_metric stays free
+// text), an optional vector_store_id referencing a VectorStoreStore entry
+// (section 22 lists "Vector store" as a configurable operation, and a
+// VectorStoreStore entry is the one real resource this phase can link
+// against; optional because a keyword-only retrieval strategy needs no
+// vector store), and an approval-status lifecycle -- not the full
+// retrieval-testing/reranking/citation pipeline the section describes,
+// since that requires a real retrieval executor. A RAG configuration is a
+// standalone registered resource like VectorStore above, not a
+// target-scoped content record, so it reuses the same three-state
+// pending/approved/rejected approval workflow rather than the five-state
+// reviewer workflow content records use.
+enum class RagConfigStatus { pending, approved, rejected };
+
+std::string rag_config_status_name(RagConfigStatus status);
+RagConfigStatus parse_rag_config_status(const std::string& status);
+
+struct RagConfig {
+    std::string id;
+    std::string name;
+    std::string description;
+    std::string search_strategy;
+    std::string vector_store_id;
+    std::string owner_id;
+    RagConfigStatus status{RagConfigStatus::pending};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class RagConfigStore final {
+public:
+    RagConfigStore() = default;
+    explicit RagConfigStore(RecordStore& records);
+    RagConfig create(const std::string& owner_id, const std::string& name,
+                     const std::string& description,
+                     const std::string& search_strategy,
+                     const std::string& vector_store_id);
+    std::optional<RagConfig> find(const std::string& id) const;
+    std::vector<RagConfig> list() const;
+    bool set_status(const std::string& id, RagConfigStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const RagConfig& config);
+    RecordStore* records_{nullptr};
+    std::map<std::string, RagConfig> configs_;
+    mutable std::mutex mutex_;
+};
+
+std::string rag_config_json(const RagConfig& config);
+std::string rag_configs_json(const std::vector<RagConfig>& configs);
+
 struct PerformanceSample {
     std::string name;
     std::uint64_t operations{0};

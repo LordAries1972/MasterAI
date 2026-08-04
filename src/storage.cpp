@@ -446,7 +446,11 @@ bool role_allows(const UserRole role, const std::string& permission) {
           // Embeddings and Vector Stores): administrator-only, matching
           // every other ml.* permission above. "ml.vectorstores.manage" is
           // one of section 3's own recommended permission names.
-          "ml.vectorstores.view", "ml.vectorstores.manage"}},
+          "ml.vectorstores.view", "ml.vectorstores.manage",
+          // Phase 50 (docs/PLAN.md "Machine Learning Abilities" section 22,
+          // Retrieval-Augmented Generation): administrator-only, matching
+          // every other ml.* permission above.
+          "ml.ragconfigs.view", "ml.ragconfigs.manage"}},
         {UserRole::developer,
          {"identity.read", "models.read", "models.load", "tokens.create",
           "ide.connect", "mcp.connect", "mcp.invoke", "mcp.tools.invoke",
