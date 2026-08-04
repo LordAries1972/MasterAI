@@ -743,6 +743,42 @@ Current phase status:
   whole. `test_machine_learning_instruction_training_lifecycle` covers the
   same permission/lifecycle/reload/remove guarantees as Phase 46's test,
   plus `create()` rejecting an empty target dataset id.
+- Phase 48: Implemented at a scoped-down level (2026-08-05) — Synthetic Data
+  Generation (section 20 below), scoped down to identity, the dataset each
+  record targets, a free-text generation technique, and the same
+  five-state reviewer-approval lifecycle status Phase 47 used (`draft`/
+  `in_review`/`approved`/`rejected`/`archived`), not the section's full
+  record (generator model, generator version, prompt, generation settings,
+  confidence score, original source linkage) that only means something once
+  a real generation executor exists to produce it
+  (`SyntheticRecord`/`SyntheticRecordStore`, `src/ml.cpp`).
+  `generation_technique` is free text -- section 20 lists thirteen
+  operations (paraphrases, counterexamples, edge cases, code samples, and
+  so on), an open-ended list rather than a closed enum, matching subject
+  classification's precedent on Prompt and Instruction Training above. The
+  status enum reuses Phase 47's own five reviewer-workflow states rather
+  than Training Jobs'/Fine-Tuning's eleven-state job lifecycle, because a
+  synthetic record never queues, runs, or pauses -- it only moves from
+  draft through review to an approved or rejected outcome, or an archived
+  discard -- matching section 20's requirement that generated records carry
+  a "human-review status" and "remain distinguishable from human-created
+  and real-world data" until reviewed. `create()` requires a target dataset
+  id, mirroring Phase 47's own required-dataset pattern. New
+  administrator-only `ml.syntheticdata.view`/`ml.syntheticdata.manage`
+  permissions gate `GET`/`POST /api/v1/ml/synthetic-records`,
+  `POST /api/v1/ml/synthetic-records/{id}/status`, and
+  `POST /api/v1/ml/synthetic-records/{id}/delete`, and a new "Synthetic
+  Data Generation" entry under the Machine Learning sidebar
+  (`/app/ml/synthetic-records`) in `src/web_ui.cpp` lists, creates, and
+  moves them through status. The Machine Learning interface roster still
+  reports `synthetic-data` as `planned` in `/api/v1/ml/dashboard` --
+  matching Evaluation Lab's, Experiment Tracking's, Fine-Tuning's, Model
+  Builder's, and Prompt and Instruction Training's own roster entries,
+  which stayed `planned` through their own implementing phases -- so the
+  roadmap tag change is deferred to whichever later phase revisits that
+  roster as a whole. `test_machine_learning_synthetic_data_lifecycle`
+  covers the same permission/lifecycle/reload/remove guarantees as Phase
+  47's test.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -4741,9 +4777,16 @@ rejected, archived), not the section's full record (system instruction,
 user instruction, context, expected response, rejected response, tool
 calls, tool results, required output format, difficulty, safety
 classification) that only means something once an actual example record
-exists to hold it. Every other capability in this section (Training
-Methods execution, Subject Examination, Hyperparameter Optimization,
-Synthetic Data, Embeddings and Vector Stores, Retrieval-Augmented
+exists to hold it. Phase 48 implements Synthetic Data Generation (section
+20) at the same scoped-down level -- identity, the dataset a record
+targets, a free-text generation technique, and the same five-state
+reviewer-approval lifecycle status Phase 47 uses (draft, in_review,
+approved, rejected, archived), not the section's full record (generator
+model, generator version, prompt, generation settings, confidence score,
+original source linkage) that only means something once a real generation
+executor exists to produce it. Every other capability in this section
+(Training Methods execution, Subject Examination, Hyperparameter
+Optimization, Embeddings and Vector Stores, Retrieval-Augmented
 Generation, deployment, and everything else through section 51) remains
 `Planned`: no implementation has started.
 

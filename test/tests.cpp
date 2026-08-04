@@ -5327,6 +5327,85 @@ void test_machine_learning_instruction_training_lifecycle() {
             "example's own fields");
 }
 
+// Phase 48: docs/PLAN.md "Machine Learning Abilities" section 20 (Synthetic
+// Data Generation) -- same shape as
+// test_machine_learning_instruction_training_lifecycle above, since
+// SyntheticRecordStore reuses InstructionExampleStore's target-dataset and
+// five-state reviewer-workflow pattern; see SyntheticRecordStore's class
+// comment in masterai.hpp for the rationale.
+void test_machine_learning_synthetic_data_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.syntheticdata.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.syntheticdata.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.syntheticdata.view"),
+            "ml.syntheticdata.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::SyntheticRecordStore synthetic_records(records);
+    const auto record = synthetic_records.create(
+        "administrator-1", "dataset-1", "paraphrase-batch-1",
+        "Paraphrased variants of the support ticket intents.",
+        "paraphrase");
+    require(!record.id.empty() && record.dataset_id == "dataset-1" &&
+                record.generation_technique == "paraphrase" &&
+                record.status == masterai::SyntheticRecordStatus::draft &&
+                record.owner_id == "administrator-1",
+            "a newly created synthetic record must start draft against its "
+            "target dataset with its owner recorded");
+    require(synthetic_records.list().size() == 1U,
+            "the created synthetic record was not visible in list()");
+
+    bool rejected_empty_dataset = false;
+    try {
+        synthetic_records.create("administrator-1", "", "no dataset", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_dataset = true;
+    }
+    require(rejected_empty_dataset,
+            "create() must reject a synthetic record with no target "
+            "dataset id");
+
+    require(synthetic_records.set_status(
+                record.id, masterai::SyntheticRecordStatus::approved),
+            "set_status() rejected a known synthetic record id");
+    require(synthetic_records.find(record.id)->status ==
+                masterai::SyntheticRecordStatus::approved,
+            "set_status() did not persist the new status");
+    require(!synthetic_records.set_status(
+                "nonexistent-synthetic-record",
+                masterai::SyntheticRecordStatus::rejected),
+            "set_status() must no-op for an unknown synthetic record id, "
+            "not throw");
+
+    masterai::SyntheticRecordStore reloaded(records);
+    const auto reloaded_record = reloaded.find(record.id);
+    require(reloaded_record.has_value() &&
+                reloaded_record->name == "paraphrase-batch-1" &&
+                reloaded_record->status ==
+                    masterai::SyntheticRecordStatus::approved,
+            "SyntheticRecordStore did not restore a persisted synthetic "
+            "record after reload");
+
+    require(synthetic_records.remove(record.id),
+            "remove() rejected a known synthetic record id");
+    require(synthetic_records.list().size() == 0U,
+            "remove() did not delete the synthetic record");
+    require(!synthetic_records.remove(record.id),
+            "remove() must no-op for an already-removed synthetic record "
+            "id, not throw");
+
+    const auto json = masterai::synthetic_record_json(record);
+    require(json.find("\"name\":\"paraphrase-batch-1\"") != std::string::npos &&
+                json.find("\"generationTechnique\":\"paraphrase\"") !=
+                    std::string::npos,
+            "synthetic_record_json did not report the synthetic record's "
+            "own fields");
+}
+
 }  // namespace
 
 int main() {
@@ -5466,6 +5545,8 @@ int main() {
             test_machine_learning_model_builder_lifecycle);
         run("Machine Learning prompt and instruction training lifecycle",
             test_machine_learning_instruction_training_lifecycle);
+        run("Machine Learning synthetic data generation lifecycle",
+            test_machine_learning_synthetic_data_lifecycle);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

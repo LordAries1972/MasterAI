@@ -3174,6 +3174,80 @@ std::string instruction_example_json(const InstructionExample& example);
 std::string instruction_examples_json(
     const std::vector<InstructionExample>& examples);
 
+// Phase 48: docs/PLAN.md "Machine Learning Abilities" section 20 (Synthetic
+// Data Generation). Every synthetic record targets one dataset already
+// registered in DatasetStore, the same required-target-id pattern
+// InstructionExample above (and LabelTask/DataPreparationJob before it)
+// follow. Scoped down from the section's full set of generation operations
+// (alternative questions, paraphrases, examples, counterexamples, difficult
+// cases, malformed inputs, edge cases, balanced-class samples, code samples,
+// unit-test cases, simulated conversations, image variations, tabular
+// records) to identity, the dataset it targets, and a free-text
+// generation_technique field naming which of those operations produced this
+// record -- deliberately not a closed enum, the same free-text-
+// classification precedent InstructionExample's subject_classification and
+// DataPreparationJob's source-type field set, since section 20's list of
+// techniques is open-ended and new ones can appear without a code change.
+// The deferred fields -- generator model, generator version, prompt,
+// generation settings, confidence score, and original source linkage -- only
+// mean something once a real generation executor exists to produce them,
+// exactly as Phase 47 deferred its own content fields until an example-
+// generation executor exists. The status enum reuses the same five-state
+// reviewer workflow InstructionExampleStatus defined above: section 20
+// requires that generated records carry a "human-review status" and "remain
+// distinguishable from human-created and real-world data" until reviewed,
+// the same rationale, so a synthetic record moves from draft through review
+// to an approved or rejected outcome, or an archived discard -- it never
+// queues, runs, or pauses the way TrainingJob/FineTuningJob's eleven-state
+// job lifecycle would imply.
+enum class SyntheticRecordStatus {
+    draft,
+    in_review,
+    approved,
+    rejected,
+    archived
+};
+
+std::string synthetic_record_status_name(SyntheticRecordStatus status);
+SyntheticRecordStatus parse_synthetic_record_status(const std::string& status);
+
+struct SyntheticRecord {
+    std::string id;
+    std::string dataset_id;
+    std::string name;
+    std::string description;
+    std::string generation_technique;
+    std::string owner_id;
+    SyntheticRecordStatus status{SyntheticRecordStatus::draft};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class SyntheticRecordStore final {
+public:
+    SyntheticRecordStore() = default;
+    explicit SyntheticRecordStore(RecordStore& records);
+    SyntheticRecord create(const std::string& owner_id,
+                           const std::string& dataset_id,
+                           const std::string& name,
+                           const std::string& description,
+                           const std::string& generation_technique);
+    std::optional<SyntheticRecord> find(const std::string& id) const;
+    std::vector<SyntheticRecord> list() const;
+    bool set_status(const std::string& id, SyntheticRecordStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const SyntheticRecord& record);
+    RecordStore* records_{nullptr};
+    std::map<std::string, SyntheticRecord> records_by_id_;
+    mutable std::mutex mutex_;
+};
+
+std::string synthetic_record_json(const SyntheticRecord& record);
+std::string synthetic_records_json(const std::vector<SyntheticRecord>& records);
+
 struct PerformanceSample {
     std::string name;
     std::uint64_t operations{0};

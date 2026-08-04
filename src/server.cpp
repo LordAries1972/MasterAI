@@ -326,6 +326,7 @@ public:
         ml_fine_tuning_jobs = std::make_unique<FineTuningJobStore>(records);
         ml_model_builder_configs = std::make_unique<ModelBuilderConfigStore>(records);
         ml_instruction_examples = std::make_unique<InstructionExampleStore>(records);
+        ml_synthetic_records = std::make_unique<SyntheticRecordStore>(records);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -1932,6 +1933,91 @@ public:
                          id);
             return response(200, "OK", "{\"deleted\":true}");
         }
+        // Phase 48: Synthetic Data Generation (docs/PLAN.md "Machine
+        // Learning Abilities" section 20), scoped to identity/target-
+        // dataset/generation-technique/status fields -- see
+        // SyntheticRecordStore's class comment in masterai.hpp for the
+        // generator-model/generator-version/prompt/generation-settings/
+        // confidence-score/original-source-linkage fields deferred to the
+        // phase that actually creates generated records.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/synthetic-records") {
+            if (auto denied = forbidden_unless(user->role, "ml.syntheticdata.view")) return *denied;
+            return response(200, "OK",
+                            "{\"syntheticRecords\":" +
+                                synthetic_records_json(
+                                    ml_synthetic_records->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/synthetic-records") {
+            if (auto denied = forbidden_unless(user->role, "ml.syntheticdata.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto dataset_id = root.required("datasetId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto record = ml_synthetic_records->create(
+                    user->id, dataset_id, name, text_field("description"),
+                    text_field("generationTechnique"));
+                audit.append("ml.synthetic_record.create", user->id,
+                             "success", record.id);
+                return response(201, "Created", synthetic_record_json(record));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_synthetic_record\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/synthetic-records/", 0U) ==
+                0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.syntheticdata.manage")) return *denied;
+            const auto id = request.target.substr(
+                30U, request.target.size() - 30U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_synthetic_record_status(
+                    root.required("status").as_string());
+                if (!ml_synthetic_records->set_status(id, status)) {
+                    return response(
+                        404, "Not Found",
+                        "{\"error\":\"ml_synthetic_record_not_found\"}");
+                }
+                audit.append("ml.synthetic_record.status", user->id,
+                             "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_synthetic_record_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/synthetic-records/", 0U) ==
+                0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.syntheticdata.manage")) return *denied;
+            const auto id = request.target.substr(
+                30U, request.target.size() - 30U - 7U);
+            if (!ml_synthetic_records->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_synthetic_record_not_found\"}");
+            }
+            audit.append("ml.synthetic_record.delete", user->id, "success",
+                         id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
         if (request.method == "GET" && request.target == "/models") {
             return workloads->model_inventory_page();
         }
@@ -2041,6 +2127,11 @@ public:
             if (target == "/app/ml/instruction-examples") {
                 return is_administrator
                            ? application_page(*user, "ml-instruction-examples")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/synthetic-records") {
+                return is_administrator
+                           ? application_page(*user, "ml-synthetic-records")
                            : response(302, "Found", "", {"Location: /app"});
             }
             if (target == "/app/report/system") {
@@ -3574,6 +3665,7 @@ private:
     std::unique_ptr<FineTuningJobStore> ml_fine_tuning_jobs;
     std::unique_ptr<ModelBuilderConfigStore> ml_model_builder_configs;
     std::unique_ptr<InstructionExampleStore> ml_instruction_examples;
+    std::unique_ptr<SyntheticRecordStore> ml_synthetic_records;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
     std::unique_ptr<DownloadManager> downloads;

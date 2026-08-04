@@ -681,6 +681,35 @@ Current phase status:
   43-46's own roster entries — `test_machine_learning_foundation_dashboard`'s
   fixed exclusion list stays frozen at Phase 42's interface set, so this
   phase changes nothing there.
+- Phase 48: Implemented at a scoped-down level (2026-08-05) — Synthetic Data
+  Generation (section 20 below), scoped down to identity, the dataset each
+  record targets, a free-text generation technique (section 20 lists
+  thirteen operations such as generating paraphrases, counterexamples, or
+  code samples, not a closed enum), and the same five-state reviewer-
+  approval lifecycle status Phase 47 used — draft, in_review, approved,
+  rejected, archived — matching section 20's requirement that generated
+  records carry a "human-review status" and "remain distinguishable from
+  human-created and real-world data" until reviewed, rather than reusing
+  Training Jobs'/Fine-Tuning's eleven-state job lifecycle, since a synthetic
+  record never queues, runs, or pauses (`SyntheticRecord`/
+  `SyntheticRecordStore`, `src/ml.cpp`), not the section's full record
+  (generator model, generator version, prompt, generation settings,
+  confidence score, original source linkage) that only means something once
+  a real generation executor exists to produce it. `create()` requires a
+  target dataset id, mirroring Phase 47's own required-dataset pattern. New
+  administrator-only `ml.syntheticdata.view`/`ml.syntheticdata.manage`
+  permissions gate `GET`/`POST /api/v1/ml/synthetic-records`,
+  `POST /api/v1/ml/synthetic-records/{id}/status`, and
+  `POST /api/v1/ml/synthetic-records/{id}/delete`. New "Synthetic Data
+  Generation" (`/app/ml/synthetic-records`) entry under the Machine Learning
+  sidebar in `src/web_ui.cpp` lists, creates, and moves records through
+  status. `test_machine_learning_synthetic_data_lifecycle` covers the same
+  permission/lifecycle/reload/remove guarantees as Phase 47's test. The
+  dashboard roster's `synthetic-data` interface entry (`src/ml.cpp`)
+  intentionally still reports `planned`, matching Phases 43-47's own roster
+  entries — `test_machine_learning_foundation_dashboard`'s fixed exclusion
+  list stays frozen at Phase 42's interface set, so this phase changes
+  nothing there.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that

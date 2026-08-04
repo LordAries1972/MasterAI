@@ -1969,4 +1969,151 @@ std::string instruction_examples_json(
     return body + "]";
 }
 
+// Phase 48: docs/PLAN.md "Machine Learning Abilities" section 20 (Synthetic
+// Data Generation) -- see SyntheticRecordStore's class comment in
+// masterai.hpp for the scoped-down field set and the rationale for reusing
+// InstructionExampleStatus's five-state reviewer workflow.
+std::string synthetic_record_status_name(const SyntheticRecordStatus status) {
+    switch (status) {
+        case SyntheticRecordStatus::draft: return "draft";
+        case SyntheticRecordStatus::in_review: return "in_review";
+        case SyntheticRecordStatus::approved: return "approved";
+        case SyntheticRecordStatus::rejected: return "rejected";
+        case SyntheticRecordStatus::archived: return "archived";
+    }
+    throw std::runtime_error("invalid synthetic record status");
+}
+
+SyntheticRecordStatus parse_synthetic_record_status(
+    const std::string& status) {
+    if (status == "draft") return SyntheticRecordStatus::draft;
+    if (status == "in_review") return SyntheticRecordStatus::in_review;
+    if (status == "approved") return SyntheticRecordStatus::approved;
+    if (status == "rejected") return SyntheticRecordStatus::rejected;
+    if (status == "archived") return SyntheticRecordStatus::archived;
+    throw std::runtime_error("stored synthetic record status is invalid");
+}
+
+SyntheticRecordStore::SyntheticRecordStore(RecordStore& records)
+    : records_(&records) {
+    restore();
+}
+
+void SyntheticRecordStore::restore() {
+    for (const auto& item : records_->list("ml_synthetic_records")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 6U) {
+            throw std::runtime_error(
+                "persisted synthetic record field count is wrong");
+        }
+        SyntheticRecord record;
+        record.id = item.first;
+        record.dataset_id = fields[0];
+        record.name = fields[1];
+        record.description = fields[2];
+        record.generation_technique = fields[3];
+        record.owner_id = fields[4];
+        record.status = parse_synthetic_record_status(fields[5]);
+        records_by_id_[record.id] = record;
+    }
+}
+
+void SyntheticRecordStore::persist(const SyntheticRecord& record) {
+    records_->put(
+        "ml_synthetic_records", record.id,
+        pack({record.dataset_id, record.name, record.description,
+             record.generation_technique, record.owner_id,
+             synthetic_record_status_name(record.status)}));
+}
+
+SyntheticRecord SyntheticRecordStore::create(
+    const std::string& owner_id, const std::string& dataset_id,
+    const std::string& name, const std::string& description,
+    const std::string& generation_technique) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("synthetic record name is invalid");
+    }
+    if (dataset_id.empty()) {
+        throw std::invalid_argument("synthetic record dataset id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    SyntheticRecord record;
+    record.id = random_id();
+    record.dataset_id = dataset_id;
+    record.name = name;
+    record.description = description;
+    record.generation_technique = generation_technique;
+    record.owner_id = owner_id;
+    record.status = SyntheticRecordStatus::draft;
+    record.created_at_epoch_seconds = epoch_seconds();
+    record.updated_at_epoch_seconds = record.created_at_epoch_seconds;
+    records_by_id_[record.id] = record;
+    if (records_) persist(record);
+    return record;
+}
+
+std::optional<SyntheticRecord> SyntheticRecordStore::find(
+    const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = records_by_id_.find(id);
+    return found != records_by_id_.end()
+               ? std::optional<SyntheticRecord>(found->second)
+               : std::nullopt;
+}
+
+std::vector<SyntheticRecord> SyntheticRecordStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<SyntheticRecord> result;
+    result.reserve(records_by_id_.size());
+    for (const auto& item : records_by_id_) result.push_back(item.second);
+    return result;
+}
+
+bool SyntheticRecordStore::set_status(
+    const std::string& id, const SyntheticRecordStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = records_by_id_.find(id);
+    if (found == records_by_id_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool SyntheticRecordStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = records_by_id_.find(id);
+    if (found == records_by_id_.end()) return false;
+    records_by_id_.erase(found);
+    if (records_) records_->erase("ml_synthetic_records", id);
+    return true;
+}
+
+std::string synthetic_record_json(const SyntheticRecord& record) {
+    return "{\"id\":\"" + json_escape(record.id) + "\",\"datasetId\":\"" +
+           json_escape(record.dataset_id) + "\",\"name\":\"" +
+           json_escape(record.name) + "\",\"description\":\"" +
+           json_escape(record.description) +
+           "\",\"generationTechnique\":\"" +
+           json_escape(record.generation_technique) + "\",\"ownerId\":\"" +
+           json_escape(record.owner_id) + "\",\"status\":\"" +
+           synthetic_record_status_name(record.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(record.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(record.updated_at_epoch_seconds) + "}";
+}
+
+std::string synthetic_records_json(
+    const std::vector<SyntheticRecord>& records) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& record : records) {
+        if (!first) body += ",";
+        first = false;
+        body += synthetic_record_json(record);
+    }
+    return body + "]";
+}
+
 }  // namespace masterai

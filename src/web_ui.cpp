@@ -118,7 +118,7 @@ std::string application_script() {
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
-        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,cfg,report]="
+        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,cfg,report]="
         "await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
@@ -147,6 +147,8 @@ std::string application_script() {
         "()=>({modelBuilderConfigs:[]})),"
         "api('/api/v1/ml/instruction-examples').catch("
         "()=>({instructionExamples:[]})),"
+        "api('/api/v1/ml/synthetic-records').catch("
+        "()=>({syntheticRecords:[]})),"
         // 403/503 for anyone who isn't an administrator, or when no
         // settings.json path is known to the running server -- both are
         // quiet, expected no-ops here exactly like the ml.* fetches above.
@@ -170,6 +172,7 @@ std::string application_script() {
         "renderMlFineTuningJobs(mlft.fineTuningJobs);"
         "renderMlModelBuilderConfigs(mlmb.modelBuilderConfigs);"
         "renderMlInstructionExamples(mlie.instructionExamples);"
+        "renderMlSyntheticRecords(mlsr.syntheticRecords);"
         "renderSystemConfig(cfg);"
         "renderSystemReport(report);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
@@ -1100,6 +1103,51 @@ std::string application_script() {
         "'/delete','POST');await load();}"
         "catch(x){showSystemError('Delete instruction example failed: '+"
         "x.message);}});}}"
+        // Synthetic Data Generation (docs/PLAN.md "Machine Learning
+        // Abilities" section 20): same status-dropdown-plus-Delete pattern
+        // as Prompt and Instruction Training above, with its own five-state
+        // reviewer workflow (draft/in_review/approved/rejected/archived)
+        // matching section 20's requirement that generated records "remain
+        // distinguishable from human-created and real-world data" until
+        // reviewed.
+        "const SYNTHETIC_RECORD_STATUSES=['draft','in_review','approved',"
+        "'rejected','archived'];"
+        "function renderMlSyntheticRecords(records){"
+        "const el=q('#mlSyntheticRecordsList');if(!el)return;"
+        "if(!records.length){el.innerHTML='<p>No synthetic records "
+        "created yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Dataset','Generation technique',"
+        "'Status','Set status',''],"
+        "records.map(x=>[esc(x.name),esc(x.datasetId),"
+        "esc(x.generationTechnique),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-synthetic-record-status-for=\"'+x.id+'\">'+"
+        "SYNTHETIC_RECORD_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-synthetic-record-status=\"'+"
+        "x.id+'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-synthetic-record=\"'+"
+        "x.id+'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-synthetic-record-status]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applySyntheticRecordStatus;"
+        "const status=el.querySelector("
+        "'[data-synthetic-record-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/synthetic-records/'+"
+        "encodeURIComponent(id)+'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update synthetic record status "
+        "failed: '+x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-synthetic-record]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/synthetic-records/'+"
+        "encodeURIComponent(btn.dataset.deleteMlSyntheticRecord)+"
+        "'/delete','POST');await load();}"
+        "catch(x){showSystemError('Delete synthetic record failed: '+"
+        "x.message);}});}}"
         // Each row gets its own Start/resume, Pause, Stop, and Remove buttons
         // wired directly to that job's id -- nothing to hand-type, unlike the
         // old single manual 'Download job ID' field this replaces. The State
@@ -1996,7 +2044,15 @@ std::string application_script() {
         "name:q('#mlInstructionExampleName').value,"
         "description:q('#mlInstructionExampleDescription').value,"
         "subjectClassification:"
-        "q('#mlInstructionExampleSubjectClassification').value})));}});";
+        "q('#mlInstructionExampleSubjectClassification').value})));"
+        "if(q('#newMlSyntheticRecord'))"
+        "q('#newMlSyntheticRecord').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/synthetic-records',"
+        "()=>({datasetId:q('#mlSyntheticRecordDatasetId').value,"
+        "name:q('#mlSyntheticRecordName').value,"
+        "description:q('#mlSyntheticRecordDescription').value,"
+        "generationTechnique:"
+        "q('#mlSyntheticRecordGenerationTechnique').value})));}});";
 }
 
 // Presents the native OS account sign-in form without embedding credentials.
@@ -2609,6 +2665,39 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<h2>Instruction examples</h2>"
             "<div id=\"mlInstructionExamplesList\">Loading...</div>"
             "</div></section>";
+    } else if (section == "ml-synthetic-records") {
+        // Phase 48 (docs/PLAN.md "Machine Learning Abilities" section 20):
+        // create and list synthetic records generated against a registered
+        // dataset, and move them through the same reviewer-approval
+        // lifecycle status Prompt and Instruction Training uses. Only the
+        // identity/target-dataset/generation-technique/status fields
+        // SyntheticRecordStore actually persists are collected here -- see
+        // that class's comment in masterai.hpp for the generator-model/
+        // generator-version/prompt/generation-settings/confidence-score/
+        // original-source-linkage fields deferred to the phase that
+        // actually creates generated records.
+        body =
+            "<section id=\"panel-ml-synthetic-records\" class=\"panel\">"
+            "<div>"
+            "<h2>New synthetic record</h2>"
+            "<form id=\"newMlSyntheticRecord\">"
+            "<label>Dataset ID<input id=\"mlSyntheticRecordDatasetId\" "
+            "required placeholder=\"dataset id from Dataset Manager\">"
+            "</label>"
+            "<label>Name<input id=\"mlSyntheticRecordName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Description<textarea "
+            "id=\"mlSyntheticRecordDescription\" rows=\"2\"></textarea>"
+            "</label>"
+            "<label>Generation technique<input "
+            "id=\"mlSyntheticRecordGenerationTechnique\" "
+            "placeholder=\"e.g. paraphrase, edge_case, counterexample\">"
+            "</label>"
+            "<button>Create synthetic record</button></form>"
+            "</div><div>"
+            "<h2>Synthetic records</h2>"
+            "<div id=\"mlSyntheticRecordsList\">Loading...</div>"
+            "</div></section>";
     } else if (section == "settings-config") {
         // Phase 30A: administrator-only local-configuration editor backed by
         // GET/POST /api/v1/admin/config (server.cpp's admin_config_get()/
@@ -2839,7 +2928,10 @@ std::string application_page(const UserRecord& user, const std::string& section,
                          section == "ml-model-builder-configs") +
                 nav_link("/app/ml/instruction-examples",
                          "Prompt and Instruction Training",
-                         section == "ml-instruction-examples"));
+                         section == "ml-instruction-examples") +
+                nav_link("/app/ml/synthetic-records",
+                         "Synthetic Data Generation",
+                         section == "ml-synthetic-records"));
     }
 
     return html_response(
