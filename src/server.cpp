@@ -329,6 +329,13 @@ public:
         ml_synthetic_records = std::make_unique<SyntheticRecordStore>(records);
         ml_vector_stores = std::make_unique<VectorStoreStore>(records);
         ml_rag_configs = std::make_unique<RagConfigStore>(records);
+        ml_subject_exams = std::make_unique<SubjectExamStore>(records);
+        ml_hyperparameter_searches =
+            std::make_unique<HyperparameterSearchStore>(records);
+        ml_model_optimizations = std::make_unique<ModelOptimizationStore>(records);
+        ml_training_checkpoints =
+            std::make_unique<TrainingCheckpointStore>(records);
+        ml_deployments = std::make_unique<DeploymentStore>(records);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -2176,6 +2183,413 @@ public:
             audit.append("ml.rag_config.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
         }
+        // Phase 51: Subject Examination System (docs/PLAN.md "Machine
+        // Learning Abilities" section 24), scoped to identity/subject-
+        // reference/question-format/status fields -- see SubjectExamStore's
+        // class comment in masterai.hpp for the question-bank/scoring
+        // fields deferred to the phase that actually administers exams.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/subject-exams") {
+            if (auto denied = forbidden_unless(user->role, "ml.subjectexams.view")) return *denied;
+            return response(200, "OK",
+                            "{\"subjectExams\":" +
+                                subject_exams_json(ml_subject_exams->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/subject-exams") {
+            if (auto denied = forbidden_unless(user->role, "ml.subjectexams.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto subject_id = root.required("subjectId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto exam = ml_subject_exams->create(
+                    user->id, subject_id, name, text_field("description"),
+                    text_field("questionFormat"));
+                audit.append("ml.subject_exam.create", user->id, "success",
+                             exam.id);
+                return response(201, "Created", subject_exam_json(exam));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_subject_exam\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/subject-exams/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.subjectexams.manage")) return *denied;
+            const auto id = request.target.substr(
+                25U, request.target.size() - 25U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_subject_exam_status(
+                    root.required("status").as_string());
+                if (!ml_subject_exams->set_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_subject_exam_not_found\"}");
+                }
+                audit.append("ml.subject_exam.status", user->id, "success",
+                             id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_subject_exam_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/subject-exams/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.subjectexams.manage")) return *denied;
+            const auto id = request.target.substr(
+                25U, request.target.size() - 25U - 7U);
+            if (!ml_subject_exams->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_subject_exam_not_found\"}");
+            }
+            audit.append("ml.subject_exam.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 52: Hyperparameter Optimization (docs/PLAN.md "Machine
+        // Learning Abilities" section 26), scoped to identity/training-job-
+        // reference/strategy/status fields -- see HyperparameterSearchStore's
+        // class comment in masterai.hpp for the search-space/trial-history
+        // fields deferred to the phase that actually runs searches.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/hyperparameter-searches") {
+            if (auto denied = forbidden_unless(user->role, "ml.hyperparams.view")) return *denied;
+            return response(
+                200, "OK",
+                "{\"hyperparameterSearches\":" +
+                    hyperparameter_searches_json(
+                        ml_hyperparameter_searches->list()) +
+                    "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/hyperparameter-searches") {
+            if (auto denied = forbidden_unless(user->role, "ml.hyperparams.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto training_job_id =
+                    root.required("trainingJobId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto search = ml_hyperparameter_searches->create(
+                    user->id, training_job_id, name,
+                    text_field("description"), text_field("strategy"));
+                audit.append("ml.hyperparameter_search.create", user->id,
+                             "success", search.id);
+                return response(201, "Created",
+                                hyperparameter_search_json(search));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_hyperparameter_search\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/hyperparameter-searches/", 0U) ==
+                0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.hyperparams.manage")) return *denied;
+            const auto id = request.target.substr(
+                35U, request.target.size() - 35U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_hyperparameter_search_status(
+                    root.required("status").as_string());
+                if (!ml_hyperparameter_searches->set_status(id, status)) {
+                    return response(
+                        404, "Not Found",
+                        "{\"error\":\"ml_hyperparameter_search_not_found\"}");
+                }
+                audit.append("ml.hyperparameter_search.status", user->id,
+                             "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_hyperparameter_search_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/hyperparameter-searches/", 0U) ==
+                0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.hyperparams.manage")) return *denied;
+            const auto id = request.target.substr(
+                35U, request.target.size() - 35U - 7U);
+            if (!ml_hyperparameter_searches->remove(id)) {
+                return response(
+                    404, "Not Found",
+                    "{\"error\":\"ml_hyperparameter_search_not_found\"}");
+            }
+            audit.append("ml.hyperparameter_search.delete", user->id,
+                         "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 53: Model Optimization (docs/PLAN.md "Machine Learning
+        // Abilities" section 28), scoped to identity/model-reference/
+        // operation/status fields -- see ModelOptimizationStore's class
+        // comment in masterai.hpp for the before/after-comparison fields
+        // deferred to the phase that actually optimizes models.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/model-optimizations") {
+            if (auto denied = forbidden_unless(user->role, "ml.modelopts.view")) return *denied;
+            return response(200, "OK",
+                            "{\"modelOptimizations\":" +
+                                model_optimizations_json(
+                                    ml_model_optimizations->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/model-optimizations") {
+            if (auto denied = forbidden_unless(user->role, "ml.modelopts.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto model_id = root.required("modelId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto run = ml_model_optimizations->create(
+                    user->id, model_id, name, text_field("description"),
+                    text_field("operation"));
+                audit.append("ml.model_optimization.create", user->id,
+                             "success", run.id);
+                return response(201, "Created", model_optimization_json(run));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_model_optimization\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/model-optimizations/", 0U) ==
+                0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.modelopts.manage")) return *denied;
+            const auto id = request.target.substr(
+                31U, request.target.size() - 31U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_model_optimization_status(
+                    root.required("status").as_string());
+                if (!ml_model_optimizations->set_status(id, status)) {
+                    return response(
+                        404, "Not Found",
+                        "{\"error\":\"ml_model_optimization_not_found\"}");
+                }
+                audit.append("ml.model_optimization.status", user->id,
+                             "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_model_optimization_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/model-optimizations/", 0U) ==
+                0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.modelopts.manage")) return *denied;
+            const auto id = request.target.substr(
+                31U, request.target.size() - 31U - 7U);
+            if (!ml_model_optimizations->remove(id)) {
+                return response(
+                    404, "Not Found",
+                    "{\"error\":\"ml_model_optimization_not_found\"}");
+            }
+            audit.append("ml.model_optimization.delete", user->id, "success",
+                         id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 54: Checkpoint Management (docs/PLAN.md "Machine Learning
+        // Abilities" section 33), scoped to identity/training-job-reference/
+        // capture-reason/retention-status fields -- see
+        // TrainingCheckpointStore's class comment in masterai.hpp for the
+        // step/epoch/hash/resume fields deferred to the phase that actually
+        // captures checkpoints.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/checkpoints") {
+            if (auto denied = forbidden_unless(user->role, "ml.checkpoints.view")) return *denied;
+            return response(200, "OK",
+                            "{\"checkpoints\":" +
+                                training_checkpoints_json(
+                                    ml_training_checkpoints->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/checkpoints") {
+            if (auto denied = forbidden_unless(user->role, "ml.checkpoints.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto training_job_id =
+                    root.required("trainingJobId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto checkpoint = ml_training_checkpoints->create(
+                    user->id, training_job_id, name,
+                    text_field("description"), text_field("captureReason"));
+                audit.append("ml.checkpoint.create", user->id, "success",
+                             checkpoint.id);
+                return response(201, "Created",
+                                training_checkpoint_json(checkpoint));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_checkpoint\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/checkpoints/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.checkpoints.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_training_checkpoint_status(
+                    root.required("status").as_string());
+                if (!ml_training_checkpoints->set_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_checkpoint_not_found\"}");
+                }
+                audit.append("ml.checkpoint.status", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_checkpoint_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/checkpoints/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.checkpoints.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            if (!ml_training_checkpoints->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_checkpoint_not_found\"}");
+            }
+            audit.append("ml.checkpoint.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 55: Deployment Manager (docs/PLAN.md "Machine Learning
+        // Abilities" section 34), scoped to identity/model-reference/
+        // environment/strategy/status fields -- see DeploymentStore's class
+        // comment in masterai.hpp for the health/rollback fields deferred
+        // to the phase that actually promotes models.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/deployments") {
+            if (auto denied = forbidden_unless(user->role, "ml.deployments.view")) return *denied;
+            return response(200, "OK",
+                            "{\"deployments\":" +
+                                deployments_json(ml_deployments->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/deployments") {
+            if (auto denied = forbidden_unless(user->role, "ml.deployments.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto model_id = root.required("modelId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto deployment = ml_deployments->create(
+                    user->id, model_id, name, text_field("description"),
+                    text_field("environment"), text_field("strategy"));
+                audit.append("ml.deployment.create", user->id, "success",
+                             deployment.id);
+                return response(201, "Created", deployment_json(deployment));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_deployment\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/deployments/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.deployments.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_deployment_status(
+                    root.required("status").as_string());
+                if (!ml_deployments->set_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_deployment_not_found\"}");
+                }
+                audit.append("ml.deployment.status", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_deployment_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/deployments/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.deployments.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            if (!ml_deployments->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_deployment_not_found\"}");
+            }
+            audit.append("ml.deployment.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
         if (request.method == "GET" && request.target == "/models") {
             return workloads->model_inventory_page();
         }
@@ -2300,6 +2714,31 @@ public:
             if (target == "/app/ml/rag-configs") {
                 return is_administrator
                            ? application_page(*user, "ml-rag-configs")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/subject-exams") {
+                return is_administrator
+                           ? application_page(*user, "ml-subject-exams")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/hyperparameter-searches") {
+                return is_administrator
+                           ? application_page(*user, "ml-hyperparameter-searches")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/model-optimizations") {
+                return is_administrator
+                           ? application_page(*user, "ml-model-optimizations")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/checkpoints") {
+                return is_administrator
+                           ? application_page(*user, "ml-checkpoints")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/deployments") {
+                return is_administrator
+                           ? application_page(*user, "ml-deployments")
                            : response(302, "Found", "", {"Location: /app"});
             }
             if (target == "/app/report/system") {
@@ -3836,6 +4275,11 @@ private:
     std::unique_ptr<SyntheticRecordStore> ml_synthetic_records;
     std::unique_ptr<VectorStoreStore> ml_vector_stores;
     std::unique_ptr<RagConfigStore> ml_rag_configs;
+    std::unique_ptr<SubjectExamStore> ml_subject_exams;
+    std::unique_ptr<HyperparameterSearchStore> ml_hyperparameter_searches;
+    std::unique_ptr<ModelOptimizationStore> ml_model_optimizations;
+    std::unique_ptr<TrainingCheckpointStore> ml_training_checkpoints;
+    std::unique_ptr<DeploymentStore> ml_deployments;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
     std::unique_ptr<DownloadManager> downloads;

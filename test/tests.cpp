@@ -5557,6 +5557,454 @@ void test_machine_learning_rag_config_lifecycle() {
             "rag_config_json did not report the RAG config's own fields");
 }
 
+// Phase 51: docs/PLAN.md "Machine Learning Abilities" section 24 (Subject
+// Examination System) -- the same permission/lifecycle/reload/remove
+// guarantees as Phase 50's test, plus the required-subject-id rule.
+void test_machine_learning_subject_exam_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.subjectexams.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.subjectexams.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.subjectexams.view"),
+            "ml.subjectexams.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::SubjectExamStore exams(records);
+    const auto exam = exams.create(
+        "administrator-1", "subject-1", "networking-final",
+        "Final examination for the networking subject package.",
+        "multiple_choice");
+    require(!exam.id.empty() && exam.name == "networking-final" &&
+                exam.subject_id == "subject-1" &&
+                exam.question_format == "multiple_choice" &&
+                exam.status == masterai::SubjectExamStatus::draft &&
+                exam.owner_id == "administrator-1",
+            "a newly created subject exam must start draft with its owner "
+            "recorded");
+    require(exams.list().size() == 1U,
+            "the created subject exam was not visible in list()");
+
+    bool rejected_empty_name = false;
+    try {
+        exams.create("administrator-1", "subject-1", "", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_name = true;
+    }
+    require(rejected_empty_name,
+            "create() must reject a subject exam with no name");
+
+    bool rejected_missing_subject = false;
+    try {
+        exams.create("administrator-1", "", "orphan-exam", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_missing_subject = true;
+    }
+    require(rejected_missing_subject,
+            "create() must reject a subject exam with no subject id");
+
+    require(exams.set_status(exam.id,
+                             masterai::SubjectExamStatus::approved),
+            "set_status() rejected a known subject exam id");
+    require(exams.find(exam.id)->status ==
+                masterai::SubjectExamStatus::approved,
+            "set_status() did not persist the new status");
+    require(!exams.set_status("nonexistent-subject-exam",
+                              masterai::SubjectExamStatus::rejected),
+            "set_status() must no-op for an unknown subject exam id, not "
+            "throw");
+
+    masterai::SubjectExamStore reloaded(records);
+    const auto reloaded_exam = reloaded.find(exam.id);
+    require(reloaded_exam.has_value() &&
+                reloaded_exam->name == "networking-final" &&
+                reloaded_exam->status ==
+                    masterai::SubjectExamStatus::approved,
+            "SubjectExamStore did not restore a persisted subject exam "
+            "after reload");
+
+    require(exams.remove(exam.id),
+            "remove() rejected a known subject exam id");
+    require(exams.list().size() == 0U,
+            "remove() did not delete the subject exam");
+    require(!exams.remove(exam.id),
+            "remove() must no-op for an already-removed subject exam id, "
+            "not throw");
+
+    const auto json = masterai::subject_exam_json(exam);
+    require(json.find("\"name\":\"networking-final\"") !=
+                    std::string::npos &&
+                json.find("\"subjectId\":\"subject-1\"") !=
+                    std::string::npos &&
+                json.find("\"questionFormat\":\"multiple_choice\"") !=
+                    std::string::npos,
+            "subject_exam_json did not report the exam's own fields");
+}
+
+// Phase 52: docs/PLAN.md "Machine Learning Abilities" section 26
+// (Hyperparameter Optimization) -- the same permission/lifecycle/reload/
+// remove guarantees as Phase 51's test, plus the required-training-job-id
+// rule and the eleven-state job lifecycle.
+void test_machine_learning_hyperparameter_search_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.hyperparams.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.hyperparams.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.hyperparams.view"),
+            "ml.hyperparams.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::HyperparameterSearchStore searches(records);
+    const auto search = searches.create(
+        "administrator-1", "training-job-1", "lr-batch-sweep",
+        "Learning-rate and batch-size sweep for the base training job.",
+        "bayesian");
+    require(!search.id.empty() && search.name == "lr-batch-sweep" &&
+                search.training_job_id == "training-job-1" &&
+                search.strategy == "bayesian" &&
+                search.status ==
+                    masterai::HyperparameterSearchStatus::draft &&
+                search.owner_id == "administrator-1",
+            "a newly created hyperparameter search must start draft with "
+            "its owner recorded");
+    require(searches.list().size() == 1U,
+            "the created hyperparameter search was not visible in list()");
+
+    bool rejected_empty_name = false;
+    try {
+        searches.create("administrator-1", "training-job-1", "", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_name = true;
+    }
+    require(rejected_empty_name,
+            "create() must reject a hyperparameter search with no name");
+
+    bool rejected_missing_job = false;
+    try {
+        searches.create("administrator-1", "", "orphan-search", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_missing_job = true;
+    }
+    require(rejected_missing_job,
+            "create() must reject a hyperparameter search with no "
+            "training job id");
+
+    // Walk the same eleven-state lifecycle Training Jobs use.
+    require(searches.set_status(
+                search.id, masterai::HyperparameterSearchStatus::queued) &&
+                searches.set_status(
+                    search.id,
+                    masterai::HyperparameterSearchStatus::running) &&
+                searches.set_status(
+                    search.id,
+                    masterai::HyperparameterSearchStatus::completed),
+            "set_status() rejected a known hyperparameter search id");
+    require(searches.find(search.id)->status ==
+                masterai::HyperparameterSearchStatus::completed,
+            "set_status() did not persist the new status");
+    require(!searches.set_status(
+                "nonexistent-search",
+                masterai::HyperparameterSearchStatus::failed),
+            "set_status() must no-op for an unknown hyperparameter search "
+            "id, not throw");
+
+    masterai::HyperparameterSearchStore reloaded(records);
+    const auto reloaded_search = reloaded.find(search.id);
+    require(reloaded_search.has_value() &&
+                reloaded_search->name == "lr-batch-sweep" &&
+                reloaded_search->status ==
+                    masterai::HyperparameterSearchStatus::completed,
+            "HyperparameterSearchStore did not restore a persisted search "
+            "after reload");
+
+    require(searches.remove(search.id),
+            "remove() rejected a known hyperparameter search id");
+    require(searches.list().size() == 0U,
+            "remove() did not delete the hyperparameter search");
+    require(!searches.remove(search.id),
+            "remove() must no-op for an already-removed hyperparameter "
+            "search id, not throw");
+
+    const auto json = masterai::hyperparameter_search_json(search);
+    require(json.find("\"name\":\"lr-batch-sweep\"") != std::string::npos &&
+                json.find("\"trainingJobId\":\"training-job-1\"") !=
+                    std::string::npos &&
+                json.find("\"strategy\":\"bayesian\"") != std::string::npos,
+            "hyperparameter_search_json did not report the search's own "
+            "fields");
+}
+
+// Phase 53: docs/PLAN.md "Machine Learning Abilities" section 28 (Model
+// Optimization) -- the same permission/lifecycle/reload/remove guarantees
+// as Phase 52's test, plus the required-model-id rule.
+void test_machine_learning_model_optimization_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.modelopts.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.modelopts.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.modelopts.view"),
+            "ml.modelopts.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::ModelOptimizationStore optimizations(records);
+    const auto run = optimizations.create(
+        "administrator-1", "model-1", "q4-quantization",
+        "Quantize the base model to 4-bit for CPU-only hosts.",
+        "quantization");
+    require(!run.id.empty() && run.name == "q4-quantization" &&
+                run.model_id == "model-1" &&
+                run.operation == "quantization" &&
+                run.status == masterai::ModelOptimizationStatus::draft &&
+                run.owner_id == "administrator-1",
+            "a newly created model optimization must start draft with its "
+            "owner recorded");
+    require(optimizations.list().size() == 1U,
+            "the created model optimization was not visible in list()");
+
+    bool rejected_empty_name = false;
+    try {
+        optimizations.create("administrator-1", "model-1", "", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_name = true;
+    }
+    require(rejected_empty_name,
+            "create() must reject a model optimization with no name");
+
+    bool rejected_missing_model = false;
+    try {
+        optimizations.create("administrator-1", "", "orphan-run", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_missing_model = true;
+    }
+    require(rejected_missing_model,
+            "create() must reject a model optimization with no model id");
+
+    require(optimizations.set_status(
+                run.id, masterai::ModelOptimizationStatus::completed),
+            "set_status() rejected a known model optimization id");
+    require(optimizations.find(run.id)->status ==
+                masterai::ModelOptimizationStatus::completed,
+            "set_status() did not persist the new status");
+    require(!optimizations.set_status(
+                "nonexistent-optimization",
+                masterai::ModelOptimizationStatus::failed),
+            "set_status() must no-op for an unknown model optimization id, "
+            "not throw");
+
+    masterai::ModelOptimizationStore reloaded(records);
+    const auto reloaded_run = reloaded.find(run.id);
+    require(reloaded_run.has_value() &&
+                reloaded_run->name == "q4-quantization" &&
+                reloaded_run->status ==
+                    masterai::ModelOptimizationStatus::completed,
+            "ModelOptimizationStore did not restore a persisted run after "
+            "reload");
+
+    require(optimizations.remove(run.id),
+            "remove() rejected a known model optimization id");
+    require(optimizations.list().size() == 0U,
+            "remove() did not delete the model optimization");
+    require(!optimizations.remove(run.id),
+            "remove() must no-op for an already-removed model optimization "
+            "id, not throw");
+
+    const auto json = masterai::model_optimization_json(run);
+    require(json.find("\"name\":\"q4-quantization\"") !=
+                    std::string::npos &&
+                json.find("\"modelId\":\"model-1\"") != std::string::npos &&
+                json.find("\"operation\":\"quantization\"") !=
+                    std::string::npos,
+            "model_optimization_json did not report the run's own fields");
+}
+
+// Phase 54: docs/PLAN.md "Machine Learning Abilities" section 33
+// (Checkpoint Management) -- the same permission/lifecycle/reload/remove
+// guarantees as Phase 53's test, plus the bespoke active/pinned/archived
+// retention lifecycle.
+void test_machine_learning_checkpoint_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.checkpoints.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.checkpoints.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.checkpoints.view"),
+            "ml.checkpoints.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::TrainingCheckpointStore checkpoints(records);
+    const auto checkpoint = checkpoints.create(
+        "administrator-1", "training-job-1", "epoch-3-best",
+        "Best validation loss so far.", "best_metric");
+    require(!checkpoint.id.empty() && checkpoint.name == "epoch-3-best" &&
+                checkpoint.training_job_id == "training-job-1" &&
+                checkpoint.capture_reason == "best_metric" &&
+                checkpoint.status ==
+                    masterai::TrainingCheckpointStatus::active &&
+                checkpoint.owner_id == "administrator-1",
+            "a newly created checkpoint must start active with its owner "
+            "recorded");
+    require(checkpoints.list().size() == 1U,
+            "the created checkpoint was not visible in list()");
+
+    bool rejected_empty_name = false;
+    try {
+        checkpoints.create("administrator-1", "training-job-1", "", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_name = true;
+    }
+    require(rejected_empty_name,
+            "create() must reject a checkpoint with no name");
+
+    bool rejected_missing_job = false;
+    try {
+        checkpoints.create("administrator-1", "", "orphan-checkpoint", "",
+                           "");
+    } catch (const std::invalid_argument&) {
+        rejected_missing_job = true;
+    }
+    require(rejected_missing_job,
+            "create() must reject a checkpoint with no training job id");
+
+    require(checkpoints.set_status(
+                checkpoint.id, masterai::TrainingCheckpointStatus::pinned),
+            "set_status() rejected a known checkpoint id");
+    require(checkpoints.find(checkpoint.id)->status ==
+                masterai::TrainingCheckpointStatus::pinned,
+            "set_status() did not persist the new status");
+    require(!checkpoints.set_status(
+                "nonexistent-checkpoint",
+                masterai::TrainingCheckpointStatus::archived),
+            "set_status() must no-op for an unknown checkpoint id, not "
+            "throw");
+
+    masterai::TrainingCheckpointStore reloaded(records);
+    const auto reloaded_checkpoint = reloaded.find(checkpoint.id);
+    require(reloaded_checkpoint.has_value() &&
+                reloaded_checkpoint->name == "epoch-3-best" &&
+                reloaded_checkpoint->status ==
+                    masterai::TrainingCheckpointStatus::pinned,
+            "TrainingCheckpointStore did not restore a persisted "
+            "checkpoint after reload");
+
+    require(checkpoints.remove(checkpoint.id),
+            "remove() rejected a known checkpoint id");
+    require(checkpoints.list().size() == 0U,
+            "remove() did not delete the checkpoint");
+    require(!checkpoints.remove(checkpoint.id),
+            "remove() must no-op for an already-removed checkpoint id, not "
+            "throw");
+
+    const auto json = masterai::training_checkpoint_json(checkpoint);
+    require(json.find("\"name\":\"epoch-3-best\"") != std::string::npos &&
+                json.find("\"trainingJobId\":\"training-job-1\"") !=
+                    std::string::npos &&
+                json.find("\"captureReason\":\"best_metric\"") !=
+                    std::string::npos,
+            "training_checkpoint_json did not report the checkpoint's own "
+            "fields");
+}
+
+// Phase 55: docs/PLAN.md "Machine Learning Abilities" section 34
+// (Deployment Manager) -- the same permission/lifecycle/reload/remove
+// guarantees as Phase 54's test, plus the required-model-id rule and the
+// three-state approval workflow.
+void test_machine_learning_deployment_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.deployments.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.deployments.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.deployments.view"),
+            "ml.deployments.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::DeploymentStore deployments(records);
+    const auto deployment = deployments.create(
+        "administrator-1", "model-1", "support-model-staging",
+        "Stage the support model before production promotion.", "staging",
+        "blue_green");
+    require(!deployment.id.empty() &&
+                deployment.name == "support-model-staging" &&
+                deployment.model_id == "model-1" &&
+                deployment.environment == "staging" &&
+                deployment.strategy == "blue_green" &&
+                deployment.status == masterai::DeploymentStatus::pending &&
+                deployment.owner_id == "administrator-1",
+            "a newly created deployment must start pending with its owner "
+            "recorded");
+    require(deployments.list().size() == 1U,
+            "the created deployment was not visible in list()");
+
+    bool rejected_empty_name = false;
+    try {
+        deployments.create("administrator-1", "model-1", "", "", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_name = true;
+    }
+    require(rejected_empty_name,
+            "create() must reject a deployment with no name");
+
+    bool rejected_missing_model = false;
+    try {
+        deployments.create("administrator-1", "", "orphan-deployment", "",
+                           "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_missing_model = true;
+    }
+    require(rejected_missing_model,
+            "create() must reject a deployment with no model id");
+
+    require(deployments.set_status(deployment.id,
+                                   masterai::DeploymentStatus::approved),
+            "set_status() rejected a known deployment id");
+    require(deployments.find(deployment.id)->status ==
+                masterai::DeploymentStatus::approved,
+            "set_status() did not persist the new status");
+    require(!deployments.set_status("nonexistent-deployment",
+                                    masterai::DeploymentStatus::rejected),
+            "set_status() must no-op for an unknown deployment id, not "
+            "throw");
+
+    masterai::DeploymentStore reloaded(records);
+    const auto reloaded_deployment = reloaded.find(deployment.id);
+    require(reloaded_deployment.has_value() &&
+                reloaded_deployment->name == "support-model-staging" &&
+                reloaded_deployment->status ==
+                    masterai::DeploymentStatus::approved,
+            "DeploymentStore did not restore a persisted deployment after "
+            "reload");
+
+    require(deployments.remove(deployment.id),
+            "remove() rejected a known deployment id");
+    require(deployments.list().size() == 0U,
+            "remove() did not delete the deployment");
+    require(!deployments.remove(deployment.id),
+            "remove() must no-op for an already-removed deployment id, not "
+            "throw");
+
+    const auto json = masterai::deployment_json(deployment);
+    require(json.find("\"name\":\"support-model-staging\"") !=
+                    std::string::npos &&
+                json.find("\"modelId\":\"model-1\"") != std::string::npos &&
+                json.find("\"environment\":\"staging\"") !=
+                    std::string::npos &&
+                json.find("\"strategy\":\"blue_green\"") !=
+                    std::string::npos,
+            "deployment_json did not report the deployment's own fields");
+}
+
 }  // namespace
 
 int main() {
@@ -5702,6 +6150,16 @@ int main() {
             test_machine_learning_vector_store_lifecycle);
         run("Machine Learning RAG config lifecycle",
             test_machine_learning_rag_config_lifecycle);
+        run("Machine Learning subject exam lifecycle",
+            test_machine_learning_subject_exam_lifecycle);
+        run("Machine Learning hyperparameter search lifecycle",
+            test_machine_learning_hyperparameter_search_lifecycle);
+        run("Machine Learning model optimization lifecycle",
+            test_machine_learning_model_optimization_lifecycle);
+        run("Machine Learning checkpoint lifecycle",
+            test_machine_learning_checkpoint_lifecycle);
+        run("Machine Learning deployment lifecycle",
+            test_machine_learning_deployment_lifecycle);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

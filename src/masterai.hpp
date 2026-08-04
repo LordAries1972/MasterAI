@@ -3372,6 +3372,328 @@ private:
 std::string rag_config_json(const RagConfig& config);
 std::string rag_configs_json(const std::vector<RagConfig>& configs);
 
+// Phase 51: docs/PLAN.md "Machine Learning Abilities" section 24
+// (Subject Examination System). Scoped down from the section's full
+// examination surface (question banks with multiple-choice/short-answer/
+// long-answer/code/scenario/troubleshooting/tool-use/retrieval/
+// fact-verification question types, computed score suites, per-topic and
+// per-difficulty breakdowns, hallucination rate, citation quality, and a
+// configurable minimum approval score per subject) to identity, a
+// mandatory subject_id referencing a SubjectPackageStore entry (an exam
+// only means something against a registered subject package, mirroring
+// InstructionExample's required dataset id), a free-text question_format
+// field (section 24 lists nine question types as examples, not a closed
+// enum), and the five-state reviewer-approval lifecycle content records
+// use -- an exam is authored content that a reviewer approves before it
+// may examine anything, exactly like an InstructionExample, not
+// standalone infrastructure like a VectorStore.
+enum class SubjectExamStatus {
+    draft,
+    in_review,
+    approved,
+    rejected,
+    archived
+};
+
+std::string subject_exam_status_name(SubjectExamStatus status);
+SubjectExamStatus parse_subject_exam_status(const std::string& status);
+
+struct SubjectExam {
+    std::string id;
+    std::string subject_id;
+    std::string name;
+    std::string description;
+    std::string question_format;
+    std::string owner_id;
+    SubjectExamStatus status{SubjectExamStatus::draft};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class SubjectExamStore final {
+public:
+    SubjectExamStore() = default;
+    explicit SubjectExamStore(RecordStore& records);
+    SubjectExam create(const std::string& owner_id,
+                       const std::string& subject_id,
+                       const std::string& name,
+                       const std::string& description,
+                       const std::string& question_format);
+    std::optional<SubjectExam> find(const std::string& id) const;
+    std::vector<SubjectExam> list() const;
+    bool set_status(const std::string& id, SubjectExamStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const SubjectExam& exam);
+    RecordStore* records_{nullptr};
+    std::map<std::string, SubjectExam> exams_;
+    mutable std::mutex mutex_;
+};
+
+std::string subject_exam_json(const SubjectExam& exam);
+std::string subject_exams_json(const std::vector<SubjectExam>& exams);
+
+// Phase 52: docs/PLAN.md "Machine Learning Abilities" section 26
+// (Hyperparameter Optimization). Scoped down from the section's full
+// search surface (grid/random/Bayesian/population-based/successive-
+// halving strategies over a configurable search space of learning rate,
+// batch size, epochs, optimiser, dropout, adapter rank and more, with
+// early stopping and enforced resource/time limits) to identity, a
+// mandatory training_job_id referencing a TrainingJobStore entry (a
+// search tunes an existing training job's configuration, so the job
+// reference is required the way FineTuningJob's base model is), a
+// free-text strategy field (section 26 lists its search strategies as
+// examples, not a closed enum, matching TrainingJob's own free-text
+// training_type), and the same eleven-state job lifecycle Training Jobs
+// and Fine-Tuning use, since a search queues, runs, pauses, and fails
+// like any other job -- not the search-space/trial-history/best-result
+// field list that a real search executor will attach once it exists.
+enum class HyperparameterSearchStatus {
+    draft,
+    queued,
+    preparing,
+    running,
+    paused,
+    canceling,
+    canceled,
+    failed,
+    completed,
+    awaiting_evaluation,
+    archived
+};
+
+std::string hyperparameter_search_status_name(
+    HyperparameterSearchStatus status);
+HyperparameterSearchStatus parse_hyperparameter_search_status(
+    const std::string& status);
+
+struct HyperparameterSearch {
+    std::string id;
+    std::string training_job_id;
+    std::string name;
+    std::string description;
+    std::string strategy;
+    std::string owner_id;
+    HyperparameterSearchStatus status{HyperparameterSearchStatus::draft};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class HyperparameterSearchStore final {
+public:
+    HyperparameterSearchStore() = default;
+    explicit HyperparameterSearchStore(RecordStore& records);
+    HyperparameterSearch create(const std::string& owner_id,
+                                const std::string& training_job_id,
+                                const std::string& name,
+                                const std::string& description,
+                                const std::string& strategy);
+    std::optional<HyperparameterSearch> find(const std::string& id) const;
+    std::vector<HyperparameterSearch> list() const;
+    bool set_status(const std::string& id, HyperparameterSearchStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const HyperparameterSearch& search);
+    RecordStore* records_{nullptr};
+    std::map<std::string, HyperparameterSearch> searches_;
+    mutable std::mutex mutex_;
+};
+
+std::string hyperparameter_search_json(const HyperparameterSearch& search);
+std::string hyperparameter_searches_json(
+    const std::vector<HyperparameterSearch>& searches);
+
+// Phase 53: docs/PLAN.md "Machine Learning Abilities" section 28
+// (Model Optimization). Scoped down from the section's full operation
+// surface (quantization, pruning, distillation, graph optimization,
+// operator fusion, weight compression, adapter/checkpoint merging,
+// vocabulary reduction, context/cache/batch optimization, runtime
+// conversion, plus the quality-loss comparison against the original
+// model) to identity, a mandatory model_id referencing a
+// ModelRegistryStore entry (an optimization run only means something
+// against a registered model), a free-text operation field (section 28
+// lists thirteen operations as examples, not a closed enum), and the
+// same eleven-state job lifecycle Training Jobs use, since an
+// optimization run executes like any other job -- not the
+// before/after-comparison field list that a real optimizer executor
+// will attach once it exists.
+enum class ModelOptimizationStatus {
+    draft,
+    queued,
+    preparing,
+    running,
+    paused,
+    canceling,
+    canceled,
+    failed,
+    completed,
+    awaiting_evaluation,
+    archived
+};
+
+std::string model_optimization_status_name(ModelOptimizationStatus status);
+ModelOptimizationStatus parse_model_optimization_status(
+    const std::string& status);
+
+struct ModelOptimizationRun {
+    std::string id;
+    std::string model_id;
+    std::string name;
+    std::string description;
+    std::string operation;
+    std::string owner_id;
+    ModelOptimizationStatus status{ModelOptimizationStatus::draft};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class ModelOptimizationStore final {
+public:
+    ModelOptimizationStore() = default;
+    explicit ModelOptimizationStore(RecordStore& records);
+    ModelOptimizationRun create(const std::string& owner_id,
+                                const std::string& model_id,
+                                const std::string& name,
+                                const std::string& description,
+                                const std::string& operation);
+    std::optional<ModelOptimizationRun> find(const std::string& id) const;
+    std::vector<ModelOptimizationRun> list() const;
+    bool set_status(const std::string& id, ModelOptimizationStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const ModelOptimizationRun& run);
+    RecordStore* records_{nullptr};
+    std::map<std::string, ModelOptimizationRun> runs_;
+    mutable std::mutex mutex_;
+};
+
+std::string model_optimization_json(const ModelOptimizationRun& run);
+std::string model_optimizations_json(
+    const std::vector<ModelOptimizationRun>& runs);
+
+// Phase 54: docs/PLAN.md "Machine Learning Abilities" section 33
+// (Checkpoint Management). Scoped down from the section's full checkpoint
+// record (step, epoch, validation metric, size, hash, parent model,
+// dataset/configuration version, retention policy, and the resume/
+// compare/promote/download operations) to identity, a mandatory
+// training_job_id referencing a TrainingJobStore entry (a checkpoint is
+// a child record of the training job that produced it), a free-text
+// capture_reason field (section 33 describes automatic epoch/step
+// capture alongside manual capture without naming a closed set), and a
+// bespoke three-state retention lifecycle: active (subject to normal
+// retention), pinned (section 33's "protect" operation -- exempt from
+// retention deletion), and archived. This is a retention lifecycle, not
+// an approval workflow, so it deliberately does not reuse the pending/
+// approved/rejected shape -- nobody "approves" a checkpoint; they keep
+// it, protect it, or archive it.
+enum class TrainingCheckpointStatus { active, pinned, archived };
+
+std::string training_checkpoint_status_name(TrainingCheckpointStatus status);
+TrainingCheckpointStatus parse_training_checkpoint_status(
+    const std::string& status);
+
+struct TrainingCheckpoint {
+    std::string id;
+    std::string training_job_id;
+    std::string name;
+    std::string description;
+    std::string capture_reason;
+    std::string owner_id;
+    TrainingCheckpointStatus status{TrainingCheckpointStatus::active};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class TrainingCheckpointStore final {
+public:
+    TrainingCheckpointStore() = default;
+    explicit TrainingCheckpointStore(RecordStore& records);
+    TrainingCheckpoint create(const std::string& owner_id,
+                              const std::string& training_job_id,
+                              const std::string& name,
+                              const std::string& description,
+                              const std::string& capture_reason);
+    std::optional<TrainingCheckpoint> find(const std::string& id) const;
+    std::vector<TrainingCheckpoint> list() const;
+    bool set_status(const std::string& id, TrainingCheckpointStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const TrainingCheckpoint& checkpoint);
+    RecordStore* records_{nullptr};
+    std::map<std::string, TrainingCheckpoint> checkpoints_;
+    mutable std::mutex mutex_;
+};
+
+std::string training_checkpoint_json(const TrainingCheckpoint& checkpoint);
+std::string training_checkpoints_json(
+    const std::vector<TrainingCheckpoint>& checkpoints);
+
+// Phase 55: docs/PLAN.md "Machine Learning Abilities" section 34
+// (Deployment Manager). Scoped down from the section's full deployment
+// record (model version, runtime, target node, configuration, time,
+// administrator, rollback version, health status, and the direct/
+// blue-green/canary/shadow/A-B/rolling strategies across dev/test/
+// staging/production/offline/intranet/MCP/desktop/web targets) to
+// identity, a mandatory model_id referencing a ModelRegistryStore entry
+// (a deployment promotes a registered model and nothing else), free-text
+// environment and strategy fields (section 34 lists both sets as
+// examples, not closed enums), and the three-state pending/approved/
+// rejected approval workflow VectorStore and RagConfig use -- section 34
+// explicitly names approval as part of the deployment record, and a
+// deployment is a standalone registered resource awaiting authorization,
+// not reviewer-workflow content -- not the health/rollback machinery a
+// real deployment executor will attach once it exists.
+enum class DeploymentStatus { pending, approved, rejected };
+
+std::string deployment_status_name(DeploymentStatus status);
+DeploymentStatus parse_deployment_status(const std::string& status);
+
+struct Deployment {
+    std::string id;
+    std::string model_id;
+    std::string name;
+    std::string description;
+    std::string environment;
+    std::string strategy;
+    std::string owner_id;
+    DeploymentStatus status{DeploymentStatus::pending};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class DeploymentStore final {
+public:
+    DeploymentStore() = default;
+    explicit DeploymentStore(RecordStore& records);
+    Deployment create(const std::string& owner_id,
+                      const std::string& model_id, const std::string& name,
+                      const std::string& description,
+                      const std::string& environment,
+                      const std::string& strategy);
+    std::optional<Deployment> find(const std::string& id) const;
+    std::vector<Deployment> list() const;
+    bool set_status(const std::string& id, DeploymentStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const Deployment& deployment);
+    RecordStore* records_{nullptr};
+    std::map<std::string, Deployment> deployments_;
+    mutable std::mutex mutex_;
+};
+
+std::string deployment_json(const Deployment& deployment);
+std::string deployments_json(const std::vector<Deployment>& deployments);
+
 struct PerformanceSample {
     std::string name;
     std::uint64_t operations{0};

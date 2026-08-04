@@ -2386,4 +2386,760 @@ std::string rag_configs_json(const std::vector<RagConfig>& configs) {
     return body + "]";
 }
 
+// Phase 51: docs/PLAN.md "Machine Learning Abilities" section 24 (Subject
+// Examination System) -- see SubjectExamStore's class comment in
+// masterai.hpp for the scoped-down field set and the rationale for reusing
+// the five-state reviewer-approval workflow.
+std::string subject_exam_status_name(const SubjectExamStatus status) {
+    switch (status) {
+        case SubjectExamStatus::draft: return "draft";
+        case SubjectExamStatus::in_review: return "in_review";
+        case SubjectExamStatus::approved: return "approved";
+        case SubjectExamStatus::rejected: return "rejected";
+        case SubjectExamStatus::archived: return "archived";
+    }
+    throw std::runtime_error("invalid subject exam status");
+}
+
+SubjectExamStatus parse_subject_exam_status(const std::string& status) {
+    if (status == "draft") return SubjectExamStatus::draft;
+    if (status == "in_review") return SubjectExamStatus::in_review;
+    if (status == "approved") return SubjectExamStatus::approved;
+    if (status == "rejected") return SubjectExamStatus::rejected;
+    if (status == "archived") return SubjectExamStatus::archived;
+    throw std::runtime_error("stored subject exam status is invalid");
+}
+
+SubjectExamStore::SubjectExamStore(RecordStore& records) : records_(&records) {
+    restore();
+}
+
+void SubjectExamStore::restore() {
+    for (const auto& item : records_->list("ml_subject_exams")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 6U) {
+            throw std::runtime_error(
+                "persisted subject exam record field count is wrong");
+        }
+        SubjectExam exam;
+        exam.id = item.first;
+        exam.subject_id = fields[0];
+        exam.name = fields[1];
+        exam.description = fields[2];
+        exam.question_format = fields[3];
+        exam.owner_id = fields[4];
+        exam.status = parse_subject_exam_status(fields[5]);
+        exams_[exam.id] = exam;
+    }
+}
+
+void SubjectExamStore::persist(const SubjectExam& exam) {
+    records_->put(
+        "ml_subject_exams", exam.id,
+        pack({exam.subject_id, exam.name, exam.description,
+             exam.question_format, exam.owner_id,
+             subject_exam_status_name(exam.status)}));
+}
+
+SubjectExam SubjectExamStore::create(const std::string& owner_id,
+                                     const std::string& subject_id,
+                                     const std::string& name,
+                                     const std::string& description,
+                                     const std::string& question_format) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("subject exam name is invalid");
+    }
+    if (subject_id.empty()) {
+        throw std::invalid_argument("subject exam subject id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    SubjectExam exam;
+    exam.id = random_id();
+    exam.subject_id = subject_id;
+    exam.name = name;
+    exam.description = description;
+    exam.question_format = question_format;
+    exam.owner_id = owner_id;
+    exam.status = SubjectExamStatus::draft;
+    exam.created_at_epoch_seconds = epoch_seconds();
+    exam.updated_at_epoch_seconds = exam.created_at_epoch_seconds;
+    exams_[exam.id] = exam;
+    if (records_) persist(exam);
+    return exam;
+}
+
+std::optional<SubjectExam> SubjectExamStore::find(const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = exams_.find(id);
+    return found != exams_.end() ? std::optional<SubjectExam>(found->second)
+                                 : std::nullopt;
+}
+
+std::vector<SubjectExam> SubjectExamStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<SubjectExam> result;
+    result.reserve(exams_.size());
+    for (const auto& item : exams_) result.push_back(item.second);
+    return result;
+}
+
+bool SubjectExamStore::set_status(const std::string& id,
+                                  const SubjectExamStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = exams_.find(id);
+    if (found == exams_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool SubjectExamStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = exams_.find(id);
+    if (found == exams_.end()) return false;
+    exams_.erase(found);
+    if (records_) records_->erase("ml_subject_exams", id);
+    return true;
+}
+
+std::string subject_exam_json(const SubjectExam& exam) {
+    return "{\"id\":\"" + json_escape(exam.id) + "\",\"subjectId\":\"" +
+           json_escape(exam.subject_id) + "\",\"name\":\"" +
+           json_escape(exam.name) + "\",\"description\":\"" +
+           json_escape(exam.description) + "\",\"questionFormat\":\"" +
+           json_escape(exam.question_format) + "\",\"ownerId\":\"" +
+           json_escape(exam.owner_id) + "\",\"status\":\"" +
+           subject_exam_status_name(exam.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(exam.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(exam.updated_at_epoch_seconds) + "}";
+}
+
+std::string subject_exams_json(const std::vector<SubjectExam>& exams) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& exam : exams) {
+        if (!first) body += ",";
+        first = false;
+        body += subject_exam_json(exam);
+    }
+    return body + "]";
+}
+
+// Phase 52: docs/PLAN.md "Machine Learning Abilities" section 26
+// (Hyperparameter Optimization) -- see HyperparameterSearchStore's class
+// comment in masterai.hpp for the scoped-down field set and the rationale
+// for reusing the eleven-state job lifecycle.
+std::string hyperparameter_search_status_name(
+    const HyperparameterSearchStatus status) {
+    switch (status) {
+        case HyperparameterSearchStatus::draft: return "draft";
+        case HyperparameterSearchStatus::queued: return "queued";
+        case HyperparameterSearchStatus::preparing: return "preparing";
+        case HyperparameterSearchStatus::running: return "running";
+        case HyperparameterSearchStatus::paused: return "paused";
+        case HyperparameterSearchStatus::canceling: return "canceling";
+        case HyperparameterSearchStatus::canceled: return "canceled";
+        case HyperparameterSearchStatus::failed: return "failed";
+        case HyperparameterSearchStatus::completed: return "completed";
+        case HyperparameterSearchStatus::awaiting_evaluation:
+            return "awaiting_evaluation";
+        case HyperparameterSearchStatus::archived: return "archived";
+    }
+    throw std::runtime_error("invalid hyperparameter search status");
+}
+
+HyperparameterSearchStatus parse_hyperparameter_search_status(
+    const std::string& status) {
+    if (status == "draft") return HyperparameterSearchStatus::draft;
+    if (status == "queued") return HyperparameterSearchStatus::queued;
+    if (status == "preparing") return HyperparameterSearchStatus::preparing;
+    if (status == "running") return HyperparameterSearchStatus::running;
+    if (status == "paused") return HyperparameterSearchStatus::paused;
+    if (status == "canceling") return HyperparameterSearchStatus::canceling;
+    if (status == "canceled") return HyperparameterSearchStatus::canceled;
+    if (status == "failed") return HyperparameterSearchStatus::failed;
+    if (status == "completed") return HyperparameterSearchStatus::completed;
+    if (status == "awaiting_evaluation") {
+        return HyperparameterSearchStatus::awaiting_evaluation;
+    }
+    if (status == "archived") return HyperparameterSearchStatus::archived;
+    throw std::runtime_error("stored hyperparameter search status is invalid");
+}
+
+HyperparameterSearchStore::HyperparameterSearchStore(RecordStore& records)
+    : records_(&records) {
+    restore();
+}
+
+void HyperparameterSearchStore::restore() {
+    for (const auto& item : records_->list("ml_hyperparameter_searches")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 6U) {
+            throw std::runtime_error(
+                "persisted hyperparameter search record field count is wrong");
+        }
+        HyperparameterSearch search;
+        search.id = item.first;
+        search.training_job_id = fields[0];
+        search.name = fields[1];
+        search.description = fields[2];
+        search.strategy = fields[3];
+        search.owner_id = fields[4];
+        search.status = parse_hyperparameter_search_status(fields[5]);
+        searches_[search.id] = search;
+    }
+}
+
+void HyperparameterSearchStore::persist(const HyperparameterSearch& search) {
+    records_->put(
+        "ml_hyperparameter_searches", search.id,
+        pack({search.training_job_id, search.name, search.description,
+             search.strategy, search.owner_id,
+             hyperparameter_search_status_name(search.status)}));
+}
+
+HyperparameterSearch HyperparameterSearchStore::create(
+    const std::string& owner_id, const std::string& training_job_id,
+    const std::string& name, const std::string& description,
+    const std::string& strategy) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("hyperparameter search name is invalid");
+    }
+    if (training_job_id.empty()) {
+        throw std::invalid_argument(
+            "hyperparameter search training job id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    HyperparameterSearch search;
+    search.id = random_id();
+    search.training_job_id = training_job_id;
+    search.name = name;
+    search.description = description;
+    search.strategy = strategy;
+    search.owner_id = owner_id;
+    search.status = HyperparameterSearchStatus::draft;
+    search.created_at_epoch_seconds = epoch_seconds();
+    search.updated_at_epoch_seconds = search.created_at_epoch_seconds;
+    searches_[search.id] = search;
+    if (records_) persist(search);
+    return search;
+}
+
+std::optional<HyperparameterSearch> HyperparameterSearchStore::find(
+    const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = searches_.find(id);
+    return found != searches_.end()
+               ? std::optional<HyperparameterSearch>(found->second)
+               : std::nullopt;
+}
+
+std::vector<HyperparameterSearch> HyperparameterSearchStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<HyperparameterSearch> result;
+    result.reserve(searches_.size());
+    for (const auto& item : searches_) result.push_back(item.second);
+    return result;
+}
+
+bool HyperparameterSearchStore::set_status(
+    const std::string& id, const HyperparameterSearchStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = searches_.find(id);
+    if (found == searches_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool HyperparameterSearchStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = searches_.find(id);
+    if (found == searches_.end()) return false;
+    searches_.erase(found);
+    if (records_) records_->erase("ml_hyperparameter_searches", id);
+    return true;
+}
+
+std::string hyperparameter_search_json(const HyperparameterSearch& search) {
+    return "{\"id\":\"" + json_escape(search.id) + "\",\"trainingJobId\":\"" +
+           json_escape(search.training_job_id) + "\",\"name\":\"" +
+           json_escape(search.name) + "\",\"description\":\"" +
+           json_escape(search.description) + "\",\"strategy\":\"" +
+           json_escape(search.strategy) + "\",\"ownerId\":\"" +
+           json_escape(search.owner_id) + "\",\"status\":\"" +
+           hyperparameter_search_status_name(search.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(search.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(search.updated_at_epoch_seconds) + "}";
+}
+
+std::string hyperparameter_searches_json(
+    const std::vector<HyperparameterSearch>& searches) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& search : searches) {
+        if (!first) body += ",";
+        first = false;
+        body += hyperparameter_search_json(search);
+    }
+    return body + "]";
+}
+
+// Phase 53: docs/PLAN.md "Machine Learning Abilities" section 28 (Model
+// Optimization) -- see ModelOptimizationStore's class comment in
+// masterai.hpp for the scoped-down field set and the rationale for reusing
+// the eleven-state job lifecycle.
+std::string model_optimization_status_name(
+    const ModelOptimizationStatus status) {
+    switch (status) {
+        case ModelOptimizationStatus::draft: return "draft";
+        case ModelOptimizationStatus::queued: return "queued";
+        case ModelOptimizationStatus::preparing: return "preparing";
+        case ModelOptimizationStatus::running: return "running";
+        case ModelOptimizationStatus::paused: return "paused";
+        case ModelOptimizationStatus::canceling: return "canceling";
+        case ModelOptimizationStatus::canceled: return "canceled";
+        case ModelOptimizationStatus::failed: return "failed";
+        case ModelOptimizationStatus::completed: return "completed";
+        case ModelOptimizationStatus::awaiting_evaluation:
+            return "awaiting_evaluation";
+        case ModelOptimizationStatus::archived: return "archived";
+    }
+    throw std::runtime_error("invalid model optimization status");
+}
+
+ModelOptimizationStatus parse_model_optimization_status(
+    const std::string& status) {
+    if (status == "draft") return ModelOptimizationStatus::draft;
+    if (status == "queued") return ModelOptimizationStatus::queued;
+    if (status == "preparing") return ModelOptimizationStatus::preparing;
+    if (status == "running") return ModelOptimizationStatus::running;
+    if (status == "paused") return ModelOptimizationStatus::paused;
+    if (status == "canceling") return ModelOptimizationStatus::canceling;
+    if (status == "canceled") return ModelOptimizationStatus::canceled;
+    if (status == "failed") return ModelOptimizationStatus::failed;
+    if (status == "completed") return ModelOptimizationStatus::completed;
+    if (status == "awaiting_evaluation") {
+        return ModelOptimizationStatus::awaiting_evaluation;
+    }
+    if (status == "archived") return ModelOptimizationStatus::archived;
+    throw std::runtime_error("stored model optimization status is invalid");
+}
+
+ModelOptimizationStore::ModelOptimizationStore(RecordStore& records)
+    : records_(&records) {
+    restore();
+}
+
+void ModelOptimizationStore::restore() {
+    for (const auto& item : records_->list("ml_model_optimizations")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 6U) {
+            throw std::runtime_error(
+                "persisted model optimization record field count is wrong");
+        }
+        ModelOptimizationRun run;
+        run.id = item.first;
+        run.model_id = fields[0];
+        run.name = fields[1];
+        run.description = fields[2];
+        run.operation = fields[3];
+        run.owner_id = fields[4];
+        run.status = parse_model_optimization_status(fields[5]);
+        runs_[run.id] = run;
+    }
+}
+
+void ModelOptimizationStore::persist(const ModelOptimizationRun& run) {
+    records_->put(
+        "ml_model_optimizations", run.id,
+        pack({run.model_id, run.name, run.description, run.operation,
+             run.owner_id, model_optimization_status_name(run.status)}));
+}
+
+ModelOptimizationRun ModelOptimizationStore::create(
+    const std::string& owner_id, const std::string& model_id,
+    const std::string& name, const std::string& description,
+    const std::string& operation) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("model optimization name is invalid");
+    }
+    if (model_id.empty()) {
+        throw std::invalid_argument("model optimization model id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    ModelOptimizationRun run;
+    run.id = random_id();
+    run.model_id = model_id;
+    run.name = name;
+    run.description = description;
+    run.operation = operation;
+    run.owner_id = owner_id;
+    run.status = ModelOptimizationStatus::draft;
+    run.created_at_epoch_seconds = epoch_seconds();
+    run.updated_at_epoch_seconds = run.created_at_epoch_seconds;
+    runs_[run.id] = run;
+    if (records_) persist(run);
+    return run;
+}
+
+std::optional<ModelOptimizationRun> ModelOptimizationStore::find(
+    const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = runs_.find(id);
+    return found != runs_.end()
+               ? std::optional<ModelOptimizationRun>(found->second)
+               : std::nullopt;
+}
+
+std::vector<ModelOptimizationRun> ModelOptimizationStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ModelOptimizationRun> result;
+    result.reserve(runs_.size());
+    for (const auto& item : runs_) result.push_back(item.second);
+    return result;
+}
+
+bool ModelOptimizationStore::set_status(const std::string& id,
+                                        const ModelOptimizationStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = runs_.find(id);
+    if (found == runs_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool ModelOptimizationStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = runs_.find(id);
+    if (found == runs_.end()) return false;
+    runs_.erase(found);
+    if (records_) records_->erase("ml_model_optimizations", id);
+    return true;
+}
+
+std::string model_optimization_json(const ModelOptimizationRun& run) {
+    return "{\"id\":\"" + json_escape(run.id) + "\",\"modelId\":\"" +
+           json_escape(run.model_id) + "\",\"name\":\"" +
+           json_escape(run.name) + "\",\"description\":\"" +
+           json_escape(run.description) + "\",\"operation\":\"" +
+           json_escape(run.operation) + "\",\"ownerId\":\"" +
+           json_escape(run.owner_id) + "\",\"status\":\"" +
+           model_optimization_status_name(run.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(run.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(run.updated_at_epoch_seconds) + "}";
+}
+
+std::string model_optimizations_json(
+    const std::vector<ModelOptimizationRun>& runs) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& run : runs) {
+        if (!first) body += ",";
+        first = false;
+        body += model_optimization_json(run);
+    }
+    return body + "]";
+}
+
+// Phase 54: docs/PLAN.md "Machine Learning Abilities" section 33
+// (Checkpoint Management) -- see TrainingCheckpointStore's class comment in
+// masterai.hpp for the scoped-down field set and the rationale for the
+// bespoke active/pinned/archived retention lifecycle.
+std::string training_checkpoint_status_name(
+    const TrainingCheckpointStatus status) {
+    switch (status) {
+        case TrainingCheckpointStatus::active: return "active";
+        case TrainingCheckpointStatus::pinned: return "pinned";
+        case TrainingCheckpointStatus::archived: return "archived";
+    }
+    throw std::runtime_error("invalid training checkpoint status");
+}
+
+TrainingCheckpointStatus parse_training_checkpoint_status(
+    const std::string& status) {
+    if (status == "active") return TrainingCheckpointStatus::active;
+    if (status == "pinned") return TrainingCheckpointStatus::pinned;
+    if (status == "archived") return TrainingCheckpointStatus::archived;
+    throw std::runtime_error("stored training checkpoint status is invalid");
+}
+
+TrainingCheckpointStore::TrainingCheckpointStore(RecordStore& records)
+    : records_(&records) {
+    restore();
+}
+
+void TrainingCheckpointStore::restore() {
+    for (const auto& item : records_->list("ml_training_checkpoints")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 6U) {
+            throw std::runtime_error(
+                "persisted training checkpoint record field count is wrong");
+        }
+        TrainingCheckpoint checkpoint;
+        checkpoint.id = item.first;
+        checkpoint.training_job_id = fields[0];
+        checkpoint.name = fields[1];
+        checkpoint.description = fields[2];
+        checkpoint.capture_reason = fields[3];
+        checkpoint.owner_id = fields[4];
+        checkpoint.status = parse_training_checkpoint_status(fields[5]);
+        checkpoints_[checkpoint.id] = checkpoint;
+    }
+}
+
+void TrainingCheckpointStore::persist(const TrainingCheckpoint& checkpoint) {
+    records_->put(
+        "ml_training_checkpoints", checkpoint.id,
+        pack({checkpoint.training_job_id, checkpoint.name,
+             checkpoint.description, checkpoint.capture_reason,
+             checkpoint.owner_id,
+             training_checkpoint_status_name(checkpoint.status)}));
+}
+
+TrainingCheckpoint TrainingCheckpointStore::create(
+    const std::string& owner_id, const std::string& training_job_id,
+    const std::string& name, const std::string& description,
+    const std::string& capture_reason) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("training checkpoint name is invalid");
+    }
+    if (training_job_id.empty()) {
+        throw std::invalid_argument(
+            "training checkpoint training job id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    TrainingCheckpoint checkpoint;
+    checkpoint.id = random_id();
+    checkpoint.training_job_id = training_job_id;
+    checkpoint.name = name;
+    checkpoint.description = description;
+    checkpoint.capture_reason = capture_reason;
+    checkpoint.owner_id = owner_id;
+    checkpoint.status = TrainingCheckpointStatus::active;
+    checkpoint.created_at_epoch_seconds = epoch_seconds();
+    checkpoint.updated_at_epoch_seconds = checkpoint.created_at_epoch_seconds;
+    checkpoints_[checkpoint.id] = checkpoint;
+    if (records_) persist(checkpoint);
+    return checkpoint;
+}
+
+std::optional<TrainingCheckpoint> TrainingCheckpointStore::find(
+    const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = checkpoints_.find(id);
+    return found != checkpoints_.end()
+               ? std::optional<TrainingCheckpoint>(found->second)
+               : std::nullopt;
+}
+
+std::vector<TrainingCheckpoint> TrainingCheckpointStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<TrainingCheckpoint> result;
+    result.reserve(checkpoints_.size());
+    for (const auto& item : checkpoints_) result.push_back(item.second);
+    return result;
+}
+
+bool TrainingCheckpointStore::set_status(
+    const std::string& id, const TrainingCheckpointStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = checkpoints_.find(id);
+    if (found == checkpoints_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool TrainingCheckpointStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = checkpoints_.find(id);
+    if (found == checkpoints_.end()) return false;
+    checkpoints_.erase(found);
+    if (records_) records_->erase("ml_training_checkpoints", id);
+    return true;
+}
+
+std::string training_checkpoint_json(const TrainingCheckpoint& checkpoint) {
+    return "{\"id\":\"" + json_escape(checkpoint.id) +
+           "\",\"trainingJobId\":\"" +
+           json_escape(checkpoint.training_job_id) + "\",\"name\":\"" +
+           json_escape(checkpoint.name) + "\",\"description\":\"" +
+           json_escape(checkpoint.description) + "\",\"captureReason\":\"" +
+           json_escape(checkpoint.capture_reason) + "\",\"ownerId\":\"" +
+           json_escape(checkpoint.owner_id) + "\",\"status\":\"" +
+           training_checkpoint_status_name(checkpoint.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(checkpoint.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(checkpoint.updated_at_epoch_seconds) + "}";
+}
+
+std::string training_checkpoints_json(
+    const std::vector<TrainingCheckpoint>& checkpoints) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& checkpoint : checkpoints) {
+        if (!first) body += ",";
+        first = false;
+        body += training_checkpoint_json(checkpoint);
+    }
+    return body + "]";
+}
+
+// Phase 55: docs/PLAN.md "Machine Learning Abilities" section 34
+// (Deployment Manager) -- see DeploymentStore's class comment in
+// masterai.hpp for the scoped-down field set and the rationale for reusing
+// the pending/approved/rejected approval workflow.
+std::string deployment_status_name(const DeploymentStatus status) {
+    switch (status) {
+        case DeploymentStatus::pending: return "pending";
+        case DeploymentStatus::approved: return "approved";
+        case DeploymentStatus::rejected: return "rejected";
+    }
+    throw std::runtime_error("invalid deployment status");
+}
+
+DeploymentStatus parse_deployment_status(const std::string& status) {
+    if (status == "pending") return DeploymentStatus::pending;
+    if (status == "approved") return DeploymentStatus::approved;
+    if (status == "rejected") return DeploymentStatus::rejected;
+    throw std::runtime_error("stored deployment status is invalid");
+}
+
+DeploymentStore::DeploymentStore(RecordStore& records) : records_(&records) {
+    restore();
+}
+
+void DeploymentStore::restore() {
+    for (const auto& item : records_->list("ml_deployments")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 7U) {
+            throw std::runtime_error(
+                "persisted deployment record field count is wrong");
+        }
+        Deployment deployment;
+        deployment.id = item.first;
+        deployment.model_id = fields[0];
+        deployment.name = fields[1];
+        deployment.description = fields[2];
+        deployment.environment = fields[3];
+        deployment.strategy = fields[4];
+        deployment.owner_id = fields[5];
+        deployment.status = parse_deployment_status(fields[6]);
+        deployments_[deployment.id] = deployment;
+    }
+}
+
+void DeploymentStore::persist(const Deployment& deployment) {
+    records_->put(
+        "ml_deployments", deployment.id,
+        pack({deployment.model_id, deployment.name, deployment.description,
+             deployment.environment, deployment.strategy,
+             deployment.owner_id,
+             deployment_status_name(deployment.status)}));
+}
+
+Deployment DeploymentStore::create(const std::string& owner_id,
+                                   const std::string& model_id,
+                                   const std::string& name,
+                                   const std::string& description,
+                                   const std::string& environment,
+                                   const std::string& strategy) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("deployment name is invalid");
+    }
+    if (model_id.empty()) {
+        throw std::invalid_argument("deployment model id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    Deployment deployment;
+    deployment.id = random_id();
+    deployment.model_id = model_id;
+    deployment.name = name;
+    deployment.description = description;
+    deployment.environment = environment;
+    deployment.strategy = strategy;
+    deployment.owner_id = owner_id;
+    deployment.status = DeploymentStatus::pending;
+    deployment.created_at_epoch_seconds = epoch_seconds();
+    deployment.updated_at_epoch_seconds = deployment.created_at_epoch_seconds;
+    deployments_[deployment.id] = deployment;
+    if (records_) persist(deployment);
+    return deployment;
+}
+
+std::optional<Deployment> DeploymentStore::find(const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = deployments_.find(id);
+    return found != deployments_.end()
+               ? std::optional<Deployment>(found->second)
+               : std::nullopt;
+}
+
+std::vector<Deployment> DeploymentStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Deployment> result;
+    result.reserve(deployments_.size());
+    for (const auto& item : deployments_) result.push_back(item.second);
+    return result;
+}
+
+bool DeploymentStore::set_status(const std::string& id,
+                                 const DeploymentStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = deployments_.find(id);
+    if (found == deployments_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool DeploymentStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = deployments_.find(id);
+    if (found == deployments_.end()) return false;
+    deployments_.erase(found);
+    if (records_) records_->erase("ml_deployments", id);
+    return true;
+}
+
+std::string deployment_json(const Deployment& deployment) {
+    return "{\"id\":\"" + json_escape(deployment.id) + "\",\"modelId\":\"" +
+           json_escape(deployment.model_id) + "\",\"name\":\"" +
+           json_escape(deployment.name) + "\",\"description\":\"" +
+           json_escape(deployment.description) + "\",\"environment\":\"" +
+           json_escape(deployment.environment) + "\",\"strategy\":\"" +
+           json_escape(deployment.strategy) + "\",\"ownerId\":\"" +
+           json_escape(deployment.owner_id) + "\",\"status\":\"" +
+           deployment_status_name(deployment.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(deployment.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(deployment.updated_at_epoch_seconds) + "}";
+}
+
+std::string deployments_json(const std::vector<Deployment>& deployments) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& deployment : deployments) {
+        if (!first) body += ",";
+        first = false;
+        body += deployment_json(deployment);
+    }
+    return body + "]";
+}
+
 }  // namespace masterai

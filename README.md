@@ -288,6 +288,22 @@ The current source includes native implementations for:
   on a cold model's first prompt) surfaces as a timeout error instead of
   hanging the request indefinitely; a still-streaming generation is never
   cut off since the deadline resets on every byte received.
+- Weighted-fair request scheduling and bounded backpressure across eight
+  priority classes, deterministic KV-cache reservation and eviction,
+  hardware-topology discovery, and evidence-driven model-routing/cascade
+  decision logic. Continuous backend batching, live worker affinity, and
+  transparent multi-model cascade execution remain gated follow-up work.
+- An administrator-only Machine Learning control-plane foundation with a
+  dashboard and durable lifecycle records for ML projects, model registry
+  entries, datasets, subject packages, labeling and preparation work,
+  training and fine-tuning jobs, evaluations, experiments, model-builder
+  configurations, instruction and synthetic-data records, vector stores,
+  RAG configurations, subject exams, hyperparameter searches,
+  model-optimization runs, training checkpoints, and deployments. These are
+  real authorized administrative records; they do not yet execute training,
+  generate embeddings, populate vector indexes, run an end-to-end RAG
+  pipeline, administer exams, run searches or optimizations, capture
+  checkpoints, or promote deployments.
 
 Implementation does not automatically mean operational certification. The next
 section records the distinction.
@@ -295,7 +311,7 @@ section records the distinction.
 ## Project status
 
 Status below reflects the evidence recorded in
-[docs/PLAN.md](docs/PLAN.md) on **1 August 2026**.
+[docs/PLAN.md](docs/PLAN.md) on **5 August 2026**.
 
 | Phase | Area | Status |
 |---:|---|---|
@@ -303,10 +319,10 @@ Status below reflects the evidence recorded in
 | 1 | Native foundation and lifecycle | Complete |
 | 2 | Identity and security baseline | Complete |
 | 3 | Model registry and hardware assessment | Complete |
-| 4 | First isolated inference adapter | Implemented; verified real GGUF/backend exit check pending |
-| 5 | Chat and project web application | Implemented; real-model browser and optional voice checks pending |
+| 4 | First isolated inference adapter | Complete; real pinned backend/GGUF path validated |
+| 5 | Chat and project web application | Implemented; browser visual and optional voice checks pending |
 | 6 | Secure resumable downloads | Implemented; interrupted real HTTPS transfer check pending |
-| 7 | Reproducible benchmarking | Implemented; same-host real-model comparison pending |
+| 7 | Reproducible benchmarking | Complete; same-host real-model comparison validated |
 | 8 | Inbound MCP | Implemented; live supported IDE/inspector connection pending |
 | 9 | Outbound MCP | Complete |
 | 10 | IDE integrations | Native boundary implemented; host packaging and live-IDE checks pending |
@@ -314,23 +330,48 @@ Status below reflects the evidence recorded in
 | 12 | Measured control-plane optimization | Complete for measured native scope |
 | 13 | Query measurement and resource baseline | Complete |
 | 14 | Bounded-memory foundation | Complete |
-| 15 | Incremental disk-backed indexing | Exit criteria evidence recorded; deeper symbol extraction pending |
+| 15 | Incremental disk-backed indexing | Complete; deeper symbol extraction remains a forward enhancement |
 | 16 | Deadline-bound hybrid retrieval | Implemented; authored retrieval-quality evaluation set pending |
 | 17 | Security-partitioned cache hierarchy | Implemented; representative-query latency benchmark pending |
-| 18 | Prompt-prefix and KV/session reuse | Implemented; same-host repeated-turn benchmark pending |
-| 19 | Hardware/model calibration | Implemented; real-hardware-class benchmark pending |
+| 18 | Prompt-prefix and KV/session reuse | Complete; real repeated-turn prefix reuse validated |
+| 19 | Hardware/model calibration | Implemented; comparative tuning evidence still pending |
 | 20 | Optional advanced throughput | Scaffolding only; every candidate remains disabled and unimplemented |
 | 21 | Native asynchronous storage and prefetch engine | Implemented at a scoped-down level; no Linux `io_uring` adapter |
-| 22 | Hierarchical content and model-data caching | Planned |
+| 22 | Hierarchical content and model-data caching | Implemented at a scoped-down level |
 | 23 | Tokenization, template, and prompt-fragment caching | Implemented at a scoped-down level |
 | 24 | Advanced retrieval fan-out and adaptive query planning | Implemented at a scoped-down level; some strategies stubbed pending adapters |
-| 25 | Continuous inference batching and request scheduling | Planned |
+| 25 | Continuous inference batching and request scheduling | Scheduling/backpressure implemented at a scoped-down level; backend batching pending |
 | 26 | Model loading, mapping, pre-touch, and warm-state management | Implemented at a scoped-down level; two pre-touch levels not yet backend-actionable |
-| 27 | KV-cache compression, placement, and lifecycle management | Planned |
-| 28 | NUMA, processor-group, and topology-aware execution | Planned |
-| 29 | Model tiering, routing, and cascade inference | Planned |
+| 27 | KV-cache compression, placement, and lifecycle management | Accounting/placement/lifecycle implemented at a scoped-down level; compression and prefix sharing gated |
+| 28 | NUMA, processor-group, and topology-aware execution | Discovery and recommendation implemented at a scoped-down level; live affinity pending evidence |
+| 29 | Model tiering, routing, and cascade inference | Decision logic implemented at a scoped-down level; live chat routing/cascade execution pending |
 | 30 | Memory deduplication and immutable shared-data architecture | Implemented at a scoped-down level |
+| 30A | CPU-only and GPU-disabled low-memory operation | Implemented; matched real-model benchmark matrix pending |
 | 31 | Storage tiering, virtual drives, and scratch-volume management | Planned |
+| 32 | Speculative decoding and draft-model acceleration | Planned |
+| 33 | Distributed local runners and multi-device orchestration | Planned |
+| 34 | Adaptive performance controller | Planned |
+| 35 | Performance administration interfaces | Planned |
+| 36 | Full performance certification and regression gates | Planned |
+| 37 | Machine Learning module foundation | Implemented at a scoped-down level |
+| 38 | Machine Learning projects | Implemented at a scoped-down level |
+| 39 | ML model registry and dataset manager | Implemented at a scoped-down level |
+| 40 | Subject Knowledge Manager | Implemented at a scoped-down level |
+| 41 | Data labeling and preparation | Implemented at a scoped-down level |
+| 42 | Training Jobs | Implemented at a scoped-down level; no training executor |
+| 43 | Evaluation Lab | Implemented at a scoped-down level; no scoring harness |
+| 44 | Experiment Tracking | Implemented at a scoped-down level |
+| 45 | Fine-Tuning Interface | Implemented at a scoped-down level; no fine-tuning executor |
+| 46 | Model Builder | Implemented at a scoped-down level; no construction executor |
+| 47 | Prompt and Instruction Training | Implemented at a scoped-down metadata level |
+| 48 | Synthetic Data Generation | Implemented at a scoped-down metadata level; no generator |
+| 49 | Embeddings and Vector Stores | Implemented at a scoped-down registry level; no embedding/index pipeline |
+| 50 | Retrieval-Augmented Generation | Implemented at a scoped-down configuration level; no RAG executor |
+| 51 | Subject Examination System | Implemented at a scoped-down record level; no exam administration |
+| 52 | Hyperparameter Optimization | Implemented at a scoped-down record level; no search executor |
+| 53 | Model Optimization | Implemented at a scoped-down record level; no optimizer executor |
+| 54 | Checkpoint Management | Implemented at a scoped-down retention-record level; no checkpoint capture |
+| 55 | Deployment Manager | Implemented at a scoped-down approval-record level; no deployment executor |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -359,19 +400,28 @@ with authenticated `GET/POST /api/v1/system/cache*` administrative routes.
 Both are Windows Debug- and Release-validated; each still has one
 evidence-gathering exit criterion outstanding (see the status table above).
 
-Phases 21, 23, 24, 26, and 30 add a first, real (but deliberately
+Phases 21–30 add a first, real (but deliberately
 scoped-down) layer of performance/architecture work on top of Phases 15–19:
-an asynchronous storage/prefetch engine, tokenization/prompt-fragment
-caching with segmented assembly, staged/classified retrieval fan-out,
-explicit model load-mode and warm-state management, and an immutable
-shared-buffer/arena memory architecture with a zero-copy chat-streaming
-write path. Each is "Implemented at a scoped-down level": the mechanism is
-real, tested, and wired into the existing request paths, but the full
-PLAN.md specification for that phase includes further hardware-specific
-adapters (e.g. Linux `io_uring`) or a formal benchmark corpus that remain
-outstanding — see each phase's entry in [docs/PLAN.md](docs/PLAN.md) for the
-precise, itemized scope trim. Phases 22, 25, 27, 28, 29, and 31 remain
-Planned and unimplemented.
+an asynchronous storage/prefetch engine, hierarchical and prompt caches,
+staged retrieval fan-out, weighted-fair scheduling, model warm-state
+management, KV-cache governance, hardware-topology decisions, model-routing
+logic, and an immutable shared-buffer/arena architecture with a zero-copy
+chat-streaming write path. The mechanisms are real and tested, but each
+phase retains the explicit scope limits recorded in
+[docs/PLAN.md](docs/PLAN.md), such as Linux `io_uring`, live continuous
+backend batching, measured worker affinity, KV compression/prefix sharing,
+and transparent live cascade execution. Phase 31 and Phases 32–36 remain
+planned.
+
+Phases 37–50 establish the current Machine Learning administration layer.
+Administrators can manage durable, permission-gated records through native
+web pages and `/api/v1/ml/*` routes, with lifecycle, review, approval,
+reload, and deletion behavior covered by native tests. This is deliberately
+not represented as an operating training platform: no training or
+fine-tuning executor, embedding generator, populated vector index, complete
+evaluation harness, or executable RAG pipeline exists yet. For the concepts,
+current workflows, exact capability boundary, and a sequential teaching
+guide, read [How to Use Machine Learning and Models with MasterAI](docs/HowToUse-MachineLearning.md).
 
 No release may be called production-ready until the functional, security,
 migration, recovery, MCP conformance, performance, resource-ceiling, retrieval,
@@ -752,8 +802,10 @@ promotion to `Ready`; load time rechecks integrity again regardless of the
 cache.
 
 The current release baseline supports a separately supervised
-`llama.cpp`-compatible GGUF backend. Real-model operational certification is
-still pending, as noted in [Project status](#project-status).
+`llama.cpp`-compatible GGUF backend. The pinned backend and a verified
+programming GGUF have completed the Phase 4 end-to-end inference check;
+remaining browser, download, MCP, IDE, packaging, and optional voice checks
+are listed in [Project status](#project-status).
 
 ## Web application and API
 
@@ -775,17 +827,41 @@ The native service provides browser workflows for:
 - Download jobs and progress, with pause, resume, cancel, and remove controls
 - Benchmarks and recommendations
 - Resource, memory, request, and indexing status
+- Administrator-only Machine Learning dashboard and lifecycle-management pages
 - Administrative settings and operations
 
 HTTP APIs are versioned under `/api/v1/`. Implemented capability areas include
 authentication, users, projects, chats, models, downloads (including
 `.../model-downloads/{id}/pause`, `.../cancel`, and `.../remove`),
 benchmarks, resources, memory, request metrics, project indexes, MCP
-integrations, and IDE connections.
+integrations, IDE connections, and administrator-only Machine Learning
+records under `/api/v1/ml/*`.
 
 Inputs are bounded and strictly parsed. Administrative mutations require the
 applicable identity, role, scope, project binding, host/origin checks, CSRF
 protection, and audit record.
+
+## Machine Learning
+
+MasterAI now provides a native, administrator-only Machine Learning
+administration area at `/app/ml`. Its current pages manage scoped lifecycle
+records for projects, registered models, datasets, subject knowledge,
+labeling, data preparation, training and fine-tuning jobs, evaluation,
+experiments, model building, instruction examples, synthetic data, vector
+stores, and RAG configurations.
+
+The present Phase 50 boundary is a governed control plane, not an end-to-end
+training engine. Creating or advancing a job records administrative intent
+and state; it does not run a training framework. Likewise, registering a
+vector store or RAG configuration does not generate embeddings, populate an
+index, execute retrieval, or prove grounded output. Approved externally
+trained models must still be deliberately packaged as verified GGUF artifacts
+in the inference model tree before MasterAI can serve them.
+
+For a classroom-style explanation of machine learning, model preparation,
+the current interfaces, exact limitations, existing-model setup, and the
+sequential workflow for teaching a specialized model, read
+[How to Use Machine Learning and Models with MasterAI](docs/HowToUse-MachineLearning.md).
 
 ## MCP and IDE integration
 
@@ -983,21 +1059,22 @@ The completed bounded-memory foundation provides:
 Deadline-bound hybrid retrieval, a security-partitioned cache hierarchy,
 compatible prompt/KV reuse, and host-specific calibration are now
 implemented on top of that foundation (Phases 16–19 in the status table
-above); each still has a real-model or real-hardware benchmark outstanding
-before its exit criterion is satisfied. Optional advanced-throughput
-features (Phase 20) exist only as a disabled-by-default registry scaffold —
-no candidate's optimization logic is implemented.
+above). Phase 18's real-model repeated-turn reuse check is complete; Phases
+16, 17, and 19 retain the evaluation or comparative evidence listed in the
+status table. Optional advanced-throughput features (Phase 20) exist only as
+a disabled-by-default registry scaffold — no candidate's optimization logic
+is implemented.
 
-A further, scoped-down layer (Phases 21, 23, 24, 26, 30) adds asynchronous
-storage/prefetch, tokenization/prompt-fragment caching with segmented
-assembly, staged retrieval fan-out, explicit model load-mode/warm-state
-management, and an immutable shared-buffer/arena memory model with
-zero-copy chat streaming. These are real, test-covered mechanisms wired
-into the live request paths, not scaffolding — but each still has
-hardware-specific adapters (Linux `io_uring`) or a formal benchmark corpus
-outstanding before its PLAN.md exit criteria are fully satisfied. None of
-this work may bypass authorization, integrity, auditing, cancellation,
-quality checks, or memory ceilings.
+A further, scoped-down layer (Phases 21–30) adds asynchronous storage and
+prefetch, hierarchical content caching, tokenization/prompt-fragment caching,
+staged retrieval fan-out, weighted-fair scheduling and backpressure, explicit
+model load/warm-state management, bounded KV-cache lifecycle, topology-aware
+placement decisions, model-tier routing decisions, and an immutable shared-
+buffer/arena memory model with zero-copy chat streaming. These are real,
+test-covered mechanisms, but the plan records which are wired into live paths
+and which remain decision or policy layers awaiting backend integration and
+measurement. None may bypass authorization, integrity, auditing,
+cancellation, quality checks, or memory ceilings.
 
 How a chat request moves through the scoped-down performance layer:
 
@@ -1022,7 +1099,9 @@ flowchart TD
 Each labeled stage is "Implemented at a scoped-down level" per the status
 table above; the diagram shows where the mechanism sits in the request
 path, not a claim that every listed optimization is fully realized end to
-end — see [docs/PLAN.md](docs/PLAN.md) for the itemized scope of each.
+end. Scheduling, KV governance, topology, and model routing are supporting
+decision layers and are intentionally omitted from this simplified data-flow
+view. See [docs/PLAN.md](docs/PLAN.md) for the itemized scope of each.
 
 ## Repository layout
 
@@ -1058,7 +1137,9 @@ sh ./scripts/test.sh Release Linux-x86_64
 The test suite covers configuration, persistence and recovery, identity,
 sessions and tokens, secrets, path security, model integrity and suitability,
 runner isolation, projects/chats/attachments, downloads, benchmarks, MCP,
-operations, query metrics, bounded memory, and indexing behavior.
+operations, query metrics, bounded memory, indexing, retrieval, caching,
+scheduling, topology and routing decisions, and Machine Learning record,
+permission, lifecycle, reload, and removal behavior.
 
 Fixture and implementation tests do not replace external exit checks. Claims of
 phase completion are governed by the evidence and exit criteria in
@@ -1082,38 +1163,35 @@ Near-term work is:
    improvement over full-text-only retrieval.
 2. Author the Phase 17 representative-query latency benchmark comparing
    cached against uncached retrieval preparation time.
-3. Record the Phase 18 same-host repeated-turn prompt-prefix/KV-session
-   reuse benchmark on a real pinned model/backend.
-4. Record the Phase 19 real-hardware-class calibration benchmark; add GPU
-   utilization/thermal-trend probing if an approved vendor SDK is adopted.
-5. Evaluate Phase 20 throughput options independently, each with its own
+3. Complete the Phase 19 comparative calibration evidence and the Phase 30A
+   matched `auto`-versus-`cpu_only` real-model benchmark matrix; add GPU
+   utilization/thermal-trend probing only if an approved vendor SDK is adopted.
+4. Evaluate Phase 20 throughput options independently, each with its own
    baseline and evidence, and only after all prerequisite gates pass — the
    registry scaffold does not pre-approve any candidate.
-6. Longer term: evaluate deeper language-aware symbol extraction for
+5. Longer term: evaluate deeper language-aware symbol extraction for
    Phase 15.
-7. Close the scoped-down trims recorded for Phases 21, 23, 24, 26, and 30
-   (Linux `io_uring` storage adapter, remaining unadapted retrieval
-   strategies, backend-actionable metadata/first-use/layer-window pre-touch,
-   and broader zero-copy/arena adoption beyond the demonstrated call sites),
-   each with its own before/after measurement.
-8. Implement Phase 22 (hierarchical content/model-data caching), Phase 25
-   (continuous batching and request scheduling), Phase 27 (KV-cache
-   compression/placement/lifecycle), Phase 28 (NUMA/topology awareness),
-   Phase 29 (model tiering and cascade inference), and Phase 31 (storage
-   tiering and scratch-volume management), which remain Planned.
+6. Close the documented scope trims across Phases 21–30, including Linux
+   `io_uring`, unadapted retrieval strategies, live backend batching,
+   backend-actionable pre-touch, validated KV compression/prefix sharing,
+   measured worker affinity, live cascade routing, and broader zero-copy use.
+7. Implement the still-planned performance Phases 31–36 in prerequisite
+   order, beginning with storage tiering and scratch-volume management.
+8. Extend the Machine Learning foundation beyond Phase 50 metadata into
+   evidence-producing ingestion, execution, evaluation, embedding/vector,
+   and RAG workflows without allowing lifecycle state to substitute for
+   proof that work ran successfully.
 
 Outstanding operational certification also includes:
 
-- Pinned real `llama.cpp` plus a verified programming GGUF
-- Real-model browser chat and generation cancellation
+- Real-model browser rendering and generation cancellation validation
 - A deliberately interrupted and resumed real HTTPS model transfer
-- Same-host real-model benchmark comparison
 - Live inbound MCP connection from a supported IDE or independent inspector
 - Live IDE-host validation
 - Ubuntu 24.04 and Debian 13 packaging-host certification
 - Optional pinned `whisper.cpp` integration, if enabled
-- Phase 18 same-host repeated-turn prompt-prefix/KV-session reuse benchmark
-- Phase 19 real-hardware-class calibration benchmark
+- Phase 19 comparative calibration evidence
+- Phase 30A matched `auto`-versus-`cpu_only` real-model benchmark matrix
 
 The detailed roadmap, deliverables, dependencies, installation outcomes, and
 exit criteria are maintained in [docs/PLAN.md](docs/PLAN.md).
@@ -1122,7 +1200,7 @@ exit criteria are maintained in [docs/PLAN.md](docs/PLAN.md).
 
 The initial release does not aim to provide:
 
-- Foundation-model training
+- In-process foundation-model training in the current release
 - A custom transformer inference engine
 - Public internet SaaS hosting
 - Multi-node distributed inference
@@ -1169,6 +1247,7 @@ does not implement cryptographic primitives.
 ## Documentation
 
 - [Authoritative implementation plan](docs/PLAN.md)
+- [How to use Machine Learning and models](docs/HowToUse-MachineLearning.md)
 - [Project objectives](docs/objectives.md)
 - [Architecture decisions](docs/architecture/)
 - [`settings.json` field reference](docs/architecture/configuration.md)

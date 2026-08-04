@@ -450,7 +450,27 @@ bool role_allows(const UserRole role, const std::string& permission) {
           // Phase 50 (docs/PLAN.md "Machine Learning Abilities" section 22,
           // Retrieval-Augmented Generation): administrator-only, matching
           // every other ml.* permission above.
-          "ml.ragconfigs.view", "ml.ragconfigs.manage"}},
+          "ml.ragconfigs.view", "ml.ragconfigs.manage",
+          // Phase 51 (docs/PLAN.md "Machine Learning Abilities" section 24,
+          // Subject Examination System): administrator-only, matching every
+          // other ml.* permission above.
+          "ml.subjectexams.view", "ml.subjectexams.manage",
+          // Phase 52 (docs/PLAN.md "Machine Learning Abilities" section 26,
+          // Hyperparameter Optimization): administrator-only, matching
+          // every other ml.* permission above.
+          "ml.hyperparams.view", "ml.hyperparams.manage",
+          // Phase 53 (docs/PLAN.md "Machine Learning Abilities" section 28,
+          // Model Optimization): administrator-only, matching every other
+          // ml.* permission above.
+          "ml.modelopts.view", "ml.modelopts.manage",
+          // Phase 54 (docs/PLAN.md "Machine Learning Abilities" section 33,
+          // Checkpoint Management): administrator-only, matching every
+          // other ml.* permission above.
+          "ml.checkpoints.view", "ml.checkpoints.manage",
+          // Phase 55 (docs/PLAN.md "Machine Learning Abilities" section 34,
+          // Deployment Manager): administrator-only, matching every other
+          // ml.* permission above.
+          "ml.deployments.view", "ml.deployments.manage"}},
         {UserRole::developer,
          {"identity.read", "models.read", "models.load", "tokens.create",
           "ide.connect", "mcp.connect", "mcp.invoke", "mcp.tools.invoke",

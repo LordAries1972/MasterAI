@@ -133,7 +133,7 @@ std::string application_script() {
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
-        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,cfg,report]="
+        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,mlse,mlhs,mlmo,mlck,mldp,cfg,report]="
         "await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
@@ -174,6 +174,16 @@ std::string application_script() {
         "{vectorStores:[]}),"
         "fetchFor('#mlRagConfigsList','/api/v1/ml/rag-configs',"
         "{ragConfigs:[]}),"
+        "fetchFor('#mlSubjectExamsList','/api/v1/ml/subject-exams',"
+        "{subjectExams:[]}),"
+        "fetchFor('#mlHyperparameterSearchesList',"
+        "'/api/v1/ml/hyperparameter-searches',{hyperparameterSearches:[]}),"
+        "fetchFor('#mlModelOptimizationsList',"
+        "'/api/v1/ml/model-optimizations',{modelOptimizations:[]}),"
+        "fetchFor('#mlCheckpointsList','/api/v1/ml/checkpoints',"
+        "{checkpoints:[]}),"
+        "fetchFor('#mlDeploymentsList','/api/v1/ml/deployments',"
+        "{deployments:[]}),"
         // 403/503 for anyone who isn't an administrator, or when no
         // settings.json path is known to the running server -- both are
         // quiet, expected no-ops here exactly like the ml.* fetches above.
@@ -200,6 +210,11 @@ std::string application_script() {
         "renderMlSyntheticRecords(mlsr.syntheticRecords);"
         "renderMlVectorStores(mlvs.vectorStores);"
         "renderMlRagConfigs(mlrag.ragConfigs);"
+        "renderMlSubjectExams(mlse.subjectExams);"
+        "renderMlHyperparameterSearches(mlhs.hyperparameterSearches);"
+        "renderMlModelOptimizations(mlmo.modelOptimizations);"
+        "renderMlCheckpoints(mlck.checkpoints);"
+        "renderMlDeployments(mldp.deployments);"
         "renderSystemConfig(cfg);"
         "renderSystemReport(report);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
@@ -1259,6 +1274,213 @@ std::string application_script() {
         "'/delete','POST');await load();}"
         "catch(x){showSystemError('Delete RAG config failed: '+"
         "x.message);}});}}"
+        // Subject Examination System (docs/PLAN.md "Machine Learning
+        // Abilities" section 24): an exam is authored content that a
+        // reviewer approves before it may examine anything, so it uses the
+        // same five-state reviewer workflow as Instruction Examples.
+        "const SUBJECT_EXAM_STATUSES=['draft','in_review','approved',"
+        "'rejected','archived'];"
+        "function renderMlSubjectExams(exams){"
+        "const el=q('#mlSubjectExamsList');if(!el)return;"
+        "if(!exams.length){el.innerHTML='<p>No subject exams created "
+        "yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Subject ID','Question format',"
+        "'Status','Set status',''],"
+        "exams.map(x=>[esc(x.name),esc(x.subjectId),"
+        "esc(x.questionFormat),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-subject-exam-status-for=\"'+x.id+'\">'+"
+        "SUBJECT_EXAM_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-subject-exam-status=\"'+"
+        "x.id+'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-subject-exam=\"'+"
+        "x.id+'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-subject-exam-status]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const id=btn.dataset.applySubjectExamStatus;"
+        "const status=el.querySelector("
+        "'[data-subject-exam-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/subject-exams/'+"
+        "encodeURIComponent(id)+'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update subject exam status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-subject-exam]')){"
+        "btn.addEventListener('click',async()=>{"
+        "try{await api('/api/v1/ml/subject-exams/'+"
+        "encodeURIComponent(btn.dataset.deleteMlSubjectExam)+"
+        "'/delete','POST');await load();}"
+        "catch(x){showSystemError('Delete subject exam failed: '+"
+        "x.message);}});}}"
+        // Hyperparameter Optimization (docs/PLAN.md "Machine Learning
+        // Abilities" section 26): a search queues, runs, and pauses like a
+        // training job, so it uses the same eleven-state job lifecycle.
+        "const HYPERPARAMETER_SEARCH_STATUSES=['draft','queued','preparing',"
+        "'running','paused','canceling','canceled','failed','completed',"
+        "'awaiting_evaluation','archived'];"
+        "function renderMlHyperparameterSearches(searches){"
+        "const el=q('#mlHyperparameterSearchesList');if(!el)return;"
+        "if(!searches.length){el.innerHTML='<p>No hyperparameter searches "
+        "created yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Training job ID','Strategy',"
+        "'Status','Set status',''],"
+        "searches.map(x=>[esc(x.name),esc(x.trainingJobId),"
+        "esc(x.strategy),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-hyperparameter-search-status-for=\"'+x.id+'\">'+"
+        "HYPERPARAMETER_SEARCH_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-hyperparameter-search-status=\"'+"
+        "x.id+'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-hyperparameter-search=\"'+"
+        "x.id+'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-hyperparameter-search-status]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const id=btn.dataset.applyHyperparameterSearchStatus;"
+        "const status=el.querySelector("
+        "'[data-hyperparameter-search-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/hyperparameter-searches/'+"
+        "encodeURIComponent(id)+'/status','POST',{status});await load();}"
+        "catch(x){showSystemError("
+        "'Update hyperparameter search status failed: '+x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-hyperparameter-search]')){"
+        "btn.addEventListener('click',async()=>{"
+        "try{await api('/api/v1/ml/hyperparameter-searches/'+"
+        "encodeURIComponent(btn.dataset.deleteMlHyperparameterSearch)+"
+        "'/delete','POST');await load();}"
+        "catch(x){showSystemError('Delete hyperparameter search failed: '+"
+        "x.message);}});}}"
+        // Model Optimization (docs/PLAN.md "Machine Learning Abilities"
+        // section 28): an optimization run executes like a training job, so
+        // it uses the same eleven-state job lifecycle.
+        "const MODEL_OPTIMIZATION_STATUSES=['draft','queued','preparing',"
+        "'running','paused','canceling','canceled','failed','completed',"
+        "'awaiting_evaluation','archived'];"
+        "function renderMlModelOptimizations(runs){"
+        "const el=q('#mlModelOptimizationsList');if(!el)return;"
+        "if(!runs.length){el.innerHTML='<p>No model optimization runs "
+        "created yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Model ID','Operation',"
+        "'Status','Set status',''],"
+        "runs.map(x=>[esc(x.name),esc(x.modelId),esc(x.operation),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-model-optimization-status-for=\"'+x.id+'\">'+"
+        "MODEL_OPTIMIZATION_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-model-optimization-status=\"'+"
+        "x.id+'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-model-optimization=\"'+"
+        "x.id+'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-model-optimization-status]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const id=btn.dataset.applyModelOptimizationStatus;"
+        "const status=el.querySelector("
+        "'[data-model-optimization-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/model-optimizations/'+"
+        "encodeURIComponent(id)+'/status','POST',{status});await load();}"
+        "catch(x){showSystemError("
+        "'Update model optimization status failed: '+x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-model-optimization]')){"
+        "btn.addEventListener('click',async()=>{"
+        "try{await api('/api/v1/ml/model-optimizations/'+"
+        "encodeURIComponent(btn.dataset.deleteMlModelOptimization)+"
+        "'/delete','POST');await load();}"
+        "catch(x){showSystemError('Delete model optimization failed: '+"
+        "x.message);}});}}"
+        // Checkpoint Management (docs/PLAN.md "Machine Learning Abilities"
+        // section 33): a checkpoint carries a retention lifecycle (active/
+        // pinned/archived), not an approval workflow -- pinned is section
+        // 33's own "protect" operation.
+        "const CHECKPOINT_STATUSES=['active','pinned','archived'];"
+        "function renderMlCheckpoints(checkpoints){"
+        "const el=q('#mlCheckpointsList');if(!el)return;"
+        "if(!checkpoints.length){el.innerHTML='<p>No checkpoints recorded "
+        "yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Training job ID','Capture reason',"
+        "'Status','Set status',''],"
+        "checkpoints.map(x=>[esc(x.name),esc(x.trainingJobId),"
+        "esc(x.captureReason),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-checkpoint-status-for=\"'+x.id+'\">'+"
+        "CHECKPOINT_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-checkpoint-status=\"'+"
+        "x.id+'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-checkpoint=\"'+"
+        "x.id+'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-checkpoint-status]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const id=btn.dataset.applyCheckpointStatus;"
+        "const status=el.querySelector("
+        "'[data-checkpoint-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/checkpoints/'+"
+        "encodeURIComponent(id)+'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update checkpoint status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-checkpoint]')){"
+        "btn.addEventListener('click',async()=>{"
+        "try{await api('/api/v1/ml/checkpoints/'+"
+        "encodeURIComponent(btn.dataset.deleteMlCheckpoint)+"
+        "'/delete','POST');await load();}"
+        "catch(x){showSystemError('Delete checkpoint failed: '+"
+        "x.message);}});}}"
+        // Deployment Manager (docs/PLAN.md "Machine Learning Abilities"
+        // section 34): a deployment is a standalone registered resource
+        // awaiting authorization, so it reuses the same three-state
+        // pending/approved/rejected approval workflow as Vector Stores.
+        "const DEPLOYMENT_STATUSES=['pending','approved','rejected'];"
+        "function renderMlDeployments(deployments){"
+        "const el=q('#mlDeploymentsList');if(!el)return;"
+        "if(!deployments.length){el.innerHTML='<p>No deployments recorded "
+        "yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Model ID','Environment','Strategy',"
+        "'Status','Set status',''],"
+        "deployments.map(x=>[esc(x.name),esc(x.modelId),"
+        "esc(x.environment),esc(x.strategy),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-deployment-status-for=\"'+x.id+'\">'+"
+        "DEPLOYMENT_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-deployment-status=\"'+"
+        "x.id+'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-deployment=\"'+"
+        "x.id+'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-deployment-status]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const id=btn.dataset.applyDeploymentStatus;"
+        "const status=el.querySelector("
+        "'[data-deployment-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/deployments/'+"
+        "encodeURIComponent(id)+'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update deployment status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-deployment]')){"
+        "btn.addEventListener('click',async()=>{"
+        "try{await api('/api/v1/ml/deployments/'+"
+        "encodeURIComponent(btn.dataset.deleteMlDeployment)+"
+        "'/delete','POST');await load();}"
+        "catch(x){showSystemError('Delete deployment failed: '+"
+        "x.message);}});}}"
         // Each row gets its own Start/resume, Pause, Stop, and Remove buttons
         // wired directly to that job's id -- nothing to hand-type, unlike the
         // old single manual 'Download job ID' field this replaces. The State
@@ -2030,6 +2252,32 @@ std::string application_script() {
         "const k='sidebarSection:'+d.dataset.key;const saved=localStorage.getItem(k);"
         "if(saved!==null)d.open=saved==='1';"
         "d.addEventListener('toggle',()=>localStorage.setItem(k,d.open?'1':'0'));});"
+        // The sidebar's width and scroll position persist the same way the
+        // section collapse state above does: every sidebar click is a
+        // full-page navigation, so both are restored from localStorage on
+        // each load. The width restore must run before the scroll restore
+        // -- reflowing the sidebar after setting scrollTop would shift it.
+        "const sb=q('#sidebar');"
+        "const savedWidth=parseInt(localStorage.getItem('sidebarWidth'));"
+        "if(savedWidth)sb.style.width=savedWidth+'px';"
+        "const savedScroll=parseInt(localStorage.getItem('sidebarScroll'));"
+        "if(savedScroll)sb.scrollTop=savedScroll;"
+        "sb.addEventListener('scroll',()=>"
+        "localStorage.setItem('sidebarScroll',Math.round(sb.scrollTop)));"
+        // Pointer-capture drag on the gutter between sidebar and content:
+        // width is clamped to keep both panes usable, and the final width
+        // is saved once on release rather than on every move event.
+        "const rz=q('#sidebarResizer');"
+        "if(rz)rz.addEventListener('pointerdown',e=>{e.preventDefault();"
+        "rz.setPointerCapture(e.pointerId);rz.classList.add('dragging');"
+        "const move=ev=>{const w=Math.min(Math.max(ev.clientX,170),600);"
+        "sb.style.width=w+'px';};"
+        "const up=()=>{rz.classList.remove('dragging');"
+        "rz.removeEventListener('pointermove',move);"
+        "rz.removeEventListener('pointerup',up);"
+        "localStorage.setItem('sidebarWidth',parseInt(sb.style.width));};"
+        "rz.addEventListener('pointermove',move);"
+        "rz.addEventListener('pointerup',up);});"
         "if(q('#newProject'))q('#newProject').addEventListener('submit',e=>submit(e,'/api/v1/projects',"
         "()=>({id:q('#projectId').value,displayName:q('#projectName').value})));"
         "if(q('#attachToggle'))q('#attachToggle').addEventListener('click',()=>{"
@@ -2177,7 +2425,43 @@ std::string application_script() {
         "()=>({name:q('#mlRagConfigName').value,"
         "description:q('#mlRagConfigDescription').value,"
         "searchStrategy:q('#mlRagConfigSearchStrategy').value,"
-        "vectorStoreId:q('#mlRagConfigVectorStoreId').value})));}});";
+        "vectorStoreId:q('#mlRagConfigVectorStoreId').value})));"
+        "if(q('#newMlSubjectExam'))"
+        "q('#newMlSubjectExam').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/subject-exams',"
+        "()=>({subjectId:q('#mlSubjectExamSubjectId').value,"
+        "name:q('#mlSubjectExamName').value,"
+        "description:q('#mlSubjectExamDescription').value,"
+        "questionFormat:q('#mlSubjectExamQuestionFormat').value})));"
+        "if(q('#newMlHyperparameterSearch'))"
+        "q('#newMlHyperparameterSearch').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/hyperparameter-searches',"
+        "()=>({trainingJobId:q('#mlHyperparameterSearchTrainingJobId').value,"
+        "name:q('#mlHyperparameterSearchName').value,"
+        "description:q('#mlHyperparameterSearchDescription').value,"
+        "strategy:q('#mlHyperparameterSearchStrategy').value})));"
+        "if(q('#newMlModelOptimization'))"
+        "q('#newMlModelOptimization').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/model-optimizations',"
+        "()=>({modelId:q('#mlModelOptimizationModelId').value,"
+        "name:q('#mlModelOptimizationName').value,"
+        "description:q('#mlModelOptimizationDescription').value,"
+        "operation:q('#mlModelOptimizationOperation').value})));"
+        "if(q('#newMlCheckpoint'))"
+        "q('#newMlCheckpoint').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/checkpoints',"
+        "()=>({trainingJobId:q('#mlCheckpointTrainingJobId').value,"
+        "name:q('#mlCheckpointName').value,"
+        "description:q('#mlCheckpointDescription').value,"
+        "captureReason:q('#mlCheckpointCaptureReason').value})));"
+        "if(q('#newMlDeployment'))"
+        "q('#newMlDeployment').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/deployments',"
+        "()=>({modelId:q('#mlDeploymentModelId').value,"
+        "name:q('#mlDeploymentName').value,"
+        "description:q('#mlDeploymentDescription').value,"
+        "environment:q('#mlDeploymentEnvironment').value,"
+        "strategy:q('#mlDeploymentStrategy').value})));}});";
 }
 
 // Presents the native OS account sign-in form without embedding credentials.
@@ -2884,6 +3168,159 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<h2>RAG configurations</h2>"
             "<div id=\"mlRagConfigsList\">Loading...</div>"
             "</div></section>";
+    } else if (section == "ml-subject-exams") {
+        // Phase 51 (docs/PLAN.md "Machine Learning Abilities" section 24):
+        // create and list subject exams and move them through the same
+        // five-state reviewer-approval workflow Instruction Examples use,
+        // since an exam is authored content a reviewer approves before it
+        // may examine anything. Only the identity/subject-reference/
+        // question-format/status fields SubjectExamStore actually persists
+        // are collected here -- see that class's comment in masterai.hpp
+        // for the question-bank/scoring fields deferred to the phase that
+        // actually administers exams.
+        body =
+            "<section id=\"panel-ml-subject-exams\" class=\"panel\">"
+            "<div>"
+            "<h2>New subject exam</h2>"
+            "<form id=\"newMlSubjectExam\">"
+            "<label>Name<input id=\"mlSubjectExamName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Subject ID<input id=\"mlSubjectExamSubjectId\" required "
+            "placeholder=\"id of a registered subject package\"></label>"
+            "<label>Description<textarea "
+            "id=\"mlSubjectExamDescription\" rows=\"2\"></textarea></label>"
+            "<label>Question format<input "
+            "id=\"mlSubjectExamQuestionFormat\" "
+            "placeholder=\"e.g. multiple_choice, short_answer, code_task\">"
+            "</label>"
+            "<button>Create subject exam</button></form>"
+            "</div><div>"
+            "<h2>Subject exams</h2>"
+            "<div id=\"mlSubjectExamsList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-hyperparameter-searches") {
+        // Phase 52 (docs/PLAN.md "Machine Learning Abilities" section 26):
+        // create and list hyperparameter searches and move them through the
+        // same eleven-state job lifecycle Training Jobs use, since a search
+        // queues, runs, and pauses like any other job. Only the identity/
+        // training-job-reference/strategy/status fields
+        // HyperparameterSearchStore actually persists are collected here --
+        // see that class's comment in masterai.hpp for the search-space/
+        // trial-history fields deferred to the phase that actually runs
+        // searches.
+        body =
+            "<section id=\"panel-ml-hyperparameter-searches\" "
+            "class=\"panel\">"
+            "<div>"
+            "<h2>New hyperparameter search</h2>"
+            "<form id=\"newMlHyperparameterSearch\">"
+            "<label>Name<input id=\"mlHyperparameterSearchName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Training job ID<input "
+            "id=\"mlHyperparameterSearchTrainingJobId\" required "
+            "placeholder=\"id of the training job this search tunes\">"
+            "</label>"
+            "<label>Description<textarea "
+            "id=\"mlHyperparameterSearchDescription\" rows=\"2\">"
+            "</textarea></label>"
+            "<label>Search strategy<input "
+            "id=\"mlHyperparameterSearchStrategy\" "
+            "placeholder=\"e.g. grid, random, bayesian\"></label>"
+            "<button>Create hyperparameter search</button></form>"
+            "</div><div>"
+            "<h2>Hyperparameter searches</h2>"
+            "<div id=\"mlHyperparameterSearchesList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-model-optimizations") {
+        // Phase 53 (docs/PLAN.md "Machine Learning Abilities" section 28):
+        // create and list model optimization runs and move them through the
+        // same eleven-state job lifecycle Training Jobs use, since an
+        // optimization run executes like any other job. Only the identity/
+        // model-reference/operation/status fields ModelOptimizationStore
+        // actually persists are collected here -- see that class's comment
+        // in masterai.hpp for the before/after-comparison fields deferred
+        // to the phase that actually optimizes models.
+        body =
+            "<section id=\"panel-ml-model-optimizations\" class=\"panel\">"
+            "<div>"
+            "<h2>New model optimization</h2>"
+            "<form id=\"newMlModelOptimization\">"
+            "<label>Name<input id=\"mlModelOptimizationName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Model ID<input id=\"mlModelOptimizationModelId\" "
+            "required placeholder=\"id of a registered model\"></label>"
+            "<label>Description<textarea "
+            "id=\"mlModelOptimizationDescription\" rows=\"2\"></textarea>"
+            "</label>"
+            "<label>Operation<input id=\"mlModelOptimizationOperation\" "
+            "placeholder=\"e.g. quantization, pruning, distillation\">"
+            "</label>"
+            "<button>Create model optimization</button></form>"
+            "</div><div>"
+            "<h2>Model optimization runs</h2>"
+            "<div id=\"mlModelOptimizationsList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-checkpoints") {
+        // Phase 54 (docs/PLAN.md "Machine Learning Abilities" section 33):
+        // record and list training checkpoints and move them through a
+        // bespoke three-state retention lifecycle (active/pinned/archived)
+        // -- pinned is section 33's own "protect" operation, exempting a
+        // checkpoint from retention deletion. Only the identity/training-
+        // job-reference/capture-reason/status fields
+        // TrainingCheckpointStore actually persists are collected here --
+        // see that class's comment in masterai.hpp for the step/epoch/hash/
+        // resume fields deferred to the phase that actually captures
+        // checkpoints.
+        body =
+            "<section id=\"panel-ml-checkpoints\" class=\"panel\">"
+            "<div>"
+            "<h2>New checkpoint record</h2>"
+            "<form id=\"newMlCheckpoint\">"
+            "<label>Name<input id=\"mlCheckpointName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Training job ID<input "
+            "id=\"mlCheckpointTrainingJobId\" required "
+            "placeholder=\"id of the training job that produced it\">"
+            "</label>"
+            "<label>Description<textarea "
+            "id=\"mlCheckpointDescription\" rows=\"2\"></textarea></label>"
+            "<label>Capture reason<input id=\"mlCheckpointCaptureReason\" "
+            "placeholder=\"e.g. epoch_end, best_metric, manual\"></label>"
+            "<button>Create checkpoint record</button></form>"
+            "</div><div>"
+            "<h2>Checkpoints</h2>"
+            "<div id=\"mlCheckpointsList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-deployments") {
+        // Phase 55 (docs/PLAN.md "Machine Learning Abilities" section 34):
+        // record and list deployments and move them through the same
+        // three-state pending/approved/rejected approval workflow Vector
+        // Stores use, since section 34 explicitly names approval as part of
+        // the deployment record. Only the identity/model-reference/
+        // environment/strategy/status fields DeploymentStore actually
+        // persists are collected here -- see that class's comment in
+        // masterai.hpp for the health/rollback fields deferred to the phase
+        // that actually promotes models.
+        body =
+            "<section id=\"panel-ml-deployments\" class=\"panel\">"
+            "<div>"
+            "<h2>New deployment</h2>"
+            "<form id=\"newMlDeployment\">"
+            "<label>Name<input id=\"mlDeploymentName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Model ID<input id=\"mlDeploymentModelId\" required "
+            "placeholder=\"id of a registered model\"></label>"
+            "<label>Description<textarea "
+            "id=\"mlDeploymentDescription\" rows=\"2\"></textarea></label>"
+            "<label>Environment<input id=\"mlDeploymentEnvironment\" "
+            "placeholder=\"e.g. development, staging, production\"></label>"
+            "<label>Strategy<input id=\"mlDeploymentStrategy\" "
+            "placeholder=\"e.g. direct, blue_green, canary\"></label>"
+            "<button>Create deployment</button></form>"
+            "</div><div>"
+            "<h2>Deployments</h2>"
+            "<div id=\"mlDeploymentsList\">Loading...</div>"
+            "</div></section>";
     } else if (section == "settings-config") {
         // Phase 30A: administrator-only local-configuration editor backed by
         // GET/POST /api/v1/admin/config (server.cpp's admin_config_get()/
@@ -3123,7 +3560,22 @@ std::string application_page(const UserRecord& user, const std::string& section,
                          section == "ml-vector-stores") +
                 nav_link("/app/ml/rag-configs",
                          "Retrieval-Augmented Generation",
-                         section == "ml-rag-configs"));
+                         section == "ml-rag-configs") +
+                nav_link("/app/ml/subject-exams",
+                         "Subject Examination",
+                         section == "ml-subject-exams") +
+                nav_link("/app/ml/hyperparameter-searches",
+                         "Hyperparameter Optimization",
+                         section == "ml-hyperparameter-searches") +
+                nav_link("/app/ml/model-optimizations",
+                         "Model Optimization",
+                         section == "ml-model-optimizations") +
+                nav_link("/app/ml/checkpoints",
+                         "Checkpoint Management",
+                         section == "ml-checkpoints") +
+                nav_link("/app/ml/deployments",
+                         "Deployment Manager",
+                         section == "ml-deployments"));
     }
 
     return html_response(
@@ -3142,6 +3594,14 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "#sidebar{width:16rem;flex:none;padding:1.25rem 1rem;"
         "border-right:1px solid var(--panel-border);"
         "display:flex;flex-direction:column;gap:.5rem;overflow-y:auto}"
+        // A thin draggable gutter between the sidebar and the content pane
+        // -- the sidebar script persists the chosen width (and the
+        // sidebar's scroll position) in localStorage so both survive the
+        // full-page navigation every sidebar click performs.
+        "#sidebarResizer{flex:none;width:6px;cursor:col-resize;"
+        "background:transparent;touch-action:none}"
+        "#sidebarResizer:hover,#sidebarResizer.dragging{"
+        "background:var(--panel-border)}"
         "#sidebar h1{font-size:1.3rem}"
         "#sidebar h3{margin-top:1rem}"
         // Collapsible sidebar section groups (Chats/Workspace/Settings/
@@ -3369,11 +3829,17 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "#systemReport td.reportLabel{width:9rem}}"
         "</style></head><body>"
         "<div id=\"shell\" data-role=\"" + role_attr + "\"><nav id=\"sidebar\">"
+        // The sidebar's width and scroll position both persist client-side
+        // (see the sidebar script in application_script()): a drag handle
+        // (#sidebarResizer below) lets the user widen or narrow the
+        // sidebar, and both settings survive the full-page navigation every
+        // sidebar click performs.
         "<h1>MasterAI</h1><p id=\"who\">" +
         html_escape(user.display_name) +
         "</p>" +
         sidebar_links +
-        "</nav><main id=\"content\">"
+        "</nav><div id=\"sidebarResizer\" "
+        "title=\"Drag to resize the sidebar\"></div><main id=\"content\">"
         "<p id=\"actionStatus\" role=\"status\"></p>" +
         body +
         "</main></div><script src=\"/assets/app.js\"></script></body></html>");

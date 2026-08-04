@@ -776,6 +776,135 @@ Current phase status:
   43-49's own roster entries — `test_machine_learning_foundation_dashboard`'s
   fixed exclusion list stays frozen at Phase 42's interface set, so this
   phase changes nothing there.
+- Phase 51: Implemented at a scoped-down level (2026-08-05) — the Subject
+  Examination System (section 24 below), scoped down to identity, a
+  mandatory `subject_id` referencing a `SubjectPackageStore` entry (an
+  exam only means something against a registered subject package,
+  mirroring Phase 47's required-dataset pattern), a free-text question
+  format (section 24 lists nine question types as examples, not a closed
+  enum), and the same five-state draft/in_review/approved/rejected/
+  archived reviewer-approval lifecycle content records use (`SubjectExam`/
+  `SubjectExamStore`, `src/ml.cpp`) — not the section's question-bank/
+  score-suite surface (per-topic and per-difficulty breakdowns,
+  hallucination rate, citation quality, minimum approval score) that only
+  means something once a real examination executor exists. An exam is
+  authored content a reviewer approves before it may examine anything,
+  exactly like an `InstructionExample`, so it uses the five-state reviewer
+  workflow rather than the three-state resource-approval workflow. New
+  administrator-only `ml.subjectexams.view`/`ml.subjectexams.manage`
+  permissions gate `GET`/`POST /api/v1/ml/subject-exams`,
+  `POST /api/v1/ml/subject-exams/{id}/status`, and
+  `POST /api/v1/ml/subject-exams/{id}/delete`. New "Subject Examination"
+  (`/app/ml/subject-exams`) entry under the Machine Learning sidebar in
+  `src/web_ui.cpp` lists, creates, and moves exams through status.
+  `test_machine_learning_subject_exam_lifecycle` covers the same
+  permission/lifecycle/reload/remove guarantees as Phase 50's test, plus
+  the required-subject-id rule. The dashboard roster's
+  `subject-examination` interface entry (`src/ml.cpp`) intentionally still
+  reports `planned`, matching Phases 43-50's own roster entries —
+  `test_machine_learning_foundation_dashboard`'s fixed exclusion list
+  stays frozen at Phase 42's interface set, so this phase changes nothing
+  there.
+- Phase 52: Implemented at a scoped-down level (2026-08-05) —
+  Hyperparameter Optimization (section 26 below), scoped down to identity,
+  a mandatory `training_job_id` referencing a `TrainingJobStore` entry (a
+  search tunes an existing training job's configuration, so the job
+  reference is required the way Phase 45's base model is), a free-text
+  strategy (section 26 lists grid/random/Bayesian/population-based/
+  successive-halving as examples, not a closed enum), and the same
+  eleven-state job lifecycle Training Jobs and Fine-Tuning use
+  (`HyperparameterSearch`/`HyperparameterSearchStore`, `src/ml.cpp`) —
+  not the search-space/trial-history/best-result surface (learning rate,
+  batch size, epochs, optimiser, dropout, adapter rank, early stopping,
+  resource/time limits) that only means something once a real search
+  executor exists. New administrator-only `ml.hyperparams.view`/
+  `ml.hyperparams.manage` permissions gate `GET`/
+  `POST /api/v1/ml/hyperparameter-searches`,
+  `POST /api/v1/ml/hyperparameter-searches/{id}/status`, and
+  `POST /api/v1/ml/hyperparameter-searches/{id}/delete`. New
+  "Hyperparameter Optimization" (`/app/ml/hyperparameter-searches`) entry
+  under the Machine Learning sidebar in `src/web_ui.cpp` lists, creates,
+  and moves searches through status.
+  `test_machine_learning_hyperparameter_search_lifecycle` covers the same
+  permission/lifecycle/reload/remove guarantees as Phase 51's test, plus
+  the required-training-job-id rule and an eleven-state lifecycle walk.
+  The dashboard roster's `hyperparameter-optimization` interface entry
+  intentionally still reports `planned`, exactly as Phases 43-51 left
+  their own roster entries.
+- Phase 53: Implemented at a scoped-down level (2026-08-05) — Model
+  Optimization (section 28 below), scoped down to identity, a mandatory
+  `model_id` referencing a `ModelRegistryStore` entry (an optimization run
+  only means something against a registered model), a free-text operation
+  (section 28 lists thirteen operations — quantization, pruning,
+  distillation, graph optimization, and more — as examples, not a closed
+  enum), and the same eleven-state job lifecycle Training Jobs use
+  (`ModelOptimizationRun`/`ModelOptimizationStore`, `src/ml.cpp`) — not
+  the before/after quality-loss comparison against the original model
+  that only means something once a real optimizer executor exists. New
+  administrator-only `ml.modelopts.view`/`ml.modelopts.manage` permissions
+  gate `GET`/`POST /api/v1/ml/model-optimizations`,
+  `POST /api/v1/ml/model-optimizations/{id}/status`, and
+  `POST /api/v1/ml/model-optimizations/{id}/delete`. New "Model
+  Optimization" (`/app/ml/model-optimizations`) entry under the Machine
+  Learning sidebar in `src/web_ui.cpp` lists, creates, and moves runs
+  through status. `test_machine_learning_model_optimization_lifecycle`
+  covers the same permission/lifecycle/reload/remove guarantees as Phase
+  52's test, plus the required-model-id rule. The dashboard roster's
+  `model-optimization` interface entry intentionally still reports
+  `planned`, exactly as Phases 43-52 left their own roster entries.
+- Phase 54: Implemented at a scoped-down level (2026-08-05) — Checkpoint
+  Management (section 33 below), scoped down to identity, a mandatory
+  `training_job_id` referencing a `TrainingJobStore` entry (a checkpoint
+  is a child record of the training job that produced it), a free-text
+  capture reason (section 33 describes automatic epoch/step capture
+  alongside manual capture without naming a closed set), and a bespoke
+  three-state retention lifecycle — active (subject to normal retention),
+  pinned (section 33's "protect" operation: exempt from retention
+  deletion), archived (`TrainingCheckpoint`/`TrainingCheckpointStore`,
+  `src/ml.cpp`) — not the step/epoch/validation-metric/size/hash/
+  parent-model record or the resume/compare/promote/download operations
+  that only mean something once a real training executor captures
+  checkpoints. This is a retention lifecycle, not an approval workflow, so
+  it deliberately reuses neither the three-state pending/approved/rejected
+  shape nor the five-state reviewer shape: nobody "approves" a checkpoint;
+  they keep it, protect it, or archive it. New administrator-only
+  `ml.checkpoints.view`/`ml.checkpoints.manage` permissions gate `GET`/
+  `POST /api/v1/ml/checkpoints`, `POST /api/v1/ml/checkpoints/{id}/status`,
+  and `POST /api/v1/ml/checkpoints/{id}/delete`. New "Checkpoint
+  Management" (`/app/ml/checkpoints`) entry under the Machine Learning
+  sidebar in `src/web_ui.cpp` lists, creates, and moves checkpoint records
+  through status. `test_machine_learning_checkpoint_lifecycle` covers the
+  same permission/lifecycle/reload/remove guarantees as Phase 53's test,
+  plus the bespoke retention lifecycle. The dashboard roster's
+  `checkpoint-management` interface entry intentionally still reports
+  `planned`, exactly as Phases 43-53 left their own roster entries.
+- Phase 55: Implemented at a scoped-down level (2026-08-05) — the
+  Deployment Manager (section 34 below), scoped down to identity, a
+  mandatory `model_id` referencing a `ModelRegistryStore` entry (a
+  deployment promotes a registered model and nothing else), free-text
+  environment and strategy fields (section 34 lists dev/test/staging/
+  production/offline/intranet targets and direct/blue-green/canary/shadow/
+  A-B/rolling strategies as examples, not closed enums), and the same
+  three-state pending/approved/rejected approval lifecycle Phases 49-50
+  use (`Deployment`/`DeploymentStore`, `src/ml.cpp`) — section 34
+  explicitly names approval as part of the deployment record, and a
+  deployment is a standalone registered resource awaiting authorization,
+  not reviewer-workflow content — not the model-version/runtime/
+  target-node/rollback-version/health-status record that only means
+  something once a real deployment executor exists. New administrator-only
+  `ml.deployments.view`/`ml.deployments.manage` permissions gate `GET`/
+  `POST /api/v1/ml/deployments`, `POST /api/v1/ml/deployments/{id}/status`,
+  and `POST /api/v1/ml/deployments/{id}/delete`. New "Deployment Manager"
+  (`/app/ml/deployments`) entry under the Machine Learning sidebar in
+  `src/web_ui.cpp` lists, creates, and moves deployments through status.
+  `test_machine_learning_deployment_lifecycle` covers the same
+  permission/lifecycle/reload/remove guarantees as Phase 54's test, plus
+  the required-model-id rule. The dashboard roster's `deployment-manager`
+  interface entry intentionally still reports `planned`, exactly as
+  Phases 43-54 left their own roster entries —
+  `test_machine_learning_foundation_dashboard`'s fixed exclusion list
+  stays frozen at Phase 42's interface set, so these phases change
+  nothing there.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -4808,10 +4937,35 @@ behavior, source-priority rules, restricted documents, cache behavior) or
 its retrieval-testing surface that only mean something once a real
 retrieval executor exists; like Phase 49's vector store, a RAG
 configuration is a standalone registered resource, not a target-scoped
-content record. Every other capability in this section (Training Methods
-execution, Subject Examination, Hyperparameter Optimization, deployment,
-and everything else through section 51) remains `Planned`: no
-implementation has started.
+content record. Phase 51 implements the Subject Examination System
+(section 24) at the same scoped-down level — identity, a mandatory
+subject package reference, a free-text question format, and the
+five-state reviewer-approval lifecycle content records use, not the
+question-bank/score-suite surface that only means something once a real
+examination executor exists. Phase 52 implements Hyperparameter
+Optimization (section 26) at the same scoped-down level — identity, a
+mandatory training job reference, a free-text search strategy, and the
+same eleven-state job lifecycle Training Jobs use, not the
+search-space/trial-history surface a real search executor will attach.
+Phase 53 implements Model Optimization (section 28) at the same
+scoped-down level — identity, a mandatory model reference, a free-text
+operation, and the eleven-state job lifecycle, not the quality-loss
+comparison a real optimizer executor will attach. Phase 54 implements
+Checkpoint Management (section 33) at the same scoped-down level —
+identity, a mandatory training job reference, a free-text capture
+reason, and a bespoke three-state active/pinned/archived retention
+lifecycle (pinned being section 33's "protect" operation), not the
+step/epoch/hash/resume record a real training executor will attach.
+Phase 55 implements the Deployment Manager (section 34) at the same
+scoped-down level — identity, a mandatory model reference, free-text
+environment and strategy fields, and the same three-state
+pending/approved/rejected approval lifecycle Phases 49-50 use, since
+section 34 explicitly names approval as part of the deployment record,
+not the runtime/target-node/rollback/health-status record a real
+deployment executor will attach. Every other capability in this section
+(Training Methods execution, Knowledge Ingestion, Model Comparison,
+Inference Endpoints, and everything else through section 51) remains
+`Planned`: no implementation has started.
 
 This section extends the plan with an administrator-only Machine Learning
 administration and model-development module, covering the full lifecycle

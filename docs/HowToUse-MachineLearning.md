@@ -8,7 +8,7 @@
 
 **Project basis:** This guide is derived from the architecture, security rules, model lifecycle, Machine Learning Abilities, and phased implementation status in [PLAN.md](PLAN.md). Where the plan describes a future capability, this guide labels it as planned rather than presenting it as currently executable.
 
-**Last aligned with the plan:** 5 August 2026, through the scoped Phase 50 Machine Learning foundation.
+**Last aligned with the plan:** 5 August 2026, through the scoped Phase 55 Machine Learning foundation.
 
 ---
 
@@ -829,27 +829,34 @@ The Machine Learning administration foundation currently records and manages sco
 - instruction examples;
 - synthetic-data records;
 - vector-store registrations;
-- retrieval-augmented-generation configuration registrations.
+- retrieval-augmented-generation configuration registrations;
+- subject exams;
+- hyperparameter searches;
+- model-optimization runs;
+- training checkpoints;
+- deployments.
 
 These are valuable control-plane records. They establish identity, ownership, intent, relationships, status, review, and approval boundaries.
 
 ### 10.2 What must not be assumed yet
 
-At the plan's current Phase 50 boundary, the following must not be represented as an operating end-to-end training platform:
+At the plan's current Phase 55 boundary, the following must not be represented as an operating end-to-end training platform:
 
 - a training executor that launches and monitors real framework jobs;
 - complete dataset import, immutable version publication, and transformation execution;
 - real label-record editing and consensus review;
-- checkpoint production and promotion;
+- automated checkpoint capture, resume, comparison, or promotion;
 - fine-tuning or adapter execution;
 - full experiment metric and artifact capture;
-- automated model scoring and subject examinations;
+- automated model scoring, exam administration, or computed exam results;
+- automated hyperparameter search trials or best-result selection;
+- executed quantization, pruning, distillation, or other optimization operations;
 - embedding generation or a populated vector index;
 - a complete executable RAG pipeline;
-- deployment automation, canary rollout, or automatic rollback;
+- deployment automation, canary rollout, health monitoring, or automatic rollback;
 - continual learning from user conversations.
 
-Creating a Training Job or Fine-Tuning Job record records administrative intent and lifecycle state. It does not train a model. Creating a Vector Store record does not generate embeddings or index documents.
+Creating a Training Job or Fine-Tuning Job record records administrative intent and lifecycle state. It does not train a model. Creating a Vector Store record does not generate embeddings or index documents. Likewise, a Subject Exam record does not administer questions, a Hyperparameter Search record does not run trials, a Model Optimization record does not quantize anything, a Checkpoint record does not save weights, and an approved Deployment record does not route a single request — each is a governed statement of intent and approval that a future executor will attach real evidence to.
 
 ### 10.3 Two model catalogs with different purposes
 
@@ -896,8 +903,34 @@ The current administrator pages are easiest to understand as a chain of controll
 | Synthetic Data | `/app/ml/synthetic-records` | Tracks generation technique, dataset, and review status | Does not generate content |
 | Embeddings and Vector Stores | `/app/ml/vector-stores` | Registers store identity, embedding model name, metric, and approval | Does not create embeddings or populate the index |
 | Retrieval-Augmented Generation | `/app/ml/rag-configs` | Registers a search strategy, optional vector-store relationship, and approval | Does not execute retrieval, assemble grounded prompts, or test citations |
+| Subject Examination | `/app/ml/subject-exams` | Tracks an exam for a registered subject package, its question format, and review lifecycle | Does not administer questions or compute scores |
+| Hyperparameter Optimization | `/app/ml/hyperparameter-searches` | Tracks a search over a training job's settings, its strategy, and job lifecycle | Does not run trials or select a best result |
+| Model Optimization | `/app/ml/model-optimizations` | Tracks an intended operation (quantization, pruning, ...) against a registered model | Does not transform any model artifact |
+| Checkpoint Management | `/app/ml/checkpoints` | Tracks a checkpoint record for a training job with an active/pinned/archived retention state | Does not capture, resume, compare, or promote real weights |
+| Deployment Manager | `/app/ml/deployments` | Tracks an intended promotion of a registered model to an environment, with strategy and approval | Does not serve, monitor, or roll back anything |
 
 The order in Section 12 intentionally moves between these pages according to the actual development lifecycle, rather than simply following the sidebar order.
+
+The five newest record types form a governed post-training chain around a training job and its resulting model. The diagram shows how the records relate; every arrow is an administrative reference today, not an automated hand-off:
+
+```mermaid
+flowchart LR
+    TJ["Training Job record"] --> HS["Hyperparameter Search record<br/>(tunes the job's settings)"]
+    TJ --> CP["Checkpoint records<br/>(active / pinned / archived)"]
+    TJ --> MR["Model Registry entry"]
+    MR --> MO["Model Optimization record<br/>(quantization, pruning, ...)"]
+    SK["Subject Knowledge package"] --> SE["Subject Exam record<br/>(reviewer-approved)"]
+    SE -. "future: gates approval" .-> MR
+    MR --> DP["Deployment record<br/>(pending → approved)"]
+    DP -. "future: executor promotes" .-> ENV["Environment<br/>(staging, production, ...)"]
+```
+
+Three different lifecycles appear in this chain, and each was chosen to match what the record *is*:
+
+- **Reviewer workflow** (`draft → in_review → approved / rejected → archived`) — Subject Exams, like Instruction Examples, because an exam is authored content a person reviews.
+- **Job lifecycle** (`draft → queued → running → completed / failed / canceled → archived`, eleven states) — Hyperparameter Searches and Model Optimizations, because both execute like training jobs once a real executor exists.
+- **Resource approval** (`pending → approved / rejected`) — Deployments, like Vector Stores and RAG configurations, because a deployment is infrastructure awaiting authorization.
+- **Retention lifecycle** (`active → pinned → archived`) — Checkpoints only. Nobody "approves" a checkpoint; an administrator keeps it, protects it from retention deletion (`pinned`), or archives it.
 
 ### 10.6 Status is state, not evidence
 
@@ -1282,7 +1315,10 @@ Open:
 ```text
 /app/ml/experiments
 /app/ml/model-builder-configs
+/app/ml/hyperparameter-searches
 ```
+
+If the experiment includes a settings search rather than one fixed configuration, register a Hyperparameter Search against the training job it tunes and record the intended strategy (for example grid, random, or Bayesian). The current record tracks identity, target job, strategy, and job lifecycle only — it does not run trials, so the search space, per-trial results, and best-configuration selection must live in the experiment specification until the planned executor exists.
 
 Record the project, model, dataset, and intended lifecycle. In the full experiment specification, pin:
 
@@ -1331,6 +1367,14 @@ The present MasterAI job record does not launch a training framework. Execute th
 
 Monitor training and validation loss, learning rate, gradient norm, throughput, CPU, GPU, memory, disk, temperature, warnings, and checkpoint health. Stop on NaN/Inf loss, uncontrolled resource use, data-policy failure, worsening validation beyond policy, or loss of reproducibility evidence.
 
+As the external workflow produces checkpoints, register the ones worth governing at:
+
+```text
+/app/ml/checkpoints
+```
+
+Each record names the training job that produced it and why it was captured (for example `epoch_end`, `best_metric`, or `manual`). Set a checkpoint to `pinned` to declare it exempt from retention deletion — the candidate you intend to evaluate and the last-known-good state are the usual candidates — and `archived` when it is retired. The record governs retention intent; the checkpoint file itself, its step/epoch metadata, and its hash remain in the external workflow's evidence bundle until the planned executor captures them directly.
+
 **Exit condition:** A recoverable candidate checkpoint and complete evidence bundle exist.
 
 ### Step 12 — Evaluate the candidate
@@ -1340,6 +1384,14 @@ Create an evaluation record at:
 ```text
 /app/ml/evaluation-runs
 ```
+
+If the candidate must pass a subject-specific examination — the plan's Subject Examination System — register the exam against its subject knowledge package at:
+
+```text
+/app/ml/subject-exams
+```
+
+Record the exam's question format (for example `multiple_choice`, `short_answer`, or `code_task`) and move it through review to `approved` before administering it. The current record establishes which exam exists, which subject it examines, and whether a reviewer approved it; the question bank, administration, and computed scores remain in the external evaluation workflow until the planned executor exists.
 
 Run the frozen test set only after model and hyperparameter choices are settled. Compare against the base model and previous approved version. Include target capability, regressions, safety, adversarial cases, privacy leakage, memorization probes, latency, memory, and hardware compatibility.
 
@@ -1367,6 +1419,14 @@ Create a new dataset or experiment version. Never rewrite the evidence of the fa
 ### Step 14 — Convert and optimize for MasterAI inference
 
 After approval of a source checkpoint, convert or merge it through an approved isolated process into a `llama.cpp`-compatible GGUF. Select quantization using measured quality and hardware results, not file size alone.
+
+Register the intended operation against the registered model at:
+
+```text
+/app/ml/model-optimizations
+```
+
+Name the operation honestly (for example `quantization`, `pruning`, or `distillation`) and advance the record through the job lifecycle as the external workflow actually runs. The record does not transform the artifact — it creates the governed identity that the before/after quality comparison and the resulting artifact's hash will be attached to once the planned optimizer executor exists.
 
 Treat each conversion or quantization as a new candidate artifact with a new hash and evaluation. A model that passed before conversion may fail afterward.
 
@@ -1401,6 +1461,14 @@ Load the candidate only in a controlled staging environment. Test real prompt as
 ### Step 18 — Approve production deployment
 
 Require the designated model evaluator, safety reviewer, and deployment authority. For high-risk use, require dual approval. Record the model card, dataset card, evaluations, known limits, monitoring thresholds, and rollback model.
+
+Register the promotion itself at:
+
+```text
+/app/ml/deployments
+```
+
+Name the registered model, the target environment (for example `staging` or `production`), and the strategy (for example `direct`, `blue_green`, or `canary`). A new deployment starts `pending`; the deployment authority moves it to `approved` as the recorded act of authorization, or `rejected` with reasons. The record is the auditable approval — it does not load the model, route requests, or roll anything back. Serving still happens through the verified inference model tree (Section 10.3), and the runtime/target-node/health-status evidence will attach to this record once the planned deployment executor exists.
 
 **Exit condition:** Approval is explicit, attributable, and auditable.
 
@@ -1558,6 +1626,9 @@ Every production model should document:
 | RAG answers cite irrelevant material | Weak chunking, retrieval, filtering, threshold, or reranking | Evaluate retrieval separately before blaming generation |
 | A Training Job says `completed` but no artifact exists | Current record status was advanced without a real executor | Treat it as invalid operational evidence; run a controlled external job or wait for the executor |
 | Vector Store exists but searches return nothing | Current scoped record does not populate an index | Implement or use an approved embedding/index pipeline; do not infer readiness from registration |
+| Deployment is `approved` but the model is not being served | The deployment record is authorization, not execution | Package and verify the GGUF in the inference model tree; the record governs the promotion, it does not perform it |
+| Checkpoint record exists but no checkpoint file can be found | The record tracks retention intent, not the saved weights | Locate the file in the external workflow's evidence bundle; treat an unbacked record as a bookkeeping error to correct |
+| Hyperparameter Search shows `completed` with no trial results | Status was advanced without a real search executor | Keep trial evidence in the experiment specification; treat the status as intent until the executor exists |
 | Larger context causes load rejection or severe slowdown | KV-cache and runtime memory exceed the safety ceiling | Reduce context/slots, choose a smaller model or quantization, and recalibrate |
 | Quantized model is faster but less accurate | Precision reduction changed behavior | Evaluate each quantization and reject unacceptable quality loss |
 
@@ -1581,6 +1652,7 @@ Every production model should document:
 | Classification | Selecting a category or label for an input. |
 | Context window | The maximum bounded token sequence a language model can consider for one inference sequence. |
 | Data leakage | Information improperly crossing into training, validation, or test data and making results misleading. |
+| Deployment strategy | The controlled method used to promote a model into an environment, such as direct replacement, blue-green switchover, or a canary rollout to a small share of traffic first. |
 | Dataset | A governed collection of records used for training, validation, testing, evaluation, or retrieval. |
 | Distillation | Training a smaller student model to reproduce selected behavior of a larger teacher model. |
 | Embedding | A numeric vector representation used internally by models or for similarity search. |
@@ -1594,6 +1666,7 @@ Every production model should document:
 | Gradient | The estimated direction and sensitivity of loss with respect to a trainable parameter. |
 | Hallucination | A plausible-looking model output that is unsupported, incorrect, or fabricated. |
 | Hyperparameter | A trainer-selected setting such as learning rate, batch size, or epoch count. |
+| Hyperparameter optimization | A systematic search (grid, random, Bayesian, and similar strategies) over training settings to find a configuration that performs best on validation data within resource limits. |
 | Inference | Running a fixed trained model to obtain a prediction or generated output. |
 | Instruction tuning | Fine-tuning on instruction-and-response examples to shape response behavior. |
 | KV cache | Stored attention keys and values that avoid recomputing eligible earlier token positions. |
@@ -1603,6 +1676,7 @@ Every production model should document:
 | LoRA | Low-rank adaptation, a parameter-efficient method that learns compact updates to selected weights. |
 | Loss | A numeric training objective measuring disagreement between prediction and target. |
 | Model card | A governed description of model purpose, lineage, data, evaluation, limits, safety, and approval. |
+| Model optimization | Post-training transformation of a finished model — quantization, pruning, distillation, merging, and similar operations — to reduce resource cost, always re-evaluated because quality can change. |
 | Optimizer | The algorithm that converts gradients into parameter updates. |
 | Overfitting | Learning training examples too specifically, causing weaker performance on unseen data. |
 | Parameter or weight | A numeric value learned during training and used during inference. |
@@ -1615,6 +1689,7 @@ Every production model should document:
 | Reranker | A model or algorithm that reorders retrieved candidates by estimated relevance. |
 | Seed | A value used to initialize controlled pseudorandom behavior for improved repeatability. |
 | Step | Commonly one optimizer update during training. |
+| Subject examination | A governed set of questions and scoring rules used to test whether a model has actually learned an approved subject to its required standard. |
 | Synthetic data | Machine-generated examples kept distinguishable from human-created or real-world records. |
 | Temperature | A generation setting that adjusts how concentrated or varied token selection is. |
 | Token | A vocabulary unit produced by a tokenizer, such as a word fragment, symbol, or whitespace pattern. |
@@ -1639,6 +1714,8 @@ Use these questions before beginning a real model project:
 8. What does a MasterAI Training Job record prove today, and what does it not prove?
 9. Why are the ML Model Registry and the inference `models/` tree different?
 10. Which evidence must exist before a specialized model enters production?
+11. Why does a Checkpoint record use a retention lifecycle instead of an approval workflow?
+12. What does an `approved` Deployment record authorize, and what does it not do?
 
 Expected answers:
 
@@ -1652,6 +1729,8 @@ Expected answers:
 8. It proves a persisted administrative record and status, not real framework execution.
 9. One tracks development governance; the other is the verified deployable GGUF runtime tree.
 10. Identity, provenance, license, dataset lineage, evaluation, safety, resource, approval, staging, monitoring, and rollback evidence.
+11. A checkpoint is not judged good or bad on creation — it is kept, protected from retention deletion (`pinned`), or archived, so its states describe retention, not approval.
+12. It records that the deployment authority authorized promoting that model to that environment with that strategy; it does not load, serve, monitor, or roll back the model.
 
 ---
 
@@ -1671,6 +1750,7 @@ Use this as the authoritative order for a model-development exercise:
 - [ ] Pin code, configuration, runtime, hardware, seeds, metrics, and ceilings.
 - [ ] Run a bounded pilot and prove cancellation/checkpoint recovery.
 - [ ] Execute the approved training workflow; do not simulate it with status changes.
+- [ ] Register governed checkpoints and pin the ones retention must never delete.
 - [ ] Evaluate against the base model, regressions, safety tests, and resource limits.
 - [ ] Diagnose failures and create new immutable versions for each iteration.
 - [ ] Convert and quantize the approved checkpoint for `llama.cpp` only when required.
@@ -1679,7 +1759,7 @@ Use this as the authoritative order for a model-development exercise:
 - [ ] Verify the model hash and Ready state.
 - [ ] Benchmark on the target host.
 - [ ] Deploy to staging and validate the real MasterAI request path.
-- [ ] Obtain explicit production approval.
+- [ ] Obtain explicit production approval and record it as an approved Deployment.
 - [ ] Monitor drift, safety, quality, integrity, and resources.
 - [ ] Preserve a tested rollback path and retire obsolete versions safely.
 
