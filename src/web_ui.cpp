@@ -118,7 +118,7 @@ std::string application_script() {
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
-        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,cfg,report]="
+        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,cfg,report]="
         "await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
@@ -145,6 +145,8 @@ std::string application_script() {
         "api('/api/v1/ml/fine-tuning-jobs').catch(()=>({fineTuningJobs:[]})),"
         "api('/api/v1/ml/model-builder-configs').catch("
         "()=>({modelBuilderConfigs:[]})),"
+        "api('/api/v1/ml/instruction-examples').catch("
+        "()=>({instructionExamples:[]})),"
         // 403/503 for anyone who isn't an administrator, or when no
         // settings.json path is known to the running server -- both are
         // quiet, expected no-ops here exactly like the ml.* fetches above.
@@ -167,6 +169,7 @@ std::string application_script() {
         "renderMlExperiments(mlex.experiments);"
         "renderMlFineTuningJobs(mlft.fineTuningJobs);"
         "renderMlModelBuilderConfigs(mlmb.modelBuilderConfigs);"
+        "renderMlInstructionExamples(mlie.instructionExamples);"
         "renderSystemConfig(cfg);"
         "renderSystemReport(report);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
@@ -1053,6 +1056,50 @@ std::string application_script() {
         "'/delete','POST');await load();}"
         "catch(x){showSystemError('Delete model builder configuration "
         "failed: '+x.message);}});}}"
+        // Prompt and Instruction Training (docs/PLAN.md "Machine Learning
+        // Abilities" section 19): same status-dropdown-plus-Delete pattern
+        // as Model Builder above, with its own five-state reviewer workflow
+        // (draft/in_review/approved/rejected/archived) matching section 19's
+        // "generated training examples must require approval before
+        // entering an approved dataset."
+        "const INSTRUCTION_EXAMPLE_STATUSES=['draft','in_review','approved',"
+        "'rejected','archived'];"
+        "function renderMlInstructionExamples(examples){"
+        "const el=q('#mlInstructionExamplesList');if(!el)return;"
+        "if(!examples.length){el.innerHTML='<p>No instruction examples "
+        "created yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Dataset','Subject classification',"
+        "'Status','Set status',''],"
+        "examples.map(x=>[esc(x.name),esc(x.datasetId),"
+        "esc(x.subjectClassification),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-instruction-example-status-for=\"'+x.id+'\">'+"
+        "INSTRUCTION_EXAMPLE_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-instruction-example-status=\"'+"
+        "x.id+'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-instruction-example=\"'+"
+        "x.id+'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-instruction-example-status]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applyInstructionExampleStatus;"
+        "const status=el.querySelector("
+        "'[data-instruction-example-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/instruction-examples/'+"
+        "encodeURIComponent(id)+'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update instruction example status "
+        "failed: '+x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-instruction-example]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/instruction-examples/'+"
+        "encodeURIComponent(btn.dataset.deleteMlInstructionExample)+"
+        "'/delete','POST');await load();}"
+        "catch(x){showSystemError('Delete instruction example failed: '+"
+        "x.message);}});}}"
         // Each row gets its own Start/resume, Pause, Stop, and Remove buttons
         // wired directly to that job's id -- nothing to hand-type, unlike the
         // old single manual 'Download job ID' field this replaces. The State
@@ -1941,7 +1988,15 @@ std::string application_script() {
         "baseModelId:q('#mlModelBuilderConfigBaseModelId').value,"
         "projectId:q('#mlModelBuilderConfigProjectId').value,"
         "name:q('#mlModelBuilderConfigName').value,"
-        "description:q('#mlModelBuilderConfigDescription').value})));}});";
+        "description:q('#mlModelBuilderConfigDescription').value})));"
+        "if(q('#newMlInstructionExample'))"
+        "q('#newMlInstructionExample').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/instruction-examples',"
+        "()=>({datasetId:q('#mlInstructionExampleDatasetId').value,"
+        "name:q('#mlInstructionExampleName').value,"
+        "description:q('#mlInstructionExampleDescription').value,"
+        "subjectClassification:"
+        "q('#mlInstructionExampleSubjectClassification').value})));}});";
 }
 
 // Presents the native OS account sign-in form without embedding credentials.
@@ -2523,6 +2578,37 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<h2>Model builder configurations</h2>"
             "<div id=\"mlModelBuilderConfigsList\">Loading...</div>"
             "</div></section>";
+    } else if (section == "ml-instruction-examples") {
+        // Phase 47 (docs/PLAN.md "Machine Learning Abilities" section 19):
+        // create and list instruction examples against a registered
+        // dataset, and move them through a reviewer-approval lifecycle
+        // status. Only the identity/target-dataset/subject-classification/
+        // status fields InstructionExampleStore actually persists are
+        // collected here -- see that class's comment in masterai.hpp for
+        // the system-instruction/user-instruction/context/expected-
+        // response/rejected-response/tool-call/output-format fields
+        // deferred to the phase that actually creates example records.
+        body =
+            "<section id=\"panel-ml-instruction-examples\" class=\"panel\">"
+            "<div>"
+            "<h2>New instruction example</h2>"
+            "<form id=\"newMlInstructionExample\">"
+            "<label>Dataset ID<input id=\"mlInstructionExampleDatasetId\" "
+            "required placeholder=\"dataset id from Dataset Manager\">"
+            "</label>"
+            "<label>Name<input id=\"mlInstructionExampleName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Description<textarea "
+            "id=\"mlInstructionExampleDescription\" rows=\"2\"></textarea>"
+            "</label>"
+            "<label>Subject classification<input "
+            "id=\"mlInstructionExampleSubjectClassification\" "
+            "placeholder=\"e.g. cpp_code_review, customer_support\"></label>"
+            "<button>Create instruction example</button></form>"
+            "</div><div>"
+            "<h2>Instruction examples</h2>"
+            "<div id=\"mlInstructionExamplesList\">Loading...</div>"
+            "</div></section>";
     } else if (section == "settings-config") {
         // Phase 30A: administrator-only local-configuration editor backed by
         // GET/POST /api/v1/admin/config (server.cpp's admin_config_get()/
@@ -2750,7 +2836,10 @@ std::string application_page(const UserRecord& user, const std::string& section,
                 nav_link("/app/ml/fine-tuning-jobs", "Fine-Tuning",
                          section == "ml-fine-tuning-jobs") +
                 nav_link("/app/ml/model-builder-configs", "Model Builder",
-                         section == "ml-model-builder-configs"));
+                         section == "ml-model-builder-configs") +
+                nav_link("/app/ml/instruction-examples",
+                         "Prompt and Instruction Training",
+                         section == "ml-instruction-examples"));
     }
 
     return html_response(

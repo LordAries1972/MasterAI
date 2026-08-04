@@ -5254,6 +5254,79 @@ void test_machine_learning_model_builder_lifecycle() {
             "configuration's own fields");
 }
 
+void test_machine_learning_instruction_training_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.instructions.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.instructions.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.instructions.view"),
+            "ml.instructions.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::InstructionExampleStore examples(records);
+    const auto example = examples.create(
+        "administrator-1", "dataset-1", "cpp-review-example",
+        "Ask the model to review a C++ diff for undefined behavior.",
+        "cpp_code_review");
+    require(!example.id.empty() && example.dataset_id == "dataset-1" &&
+                example.subject_classification == "cpp_code_review" &&
+                example.status == masterai::InstructionExampleStatus::draft &&
+                example.owner_id == "administrator-1",
+            "a newly created instruction example must start draft against "
+            "its target dataset with its owner recorded");
+    require(examples.list().size() == 1U,
+            "the created instruction example was not visible in list()");
+
+    bool rejected_empty_dataset = false;
+    try {
+        examples.create("administrator-1", "", "no dataset", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_dataset = true;
+    }
+    require(rejected_empty_dataset,
+            "create() must reject an instruction example with no target "
+            "dataset id");
+
+    require(examples.set_status(example.id,
+                                masterai::InstructionExampleStatus::approved),
+            "set_status() rejected a known instruction example id");
+    require(examples.find(example.id)->status ==
+                masterai::InstructionExampleStatus::approved,
+            "set_status() did not persist the new status");
+    require(!examples.set_status(
+                "nonexistent-instruction-example",
+                masterai::InstructionExampleStatus::rejected),
+            "set_status() must no-op for an unknown instruction example id, "
+            "not throw");
+
+    masterai::InstructionExampleStore reloaded(records);
+    const auto reloaded_example = reloaded.find(example.id);
+    require(reloaded_example.has_value() &&
+                reloaded_example->name == "cpp-review-example" &&
+                reloaded_example->status ==
+                    masterai::InstructionExampleStatus::approved,
+            "InstructionExampleStore did not restore a persisted "
+            "instruction example after reload");
+
+    require(examples.remove(example.id),
+            "remove() rejected a known instruction example id");
+    require(examples.list().size() == 0U,
+            "remove() did not delete the instruction example");
+    require(!examples.remove(example.id),
+            "remove() must no-op for an already-removed instruction example "
+            "id, not throw");
+
+    const auto json = masterai::instruction_example_json(example);
+    require(json.find("\"name\":\"cpp-review-example\"") != std::string::npos &&
+                json.find("\"subjectClassification\":\"cpp_code_review\"") !=
+                    std::string::npos,
+            "instruction_example_json did not report the instruction "
+            "example's own fields");
+}
+
 }  // namespace
 
 int main() {
@@ -5391,6 +5464,8 @@ int main() {
             test_machine_learning_fine_tuning_lifecycle);
         run("Machine Learning model builder lifecycle",
             test_machine_learning_model_builder_lifecycle);
+        run("Machine Learning prompt and instruction training lifecycle",
+            test_machine_learning_instruction_training_lifecycle);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

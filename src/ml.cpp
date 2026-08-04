@@ -1824,4 +1824,149 @@ std::string model_builder_configs_json(const std::vector<ModelBuilderConfig>& co
     return body + "]";
 }
 
+std::string instruction_example_status_name(
+    const InstructionExampleStatus status) {
+    switch (status) {
+        case InstructionExampleStatus::draft: return "draft";
+        case InstructionExampleStatus::in_review: return "in_review";
+        case InstructionExampleStatus::approved: return "approved";
+        case InstructionExampleStatus::rejected: return "rejected";
+        case InstructionExampleStatus::archived: return "archived";
+    }
+    throw std::runtime_error("invalid instruction example status");
+}
+
+InstructionExampleStatus parse_instruction_example_status(
+    const std::string& status) {
+    if (status == "draft") return InstructionExampleStatus::draft;
+    if (status == "in_review") return InstructionExampleStatus::in_review;
+    if (status == "approved") return InstructionExampleStatus::approved;
+    if (status == "rejected") return InstructionExampleStatus::rejected;
+    if (status == "archived") return InstructionExampleStatus::archived;
+    throw std::runtime_error("stored instruction example status is invalid");
+}
+
+InstructionExampleStore::InstructionExampleStore(RecordStore& records)
+    : records_(&records) {
+    restore();
+}
+
+void InstructionExampleStore::restore() {
+    for (const auto& item : records_->list("ml_instruction_examples")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 6U) {
+            throw std::runtime_error(
+                "persisted instruction example record field count is wrong");
+        }
+        InstructionExample example;
+        example.id = item.first;
+        example.dataset_id = fields[0];
+        example.name = fields[1];
+        example.description = fields[2];
+        example.subject_classification = fields[3];
+        example.owner_id = fields[4];
+        example.status = parse_instruction_example_status(fields[5]);
+        examples_[example.id] = example;
+    }
+}
+
+void InstructionExampleStore::persist(const InstructionExample& example) {
+    records_->put(
+        "ml_instruction_examples", example.id,
+        pack({example.dataset_id, example.name, example.description,
+             example.subject_classification, example.owner_id,
+             instruction_example_status_name(example.status)}));
+}
+
+InstructionExample InstructionExampleStore::create(
+    const std::string& owner_id, const std::string& dataset_id,
+    const std::string& name, const std::string& description,
+    const std::string& subject_classification) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("instruction example name is invalid");
+    }
+    if (dataset_id.empty()) {
+        throw std::invalid_argument(
+            "instruction example dataset id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    InstructionExample example;
+    example.id = random_id();
+    example.dataset_id = dataset_id;
+    example.name = name;
+    example.description = description;
+    example.subject_classification = subject_classification;
+    example.owner_id = owner_id;
+    example.status = InstructionExampleStatus::draft;
+    example.created_at_epoch_seconds = epoch_seconds();
+    example.updated_at_epoch_seconds = example.created_at_epoch_seconds;
+    examples_[example.id] = example;
+    if (records_) persist(example);
+    return example;
+}
+
+std::optional<InstructionExample> InstructionExampleStore::find(
+    const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = examples_.find(id);
+    return found != examples_.end()
+               ? std::optional<InstructionExample>(found->second)
+               : std::nullopt;
+}
+
+std::vector<InstructionExample> InstructionExampleStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<InstructionExample> result;
+    result.reserve(examples_.size());
+    for (const auto& item : examples_) result.push_back(item.second);
+    return result;
+}
+
+bool InstructionExampleStore::set_status(
+    const std::string& id, const InstructionExampleStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = examples_.find(id);
+    if (found == examples_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool InstructionExampleStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = examples_.find(id);
+    if (found == examples_.end()) return false;
+    examples_.erase(found);
+    if (records_) records_->erase("ml_instruction_examples", id);
+    return true;
+}
+
+std::string instruction_example_json(const InstructionExample& example) {
+    return "{\"id\":\"" + json_escape(example.id) + "\",\"datasetId\":\"" +
+           json_escape(example.dataset_id) + "\",\"name\":\"" +
+           json_escape(example.name) + "\",\"description\":\"" +
+           json_escape(example.description) +
+           "\",\"subjectClassification\":\"" +
+           json_escape(example.subject_classification) + "\",\"ownerId\":\"" +
+           json_escape(example.owner_id) + "\",\"status\":\"" +
+           instruction_example_status_name(example.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(example.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(example.updated_at_epoch_seconds) + "}";
+}
+
+std::string instruction_examples_json(
+    const std::vector<InstructionExample>& examples) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& example : examples) {
+        if (!first) body += ",";
+        first = false;
+        body += instruction_example_json(example);
+    }
+    return body + "]";
+}
+
 }  // namespace masterai

@@ -652,6 +652,35 @@ Current phase status:
   (`src/ml.cpp`) intentionally still reports `planned`, matching Phases
   43-45's own roster entries — see `test_machine_learning_foundation_dashboard`'s
   fixed exclusion list, which stayed frozen at Phase 42's interface set.
+- Phase 47: Implemented at a scoped-down level (2026-08-04) — Prompt and
+  Instruction Training (section 19 below), scoped down to identity, the
+  dataset each example targets, a free-text subject classification, and a
+  five-state reviewer-approval lifecycle status — draft, in_review,
+  approved, rejected, archived — matching section 19's requirement that
+  "generated training examples must require approval before entering an
+  approved dataset" rather than reusing Training Jobs'/Fine-Tuning's
+  eleven-state job lifecycle, since an instruction example never queues,
+  runs, or pauses (`InstructionExample`/`InstructionExampleStore`,
+  `src/ml.cpp`), not the section's full record (system instruction, user
+  instruction, context, expected response, rejected response, tool calls,
+  tool results, required output format, difficulty, safety classification)
+  that only means something once an actual example record exists to hold
+  it. `create()` requires a target dataset id, mirroring Data Labeling's/
+  Data Preparation's own required-dataset pattern. New administrator-only
+  `ml.instructions.view`/`ml.instructions.manage` permissions gate `GET`/
+  `POST /api/v1/ml/instruction-examples`,
+  `POST /api/v1/ml/instruction-examples/{id}/status`, and
+  `POST /api/v1/ml/instruction-examples/{id}/delete`. New "Prompt and
+  Instruction Training" (`/app/ml/instruction-examples`) entry under the
+  Machine Learning sidebar in `src/web_ui.cpp` lists, creates, and moves
+  examples through status.
+  `test_machine_learning_instruction_training_lifecycle` covers the same
+  permission/lifecycle/reload/remove guarantees as Phase 46's test. The
+  dashboard roster's `prompt-instruction-training` interface entry
+  (`src/ml.cpp`) intentionally still reports `planned`, matching Phases
+  43-46's own roster entries — `test_machine_learning_foundation_dashboard`'s
+  fixed exclusion list stays frozen at Phase 42's interface set, so this
+  phase changes nothing there.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -4646,9 +4675,18 @@ ready, submitted, archived) rather than the eleven-state job lifecycle
 Training Jobs and Fine-Tuning use, since a builder configuration never
 queues, runs, or pauses -- not the architecture/layer/tokenizer/optimiser/
 scheduling field list that a real model-construction executor will attach
-to a configuration once it exists. Every other capability in this section
-(Training Methods execution, Subject Examination, Hyperparameter
-Optimization, deployment, and everything else through section 51) remains
+to a configuration once it exists. Phase 47 implements Prompt and
+Instruction Training (section 19) at the same scoped-down level — identity,
+the dataset an example targets, a free-text subject classification, and a
+five-state reviewer-approval lifecycle status (draft, in_review, approved,
+rejected, archived), not the section's full record (system instruction,
+user instruction, context, expected response, rejected response, tool
+calls, tool results, required output format, difficulty, safety
+classification) that only means something once an actual example record
+exists to hold it. Every other capability in this section (Training
+Methods execution, Subject Examination, Hyperparameter Optimization,
+Synthetic Data, Embeddings and Vector Stores, Retrieval-Augmented
+Generation, deployment, and everything else through section 51) remains
 `Planned`: no implementation has started.
 
 This section extends the plan with an administrator-only Machine Learning

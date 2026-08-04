@@ -3105,6 +3105,75 @@ private:
 std::string model_builder_config_json(const ModelBuilderConfig& config);
 std::string model_builder_configs_json(const std::vector<ModelBuilderConfig>& configs);
 
+// Phase 47: docs/PLAN.md "Machine Learning Abilities" section 19 (Prompt and
+// Instruction Training). Every instruction example targets one dataset
+// already registered in DatasetStore, mirroring LabelTask/DataPreparationJob's
+// required-target-id pattern above. Scoped down from the section's full
+// record (system instruction, user instruction, context, expected response,
+// rejected response, tool calls, tool results, required output format,
+// difficulty, safety classification) to identity, the dataset it targets,
+// a free-text subject classification (the one field of the full record that
+// is itself organizational metadata rather than example content, so it
+// carries over even at this scoped-down level, matching category/method's
+// precedent on EvaluationRun/FineTuningJob above), and a lifecycle status --
+// none of the deferred content fields mean anything before an actual
+// example record exists to hold them. The status enum tracks section 19's
+// own reviewer workflow ("Generated training examples must require approval
+// before entering an approved dataset") rather than reusing TrainingJob's
+// eleven-state job lifecycle, since an instruction example never queues,
+// runs, or pauses -- it only moves from draft through review to an approved
+// or rejected outcome, or an archived discard, the same shape as
+// ModelBuilderConfigStatus above.
+enum class InstructionExampleStatus {
+    draft,
+    in_review,
+    approved,
+    rejected,
+    archived
+};
+
+std::string instruction_example_status_name(InstructionExampleStatus status);
+InstructionExampleStatus parse_instruction_example_status(
+    const std::string& status);
+
+struct InstructionExample {
+    std::string id;
+    std::string dataset_id;
+    std::string name;
+    std::string description;
+    std::string subject_classification;
+    std::string owner_id;
+    InstructionExampleStatus status{InstructionExampleStatus::draft};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class InstructionExampleStore final {
+public:
+    InstructionExampleStore() = default;
+    explicit InstructionExampleStore(RecordStore& records);
+    InstructionExample create(const std::string& owner_id,
+                              const std::string& dataset_id,
+                              const std::string& name,
+                              const std::string& description,
+                              const std::string& subject_classification);
+    std::optional<InstructionExample> find(const std::string& id) const;
+    std::vector<InstructionExample> list() const;
+    bool set_status(const std::string& id, InstructionExampleStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const InstructionExample& example);
+    RecordStore* records_{nullptr};
+    std::map<std::string, InstructionExample> examples_;
+    mutable std::mutex mutex_;
+};
+
+std::string instruction_example_json(const InstructionExample& example);
+std::string instruction_examples_json(
+    const std::vector<InstructionExample>& examples);
+
 struct PerformanceSample {
     std::string name;
     std::uint64_t operations{0};

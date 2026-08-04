@@ -325,6 +325,7 @@ public:
         ml_experiments = std::make_unique<ExperimentStore>(records);
         ml_fine_tuning_jobs = std::make_unique<FineTuningJobStore>(records);
         ml_model_builder_configs = std::make_unique<ModelBuilderConfigStore>(records);
+        ml_instruction_examples = std::make_unique<InstructionExampleStore>(records);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -1845,6 +1846,92 @@ public:
             audit.append("ml.model_builder_config.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
         }
+        // Phase 47: Prompt and Instruction Training (docs/PLAN.md "Machine
+        // Learning Abilities" section 19), scoped to identity/target-
+        // dataset/subject-classification/status fields -- see
+        // InstructionExampleStore's class comment in masterai.hpp for the
+        // system-instruction/user-instruction/context/expected-response/
+        // rejected-response/tool-call/output-format fields deferred to the
+        // phase that actually creates example records.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/instruction-examples") {
+            if (auto denied = forbidden_unless(user->role, "ml.instructions.view")) return *denied;
+            return response(200, "OK",
+                            "{\"instructionExamples\":" +
+                                instruction_examples_json(
+                                    ml_instruction_examples->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/instruction-examples") {
+            if (auto denied = forbidden_unless(user->role, "ml.instructions.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto dataset_id = root.required("datasetId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto example = ml_instruction_examples->create(
+                    user->id, dataset_id, name, text_field("description"),
+                    text_field("subjectClassification"));
+                audit.append("ml.instruction_example.create", user->id,
+                             "success", example.id);
+                return response(201, "Created",
+                                instruction_example_json(example));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_instruction_example\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/instruction-examples/", 0U) ==
+                0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.instructions.manage")) return *denied;
+            const auto id = request.target.substr(
+                33U, request.target.size() - 33U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_instruction_example_status(
+                    root.required("status").as_string());
+                if (!ml_instruction_examples->set_status(id, status)) {
+                    return response(
+                        404, "Not Found",
+                        "{\"error\":\"ml_instruction_example_not_found\"}");
+                }
+                audit.append("ml.instruction_example.status", user->id,
+                             "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_instruction_example_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/instruction-examples/", 0U) ==
+                0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.instructions.manage")) return *denied;
+            const auto id = request.target.substr(
+                33U, request.target.size() - 33U - 7U);
+            if (!ml_instruction_examples->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_instruction_example_not_found\"}");
+            }
+            audit.append("ml.instruction_example.delete", user->id, "success",
+                         id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
         if (request.method == "GET" && request.target == "/models") {
             return workloads->model_inventory_page();
         }
@@ -1949,6 +2036,11 @@ public:
             if (target == "/app/ml/model-builder-configs") {
                 return is_administrator
                            ? application_page(*user, "ml-model-builder-configs")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/instruction-examples") {
+                return is_administrator
+                           ? application_page(*user, "ml-instruction-examples")
                            : response(302, "Found", "", {"Location: /app"});
             }
             if (target == "/app/report/system") {
@@ -3481,6 +3573,7 @@ private:
     std::unique_ptr<ExperimentStore> ml_experiments;
     std::unique_ptr<FineTuningJobStore> ml_fine_tuning_jobs;
     std::unique_ptr<ModelBuilderConfigStore> ml_model_builder_configs;
+    std::unique_ptr<InstructionExampleStore> ml_instruction_examples;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
     std::unique_ptr<DownloadManager> downloads;
