@@ -2099,11 +2099,11 @@ public:
             return response(200, "OK", "{\"deleted\":true}");
         }
         // Phase 46: Model Builder Interface (docs/PLAN.md "Machine Learning
-        // Abilities" section 9), scoped to identity/target-project/base-
-        // model/source-type/status fields -- see ModelBuilderConfigStore's
-        // class comment in masterai.hpp for the architecture/layer/
-        // tokenizer/optimiser/scheduling fields deferred to the phase that
-        // actually executes a model build.
+        // Abilities" section 9) at full surface: identity/target-project/
+        // base-model/source-type/status fields at creation, plus the
+        // complete build-settings list (architecture, layers, tokenizer,
+        // optimiser, scheduling, reproducibility -- ModelBuilderSettings in
+        // masterai.hpp) applied through the /configure endpoint below.
         if (request.method == "GET" &&
             request.target == "/api/v1/ml/model-builder-configs") {
             if (auto denied = forbidden_unless(user->role, "ml.modelbuilder.view")) return *denied;
@@ -2158,6 +2158,97 @@ public:
                 return response(
                     400, "Bad Request",
                     "{\"error\":\"invalid_ml_model_builder_config_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        // Full section 9 surface: replace a configuration's build settings.
+        // Fields absent from the request keep their current values (the web
+        // UI pre-fills the form from the stored settings, but an API caller
+        // may send only the fields it wants to change).
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/model-builder-configs/", 0U) == 0U &&
+            request.target.size() > 10U &&
+            request.target.compare(request.target.size() - 10U, 10U,
+                                   "/configure") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.modelbuilder.manage")) return *denied;
+            const auto id = request.target.substr(
+                33U, request.target.size() - 33U - 10U);
+            const auto existing = ml_model_builder_configs->find(id);
+            if (!existing) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_model_builder_config_not_found\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                auto settings = existing->settings;
+                const auto text = [&root](const char* field, std::string& out) {
+                    if (const auto* value = root.optional(field)) {
+                        out = value->as_string();
+                    }
+                };
+                const auto count = [&root](const char* field,
+                                           std::uint64_t& out) {
+                    if (const auto* value = root.optional(field)) {
+                        const auto number = value->as_integer();
+                        if (number < 0) {
+                            throw std::invalid_argument(
+                                std::string(field) + " must not be negative");
+                        }
+                        out = static_cast<std::uint64_t>(number);
+                    }
+                };
+                const auto fraction = [&root](const char* field, double& out) {
+                    if (const auto* value = root.optional(field)) {
+                        out = value->as_double();
+                    }
+                };
+                const auto flag = [&root](const char* field, bool& out) {
+                    if (const auto* value = root.optional(field)) {
+                        out = value->as_boolean();
+                    }
+                };
+                text("configurationMode", settings.configuration_mode);
+                text("architecture", settings.architecture);
+                text("layerConfiguration", settings.layer_configuration);
+                count("hiddenDimensions", settings.hidden_dimensions);
+                text("attentionConfiguration",
+                     settings.attention_configuration);
+                text("vocabularyTokenizer", settings.vocabulary_tokenizer);
+                count("sequenceLength", settings.sequence_length);
+                text("activationFunctions", settings.activation_functions);
+                fraction("dropout", settings.dropout);
+                text("initialisationStrategy",
+                     settings.initialisation_strategy);
+                text("lossFunction", settings.loss_function);
+                text("optimiser", settings.optimiser);
+                text("learningRateScheduler",
+                     settings.learning_rate_scheduler);
+                count("batchSize", settings.batch_size);
+                count("epochCount", settings.epoch_count);
+                count("gradientAccumulation", settings.gradient_accumulation);
+                fraction("gradientClipping", settings.gradient_clipping);
+                flag("mixedPrecision", settings.mixed_precision);
+                count("checkpointFrequency", settings.checkpoint_frequency);
+                count("validationFrequency", settings.validation_frequency);
+                flag("earlyStopping", settings.early_stopping);
+                count("randomSeed", settings.random_seed);
+                text("reproducibilitySettings",
+                     settings.reproducibility_settings);
+                text("distributedTrainingSettings",
+                     settings.distributed_training_settings);
+                if (!ml_model_builder_configs->configure(id, settings)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_model_builder_config_not_found\"}");
+                }
+                audit.append("ml.model_builder_config.configure", user->id,
+                             "success", id);
+                return response(200, "OK",
+                                model_builder_config_json(
+                                    *ml_model_builder_configs->find(id)));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_model_builder_config_settings\",\"detail\":\"" +
                         json_escape(error.what()) + "\"}");
             }
         }

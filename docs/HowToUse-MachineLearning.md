@@ -912,7 +912,7 @@ The current administrator pages are easiest to understand as a chain of controll
 | Evaluation Lab | `/app/ml/evaluation-runs` | Tracks the candidate, dataset, category, and run status; **Evaluate now** really computes and stores metrics | Scores tabular models only — no LLM benchmark suites yet |
 | Experiment Tracking | `/app/ml/experiments` | Relates a project, model, optional dataset, and lifecycle | Does not yet capture the full metrics/artifact bundle |
 | Fine-Tuning | `/app/ml/fine-tuning-jobs` | Tracks base model, dataset, method, and job lifecycle | Does not train an adapter or modify weights |
-| Model Builder | `/app/ml/model-builder-configs` | Tracks a proposed source type and design lifecycle | Does not construct or train the architecture |
+| Model Builder | `/app/ml/model-builder-configs` | Tracks a proposed source type, design lifecycle, and the full section 9 build-settings sheet (architecture through distributed training) edited in basic or advanced mode | Records the intended design in full detail — it does not construct or train the architecture |
 | Instruction Training | `/app/ml/instruction-examples` | Tracks a target dataset, subject, and review lifecycle | Is currently scoped metadata, not the complete example body |
 | Synthetic Data | `/app/ml/synthetic-records` | Tracks generation technique, dataset, and review status | Does not generate content |
 | Embeddings and Vector Stores | `/app/ml/vector-stores` | Registers store identity, embedding model name, metric, and approval | Does not create embeddings or populate the index |
@@ -1366,6 +1366,22 @@ Open:
 ```
 
 If the experiment includes a settings search rather than one fixed configuration, register a Hyperparameter Search against the training job it tunes and record the intended strategy (for example grid, random, or Bayesian). The current record tracks identity, target job, strategy, and job lifecycle only — it does not run trials, so the search space, per-trial results, and best-configuration selection must live in the experiment specification until the planned executor exists.
+
+The Model Builder now records the complete design sheet from the plan's section 9, not just the source type. Create the configuration first (name, source type, optional project and base model), then press its **Configure** button in the list to open the **Configure build settings** form. The form has the two modes section 9 requires:
+
+- **Basic mode** shows the six everyday decisions: model architecture, loss function, optimiser, batch size, epoch count, and sequence length.
+- **Advanced mode** additionally reveals layer configuration, hidden dimensions, attention configuration, vocabulary and tokenizer, activation functions, dropout, initialisation strategy, learning-rate scheduler, gradient accumulation, gradient clipping, mixed precision, checkpoint frequency, validation frequency, early stopping, random seed, reproducibility settings, and distributed-training settings.
+
+Numeric fields treat `0` as "not set — use the executor's default", dropout must stay between 0.0 and 1.0, and gradient clipping must not be negative; the server rejects out-of-range values instead of storing them. Saving in basic mode never discards advanced values — the form loads the stored settings and saves the whole sheet back. The honest boundary is unchanged: this is a governed, reviewable statement of the intended build. No model-construction executor consumes it yet, so a `ready` or `submitted` configuration proves design intent, not that anything was built.
+
+```mermaid
+stateDiagram-v2
+    draft --> configuring: Configure build settings
+    configuring --> ready: design sheet complete and reviewed
+    ready --> submitted: handed to the (future) build executor
+    configuring --> archived: design abandoned
+    ready --> archived: design superseded
+```
 
 Record the project, model, dataset, and intended lifecycle. In the full experiment specification, pin:
 

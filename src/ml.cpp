@@ -1,11 +1,11 @@
 // Machine Learning foundation phase: administrator-only scaffolding for
 // docs/PLAN.md's "Machine Learning Abilities" section. Dashboard, Projects,
-// Model Registry, Dataset Manager, Subject Knowledge Manager, Data
-// Labeling, Data Preparation, and Training Jobs are real; the remaining 18
-// planned interfaces (Model Builder, Fine-Tuning, ...) are listed so an
-// administrator can see the roadmap, but none of them have a backing
-// service yet -- see MachineLearningRegistry's class comment in
-// masterai.hpp for why this stays honest rather than fabricating data.
+// Model Registry, Model Builder, Dataset Manager, Subject Knowledge
+// Manager, Data Labeling, Data Preparation, and Training Jobs are real; the
+// remaining planned interfaces (Fine-Tuning, Evaluation Lab, ...) are
+// listed so an administrator can see the roadmap, but none of them have a
+// full backing service yet -- see MachineLearningRegistry's class comment
+// in masterai.hpp for why this stays honest rather than fabricating data.
 #include "masterai.hpp"
 
 #include <algorithm>
@@ -99,7 +99,10 @@ MachineLearningRegistry::MachineLearningRegistry() {
         {"dashboard", "Dashboard", "available"},
         {"projects", "Projects", "available"},
         {"model-registry", "Model Registry", "available"},
-        {"model-builder", "Model Builder", "planned"},
+        // Model Builder reports available now that Phase 46 carries the
+        // full section 9 configuration surface (ModelBuilderSettings) and
+        // basic/advanced modes, not just the scoped-down identity record.
+        {"model-builder", "Model Builder", "available"},
         {"dataset-manager", "Dataset Manager", "available"},
         {"subject-knowledge", "Subject Knowledge Manager", "available"},
         {"data-labeling", "Data Labeling", "available"},
@@ -1704,6 +1707,41 @@ ModelBuilderConfigStatus parse_model_builder_config_status(const std::string& st
     throw std::runtime_error("stored model builder config status is invalid");
 }
 
+namespace {
+
+// Compact decimal text for the two fractional build settings (dropout,
+// gradient clipping): std::to_string's fixed six decimals ("0.100000")
+// would leak into both the persisted record and the JSON the web UI
+// displays, so trim trailing zeros (and a bare trailing dot) instead.
+std::string format_settings_double(const double value) {
+    std::string text = std::to_string(value);
+    while (!text.empty() && text.back() == '0') text.pop_back();
+    if (!text.empty() && text.back() == '.') text.pop_back();
+    return text.empty() ? "0" : text;
+}
+
+// docs/PLAN.md section 9: "The interface must provide basic and advanced
+// configuration modes" -- those two modes are the whole closed set, and the
+// two fractional settings have hard numeric ranges, so configure() rejects
+// out-of-range values instead of persisting nonsense.
+void validate_model_builder_settings(const ModelBuilderSettings& settings) {
+    if (settings.configuration_mode != "basic" &&
+        settings.configuration_mode != "advanced") {
+        throw std::invalid_argument(
+            "model builder configuration mode must be basic or advanced");
+    }
+    if (settings.dropout < 0.0 || settings.dropout > 1.0) {
+        throw std::invalid_argument(
+            "model builder dropout must be between 0.0 and 1.0");
+    }
+    if (settings.gradient_clipping < 0.0) {
+        throw std::invalid_argument(
+            "model builder gradient clipping must not be negative");
+    }
+}
+
+}  // namespace
+
 ModelBuilderConfigStore::ModelBuilderConfigStore(RecordStore& records) : records_(&records) {
     restore();
 }
@@ -1711,7 +1749,12 @@ ModelBuilderConfigStore::ModelBuilderConfigStore(RecordStore& records) : records
 void ModelBuilderConfigStore::restore() {
     for (const auto& item : records_->list("ml_model_builder_configs")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 7U) {
+        // 7 fields is the legacy scoped-down Phase 46 record (identity/
+        // project/base-model/source-type/status only); 31 is the full-
+        // surface record with the 24 ModelBuilderSettings fields appended.
+        // Legacy records restore with default (unset) settings so existing
+        // databases keep working without a migration step.
+        if (fields.size() != 7U && fields.size() != 31U) {
             throw std::runtime_error(
                 "persisted model builder config record field count is wrong");
         }
@@ -1724,16 +1767,58 @@ void ModelBuilderConfigStore::restore() {
         config.source_type = fields[4];
         config.owner_id = fields[5];
         config.status = parse_model_builder_config_status(fields[6]);
+        if (fields.size() == 31U) {
+            auto& s = config.settings;
+            s.configuration_mode = fields[7];
+            s.architecture = fields[8];
+            s.layer_configuration = fields[9];
+            s.hidden_dimensions = std::stoull(fields[10]);
+            s.attention_configuration = fields[11];
+            s.vocabulary_tokenizer = fields[12];
+            s.sequence_length = std::stoull(fields[13]);
+            s.activation_functions = fields[14];
+            s.dropout = std::stod(fields[15]);
+            s.initialisation_strategy = fields[16];
+            s.loss_function = fields[17];
+            s.optimiser = fields[18];
+            s.learning_rate_scheduler = fields[19];
+            s.batch_size = std::stoull(fields[20]);
+            s.epoch_count = std::stoull(fields[21]);
+            s.gradient_accumulation = std::stoull(fields[22]);
+            s.gradient_clipping = std::stod(fields[23]);
+            s.mixed_precision = fields[24] == "1";
+            s.checkpoint_frequency = std::stoull(fields[25]);
+            s.validation_frequency = std::stoull(fields[26]);
+            s.early_stopping = fields[27] == "1";
+            s.random_seed = std::stoull(fields[28]);
+            s.reproducibility_settings = fields[29];
+            s.distributed_training_settings = fields[30];
+        }
         configs_[config.id] = config;
     }
 }
 
 void ModelBuilderConfigStore::persist(const ModelBuilderConfig& config) {
+    const auto& s = config.settings;
     records_->put(
         "ml_model_builder_configs", config.id,
         pack({config.project_id, config.base_model_id, config.name,
              config.description, config.source_type, config.owner_id,
-             model_builder_config_status_name(config.status)}));
+             model_builder_config_status_name(config.status),
+             s.configuration_mode, s.architecture, s.layer_configuration,
+             std::to_string(s.hidden_dimensions), s.attention_configuration,
+             s.vocabulary_tokenizer, std::to_string(s.sequence_length),
+             s.activation_functions, format_settings_double(s.dropout),
+             s.initialisation_strategy, s.loss_function, s.optimiser,
+             s.learning_rate_scheduler, std::to_string(s.batch_size),
+             std::to_string(s.epoch_count),
+             std::to_string(s.gradient_accumulation),
+             format_settings_double(s.gradient_clipping),
+             s.mixed_precision ? "1" : "0",
+             std::to_string(s.checkpoint_frequency),
+             std::to_string(s.validation_frequency),
+             s.early_stopping ? "1" : "0", std::to_string(s.random_seed),
+             s.reproducibility_settings, s.distributed_training_settings}));
 }
 
 ModelBuilderConfig ModelBuilderConfigStore::create(
@@ -1789,6 +1874,18 @@ bool ModelBuilderConfigStore::set_status(const std::string& id,
     return true;
 }
 
+bool ModelBuilderConfigStore::configure(const std::string& id,
+                                        const ModelBuilderSettings& settings) {
+    validate_model_builder_settings(settings);
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = configs_.find(id);
+    if (found == configs_.end()) return false;
+    found->second.settings = settings;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
 bool ModelBuilderConfigStore::remove(const std::string& id) {
     const std::lock_guard<std::mutex> lock(mutex_);
     const auto found = configs_.find(id);
@@ -1799,6 +1896,7 @@ bool ModelBuilderConfigStore::remove(const std::string& id) {
 }
 
 std::string model_builder_config_json(const ModelBuilderConfig& config) {
+    const auto& s = config.settings;
     return "{\"id\":\"" + json_escape(config.id) + "\",\"projectId\":\"" +
            json_escape(config.project_id) + "\",\"baseModelId\":\"" +
            json_escape(config.base_model_id) + "\",\"name\":\"" +
@@ -1807,7 +1905,44 @@ std::string model_builder_config_json(const ModelBuilderConfig& config) {
            json_escape(config.source_type) + "\",\"ownerId\":\"" +
            json_escape(config.owner_id) + "\",\"status\":\"" +
            model_builder_config_status_name(config.status) +
-           "\",\"createdAtEpochSeconds\":" +
+           // The full section 9 build-settings surface, nested so list
+           // consumers can ignore it and the configure form can read it as
+           // one object.
+           "\",\"settings\":{\"configurationMode\":\"" +
+           json_escape(s.configuration_mode) + "\",\"architecture\":\"" +
+           json_escape(s.architecture) + "\",\"layerConfiguration\":\"" +
+           json_escape(s.layer_configuration) + "\",\"hiddenDimensions\":" +
+           std::to_string(s.hidden_dimensions) +
+           ",\"attentionConfiguration\":\"" +
+           json_escape(s.attention_configuration) +
+           "\",\"vocabularyTokenizer\":\"" +
+           json_escape(s.vocabulary_tokenizer) + "\",\"sequenceLength\":" +
+           std::to_string(s.sequence_length) +
+           ",\"activationFunctions\":\"" +
+           json_escape(s.activation_functions) + "\",\"dropout\":" +
+           format_settings_double(s.dropout) +
+           ",\"initialisationStrategy\":\"" +
+           json_escape(s.initialisation_strategy) + "\",\"lossFunction\":\"" +
+           json_escape(s.loss_function) + "\",\"optimiser\":\"" +
+           json_escape(s.optimiser) + "\",\"learningRateScheduler\":\"" +
+           json_escape(s.learning_rate_scheduler) + "\",\"batchSize\":" +
+           std::to_string(s.batch_size) + ",\"epochCount\":" +
+           std::to_string(s.epoch_count) + ",\"gradientAccumulation\":" +
+           std::to_string(s.gradient_accumulation) +
+           ",\"gradientClipping\":" +
+           format_settings_double(s.gradient_clipping) +
+           ",\"mixedPrecision\":" + (s.mixed_precision ? "true" : "false") +
+           ",\"checkpointFrequency\":" +
+           std::to_string(s.checkpoint_frequency) +
+           ",\"validationFrequency\":" +
+           std::to_string(s.validation_frequency) + ",\"earlyStopping\":" +
+           (s.early_stopping ? "true" : "false") + ",\"randomSeed\":" +
+           std::to_string(s.random_seed) +
+           ",\"reproducibilitySettings\":\"" +
+           json_escape(s.reproducibility_settings) +
+           "\",\"distributedTrainingSettings\":\"" +
+           json_escape(s.distributed_training_settings) +
+           "\"},\"createdAtEpochSeconds\":" +
            std::to_string(config.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
            std::to_string(config.updated_at_epoch_seconds) + "}";

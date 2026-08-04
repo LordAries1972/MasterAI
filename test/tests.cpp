@@ -4386,14 +4386,16 @@ void test_machine_learning_foundation_dashboard() {
             "the Dashboard interface must report available");
     // Dashboard (Phase 37), Projects (Phase 38), Model Registry / Dataset
     // Manager (Phase 39), Subject Knowledge Manager (Phase 40), Data
-    // Labeling / Data Preparation (Phase 41), and Training Jobs (Phase 42)
-    // are the only interfaces with a real backing service so far; every
-    // other roadmap entry from docs/PLAN.md "Machine Learning Abilities"
-    // section 2 must still report planned rather than fabricating readiness
-    // ahead of its own phase.
+    // Labeling / Data Preparation (Phase 41), Training Jobs (Phase 42),
+    // and Model Builder (Phase 46, at full section 9 surface) are the only
+    // interfaces with a real backing service so far; every other roadmap
+    // entry from docs/PLAN.md "Machine Learning Abilities" section 2 must
+    // still report planned rather than fabricating readiness ahead of its
+    // own phase.
     for (const auto& interface : dashboard.interfaces) {
         if (interface.key == "dashboard" || interface.key == "projects" ||
             interface.key == "model-registry" ||
+            interface.key == "model-builder" ||
             interface.key == "dataset-manager" ||
             interface.key == "subject-knowledge" ||
             interface.key == "data-labeling" ||
@@ -5223,6 +5225,87 @@ void test_machine_learning_model_builder_lifecycle() {
             "create() must allow a model builder configuration with no "
             "target project id or base model id");
 
+    // Full section 9 surface: configure() must persist the complete build-
+    // settings list, validate its closed/bounded fields, and survive a
+    // reload alongside the identity fields.
+    masterai::ModelBuilderSettings settings;
+    settings.configuration_mode = "advanced";
+    settings.architecture = "transformer_decoder";
+    settings.layer_configuration = "24 decoder layers";
+    settings.hidden_dimensions = 2048U;
+    settings.attention_configuration = "16 heads, grouped-query";
+    settings.vocabulary_tokenizer = "32000-entry BPE";
+    settings.sequence_length = 4096U;
+    settings.activation_functions = "silu";
+    settings.dropout = 0.1;
+    settings.initialisation_strategy = "xavier";
+    settings.loss_function = "cross_entropy";
+    settings.optimiser = "adamw";
+    settings.learning_rate_scheduler = "cosine with warmup";
+    settings.batch_size = 32U;
+    settings.epoch_count = 3U;
+    settings.gradient_accumulation = 4U;
+    settings.gradient_clipping = 1.0;
+    settings.mixed_precision = true;
+    settings.checkpoint_frequency = 500U;
+    settings.validation_frequency = 100U;
+    settings.early_stopping = true;
+    settings.random_seed = 42U;
+    settings.reproducibility_settings = "deterministic kernels";
+    settings.distributed_training_settings = "2-node data parallel";
+    require(configs.configure(config.id, settings),
+            "configure() rejected a known model builder configuration id");
+    require(!configs.configure("nonexistent-model-builder-config", settings),
+            "configure() must no-op for an unknown model builder "
+            "configuration id, not throw");
+    {
+        const auto configured = configs.find(config.id);
+        require(configured.has_value() &&
+                    configured->settings.configuration_mode == "advanced" &&
+                    configured->settings.architecture ==
+                        "transformer_decoder" &&
+                    configured->settings.hidden_dimensions == 2048U &&
+                    configured->settings.dropout == 0.1 &&
+                    configured->settings.mixed_precision &&
+                    configured->settings.early_stopping &&
+                    configured->settings.random_seed == 42U,
+                "configure() did not store the build settings");
+    }
+
+    bool rejected_bad_mode = false;
+    try {
+        auto bad = settings;
+        bad.configuration_mode = "expert";
+        configs.configure(config.id, bad);
+    } catch (const std::invalid_argument&) {
+        rejected_bad_mode = true;
+    }
+    require(rejected_bad_mode,
+            "configure() must reject a configuration mode other than basic "
+            "or advanced");
+
+    bool rejected_bad_dropout = false;
+    try {
+        auto bad = settings;
+        bad.dropout = 1.5;
+        configs.configure(config.id, bad);
+    } catch (const std::invalid_argument&) {
+        rejected_bad_dropout = true;
+    }
+    require(rejected_bad_dropout,
+            "configure() must reject a dropout outside 0.0 to 1.0");
+
+    bool rejected_bad_clipping = false;
+    try {
+        auto bad = settings;
+        bad.gradient_clipping = -0.5;
+        configs.configure(config.id, bad);
+    } catch (const std::invalid_argument&) {
+        rejected_bad_clipping = true;
+    }
+    require(rejected_bad_clipping,
+            "configure() must reject a negative gradient clipping value");
+
     require(configs.set_status(config.id,
                                masterai::ModelBuilderConfigStatus::ready),
             "set_status() rejected a known model builder configuration id");
@@ -5243,6 +5326,68 @@ void test_machine_learning_model_builder_lifecycle() {
                     masterai::ModelBuilderConfigStatus::ready,
             "ModelBuilderConfigStore did not restore a persisted model "
             "builder configuration after reload");
+    require(reloaded_config->settings.configuration_mode == "advanced" &&
+                reloaded_config->settings.architecture ==
+                    "transformer_decoder" &&
+                reloaded_config->settings.layer_configuration ==
+                    "24 decoder layers" &&
+                reloaded_config->settings.hidden_dimensions == 2048U &&
+                reloaded_config->settings.attention_configuration ==
+                    "16 heads, grouped-query" &&
+                reloaded_config->settings.vocabulary_tokenizer ==
+                    "32000-entry BPE" &&
+                reloaded_config->settings.sequence_length == 4096U &&
+                reloaded_config->settings.activation_functions == "silu" &&
+                reloaded_config->settings.dropout == 0.1 &&
+                reloaded_config->settings.initialisation_strategy ==
+                    "xavier" &&
+                reloaded_config->settings.loss_function == "cross_entropy" &&
+                reloaded_config->settings.optimiser == "adamw" &&
+                reloaded_config->settings.learning_rate_scheduler ==
+                    "cosine with warmup" &&
+                reloaded_config->settings.batch_size == 32U &&
+                reloaded_config->settings.epoch_count == 3U &&
+                reloaded_config->settings.gradient_accumulation == 4U &&
+                reloaded_config->settings.gradient_clipping == 1.0 &&
+                reloaded_config->settings.mixed_precision &&
+                reloaded_config->settings.checkpoint_frequency == 500U &&
+                reloaded_config->settings.validation_frequency == 100U &&
+                reloaded_config->settings.early_stopping &&
+                reloaded_config->settings.random_seed == 42U &&
+                reloaded_config->settings.reproducibility_settings ==
+                    "deterministic kernels" &&
+                reloaded_config->settings.distributed_training_settings ==
+                    "2-node data parallel",
+            "ModelBuilderConfigStore did not restore the full build "
+            "settings after reload");
+
+    // Legacy scoped-down Phase 46 records persisted only seven fields;
+    // restore() must accept them with default (unset) settings so existing
+    // databases keep working without a migration step. Reproduce the
+    // legacy encoding with the same length-prefixed packing persist() uses.
+    {
+        const auto legacy_pack = [](const std::vector<std::string>& fields) {
+            std::string result;
+            for (const auto& field : fields) {
+                result += std::to_string(field.size()) + ":" + field;
+            }
+            return result;
+        };
+        records.put("ml_model_builder_configs", "legacy-config-1",
+                    legacy_pack({"project-9", "model-9", "legacy build",
+                                 "created before the full surface", "template",
+                                 "administrator-1", "draft"}));
+        masterai::ModelBuilderConfigStore migrated(records);
+        const auto legacy = migrated.find("legacy-config-1");
+        require(legacy.has_value() && legacy->name == "legacy build" &&
+                    legacy->settings.configuration_mode == "basic" &&
+                    legacy->settings.architecture.empty() &&
+                    legacy->settings.batch_size == 0U &&
+                    !legacy->settings.mixed_precision,
+                "restore() must accept a legacy seven-field model builder "
+                "record with default build settings");
+        records.erase("ml_model_builder_configs", "legacy-config-1");
+    }
 
     require(configs.remove(config.id),
             "remove() rejected a known model builder configuration id");
@@ -5259,6 +5404,14 @@ void test_machine_learning_model_builder_lifecycle() {
                 json.find("\"baseModelId\":\"\"") != std::string::npos,
             "model_builder_config_json did not report the model builder "
             "configuration's own fields");
+    require(json.find("\"settings\":{\"configurationMode\":\"basic\"") !=
+                    std::string::npos &&
+                json.find("\"hiddenDimensions\":0") != std::string::npos &&
+                json.find("\"dropout\":0") != std::string::npos &&
+                json.find("\"mixedPrecision\":false") != std::string::npos &&
+                json.find("\"earlyStopping\":false") != std::string::npos,
+            "model_builder_config_json did not report the nested build "
+            "settings");
 }
 
 void test_machine_learning_instruction_training_lifecycle() {

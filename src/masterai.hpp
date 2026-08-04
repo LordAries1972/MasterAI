@@ -3035,22 +3035,19 @@ std::string fine_tuning_job_json(const FineTuningJob& job);
 std::string fine_tuning_jobs_json(const std::vector<FineTuningJob>& jobs);
 
 // Phase 46: docs/PLAN.md "Machine Learning Abilities" section 9 (Model
-// Builder Interface). The full interface guides an administrator through
-// architecture, layer, tokenizer, optimiser, scheduling, and
-// reproducibility configuration (docs/PLAN.md section 9's second list) for
-// eleven starting points (template, existing architecture, imported base
-// model, previous model version, classical ML, neural network, language-
-// model adaptation, embedding model, reranking model, vision model, audio
-// model -- section 9's first list). None of that configuration surface
-// means anything before a real model-construction executor exists to
-// consume it, so this records only identity, the project/base model it
-// relates to, which of the eleven starting points was chosen (free text,
-// like FineTuningJob's method, since an administrator may describe a
-// starting point the list doesn't name), and a lifecycle status. Both
-// project_id and base_model_id stay optional -- a from-template or
-// from-scratch build has neither a tracked project nor an existing model
-// to start from, unlike FineTuningJob where the base model is mandatory.
-// The status enum is its own five states rather than reusing
+// Builder Interface), now implemented at full surface. The interface guides
+// an administrator through architecture, layer, tokenizer, optimiser,
+// scheduling, and reproducibility configuration (section 9's second list,
+// carried by ModelBuilderSettings below) for eleven starting points
+// (template, existing architecture, imported base model, previous model
+// version, classical ML, neural network, language-model adaptation,
+// embedding model, reranking model, vision model, audio model -- section
+// 9's first list). The starting point stays free text, like FineTuningJob's
+// method, since an administrator may describe a starting point the list
+// doesn't name. Both project_id and base_model_id stay optional -- a
+// from-template or from-scratch build has neither a tracked project nor an
+// existing model to start from, unlike FineTuningJob where the base model
+// is mandatory. The status enum is its own five states rather than reusing
 // FineTuningJobStatus/TrainingJobStatus's eleven, because a builder
 // configuration is a design-time draft, not a running job: it never
 // queues, runs, or pauses, it only moves from draft through configuration
@@ -3066,6 +3063,47 @@ enum class ModelBuilderConfigStatus {
 std::string model_builder_config_status_name(ModelBuilderConfigStatus status);
 ModelBuilderConfigStatus parse_model_builder_config_status(const std::string& status);
 
+// Full-surface completion of Phase 46: the complete configuration list from
+// docs/PLAN.md section 9's second list ("The builder should allow
+// configuration of: ..."), plus the section's required basic/advanced
+// configuration mode. Text fields stay free text (an administrator may name
+// any architecture, optimiser, or scheduler; MasterAI does not curate a
+// closed catalogue), numeric fields use 0 to mean "not set / use executor
+// default", and the two genuinely two-state settings (mixed precision,
+// early stopping) are booleans. "Vocabulary and tokenizer" is one field
+// because section 9 lists it as one item. These settings describe the
+// intended build; the model-construction executor that consumes them is a
+// separate future phase.
+struct ModelBuilderSettings {
+    std::string configuration_mode{"basic"};  // "basic" or "advanced"
+    // Architecture group.
+    std::string architecture;
+    std::string layer_configuration;
+    std::uint64_t hidden_dimensions{0};
+    std::string attention_configuration;
+    std::string vocabulary_tokenizer;
+    std::uint64_t sequence_length{0};
+    std::string activation_functions;
+    double dropout{0.0};  // 0.0 .. 1.0
+    std::string initialisation_strategy;
+    // Training group.
+    std::string loss_function;
+    std::string optimiser;
+    std::string learning_rate_scheduler;
+    std::uint64_t batch_size{0};
+    std::uint64_t epoch_count{0};
+    std::uint64_t gradient_accumulation{0};  // accumulation steps
+    double gradient_clipping{0.0};           // max gradient norm, 0 = off
+    bool mixed_precision{false};
+    std::uint64_t checkpoint_frequency{0};  // checkpoints every N steps
+    std::uint64_t validation_frequency{0};  // validations every N steps
+    bool early_stopping{false};
+    // Reproducibility group.
+    std::uint64_t random_seed{0};
+    std::string reproducibility_settings;
+    std::string distributed_training_settings;
+};
+
 struct ModelBuilderConfig {
     std::string id;
     std::string project_id;
@@ -3075,6 +3113,7 @@ struct ModelBuilderConfig {
     std::string source_type;
     std::string owner_id;
     ModelBuilderConfigStatus status{ModelBuilderConfigStatus::draft};
+    ModelBuilderSettings settings;
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -3092,6 +3131,11 @@ public:
     std::optional<ModelBuilderConfig> find(const std::string& id) const;
     std::vector<ModelBuilderConfig> list() const;
     bool set_status(const std::string& id, ModelBuilderConfigStatus status);
+    // Replaces a configuration's build settings wholesale (the web UI always
+    // submits the complete settings form, pre-filled from current values, so
+    // partial merge semantics are unnecessary). Returns false for an unknown
+    // id; throws std::invalid_argument for out-of-range values.
+    bool configure(const std::string& id, const ModelBuilderSettings& settings);
     bool remove(const std::string& id);
 
 private:

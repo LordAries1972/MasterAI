@@ -366,7 +366,7 @@ Status below reflects the evidence recorded in
 | 43 | Evaluation Lab | Implemented; real tabular scoring harness (Phase 56) |
 | 44 | Experiment Tracking | Implemented at a scoped-down level |
 | 45 | Fine-Tuning Interface | Implemented at a scoped-down level; no fine-tuning executor |
-| 46 | Model Builder | Implemented at a scoped-down level; no construction executor |
+| 46 | Model Builder | Fully implemented (full section 9 design sheet, basic/advanced modes); no construction executor |
 | 47 | Prompt and Instruction Training | Implemented at a scoped-down metadata level |
 | 48 | Synthetic Data Generation | Implemented at a scoped-down metadata level; no generator |
 | 49 | Embeddings and Vector Stores | Implemented at a scoped-down registry level; no embedding/index pipeline |

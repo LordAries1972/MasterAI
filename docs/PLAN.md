@@ -624,34 +624,50 @@ Current phase status:
   `src/web_ui.cpp` lists, creates, and moves jobs through status.
   `test_machine_learning_fine_tuning_lifecycle` covers the same
   permission/lifecycle/reload/remove guarantees as Phase 44's test.
-- Phase 46: Implemented at a scoped-down level (2026-08-04) — the Model
-  Builder Interface (section 9 below), scoped down to identity, the
-  project/base model it relates to (both optional, since a from-template
-  or from-scratch build has neither a tracked project nor an existing
-  model to start from), a free-text source type (section 9 lists eleven
-  starting points such as new model from template, imported base model, or
-  embedding model, not a closed enum), and its own five-state design-time
-  lifecycle status — draft, configuring, ready, submitted, archived —
-  rather than the eleven-state job lifecycle Training Jobs and Fine-Tuning
-  use, since a builder configuration never queues, runs, or pauses
-  (`ModelBuilderConfig`/`ModelBuilderConfigStore`, `src/ml.cpp`), not the
-  section's full surface (architecture, layer configuration, hidden
-  dimensions, attention configuration, vocabulary/tokenizer, optimiser,
-  learning-rate scheduler, gradient/precision/checkpoint settings,
-  distributed-training settings) that only means something once a real
-  model-construction executor exists to consume it. New administrator-only
-  `ml.modelbuilder.view`/`ml.modelbuilder.manage` permissions gate `GET`/
-  `POST /api/v1/ml/model-builder-configs`,
-  `POST /api/v1/ml/model-builder-configs/{id}/status`, and
-  `POST /api/v1/ml/model-builder-configs/{id}/delete`. New "Model Builder"
+- Phase 46: Fully implemented (2026-08-05; scoped-down version 2026-08-04)
+  — the Model Builder Interface (section 9 below) at full surface:
+  identity, the project/base model it relates to (both optional, since a
+  from-template or from-scratch build has neither a tracked project nor an
+  existing model to start from), a free-text source type (section 9 lists
+  eleven starting points such as new model from template, imported base
+  model, or embedding model, not a closed enum), its own five-state
+  design-time lifecycle status — draft, configuring, ready, submitted,
+  archived — rather than the eleven-state job lifecycle Training Jobs and
+  Fine-Tuning use, since a builder configuration never queues, runs, or
+  pauses, plus the complete section 9 build-settings list
+  (`ModelBuilderSettings` in `src/masterai.hpp`: architecture, layer
+  configuration, hidden dimensions, attention configuration, vocabulary
+  and tokenizer, sequence length, activation functions, dropout,
+  initialisation strategy, loss function, optimiser, learning-rate
+  scheduler, batch size, epoch count, gradient accumulation, gradient
+  clipping, mixed precision, checkpoint frequency, validation frequency,
+  early stopping, random seed, reproducibility settings, and
+  distributed-training settings) carried by `ModelBuilderConfig`/
+  `ModelBuilderConfigStore` (`src/ml.cpp`), which validates the closed
+  basic/advanced configuration-mode set and the bounded dropout/gradient-
+  clipping ranges and restores legacy seven-field scoped-down records with
+  default settings so existing databases need no migration. Administrator-
+  only `ml.modelbuilder.view`/`ml.modelbuilder.manage` permissions gate
+  `GET`/`POST /api/v1/ml/model-builder-configs`,
+  `POST /api/v1/ml/model-builder-configs/{id}/status`,
+  `POST /api/v1/ml/model-builder-configs/{id}/configure` (partial-update:
+  absent fields keep their stored values), and
+  `POST /api/v1/ml/model-builder-configs/{id}/delete`. The "Model Builder"
   (`/app/ml/model-builder-configs`) entry under the Machine Learning
   sidebar in `src/web_ui.cpp` lists, creates, and moves configurations
-  through status. `test_machine_learning_model_builder_lifecycle` covers
-  the same permission/lifecycle/reload/remove guarantees as Phase 45's
-  test. The dashboard roster's `model-builder` interface entry
-  (`src/ml.cpp`) intentionally still reports `planned`, matching Phases
-  43-45's own roster entries — see `test_machine_learning_foundation_dashboard`'s
-  fixed exclusion list, which stayed frozen at Phase 42's interface set.
+  through status, and its "Configure build settings" form provides the
+  basic and advanced configuration modes section 9 requires — basic shows
+  the six everyday fields (mode, architecture, loss function, optimiser,
+  batch size, epoch count, sequence length), advanced additionally reveals
+  the full surface — pre-filled from a row's Configure button.
+  `test_machine_learning_model_builder_lifecycle` covers the permission/
+  lifecycle/reload/remove guarantees plus configure() validation,
+  full-settings persistence across reload, and legacy-record restore. The
+  dashboard roster's `model-builder` interface entry (`src/ml.cpp`) now
+  reports `available`, and `test_machine_learning_foundation_dashboard`'s
+  exclusion list adds it accordingly. The build-settings record describes
+  the intended build; the model-construction executor that consumes it is
+  a separate future phase.
 - Phase 47: Implemented at a scoped-down level (2026-08-04) — Prompt and
   Instruction Training (section 19 below), scoped down to identity, the
   dataset each example targets, a free-text subject classification, and a
@@ -4977,18 +4993,26 @@ specialisation, code assistant, and safety alignment, not a closed enum),
 and the same eleven-state lifecycle status Training Jobs uses, not the
 base-model-version/adapter-method/hyperparameter/checkpoint/output-model
 field list that a real fine-tuning executor will attach to a job once it
-exists. Phase 46 implements the Model Builder Interface (section 9) at the
-same scoped-down level -- identity, the project/base model it relates to
-(both optional, since a from-template or from-scratch build has neither a
+exists. Phase 46 implements the Model Builder Interface (section 9) at
+full surface -- identity, the project/base model it relates to (both
+optional, since a from-template or from-scratch build has neither a
 tracked project nor an existing model to start from), a free-text source
 type (section 9 lists eleven starting points such as new model from
-template, imported base model, or embedding model, not a closed enum), and
+template, imported base model, or embedding model, not a closed enum),
 its own five-state design-time lifecycle status (draft, configuring,
 ready, submitted, archived) rather than the eleven-state job lifecycle
 Training Jobs and Fine-Tuning use, since a builder configuration never
-queues, runs, or pauses -- not the architecture/layer/tokenizer/optimiser/
-scheduling field list that a real model-construction executor will attach
-to a configuration once it exists. Phase 47 implements Prompt and
+queues, runs, or pauses -- plus the complete section 9 build-settings
+list (architecture, layer configuration, hidden dimensions, attention
+configuration, vocabulary and tokenizer, sequence length, activation
+functions, dropout, initialisation strategy, loss function, optimiser,
+learning-rate scheduler, batch size, epoch count, gradient accumulation,
+gradient clipping, mixed precision, checkpoint frequency, validation
+frequency, early stopping, random seed, reproducibility settings, and
+distributed-training settings) edited through the basic and advanced
+configuration modes section 9 requires. The settings describe the
+intended build; the model-construction executor that consumes them is a
+separate future phase. Phase 47 implements Prompt and
 Instruction Training (section 19) at the same scoped-down level — identity,
 the dataset an example targets, a free-text subject classification, and a
 five-state reviewer-approval lifecycle status (draft, in_review, approved,
