@@ -1,9 +1,10 @@
 // Machine Learning foundation phase: administrator-only scaffolding for
 // docs/PLAN.md's "Machine Learning Abilities" section. Dashboard, Projects,
-// Model Registry, Dataset Manager, and Subject Knowledge Manager are real;
-// the remaining 20 planned interfaces (Model Builder, Training Jobs, ...)
-// are listed so an administrator can see the roadmap, but none of them have
-// a backing service yet -- see MachineLearningRegistry's class comment in
+// Model Registry, Dataset Manager, Subject Knowledge Manager, Data
+// Labeling, Data Preparation, and Training Jobs are real; the remaining 18
+// planned interfaces (Model Builder, Fine-Tuning, ...) are listed so an
+// administrator can see the roadmap, but none of them have a backing
+// service yet -- see MachineLearningRegistry's class comment in
 // masterai.hpp for why this stays honest rather than fabricating data.
 #include "masterai.hpp"
 
@@ -101,9 +102,9 @@ MachineLearningRegistry::MachineLearningRegistry() {
         {"model-builder", "Model Builder", "planned"},
         {"dataset-manager", "Dataset Manager", "available"},
         {"subject-knowledge", "Subject Knowledge Manager", "available"},
-        {"data-labeling", "Data Labeling", "planned"},
-        {"data-preparation", "Data Preparation", "planned"},
-        {"training-jobs", "Training Jobs", "planned"},
+        {"data-labeling", "Data Labeling", "available"},
+        {"data-preparation", "Data Preparation", "available"},
+        {"training-jobs", "Training Jobs", "available"},
         {"fine-tuning", "Fine-Tuning", "planned"},
         {"evaluation-lab", "Evaluation Lab", "planned"},
         {"experiment-tracking", "Experiment Tracking", "planned"},
@@ -127,7 +128,8 @@ MachineLearningRegistry::MachineLearningRegistry() {
 }
 
 MachineLearningDashboard MachineLearningRegistry::dashboard(
-    const MLProjectStore& projects, const ModelRegistryStore& models) const {
+    const MLProjectStore& projects, const ModelRegistryStore& models,
+    const TrainingJobStore& training_jobs) const {
     MachineLearningDashboard result;
     result.interfaces = interfaces_;
     // Archived projects don't count as "active" -- everything else does,
@@ -148,9 +150,13 @@ MachineLearningDashboard MachineLearningRegistry::dashboard(
             default: break;
         }
     }
-    // models_awaiting_approval and failed_training_jobs still default to
-    // zero (see the struct's own comment): there is no distinct "awaiting
-    // approval" state and no training-job store behind this phase yet.
+    for (const auto& job : training_jobs.list()) {
+        if (job.status == TrainingJobStatus::failed) {
+            ++result.failed_training_jobs;
+        }
+    }
+    // models_awaiting_approval still defaults to zero (see the struct's own
+    // comment): there is no distinct "awaiting approval" state yet.
     return result;
 }
 
@@ -787,6 +793,1033 @@ std::string subject_packages_json(const std::vector<SubjectPackage>& packages) {
         if (!first) body += ",";
         first = false;
         body += subject_package_json(package);
+    }
+    return body + "]";
+}
+
+std::string label_task_status_name(const LabelTaskStatus status) {
+    switch (status) {
+        case LabelTaskStatus::queued: return "queued";
+        case LabelTaskStatus::in_progress: return "in_progress";
+        case LabelTaskStatus::in_review: return "in_review";
+        case LabelTaskStatus::completed: return "completed";
+    }
+    throw std::runtime_error("invalid label task status");
+}
+
+LabelTaskStatus parse_label_task_status(const std::string& status) {
+    if (status == "queued") return LabelTaskStatus::queued;
+    if (status == "in_progress") return LabelTaskStatus::in_progress;
+    if (status == "in_review") return LabelTaskStatus::in_review;
+    if (status == "completed") return LabelTaskStatus::completed;
+    throw std::runtime_error("stored label task status is invalid");
+}
+
+LabelTaskStore::LabelTaskStore(RecordStore& records) : records_(&records) {
+    restore();
+}
+
+void LabelTaskStore::restore() {
+    for (const auto& item : records_->list("ml_label_tasks")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 7U) {
+            throw std::runtime_error(
+                "persisted label task record field count is wrong");
+        }
+        LabelTask task;
+        task.id = item.first;
+        task.dataset_id = fields[0];
+        task.name = fields[1];
+        task.description = fields[2];
+        task.label_mode = fields[3];
+        task.assignee_id = fields[4];
+        task.owner_id = fields[5];
+        task.status = parse_label_task_status(fields[6]);
+        tasks_[task.id] = task;
+    }
+}
+
+void LabelTaskStore::persist(const LabelTask& task) {
+    records_->put(
+        "ml_label_tasks", task.id,
+        pack({task.dataset_id, task.name, task.description, task.label_mode,
+             task.assignee_id, task.owner_id,
+             label_task_status_name(task.status)}));
+}
+
+LabelTask LabelTaskStore::create(const std::string& owner_id,
+                                 const std::string& dataset_id,
+                                 const std::string& name,
+                                 const std::string& description,
+                                 const std::string& label_mode,
+                                 const std::string& assignee_id) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("label task name is invalid");
+    }
+    if (dataset_id.empty()) {
+        throw std::invalid_argument("label task dataset id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    LabelTask task;
+    task.id = random_id();
+    task.dataset_id = dataset_id;
+    task.name = name;
+    task.description = description;
+    task.label_mode = label_mode;
+    task.assignee_id = assignee_id;
+    task.owner_id = owner_id;
+    task.status = LabelTaskStatus::queued;
+    task.created_at_epoch_seconds = epoch_seconds();
+    task.updated_at_epoch_seconds = task.created_at_epoch_seconds;
+    tasks_[task.id] = task;
+    if (records_) persist(task);
+    return task;
+}
+
+std::optional<LabelTask> LabelTaskStore::find(const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = tasks_.find(id);
+    return found != tasks_.end() ? std::optional<LabelTask>(found->second)
+                                 : std::nullopt;
+}
+
+std::vector<LabelTask> LabelTaskStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<LabelTask> result;
+    result.reserve(tasks_.size());
+    for (const auto& item : tasks_) result.push_back(item.second);
+    return result;
+}
+
+bool LabelTaskStore::set_status(const std::string& id,
+                                const LabelTaskStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = tasks_.find(id);
+    if (found == tasks_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool LabelTaskStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = tasks_.find(id);
+    if (found == tasks_.end()) return false;
+    tasks_.erase(found);
+    if (records_) records_->erase("ml_label_tasks", id);
+    return true;
+}
+
+std::string label_task_json(const LabelTask& task) {
+    return "{\"id\":\"" + json_escape(task.id) + "\",\"datasetId\":\"" +
+           json_escape(task.dataset_id) + "\",\"name\":\"" +
+           json_escape(task.name) + "\",\"description\":\"" +
+           json_escape(task.description) + "\",\"labelMode\":\"" +
+           json_escape(task.label_mode) + "\",\"assigneeId\":\"" +
+           json_escape(task.assignee_id) + "\",\"ownerId\":\"" +
+           json_escape(task.owner_id) + "\",\"status\":\"" +
+           label_task_status_name(task.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(task.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(task.updated_at_epoch_seconds) + "}";
+}
+
+std::string label_tasks_json(const std::vector<LabelTask>& tasks) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& task : tasks) {
+        if (!first) body += ",";
+        first = false;
+        body += label_task_json(task);
+    }
+    return body + "]";
+}
+
+std::string data_preparation_job_status_name(
+    const DataPreparationJobStatus status) {
+    switch (status) {
+        case DataPreparationJobStatus::pending: return "pending";
+        case DataPreparationJobStatus::running: return "running";
+        case DataPreparationJobStatus::completed: return "completed";
+        case DataPreparationJobStatus::failed: return "failed";
+    }
+    throw std::runtime_error("invalid data preparation job status");
+}
+
+DataPreparationJobStatus parse_data_preparation_job_status(
+    const std::string& status) {
+    if (status == "pending") return DataPreparationJobStatus::pending;
+    if (status == "running") return DataPreparationJobStatus::running;
+    if (status == "completed") return DataPreparationJobStatus::completed;
+    if (status == "failed") return DataPreparationJobStatus::failed;
+    throw std::runtime_error("stored data preparation job status is invalid");
+}
+
+DataPreparationJobStore::DataPreparationJobStore(RecordStore& records)
+    : records_(&records) {
+    restore();
+}
+
+void DataPreparationJobStore::restore() {
+    for (const auto& item : records_->list("ml_data_preparation_jobs")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 6U) {
+            throw std::runtime_error(
+                "persisted data preparation job record field count is "
+                "wrong");
+        }
+        DataPreparationJob job;
+        job.id = item.first;
+        job.dataset_id = fields[0];
+        job.name = fields[1];
+        job.description = fields[2];
+        job.operation = fields[3];
+        job.owner_id = fields[4];
+        job.status = parse_data_preparation_job_status(fields[5]);
+        jobs_[job.id] = job;
+    }
+}
+
+void DataPreparationJobStore::persist(const DataPreparationJob& job) {
+    records_->put(
+        "ml_data_preparation_jobs", job.id,
+        pack({job.dataset_id, job.name, job.description, job.operation,
+             job.owner_id,
+             data_preparation_job_status_name(job.status)}));
+}
+
+DataPreparationJob DataPreparationJobStore::create(
+    const std::string& owner_id, const std::string& dataset_id,
+    const std::string& name, const std::string& description,
+    const std::string& operation) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("data preparation job name is invalid");
+    }
+    if (dataset_id.empty()) {
+        throw std::invalid_argument(
+            "data preparation job dataset id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    DataPreparationJob job;
+    job.id = random_id();
+    job.dataset_id = dataset_id;
+    job.name = name;
+    job.description = description;
+    job.operation = operation;
+    job.owner_id = owner_id;
+    job.status = DataPreparationJobStatus::pending;
+    job.created_at_epoch_seconds = epoch_seconds();
+    job.updated_at_epoch_seconds = job.created_at_epoch_seconds;
+    jobs_[job.id] = job;
+    if (records_) persist(job);
+    return job;
+}
+
+std::optional<DataPreparationJob> DataPreparationJobStore::find(
+    const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(id);
+    return found != jobs_.end() ? std::optional<DataPreparationJob>(found->second)
+                                : std::nullopt;
+}
+
+std::vector<DataPreparationJob> DataPreparationJobStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<DataPreparationJob> result;
+    result.reserve(jobs_.size());
+    for (const auto& item : jobs_) result.push_back(item.second);
+    return result;
+}
+
+bool DataPreparationJobStore::set_status(
+    const std::string& id, const DataPreparationJobStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(id);
+    if (found == jobs_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool DataPreparationJobStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(id);
+    if (found == jobs_.end()) return false;
+    jobs_.erase(found);
+    if (records_) records_->erase("ml_data_preparation_jobs", id);
+    return true;
+}
+
+std::string data_preparation_job_json(const DataPreparationJob& job) {
+    return "{\"id\":\"" + json_escape(job.id) + "\",\"datasetId\":\"" +
+           json_escape(job.dataset_id) + "\",\"name\":\"" +
+           json_escape(job.name) + "\",\"description\":\"" +
+           json_escape(job.description) + "\",\"operation\":\"" +
+           json_escape(job.operation) + "\",\"ownerId\":\"" +
+           json_escape(job.owner_id) + "\",\"status\":\"" +
+           data_preparation_job_status_name(job.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(job.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(job.updated_at_epoch_seconds) + "}";
+}
+
+std::string data_preparation_jobs_json(
+    const std::vector<DataPreparationJob>& jobs) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& job : jobs) {
+        if (!first) body += ",";
+        first = false;
+        body += data_preparation_job_json(job);
+    }
+    return body + "]";
+}
+
+std::string training_job_status_name(const TrainingJobStatus status) {
+    switch (status) {
+        case TrainingJobStatus::draft: return "draft";
+        case TrainingJobStatus::queued: return "queued";
+        case TrainingJobStatus::preparing: return "preparing";
+        case TrainingJobStatus::running: return "running";
+        case TrainingJobStatus::paused: return "paused";
+        case TrainingJobStatus::canceling: return "canceling";
+        case TrainingJobStatus::canceled: return "canceled";
+        case TrainingJobStatus::failed: return "failed";
+        case TrainingJobStatus::completed: return "completed";
+        case TrainingJobStatus::awaiting_evaluation: return "awaiting_evaluation";
+        case TrainingJobStatus::archived: return "archived";
+    }
+    throw std::runtime_error("invalid training job status");
+}
+
+TrainingJobStatus parse_training_job_status(const std::string& status) {
+    if (status == "draft") return TrainingJobStatus::draft;
+    if (status == "queued") return TrainingJobStatus::queued;
+    if (status == "preparing") return TrainingJobStatus::preparing;
+    if (status == "running") return TrainingJobStatus::running;
+    if (status == "paused") return TrainingJobStatus::paused;
+    if (status == "canceling") return TrainingJobStatus::canceling;
+    if (status == "canceled") return TrainingJobStatus::canceled;
+    if (status == "failed") return TrainingJobStatus::failed;
+    if (status == "completed") return TrainingJobStatus::completed;
+    if (status == "awaiting_evaluation") return TrainingJobStatus::awaiting_evaluation;
+    if (status == "archived") return TrainingJobStatus::archived;
+    throw std::runtime_error("stored training job status is invalid");
+}
+
+TrainingJobStore::TrainingJobStore(RecordStore& records) : records_(&records) {
+    restore();
+}
+
+void TrainingJobStore::restore() {
+    for (const auto& item : records_->list("ml_training_jobs")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 8U) {
+            throw std::runtime_error(
+                "persisted training job record field count is wrong");
+        }
+        TrainingJob job;
+        job.id = item.first;
+        job.project_id = fields[0];
+        job.model_id = fields[1];
+        job.dataset_id = fields[2];
+        job.name = fields[3];
+        job.description = fields[4];
+        job.training_type = fields[5];
+        job.owner_id = fields[6];
+        job.status = parse_training_job_status(fields[7]);
+        jobs_[job.id] = job;
+    }
+}
+
+void TrainingJobStore::persist(const TrainingJob& job) {
+    records_->put(
+        "ml_training_jobs", job.id,
+        pack({job.project_id, job.model_id, job.dataset_id, job.name,
+             job.description, job.training_type, job.owner_id,
+             training_job_status_name(job.status)}));
+}
+
+TrainingJob TrainingJobStore::create(
+    const std::string& owner_id, const std::string& project_id,
+    const std::string& model_id, const std::string& dataset_id,
+    const std::string& name, const std::string& description,
+    const std::string& training_type) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("training job name is invalid");
+    }
+    if (project_id.empty()) {
+        throw std::invalid_argument("training job project id is required");
+    }
+    if (dataset_id.empty()) {
+        throw std::invalid_argument("training job dataset id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    TrainingJob job;
+    job.id = random_id();
+    job.project_id = project_id;
+    job.model_id = model_id;
+    job.dataset_id = dataset_id;
+    job.name = name;
+    job.description = description;
+    job.training_type = training_type;
+    job.owner_id = owner_id;
+    job.status = TrainingJobStatus::draft;
+    job.created_at_epoch_seconds = epoch_seconds();
+    job.updated_at_epoch_seconds = job.created_at_epoch_seconds;
+    jobs_[job.id] = job;
+    if (records_) persist(job);
+    return job;
+}
+
+std::optional<TrainingJob> TrainingJobStore::find(const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(id);
+    return found != jobs_.end() ? std::optional<TrainingJob>(found->second)
+                                : std::nullopt;
+}
+
+std::vector<TrainingJob> TrainingJobStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<TrainingJob> result;
+    result.reserve(jobs_.size());
+    for (const auto& item : jobs_) result.push_back(item.second);
+    return result;
+}
+
+bool TrainingJobStore::set_status(const std::string& id,
+                                  const TrainingJobStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(id);
+    if (found == jobs_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool TrainingJobStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(id);
+    if (found == jobs_.end()) return false;
+    jobs_.erase(found);
+    if (records_) records_->erase("ml_training_jobs", id);
+    return true;
+}
+
+std::string training_job_json(const TrainingJob& job) {
+    return "{\"id\":\"" + json_escape(job.id) + "\",\"projectId\":\"" +
+           json_escape(job.project_id) + "\",\"modelId\":\"" +
+           json_escape(job.model_id) + "\",\"datasetId\":\"" +
+           json_escape(job.dataset_id) + "\",\"name\":\"" +
+           json_escape(job.name) + "\",\"description\":\"" +
+           json_escape(job.description) + "\",\"trainingType\":\"" +
+           json_escape(job.training_type) + "\",\"ownerId\":\"" +
+           json_escape(job.owner_id) + "\",\"status\":\"" +
+           training_job_status_name(job.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(job.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(job.updated_at_epoch_seconds) + "}";
+}
+
+std::string training_jobs_json(const std::vector<TrainingJob>& jobs) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& job : jobs) {
+        if (!first) body += ",";
+        first = false;
+        body += training_job_json(job);
+    }
+    return body + "]";
+}
+
+std::string evaluation_run_status_name(const EvaluationRunStatus status) {
+    switch (status) {
+        case EvaluationRunStatus::queued: return "queued";
+        case EvaluationRunStatus::running: return "running";
+        case EvaluationRunStatus::completed: return "completed";
+        case EvaluationRunStatus::failed: return "failed";
+        case EvaluationRunStatus::canceled: return "canceled";
+    }
+    throw std::runtime_error("invalid evaluation run status");
+}
+
+EvaluationRunStatus parse_evaluation_run_status(const std::string& status) {
+    if (status == "queued") return EvaluationRunStatus::queued;
+    if (status == "running") return EvaluationRunStatus::running;
+    if (status == "completed") return EvaluationRunStatus::completed;
+    if (status == "failed") return EvaluationRunStatus::failed;
+    if (status == "canceled") return EvaluationRunStatus::canceled;
+    throw std::runtime_error("stored evaluation run status is invalid");
+}
+
+EvaluationRunStore::EvaluationRunStore(RecordStore& records) : records_(&records) {
+    restore();
+}
+
+void EvaluationRunStore::restore() {
+    for (const auto& item : records_->list("ml_evaluation_runs")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 7U) {
+            throw std::runtime_error(
+                "persisted evaluation run record field count is wrong");
+        }
+        EvaluationRun run;
+        run.id = item.first;
+        run.model_id = fields[0];
+        run.dataset_id = fields[1];
+        run.name = fields[2];
+        run.description = fields[3];
+        run.category = fields[4];
+        run.owner_id = fields[5];
+        run.status = parse_evaluation_run_status(fields[6]);
+        runs_[run.id] = run;
+    }
+}
+
+void EvaluationRunStore::persist(const EvaluationRun& run) {
+    records_->put(
+        "ml_evaluation_runs", run.id,
+        pack({run.model_id, run.dataset_id, run.name, run.description,
+             run.category, run.owner_id,
+             evaluation_run_status_name(run.status)}));
+}
+
+EvaluationRun EvaluationRunStore::create(
+    const std::string& owner_id, const std::string& model_id,
+    const std::string& dataset_id, const std::string& name,
+    const std::string& description, const std::string& category) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("evaluation run name is invalid");
+    }
+    if (model_id.empty()) {
+        throw std::invalid_argument("evaluation run model id is required");
+    }
+    if (dataset_id.empty()) {
+        throw std::invalid_argument("evaluation run dataset id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    EvaluationRun run;
+    run.id = random_id();
+    run.model_id = model_id;
+    run.dataset_id = dataset_id;
+    run.name = name;
+    run.description = description;
+    run.category = category;
+    run.owner_id = owner_id;
+    run.status = EvaluationRunStatus::queued;
+    run.created_at_epoch_seconds = epoch_seconds();
+    run.updated_at_epoch_seconds = run.created_at_epoch_seconds;
+    runs_[run.id] = run;
+    if (records_) persist(run);
+    return run;
+}
+
+std::optional<EvaluationRun> EvaluationRunStore::find(const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = runs_.find(id);
+    return found != runs_.end() ? std::optional<EvaluationRun>(found->second)
+                                : std::nullopt;
+}
+
+std::vector<EvaluationRun> EvaluationRunStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<EvaluationRun> result;
+    result.reserve(runs_.size());
+    for (const auto& item : runs_) result.push_back(item.second);
+    return result;
+}
+
+bool EvaluationRunStore::set_status(const std::string& id,
+                                    const EvaluationRunStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = runs_.find(id);
+    if (found == runs_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool EvaluationRunStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = runs_.find(id);
+    if (found == runs_.end()) return false;
+    runs_.erase(found);
+    if (records_) records_->erase("ml_evaluation_runs", id);
+    return true;
+}
+
+std::string evaluation_run_json(const EvaluationRun& run) {
+    return "{\"id\":\"" + json_escape(run.id) + "\",\"modelId\":\"" +
+           json_escape(run.model_id) + "\",\"datasetId\":\"" +
+           json_escape(run.dataset_id) + "\",\"name\":\"" +
+           json_escape(run.name) + "\",\"description\":\"" +
+           json_escape(run.description) + "\",\"category\":\"" +
+           json_escape(run.category) + "\",\"ownerId\":\"" +
+           json_escape(run.owner_id) + "\",\"status\":\"" +
+           evaluation_run_status_name(run.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(run.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(run.updated_at_epoch_seconds) + "}";
+}
+
+std::string evaluation_runs_json(const std::vector<EvaluationRun>& runs) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& run : runs) {
+        if (!first) body += ",";
+        first = false;
+        body += evaluation_run_json(run);
+    }
+    return body + "]";
+}
+
+std::string experiment_status_name(const ExperimentStatus status) {
+    switch (status) {
+        case ExperimentStatus::queued: return "queued";
+        case ExperimentStatus::running: return "running";
+        case ExperimentStatus::completed: return "completed";
+        case ExperimentStatus::failed: return "failed";
+        case ExperimentStatus::canceled: return "canceled";
+    }
+    throw std::runtime_error("invalid experiment status");
+}
+
+ExperimentStatus parse_experiment_status(const std::string& status) {
+    if (status == "queued") return ExperimentStatus::queued;
+    if (status == "running") return ExperimentStatus::running;
+    if (status == "completed") return ExperimentStatus::completed;
+    if (status == "failed") return ExperimentStatus::failed;
+    if (status == "canceled") return ExperimentStatus::canceled;
+    throw std::runtime_error("stored experiment status is invalid");
+}
+
+ExperimentStore::ExperimentStore(RecordStore& records) : records_(&records) {
+    restore();
+}
+
+void ExperimentStore::restore() {
+    for (const auto& item : records_->list("ml_experiments")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 7U) {
+            throw std::runtime_error(
+                "persisted experiment record field count is wrong");
+        }
+        Experiment experiment;
+        experiment.id = item.first;
+        experiment.project_id = fields[0];
+        experiment.model_id = fields[1];
+        experiment.dataset_id = fields[2];
+        experiment.name = fields[3];
+        experiment.description = fields[4];
+        experiment.owner_id = fields[5];
+        experiment.status = parse_experiment_status(fields[6]);
+        experiments_[experiment.id] = experiment;
+    }
+}
+
+void ExperimentStore::persist(const Experiment& experiment) {
+    records_->put(
+        "ml_experiments", experiment.id,
+        pack({experiment.project_id, experiment.model_id,
+             experiment.dataset_id, experiment.name, experiment.description,
+             experiment.owner_id,
+             experiment_status_name(experiment.status)}));
+}
+
+Experiment ExperimentStore::create(
+    const std::string& owner_id, const std::string& project_id,
+    const std::string& model_id, const std::string& dataset_id,
+    const std::string& name, const std::string& description) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("experiment name is invalid");
+    }
+    if (project_id.empty()) {
+        throw std::invalid_argument("experiment project id is required");
+    }
+    if (model_id.empty()) {
+        throw std::invalid_argument("experiment model id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    Experiment experiment;
+    experiment.id = random_id();
+    experiment.project_id = project_id;
+    experiment.model_id = model_id;
+    experiment.dataset_id = dataset_id;
+    experiment.name = name;
+    experiment.description = description;
+    experiment.owner_id = owner_id;
+    experiment.status = ExperimentStatus::queued;
+    experiment.created_at_epoch_seconds = epoch_seconds();
+    experiment.updated_at_epoch_seconds = experiment.created_at_epoch_seconds;
+    experiments_[experiment.id] = experiment;
+    if (records_) persist(experiment);
+    return experiment;
+}
+
+std::optional<Experiment> ExperimentStore::find(const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = experiments_.find(id);
+    return found != experiments_.end() ? std::optional<Experiment>(found->second)
+                                       : std::nullopt;
+}
+
+std::vector<Experiment> ExperimentStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Experiment> result;
+    result.reserve(experiments_.size());
+    for (const auto& item : experiments_) result.push_back(item.second);
+    return result;
+}
+
+bool ExperimentStore::set_status(const std::string& id,
+                                 const ExperimentStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = experiments_.find(id);
+    if (found == experiments_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool ExperimentStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = experiments_.find(id);
+    if (found == experiments_.end()) return false;
+    experiments_.erase(found);
+    if (records_) records_->erase("ml_experiments", id);
+    return true;
+}
+
+std::string experiment_json(const Experiment& experiment) {
+    return "{\"id\":\"" + json_escape(experiment.id) + "\",\"projectId\":\"" +
+           json_escape(experiment.project_id) + "\",\"modelId\":\"" +
+           json_escape(experiment.model_id) + "\",\"datasetId\":\"" +
+           json_escape(experiment.dataset_id) + "\",\"name\":\"" +
+           json_escape(experiment.name) + "\",\"description\":\"" +
+           json_escape(experiment.description) + "\",\"ownerId\":\"" +
+           json_escape(experiment.owner_id) + "\",\"status\":\"" +
+           experiment_status_name(experiment.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(experiment.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(experiment.updated_at_epoch_seconds) + "}";
+}
+
+std::string experiments_json(const std::vector<Experiment>& experiments) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& experiment : experiments) {
+        if (!first) body += ",";
+        first = false;
+        body += experiment_json(experiment);
+    }
+    return body + "]";
+}
+
+std::string fine_tuning_job_status_name(const FineTuningJobStatus status) {
+    switch (status) {
+        case FineTuningJobStatus::draft: return "draft";
+        case FineTuningJobStatus::queued: return "queued";
+        case FineTuningJobStatus::preparing: return "preparing";
+        case FineTuningJobStatus::running: return "running";
+        case FineTuningJobStatus::paused: return "paused";
+        case FineTuningJobStatus::canceling: return "canceling";
+        case FineTuningJobStatus::canceled: return "canceled";
+        case FineTuningJobStatus::failed: return "failed";
+        case FineTuningJobStatus::completed: return "completed";
+        case FineTuningJobStatus::awaiting_evaluation: return "awaiting_evaluation";
+        case FineTuningJobStatus::archived: return "archived";
+    }
+    throw std::runtime_error("invalid fine-tuning job status");
+}
+
+FineTuningJobStatus parse_fine_tuning_job_status(const std::string& status) {
+    if (status == "draft") return FineTuningJobStatus::draft;
+    if (status == "queued") return FineTuningJobStatus::queued;
+    if (status == "preparing") return FineTuningJobStatus::preparing;
+    if (status == "running") return FineTuningJobStatus::running;
+    if (status == "paused") return FineTuningJobStatus::paused;
+    if (status == "canceling") return FineTuningJobStatus::canceling;
+    if (status == "canceled") return FineTuningJobStatus::canceled;
+    if (status == "failed") return FineTuningJobStatus::failed;
+    if (status == "completed") return FineTuningJobStatus::completed;
+    if (status == "awaiting_evaluation") return FineTuningJobStatus::awaiting_evaluation;
+    if (status == "archived") return FineTuningJobStatus::archived;
+    throw std::runtime_error("stored fine-tuning job status is invalid");
+}
+
+FineTuningJobStore::FineTuningJobStore(RecordStore& records) : records_(&records) {
+    restore();
+}
+
+void FineTuningJobStore::restore() {
+    for (const auto& item : records_->list("ml_fine_tuning_jobs")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 8U) {
+            throw std::runtime_error(
+                "persisted fine-tuning job record field count is wrong");
+        }
+        FineTuningJob job;
+        job.id = item.first;
+        job.project_id = fields[0];
+        job.model_id = fields[1];
+        job.dataset_id = fields[2];
+        job.name = fields[3];
+        job.description = fields[4];
+        job.method = fields[5];
+        job.owner_id = fields[6];
+        job.status = parse_fine_tuning_job_status(fields[7]);
+        jobs_[job.id] = job;
+    }
+}
+
+void FineTuningJobStore::persist(const FineTuningJob& job) {
+    records_->put(
+        "ml_fine_tuning_jobs", job.id,
+        pack({job.project_id, job.model_id, job.dataset_id, job.name,
+             job.description, job.method, job.owner_id,
+             fine_tuning_job_status_name(job.status)}));
+}
+
+FineTuningJob FineTuningJobStore::create(
+    const std::string& owner_id, const std::string& project_id,
+    const std::string& model_id, const std::string& dataset_id,
+    const std::string& name, const std::string& description,
+    const std::string& method) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("fine-tuning job name is invalid");
+    }
+    if (model_id.empty()) {
+        throw std::invalid_argument("fine-tuning job base model id is required");
+    }
+    if (dataset_id.empty()) {
+        throw std::invalid_argument("fine-tuning job dataset id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    FineTuningJob job;
+    job.id = random_id();
+    job.project_id = project_id;
+    job.model_id = model_id;
+    job.dataset_id = dataset_id;
+    job.name = name;
+    job.description = description;
+    job.method = method;
+    job.owner_id = owner_id;
+    job.status = FineTuningJobStatus::draft;
+    job.created_at_epoch_seconds = epoch_seconds();
+    job.updated_at_epoch_seconds = job.created_at_epoch_seconds;
+    jobs_[job.id] = job;
+    if (records_) persist(job);
+    return job;
+}
+
+std::optional<FineTuningJob> FineTuningJobStore::find(const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(id);
+    return found != jobs_.end() ? std::optional<FineTuningJob>(found->second)
+                                : std::nullopt;
+}
+
+std::vector<FineTuningJob> FineTuningJobStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<FineTuningJob> result;
+    result.reserve(jobs_.size());
+    for (const auto& item : jobs_) result.push_back(item.second);
+    return result;
+}
+
+bool FineTuningJobStore::set_status(const std::string& id,
+                                    const FineTuningJobStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(id);
+    if (found == jobs_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool FineTuningJobStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(id);
+    if (found == jobs_.end()) return false;
+    jobs_.erase(found);
+    if (records_) records_->erase("ml_fine_tuning_jobs", id);
+    return true;
+}
+
+std::string fine_tuning_job_json(const FineTuningJob& job) {
+    return "{\"id\":\"" + json_escape(job.id) + "\",\"projectId\":\"" +
+           json_escape(job.project_id) + "\",\"modelId\":\"" +
+           json_escape(job.model_id) + "\",\"datasetId\":\"" +
+           json_escape(job.dataset_id) + "\",\"name\":\"" +
+           json_escape(job.name) + "\",\"description\":\"" +
+           json_escape(job.description) + "\",\"method\":\"" +
+           json_escape(job.method) + "\",\"ownerId\":\"" +
+           json_escape(job.owner_id) + "\",\"status\":\"" +
+           fine_tuning_job_status_name(job.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(job.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(job.updated_at_epoch_seconds) + "}";
+}
+
+std::string fine_tuning_jobs_json(const std::vector<FineTuningJob>& jobs) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& job : jobs) {
+        if (!first) body += ",";
+        first = false;
+        body += fine_tuning_job_json(job);
+    }
+    return body + "]";
+}
+
+std::string model_builder_config_status_name(const ModelBuilderConfigStatus status) {
+    switch (status) {
+        case ModelBuilderConfigStatus::draft: return "draft";
+        case ModelBuilderConfigStatus::configuring: return "configuring";
+        case ModelBuilderConfigStatus::ready: return "ready";
+        case ModelBuilderConfigStatus::submitted: return "submitted";
+        case ModelBuilderConfigStatus::archived: return "archived";
+    }
+    throw std::runtime_error("invalid model builder config status");
+}
+
+ModelBuilderConfigStatus parse_model_builder_config_status(const std::string& status) {
+    if (status == "draft") return ModelBuilderConfigStatus::draft;
+    if (status == "configuring") return ModelBuilderConfigStatus::configuring;
+    if (status == "ready") return ModelBuilderConfigStatus::ready;
+    if (status == "submitted") return ModelBuilderConfigStatus::submitted;
+    if (status == "archived") return ModelBuilderConfigStatus::archived;
+    throw std::runtime_error("stored model builder config status is invalid");
+}
+
+ModelBuilderConfigStore::ModelBuilderConfigStore(RecordStore& records) : records_(&records) {
+    restore();
+}
+
+void ModelBuilderConfigStore::restore() {
+    for (const auto& item : records_->list("ml_model_builder_configs")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 7U) {
+            throw std::runtime_error(
+                "persisted model builder config record field count is wrong");
+        }
+        ModelBuilderConfig config;
+        config.id = item.first;
+        config.project_id = fields[0];
+        config.base_model_id = fields[1];
+        config.name = fields[2];
+        config.description = fields[3];
+        config.source_type = fields[4];
+        config.owner_id = fields[5];
+        config.status = parse_model_builder_config_status(fields[6]);
+        configs_[config.id] = config;
+    }
+}
+
+void ModelBuilderConfigStore::persist(const ModelBuilderConfig& config) {
+    records_->put(
+        "ml_model_builder_configs", config.id,
+        pack({config.project_id, config.base_model_id, config.name,
+             config.description, config.source_type, config.owner_id,
+             model_builder_config_status_name(config.status)}));
+}
+
+ModelBuilderConfig ModelBuilderConfigStore::create(
+    const std::string& owner_id, const std::string& project_id,
+    const std::string& base_model_id, const std::string& name,
+    const std::string& description, const std::string& source_type) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("model builder config name is invalid");
+    }
+    if (source_type.empty()) {
+        throw std::invalid_argument("model builder config source type is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    ModelBuilderConfig config;
+    config.id = random_id();
+    config.project_id = project_id;
+    config.base_model_id = base_model_id;
+    config.name = name;
+    config.description = description;
+    config.source_type = source_type;
+    config.owner_id = owner_id;
+    config.status = ModelBuilderConfigStatus::draft;
+    config.created_at_epoch_seconds = epoch_seconds();
+    config.updated_at_epoch_seconds = config.created_at_epoch_seconds;
+    configs_[config.id] = config;
+    if (records_) persist(config);
+    return config;
+}
+
+std::optional<ModelBuilderConfig> ModelBuilderConfigStore::find(const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = configs_.find(id);
+    return found != configs_.end() ? std::optional<ModelBuilderConfig>(found->second)
+                                   : std::nullopt;
+}
+
+std::vector<ModelBuilderConfig> ModelBuilderConfigStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ModelBuilderConfig> result;
+    result.reserve(configs_.size());
+    for (const auto& item : configs_) result.push_back(item.second);
+    return result;
+}
+
+bool ModelBuilderConfigStore::set_status(const std::string& id,
+                                         const ModelBuilderConfigStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = configs_.find(id);
+    if (found == configs_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool ModelBuilderConfigStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = configs_.find(id);
+    if (found == configs_.end()) return false;
+    configs_.erase(found);
+    if (records_) records_->erase("ml_model_builder_configs", id);
+    return true;
+}
+
+std::string model_builder_config_json(const ModelBuilderConfig& config) {
+    return "{\"id\":\"" + json_escape(config.id) + "\",\"projectId\":\"" +
+           json_escape(config.project_id) + "\",\"baseModelId\":\"" +
+           json_escape(config.base_model_id) + "\",\"name\":\"" +
+           json_escape(config.name) + "\",\"description\":\"" +
+           json_escape(config.description) + "\",\"sourceType\":\"" +
+           json_escape(config.source_type) + "\",\"ownerId\":\"" +
+           json_escape(config.owner_id) + "\",\"status\":\"" +
+           model_builder_config_status_name(config.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(config.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(config.updated_at_epoch_seconds) + "}";
+}
+
+std::string model_builder_configs_json(const std::vector<ModelBuilderConfig>& configs) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& config : configs) {
+        if (!first) body += ",";
+        first = false;
+        body += model_builder_config_json(config);
     }
     return body + "]";
 }

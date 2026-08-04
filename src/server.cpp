@@ -318,6 +318,13 @@ public:
         ml_models = std::make_unique<ModelRegistryStore>(records);
         ml_datasets = std::make_unique<DatasetStore>(records);
         ml_subjects = std::make_unique<SubjectPackageStore>(records);
+        ml_label_tasks = std::make_unique<LabelTaskStore>(records);
+        ml_prep_jobs = std::make_unique<DataPreparationJobStore>(records);
+        ml_training_jobs = std::make_unique<TrainingJobStore>(records);
+        ml_evaluation_runs = std::make_unique<EvaluationRunStore>(records);
+        ml_experiments = std::make_unique<ExperimentStore>(records);
+        ml_fine_tuning_jobs = std::make_unique<FineTuningJobStore>(records);
+        ml_model_builder_configs = std::make_unique<ModelBuilderConfigStore>(records);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -1012,8 +1019,9 @@ public:
             if (auto denied = forbidden_unless(user->role, "ml.dashboard.view")) return *denied;
             return response(200, "OK",
                             machine_learning_dashboard_json(
-                                machine_learning.dashboard(*ml_projects,
-                                                           *ml_models)));
+                                machine_learning.dashboard(
+                                    *ml_projects, *ml_models,
+                                    *ml_training_jobs)));
         }
         // Phase 38: Machine Learning Projects (docs/PLAN.md "Machine
         // Learning Abilities" section 5), scoped to identity/intent/status
@@ -1287,6 +1295,556 @@ public:
             audit.append("ml.subject.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
         }
+        // Phase 41: Data Labeling (docs/PLAN.md "Machine Learning
+        // Abilities" section 14), scoped to identity/target-dataset/
+        // label-mode/assignment/status fields -- see LabelTaskStore's class
+        // comment in masterai.hpp for the fields deferred to the phase that
+        // creates actual label records.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/label-tasks") {
+            if (auto denied = forbidden_unless(user->role, "ml.labels.view")) return *denied;
+            return response(200, "OK",
+                            "{\"labelTasks\":" +
+                                label_tasks_json(ml_label_tasks->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/label-tasks") {
+            if (auto denied = forbidden_unless(user->role, "ml.labels.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto dataset_id = root.required("datasetId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto task = ml_label_tasks->create(
+                    user->id, dataset_id, name, text_field("description"),
+                    text_field("labelMode"), text_field("assigneeId"));
+                audit.append("ml.label_task.create", user->id, "success",
+                             task.id);
+                return response(201, "Created", label_task_json(task));
+            } catch (const std::exception& error) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_ml_label_task\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/label-tasks/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.labels.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status =
+                    parse_label_task_status(root.required("status").as_string());
+                if (!ml_label_tasks->set_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_label_task_not_found\"}");
+                }
+                audit.append("ml.label_task.status", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_label_task_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/label-tasks/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.labels.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            if (!ml_label_tasks->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_label_task_not_found\"}");
+            }
+            audit.append("ml.label_task.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 41: Data Preparation (docs/PLAN.md "Machine Learning
+        // Abilities" section 15), scoped to identity/target-dataset/
+        // operation/status fields -- see DataPreparationJobStore's class
+        // comment in masterai.hpp for the pipeline-step composition,
+        // logging, and reproducibility record deferred to the phase that
+        // actually executes a pipeline.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/prep-jobs") {
+            if (auto denied = forbidden_unless(user->role, "ml.dataprep.view")) return *denied;
+            return response(200, "OK",
+                            "{\"prepJobs\":" +
+                                data_preparation_jobs_json(
+                                    ml_prep_jobs->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/prep-jobs") {
+            if (auto denied = forbidden_unless(user->role, "ml.dataprep.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto dataset_id = root.required("datasetId").as_string();
+                const auto operation = root.required("operation").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto job = ml_prep_jobs->create(
+                    user->id, dataset_id, name, text_field("description"),
+                    operation);
+                audit.append("ml.prep_job.create", user->id, "success",
+                             job.id);
+                return response(201, "Created", data_preparation_job_json(job));
+            } catch (const std::exception& error) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_ml_prep_job\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/prep-jobs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.dataprep.manage")) return *denied;
+            const auto id = request.target.substr(
+                21U, request.target.size() - 21U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_data_preparation_job_status(
+                    root.required("status").as_string());
+                if (!ml_prep_jobs->set_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_prep_job_not_found\"}");
+                }
+                audit.append("ml.prep_job.status", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_prep_job_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/prep-jobs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.dataprep.manage")) return *denied;
+            const auto id = request.target.substr(
+                21U, request.target.size() - 21U - 7U);
+            if (!ml_prep_jobs->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_prep_job_not_found\"}");
+            }
+            audit.append("ml.prep_job.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 42: Training Jobs (docs/PLAN.md "Machine Learning
+        // Abilities" section 16), scoped to identity/target-project/target-
+        // model/target-dataset/training-method/status fields -- see
+        // TrainingJobStore's class comment in masterai.hpp for the compute/
+        // hyperparameter/scheduling fields deferred to the phase that
+        // actually executes a training run.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/training-jobs") {
+            if (auto denied = forbidden_unless(user->role, "ml.training.view")) return *denied;
+            return response(200, "OK",
+                            "{\"trainingJobs\":" +
+                                training_jobs_json(ml_training_jobs->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/training-jobs") {
+            if (auto denied = forbidden_unless(user->role, "ml.training.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto project_id = root.required("projectId").as_string();
+                const auto dataset_id = root.required("datasetId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto job = ml_training_jobs->create(
+                    user->id, project_id, text_field("modelId"), dataset_id,
+                    name, text_field("description"),
+                    text_field("trainingType"));
+                audit.append("ml.training_job.create", user->id, "success",
+                             job.id);
+                return response(201, "Created", training_job_json(job));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_training_job\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/training-jobs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.training.manage")) return *denied;
+            const auto id = request.target.substr(
+                25U, request.target.size() - 25U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_training_job_status(
+                    root.required("status").as_string());
+                if (!ml_training_jobs->set_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_training_job_not_found\"}");
+                }
+                audit.append("ml.training_job.status", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_training_job_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/training-jobs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.training.manage")) return *denied;
+            const auto id = request.target.substr(
+                25U, request.target.size() - 25U - 7U);
+            if (!ml_training_jobs->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_training_job_not_found\"}");
+            }
+            audit.append("ml.training_job.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 43: Evaluation Lab (docs/PLAN.md "Machine Learning
+        // Abilities" section 23), scoped to identity/target-model/target-
+        // dataset/category/status fields -- see EvaluationRunStore's class
+        // comment in masterai.hpp for the benchmark-set/human-evaluation/
+        // pairwise-comparison/numeric-score fields deferred to the phase
+        // that actually executes an evaluation.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/evaluation-runs") {
+            if (auto denied = forbidden_unless(user->role, "ml.evaluation.view")) return *denied;
+            return response(200, "OK",
+                            "{\"evaluationRuns\":" +
+                                evaluation_runs_json(ml_evaluation_runs->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/evaluation-runs") {
+            if (auto denied = forbidden_unless(user->role, "ml.evaluation.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto model_id = root.required("modelId").as_string();
+                const auto dataset_id = root.required("datasetId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto run = ml_evaluation_runs->create(
+                    user->id, model_id, dataset_id, name,
+                    text_field("description"), text_field("category"));
+                audit.append("ml.evaluation_run.create", user->id, "success",
+                             run.id);
+                return response(201, "Created", evaluation_run_json(run));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_evaluation_run\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/evaluation-runs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.evaluation.manage")) return *denied;
+            const auto id = request.target.substr(
+                27U, request.target.size() - 27U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_evaluation_run_status(
+                    root.required("status").as_string());
+                if (!ml_evaluation_runs->set_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_evaluation_run_not_found\"}");
+                }
+                audit.append("ml.evaluation_run.status", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_evaluation_run_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/evaluation-runs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.evaluation.manage")) return *denied;
+            const auto id = request.target.substr(
+                27U, request.target.size() - 27U - 7U);
+            if (!ml_evaluation_runs->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_evaluation_run_not_found\"}");
+            }
+            audit.append("ml.evaluation_run.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 44: Experiment Tracking (docs/PLAN.md "Machine Learning
+        // Abilities" section 25), scoped to identity/target-project/target-
+        // model/target-dataset/status fields -- see ExperimentStore's class
+        // comment in masterai.hpp for the version/hyperparameter/metric/
+        // artifact/comparison fields deferred to the phase that actually
+        // executes and records a training or evaluation run.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/experiments") {
+            if (auto denied = forbidden_unless(user->role, "ml.experiments.view")) return *denied;
+            return response(200, "OK",
+                            "{\"experiments\":" +
+                                experiments_json(ml_experiments->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/experiments") {
+            if (auto denied = forbidden_unless(user->role, "ml.experiments.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto project_id = root.required("projectId").as_string();
+                const auto model_id = root.required("modelId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto experiment = ml_experiments->create(
+                    user->id, project_id, model_id, text_field("datasetId"),
+                    name, text_field("description"));
+                audit.append("ml.experiment.create", user->id, "success",
+                             experiment.id);
+                return response(201, "Created", experiment_json(experiment));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_experiment\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/experiments/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.experiments.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_experiment_status(
+                    root.required("status").as_string());
+                if (!ml_experiments->set_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_experiment_not_found\"}");
+                }
+                audit.append("ml.experiment.status", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_experiment_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/experiments/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.experiments.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            if (!ml_experiments->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_experiment_not_found\"}");
+            }
+            audit.append("ml.experiment.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 45: Fine-Tuning Interface (docs/PLAN.md "Machine Learning
+        // Abilities" section 18), scoped to identity/target-project/target-
+        // model/target-dataset/method/status fields -- see
+        // FineTuningJobStore's class comment in masterai.hpp for the
+        // adapter-method/hyperparameter/checkpoint/output-model fields
+        // deferred to the phase that actually executes a fine-tuning run.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/fine-tuning-jobs") {
+            if (auto denied = forbidden_unless(user->role, "ml.finetuning.view")) return *denied;
+            return response(200, "OK",
+                            "{\"fineTuningJobs\":" +
+                                fine_tuning_jobs_json(ml_fine_tuning_jobs->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/fine-tuning-jobs") {
+            if (auto denied = forbidden_unless(user->role, "ml.finetuning.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto model_id = root.required("modelId").as_string();
+                const auto dataset_id = root.required("datasetId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto job = ml_fine_tuning_jobs->create(
+                    user->id, text_field("projectId"), model_id, dataset_id,
+                    name, text_field("description"), text_field("method"));
+                audit.append("ml.fine_tuning_job.create", user->id, "success",
+                             job.id);
+                return response(201, "Created", fine_tuning_job_json(job));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_fine_tuning_job\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/fine-tuning-jobs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.finetuning.manage")) return *denied;
+            const auto id = request.target.substr(
+                28U, request.target.size() - 28U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_fine_tuning_job_status(
+                    root.required("status").as_string());
+                if (!ml_fine_tuning_jobs->set_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_fine_tuning_job_not_found\"}");
+                }
+                audit.append("ml.fine_tuning_job.status", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_fine_tuning_job_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/fine-tuning-jobs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.finetuning.manage")) return *denied;
+            const auto id = request.target.substr(
+                28U, request.target.size() - 28U - 7U);
+            if (!ml_fine_tuning_jobs->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_fine_tuning_job_not_found\"}");
+            }
+            audit.append("ml.fine_tuning_job.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 46: Model Builder Interface (docs/PLAN.md "Machine Learning
+        // Abilities" section 9), scoped to identity/target-project/base-
+        // model/source-type/status fields -- see ModelBuilderConfigStore's
+        // class comment in masterai.hpp for the architecture/layer/
+        // tokenizer/optimiser/scheduling fields deferred to the phase that
+        // actually executes a model build.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/model-builder-configs") {
+            if (auto denied = forbidden_unless(user->role, "ml.modelbuilder.view")) return *denied;
+            return response(200, "OK",
+                            "{\"modelBuilderConfigs\":" +
+                                model_builder_configs_json(ml_model_builder_configs->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/model-builder-configs") {
+            if (auto denied = forbidden_unless(user->role, "ml.modelbuilder.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto source_type = root.required("sourceType").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto config = ml_model_builder_configs->create(
+                    user->id, text_field("projectId"), text_field("baseModelId"),
+                    name, text_field("description"), source_type);
+                audit.append("ml.model_builder_config.create", user->id, "success",
+                             config.id);
+                return response(201, "Created", model_builder_config_json(config));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_model_builder_config\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/model-builder-configs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.modelbuilder.manage")) return *denied;
+            const auto id = request.target.substr(
+                33U, request.target.size() - 33U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_model_builder_config_status(
+                    root.required("status").as_string());
+                if (!ml_model_builder_configs->set_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_model_builder_config_not_found\"}");
+                }
+                audit.append("ml.model_builder_config.status", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_model_builder_config_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/model-builder-configs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.modelbuilder.manage")) return *denied;
+            const auto id = request.target.substr(
+                33U, request.target.size() - 33U - 7U);
+            if (!ml_model_builder_configs->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_model_builder_config_not_found\"}");
+            }
+            audit.append("ml.model_builder_config.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
         if (request.method == "GET" && request.target == "/models") {
             return workloads->model_inventory_page();
         }
@@ -1356,6 +1914,41 @@ public:
             if (target == "/app/ml/subjects") {
                 return is_administrator
                            ? application_page(*user, "ml-subjects")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/label-tasks") {
+                return is_administrator
+                           ? application_page(*user, "ml-label-tasks")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/prep-jobs") {
+                return is_administrator
+                           ? application_page(*user, "ml-prep-jobs")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/training-jobs") {
+                return is_administrator
+                           ? application_page(*user, "ml-training-jobs")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/evaluation-runs") {
+                return is_administrator
+                           ? application_page(*user, "ml-evaluation-runs")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/experiments") {
+                return is_administrator
+                           ? application_page(*user, "ml-experiments")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/fine-tuning-jobs") {
+                return is_administrator
+                           ? application_page(*user, "ml-fine-tuning-jobs")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/model-builder-configs") {
+                return is_administrator
+                           ? application_page(*user, "ml-model-builder-configs")
                            : response(302, "Found", "", {"Location: /app"});
             }
             if (target == "/app/report/system") {
@@ -2881,6 +3474,13 @@ private:
     std::unique_ptr<ModelRegistryStore> ml_models;
     std::unique_ptr<DatasetStore> ml_datasets;
     std::unique_ptr<SubjectPackageStore> ml_subjects;
+    std::unique_ptr<LabelTaskStore> ml_label_tasks;
+    std::unique_ptr<DataPreparationJobStore> ml_prep_jobs;
+    std::unique_ptr<TrainingJobStore> ml_training_jobs;
+    std::unique_ptr<EvaluationRunStore> ml_evaluation_runs;
+    std::unique_ptr<ExperimentStore> ml_experiments;
+    std::unique_ptr<FineTuningJobStore> ml_fine_tuning_jobs;
+    std::unique_ptr<ModelBuilderConfigStore> ml_model_builder_configs;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
     std::unique_ptr<DownloadManager> downloads;

@@ -526,6 +526,187 @@ Current phase status:
   one, silently dropping the first character of the id and making every ML
   project/model/dataset delete, model state change, and dataset approval
   request 404 regardless of a valid id.
+- Phase 41: Implemented at a scoped-down level (2026-08-04) — Data
+  Labeling (section 14 below) and Data Preparation (section 15 below),
+  both scoped down to identity, the dataset each task/job targets, and a
+  lifecycle status (`LabelTask`/`LabelTaskStore` and
+  `DataPreparationJob`/`DataPreparationJobStore`, `src/ml.cpp`), not the
+  full feature lists (label guidelines, keyboard shortcuts, bulk labeling,
+  suggested labels, confidence values, disagreement handling, consensus
+  review, quality sampling, reviewer accuracy metrics, annotation history,
+  label versioning; pipeline-step composition, execution, logging, and
+  reproducibility record) that require actual label records or an
+  executing pipeline to mean anything. Each labeling task's mode and each
+  preparation job's operation are stored as free text rather than a closed
+  enum, since sections 14 and 15 list 14 and 28 options respectively and
+  growing. New administrator-only `ml.labels.view`/`ml.labels.manage`
+  permissions gate `GET`/`POST /api/v1/ml/label-tasks`,
+  `POST /api/v1/ml/label-tasks/{id}/status`, and
+  `POST /api/v1/ml/label-tasks/{id}/delete`; new
+  `ml.dataprep.view`/`ml.dataprep.manage` permissions gate the mirrored
+  `/api/v1/ml/prep-jobs` routes. New "Data Labeling"
+  (`/app/ml/label-tasks`) and "Data Preparation" (`/app/ml/prep-jobs`)
+  entries under the Machine Learning sidebar in `src/web_ui.cpp` list,
+  create, and move each through status. `test_machine_learning_data_labeling_lifecycle`
+  and `test_machine_learning_data_preparation_lifecycle` cover the same
+  permission/lifecycle/reload/remove guarantees as Phase 40's test, plus
+  `create()` rejecting an empty target dataset id.
+- Phase 42: Implemented at a scoped-down level (2026-08-04) — Training
+  Jobs (section 16 below), scoped down to identity, the project/model/
+  dataset each job targets, a free-text training method (`training_type`
+  -- section 17 lists 20 methods depending on model architecture, not a
+  closed set worth hardcoding), and the full eleven-state lifecycle status
+  from section 16 (`draft`/`queued`/`preparing`/`running`/`paused`/
+  `canceling`/`canceled`/`failed`/`completed`/`awaiting_evaluation`/
+  `archived`), not the compute/hyperparameter/scheduling field list
+  (hardware allocation, container image, hyperparameters, environment
+  variables, secrets references, checkpoint/logging/notification policy,
+  resource/cost ceilings, failure-recovery strategy) that a real training
+  executor will attach to a job once it exists (`TrainingJob`/
+  `TrainingJobStore`, `src/ml.cpp`). `create()` requires both a project id
+  and a dataset id (mirroring Phase 41's dataset-id requirement) but
+  leaves model id optional, since a job may target a model not yet
+  registered while Model Builder remains planned. New administrator-only
+  `ml.training.view`/`ml.training.manage` permissions gate
+  `GET`/`POST /api/v1/ml/training-jobs`,
+  `POST /api/v1/ml/training-jobs/{id}/status`, and
+  `POST /api/v1/ml/training-jobs/{id}/delete`, and a new "Training Jobs"
+  entry under the Machine Learning sidebar (`/app/ml/training-jobs`) in
+  `src/web_ui.cpp` lists, creates, and moves them through status.
+  `MachineLearningRegistry::dashboard()` now also takes a
+  `TrainingJobStore` and reports a real `failedTrainingJobs` count (jobs
+  in the `failed` state) instead of the always-zero placeholder every
+  prior phase left it at.
+  `test_machine_learning_training_jobs_lifecycle` covers the same
+  permission/lifecycle/reload/remove guarantees as Phase 41's tests, plus
+  `create()` rejecting an empty target project id or dataset id and the
+  dashboard's `failedTrainingJobs` count reflecting a real failed job.
+- Phase 43: Implemented at a scoped-down level (2026-08-04) — Evaluation
+  Lab (section 23 below), scoped down to identity, the model/dataset each
+  run targets, a free-text evaluation category (`category` -- section 23
+  lists 24 evaluation categories such as accuracy, F1 score, hallucination
+  rate, and safety compliance, and a real run can report more than one, so
+  this records the single category a given run is organized around, not a
+  closed enum or a full metrics report), and a lifecycle status
+  (`queued`/`running`/`completed`/`failed`/`canceled`), not the section's
+  full surface (standard/custom benchmark sets, subject-specific/
+  regression/safety/adversarial tests, human evaluation, pairwise/blind
+  model comparison, automated scoring, reviewer notes, and the numeric
+  score itself) that only means something once an actual evaluation
+  harness exists to produce one (`EvaluationRun`/`EvaluationRunStore`,
+  `src/ml.cpp`). `create()` requires both a model id and a dataset id,
+  mirroring Phase 42's project/dataset requirement. New administrator-only
+  `ml.evaluation.view`/`ml.evaluation.manage` permissions gate
+  `GET`/`POST /api/v1/ml/evaluation-runs`,
+  `POST /api/v1/ml/evaluation-runs/{id}/status`, and
+  `POST /api/v1/ml/evaluation-runs/{id}/delete`, and a new "Evaluation Lab"
+  entry under the Machine Learning sidebar (`/app/ml/evaluation-runs`) in
+  `src/web_ui.cpp` lists, creates, and moves them through status.
+  `test_machine_learning_evaluation_lab_lifecycle` covers the same
+  permission/lifecycle/reload/remove guarantees as Phase 42's test, plus
+  `create()` rejecting an empty target model id or dataset id.
+- Phase 44: Implemented at a scoped-down level (2026-08-04) — Experiment
+  Tracking (section 25 below), scoped down to identity, the project/model/
+  dataset an experiment relates to, and a lifecycle status
+  (`queued`/`running`/`completed`/`failed`/`canceled`), not the section's
+  full surface (source-code/configuration/container version,
+  hyperparameters, random seed, hardware, runtime, training/validation/
+  evaluation metrics, checkpoints, logs, artifacts, tags, and side-by-side
+  comparison) that only means something once an actual training/evaluation
+  executor exists to produce those records (`Experiment`/`ExperimentStore`,
+  `src/ml.cpp`). `create()` requires both a project id and a model id but
+  allows an empty dataset id, mirroring Phase 42's TrainingJob leaving its
+  model id optional -- not every experiment (e.g. a hyperparameter sweep
+  note) is tied to one dataset. New administrator-only
+  `ml.experiments.view`/`ml.experiments.manage` permissions gate
+  `GET`/`POST /api/v1/ml/experiments`,
+  `POST /api/v1/ml/experiments/{id}/status`, and
+  `POST /api/v1/ml/experiments/{id}/delete`, and a new "Experiment
+  Tracking" entry under the Machine Learning sidebar
+  (`/app/ml/experiments`) in `src/web_ui.cpp` lists, creates, and moves
+  them through status. `test_machine_learning_experiment_tracking_lifecycle`
+  covers the same permission/lifecycle/reload/remove guarantees as Phase
+  43's test, plus `create()` rejecting an empty target project id or model
+  id while accepting an empty dataset id.
+- Phase 45: Implemented at a scoped-down level (2026-08-04) — the
+  Fine-Tuning Interface (section 18 below), scoped down to identity, the
+  project/model/dataset a job relates to, a free-text method, and the same
+  eleven-state lifecycle status Training Jobs uses
+  (`draft`/`queued`/`preparing`/`running`/`paused`/`canceling`/`canceled`/
+  `failed`/`completed`/`awaiting_evaluation`/`archived`), not the
+  base-model-version/subject-package/adapter-method/target-layers/
+  learning-rate/batch-size/epoch-count/context-length/precision/
+  checkpoint-strategy/validation-dataset/safety-dataset/output-model-name/
+  output-version/hardware-estimate field list that a real fine-tuning
+  executor will attach to a job once it exists (`FineTuningJob`/
+  `FineTuningJobStore`, `src/ml.cpp`). `create()` requires both a base
+  model id and a fine-tuning dataset id -- fine-tuning always adapts an
+  existing model with an existing dataset, unlike Training Jobs' optional
+  model id -- but leaves project id optional, mirroring Training Jobs'
+  own optional field, since a one-off fine-tuning run need not belong to a
+  tracked project. `method` is free text rather than a closed enum --
+  section 18 lists ten presets (general instruction tuning, subject
+  specialisation, code assistant, classification, question answering,
+  conversation style, tool-use behavior, structured-output generation,
+  safety alignment, terminology adaptation) and a real job may use one the
+  list doesn't name. New administrator-only `ml.finetuning.view`/
+  `ml.finetuning.manage` permissions gate
+  `GET`/`POST /api/v1/ml/fine-tuning-jobs`,
+  `POST /api/v1/ml/fine-tuning-jobs/{id}/status`, and
+  `POST /api/v1/ml/fine-tuning-jobs/{id}/delete`, and a new "Fine-Tuning"
+  entry under the Machine Learning sidebar (`/app/ml/fine-tuning-jobs`) in
+  `src/web_ui.cpp` lists, creates, and moves them through status. The
+  Machine Learning interface roster still reports `fine-tuning` as
+  `planned` in `/api/v1/ml/dashboard` -- matching Evaluation Lab's and
+  Experiment Tracking's own roster entries, which stayed `planned` through
+  their own implementing phases -- so the roadmap tag change is deferred
+  to whichever later phase revisits that roster as a whole.
+  `test_machine_learning_fine_tuning_lifecycle` covers the same
+  permission/lifecycle/reload/remove guarantees as Phase 44's test, plus
+  `create()` rejecting an empty base model id or dataset id while
+  accepting an empty project id.
+- Phase 46: Implemented at a scoped-down level (2026-08-04) — the Model
+  Builder Interface (section 9 below), scoped down to identity, the
+  project/base model it relates to, a free-text source type, and its own
+  five-state design-time lifecycle status (`draft`/`configuring`/`ready`/
+  `submitted`/`archived`), not the architecture/layer-configuration/
+  hidden-dimensions/attention-configuration/vocabulary-tokenizer/
+  sequence-length/activation-function/dropout/initialisation-strategy/
+  loss-function/optimiser/learning-rate-scheduler/batch-size/epoch-count/
+  gradient-accumulation/gradient-clipping/mixed-precision/checkpoint-
+  frequency/validation-frequency/early-stopping/random-seed/
+  reproducibility/distributed-training field list that a real model-
+  construction executor will attach to a configuration once it exists
+  (`ModelBuilderConfig`/`ModelBuilderConfigStore`, `src/ml.cpp`). Both
+  project id and base model id stay optional -- a from-template or
+  from-scratch build has neither a tracked project nor an existing model
+  to start from, unlike Fine-Tuning where the base model id is mandatory.
+  `source_type` is free text rather than a closed enum -- section 9 lists
+  eleven starting points (new model from template, from existing
+  architecture, from imported base model, from a previous model version,
+  new classical machine-learning model, new neural-network model, new
+  language-model adaptation, new embedding model, new reranking model, new
+  vision model, new audio model) and a real configuration may use one the
+  list doesn't name. The status enum is its own five states rather than
+  reusing Training Jobs'/Fine-Tuning's eleven, because a builder
+  configuration is a design-time draft, not a running job: it never
+  queues, runs, or pauses, it only moves from draft through configuration
+  to a submitted training/fine-tuning request or an archived discard. New
+  administrator-only `ml.modelbuilder.view`/`ml.modelbuilder.manage`
+  permissions gate `GET`/`POST /api/v1/ml/model-builder-configs`,
+  `POST /api/v1/ml/model-builder-configs/{id}/status`, and
+  `POST /api/v1/ml/model-builder-configs/{id}/delete`, and a new "Model
+  Builder" entry under the Machine Learning sidebar
+  (`/app/ml/model-builder-configs`) in `src/web_ui.cpp` lists, creates, and
+  moves them through status. The Machine Learning interface roster still
+  reports `model-builder` as `planned` in `/api/v1/ml/dashboard` --
+  matching Evaluation Lab's, Experiment Tracking's, and Fine-Tuning's own
+  roster entries, which stayed `planned` through their own implementing
+  phases -- so the roadmap tag change is deferred to whichever later phase
+  revisits that roster as a whole. `test_machine_learning_model_builder_lifecycle`
+  covers the same permission/lifecycle/reload/remove guarantees as Phase
+  45's test, plus `create()` rejecting an empty source type while
+  accepting an empty project id and an empty base model id.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -4474,8 +4655,51 @@ examples, counterexamples, reference documents, FAQ, required reasoning
 patterns, prohibited conclusions, known limitations, evaluation questions,
 source citations, update schedule) that the later Knowledge Ingestion
 Pipeline (section 13) will attach to a subject package once it exists.
-Every other capability in this section (Model Builder, training,
-fine-tuning, deployment, and everything through section 51) remains
+Phase 41 implements Data Labeling (section 14) and Data Preparation
+(section 15) at the same scoped-down level — identity, target dataset,
+and lifecycle status only, with each task's label mode and each job's
+operation stored as free text rather than the full feature lists (label
+guidelines, bulk labeling, consensus review, reviewer accuracy metrics,
+...; pipeline-step composition, execution, logging, reproducibility)
+those sections describe. Phase 42 implements Training Jobs (section 16) at
+the same scoped-down level — identity, target project/model/dataset,
+training method, and the full eleven-state lifecycle status from section
+16, not the compute/hyperparameter/scheduling field list (hardware
+allocation, container image, hyperparameters, environment variables,
+secrets, checkpoint/logging/notification policy, resource/cost ceilings,
+failure-recovery strategy) that a real training executor will attach to a
+job once it exists. The dashboard's failed-training-jobs count is now
+real, drawn from Training Jobs in the `failed` state. Phase 43 implements
+the Evaluation Lab (section 23) at the same scoped-down level — identity,
+the model/dataset a run targets, a free-text evaluation category, and a
+lifecycle status, not the benchmark-set/human-evaluation/comparison/
+numeric-score field list that a real evaluation harness will attach to a
+run once it exists. Phase 44 implements Experiment Tracking (section 25)
+at the same scoped-down level -- identity, the project/model/dataset an
+experiment relates to (dataset optional, mirroring Training Jobs' own
+optional model id), and a lifecycle status, not the source-code/
+configuration/container-version, hyperparameter, random-seed, hardware/
+runtime, metric, checkpoint/log/artifact, tag, or side-by-side comparison
+field list that a real training/evaluation executor will attach to an
+experiment once it exists. Phase 45 implements the Fine-Tuning Interface
+(section 18) at the same scoped-down level -- identity, the project/model/
+dataset a job relates to (project id optional, model id and dataset id
+both mandatory since fine-tuning always adapts an existing base model with
+an existing dataset), a free-text method, and the same eleven-state
+lifecycle status Training Jobs uses, not the base-model-version/adapter-
+method/hyperparameter/checkpoint/output-model field list that a real
+fine-tuning executor will attach to a job once it exists. Phase 46
+implements the Model Builder Interface (section 9) at the same scoped-down
+level -- identity, the project/base model it relates to (both optional,
+since a from-template or from-scratch build has neither a tracked project
+nor an existing model to start from), a free-text source type, and its own
+five-state design-time lifecycle status (draft, configuring, ready,
+submitted, archived) rather than the eleven-state job lifecycle Training
+Jobs and Fine-Tuning use, not the architecture/layer/tokenizer/optimiser/
+scheduling field list that a real model-construction executor will attach
+to a configuration once it exists. Every other capability in this section
+(Training Methods execution, Subject Examination, Hyperparameter
+Optimization, deployment, and everything else through section 51) remains
 `Planned`: no implementation has started.
 
 This section extends the plan with an administrator-only Machine Learning

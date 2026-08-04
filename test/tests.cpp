@@ -4355,8 +4355,10 @@ void test_machine_learning_foundation_dashboard() {
     records.open();
     masterai::MLProjectStore empty_projects(records);
     masterai::ModelRegistryStore empty_models(records);
+    masterai::TrainingJobStore empty_training_jobs(records);
     const masterai::MachineLearningRegistry registry;
-    const auto dashboard = registry.dashboard(empty_projects, empty_models);
+    const auto dashboard =
+        registry.dashboard(empty_projects, empty_models, empty_training_jobs);
     require(dashboard.enabled, "the Machine Learning module did not report enabled");
     require(dashboard.active_projects == 0U && dashboard.models_training == 0U &&
                 dashboard.models_awaiting_evaluation == 0U &&
@@ -4376,16 +4378,20 @@ void test_machine_learning_foundation_dashboard() {
                 dashboard_entry->status == "available",
             "the Dashboard interface must report available");
     // Dashboard (Phase 37), Projects (Phase 38), Model Registry / Dataset
-    // Manager (Phase 39), and Subject Knowledge Manager (Phase 40) are the
-    // only interfaces with a real backing service so far; every other
-    // roadmap entry from docs/PLAN.md "Machine Learning Abilities" section 2
-    // must still report planned rather than fabricating readiness ahead of
-    // its own phase.
+    // Manager (Phase 39), Subject Knowledge Manager (Phase 40), Data
+    // Labeling / Data Preparation (Phase 41), and Training Jobs (Phase 42)
+    // are the only interfaces with a real backing service so far; every
+    // other roadmap entry from docs/PLAN.md "Machine Learning Abilities"
+    // section 2 must still report planned rather than fabricating readiness
+    // ahead of its own phase.
     for (const auto& interface : dashboard.interfaces) {
         if (interface.key == "dashboard" || interface.key == "projects" ||
             interface.key == "model-registry" ||
             interface.key == "dataset-manager" ||
-            interface.key == "subject-knowledge") {
+            interface.key == "subject-knowledge" ||
+            interface.key == "data-labeling" ||
+            interface.key == "data-preparation" ||
+            interface.key == "training-jobs") {
             continue;
         }
         require(interface.status == "planned",
@@ -4451,13 +4457,16 @@ void test_machine_learning_projects_lifecycle() {
 
     const masterai::MachineLearningRegistry registry;
     masterai::ModelRegistryStore models(records);
-    require(registry.dashboard(reloaded, models).active_projects == 1U,
+    masterai::TrainingJobStore training_jobs(records);
+    require(registry.dashboard(reloaded, models, training_jobs)
+                    .active_projects == 1U,
             "the dashboard's active-project count did not reflect a real, "
             "non-archived project");
 
     require(projects.set_status(project.id, masterai::MLProjectStatus::archived),
             "set_status() rejected archiving a known project id");
-    require(registry.dashboard(projects, models).active_projects == 0U,
+    require(registry.dashboard(projects, models, training_jobs)
+                    .active_projects == 0U,
             "an archived project must not count as active");
 
     require(projects.remove(project.id), "remove() rejected a known project id");
@@ -4533,8 +4542,10 @@ void test_machine_learning_model_registry_lifecycle() {
             "reload");
 
     masterai::MLProjectStore projects(records);
+    masterai::TrainingJobStore training_jobs(records);
     const masterai::MachineLearningRegistry registry;
-    require(registry.dashboard(projects, reloaded).deployed_models == 1U,
+    require(registry.dashboard(projects, reloaded, training_jobs)
+                    .deployed_models == 1U,
             "the dashboard's deployed-model count did not reflect a real "
             "production entry");
 
@@ -4669,6 +4680,580 @@ void test_machine_learning_subject_knowledge_manager_lifecycle() {
             "subject_package_json did not report the package's own fields");
 }
 
+// Phase 41: LabelTaskStore must persist labeling tasks (surviving a
+// reload), start every new task at queued against the given dataset, let an
+// administrator move it through status, and report those fields in JSON --
+// see docs/PLAN.md "Machine Learning Abilities" section 14.
+void test_machine_learning_data_labeling_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.labels.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.labels.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.labels.view"),
+            "ml.labels.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::LabelTaskStore tasks(records);
+    const auto task = tasks.create(
+        "administrator-1", "dataset-1", "cpp-transcripts-labeling",
+        "Classify transcripts by support category.", "text_category",
+        "reviewer-1");
+    require(!task.id.empty() &&
+                task.dataset_id == "dataset-1" &&
+                task.status == masterai::LabelTaskStatus::queued &&
+                task.owner_id == "administrator-1",
+            "a newly created label task must start queued against its "
+            "dataset with its owner recorded");
+    require(tasks.list().size() == 1U,
+            "the created label task was not visible in list()");
+
+    bool rejected_empty_dataset = false;
+    try {
+        tasks.create("administrator-1", "", "no dataset", "", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_dataset = true;
+    }
+    require(rejected_empty_dataset,
+            "create() must reject a label task with no target dataset id");
+
+    require(tasks.set_status(task.id, masterai::LabelTaskStatus::in_progress),
+            "set_status() rejected a known label task id");
+    require(tasks.find(task.id)->status ==
+                masterai::LabelTaskStatus::in_progress,
+            "set_status() did not persist the new status");
+    require(!tasks.set_status("nonexistent-task",
+                              masterai::LabelTaskStatus::completed),
+            "set_status() must no-op for an unknown label task id, not "
+            "throw");
+
+    masterai::LabelTaskStore reloaded(records);
+    const auto reloaded_task = reloaded.find(task.id);
+    require(reloaded_task.has_value() &&
+                reloaded_task->name == "cpp-transcripts-labeling" &&
+                reloaded_task->status == masterai::LabelTaskStatus::in_progress,
+            "LabelTaskStore did not restore a persisted label task after "
+            "reload");
+
+    require(tasks.remove(task.id), "remove() rejected a known label task id");
+    require(tasks.list().empty(), "remove() did not delete the label task");
+    require(!tasks.remove(task.id),
+            "remove() must no-op for an already-removed label task id, not "
+            "throw");
+
+    const auto json = masterai::label_task_json(task);
+    require(json.find("\"name\":\"cpp-transcripts-labeling\"") != std::string::npos &&
+                json.find("\"status\":\"queued\"") != std::string::npos,
+            "label_task_json did not report the task's own fields");
+}
+
+// Phase 41: DataPreparationJobStore must persist jobs (surviving a reload),
+// start every new job at pending against the given dataset, let an
+// administrator move it through status, and report those fields in JSON --
+// see docs/PLAN.md "Machine Learning Abilities" section 15.
+void test_machine_learning_data_preparation_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.dataprep.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.dataprep.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.dataprep.view"),
+            "ml.dataprep.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::DataPreparationJobStore jobs(records);
+    const auto job = jobs.create(
+        "administrator-1", "dataset-1", "dedupe-transcripts",
+        "Remove duplicate transcript records.", "remove_duplicates");
+    require(!job.id.empty() &&
+                job.dataset_id == "dataset-1" &&
+                job.status == masterai::DataPreparationJobStatus::pending &&
+                job.owner_id == "administrator-1",
+            "a newly created preparation job must start pending against its "
+            "dataset with its owner recorded");
+    require(jobs.list().size() == 1U,
+            "the created preparation job was not visible in list()");
+
+    bool rejected_empty_dataset = false;
+    try {
+        jobs.create("administrator-1", "", "no dataset", "", "op");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_dataset = true;
+    }
+    require(rejected_empty_dataset,
+            "create() must reject a preparation job with no target dataset "
+            "id");
+
+    require(jobs.set_status(job.id,
+                            masterai::DataPreparationJobStatus::running),
+            "set_status() rejected a known preparation job id");
+    require(jobs.find(job.id)->status ==
+                masterai::DataPreparationJobStatus::running,
+            "set_status() did not persist the new status");
+    require(!jobs.set_status("nonexistent-job",
+                             masterai::DataPreparationJobStatus::completed),
+            "set_status() must no-op for an unknown preparation job id, not "
+            "throw");
+
+    masterai::DataPreparationJobStore reloaded(records);
+    const auto reloaded_job = reloaded.find(job.id);
+    require(reloaded_job.has_value() &&
+                reloaded_job->name == "dedupe-transcripts" &&
+                reloaded_job->status ==
+                    masterai::DataPreparationJobStatus::running,
+            "DataPreparationJobStore did not restore a persisted "
+            "preparation job after reload");
+
+    require(jobs.remove(job.id),
+            "remove() rejected a known preparation job id");
+    require(jobs.list().empty(), "remove() did not delete the preparation job");
+    require(!jobs.remove(job.id),
+            "remove() must no-op for an already-removed preparation job id, "
+            "not throw");
+
+    const auto json = masterai::data_preparation_job_json(job);
+    require(json.find("\"name\":\"dedupe-transcripts\"") != std::string::npos &&
+                json.find("\"status\":\"pending\"") != std::string::npos,
+            "data_preparation_job_json did not report the job's own "
+            "fields");
+}
+
+// Phase 42: TrainingJobStore must persist training jobs (surviving a
+// reload), start every new job at draft against the given project and
+// dataset, let an administrator move it through status, and report those
+// fields in JSON -- see docs/PLAN.md "Machine Learning Abilities" section
+// 16. Also verifies the dashboard's failedTrainingJobs count now reflects
+// real training jobs instead of always reporting zero.
+void test_machine_learning_training_jobs_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.training.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.training.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.training.view"),
+            "ml.training.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::TrainingJobStore jobs(records);
+    const auto job = jobs.create(
+        "administrator-1", "project-1", "model-1", "dataset-1",
+        "cpp-review-finetune", "Fine-tune on C++ review transcripts.",
+        "fine_tuning");
+    require(!job.id.empty() &&
+                job.project_id == "project-1" &&
+                job.dataset_id == "dataset-1" &&
+                job.status == masterai::TrainingJobStatus::draft &&
+                job.owner_id == "administrator-1",
+            "a newly created training job must start draft against its "
+            "project and dataset with its owner recorded");
+    require(jobs.list().size() == 1U,
+            "the created training job was not visible in list()");
+
+    bool rejected_empty_project = false;
+    try {
+        jobs.create("administrator-1", "", "model-1", "dataset-1",
+                   "no project", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_project = true;
+    }
+    require(rejected_empty_project,
+            "create() must reject a training job with no target project id");
+
+    bool rejected_empty_dataset = false;
+    try {
+        jobs.create("administrator-1", "project-1", "model-1", "",
+                   "no dataset", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_dataset = true;
+    }
+    require(rejected_empty_dataset,
+            "create() must reject a training job with no target dataset id");
+
+    require(jobs.set_status(job.id, masterai::TrainingJobStatus::running),
+            "set_status() rejected a known training job id");
+    require(jobs.find(job.id)->status == masterai::TrainingJobStatus::running,
+            "set_status() did not persist the new status");
+    require(!jobs.set_status("nonexistent-job",
+                             masterai::TrainingJobStatus::completed),
+            "set_status() must no-op for an unknown training job id, not "
+            "throw");
+
+    masterai::TrainingJobStore reloaded(records);
+    const auto reloaded_job = reloaded.find(job.id);
+    require(reloaded_job.has_value() &&
+                reloaded_job->name == "cpp-review-finetune" &&
+                reloaded_job->status == masterai::TrainingJobStatus::running,
+            "TrainingJobStore did not restore a persisted training job "
+            "after reload");
+
+    require(jobs.set_status(job.id, masterai::TrainingJobStatus::failed),
+            "set_status() rejected moving a known training job to failed");
+    masterai::MLProjectStore projects(records);
+    masterai::ModelRegistryStore models(records);
+    const auto dashboard =
+        masterai::MachineLearningRegistry().dashboard(projects, models, jobs);
+    require(dashboard.failed_training_jobs == 1U,
+            "dashboard() did not count a failed training job");
+
+    require(jobs.remove(job.id),
+            "remove() rejected a known training job id");
+    require(jobs.list().empty(), "remove() did not delete the training job");
+    require(!jobs.remove(job.id),
+            "remove() must no-op for an already-removed training job id, "
+            "not throw");
+
+    const auto json = masterai::training_job_json(job);
+    require(json.find("\"name\":\"cpp-review-finetune\"") != std::string::npos &&
+                json.find("\"trainingType\":\"fine_tuning\"") != std::string::npos,
+            "training_job_json did not report the job's own fields");
+}
+
+// Phase 43: EvaluationRunStore must persist evaluation runs (surviving a
+// reload), start every new run at queued against the given model and
+// benchmark dataset, let an administrator move it through status, and
+// report those fields in JSON -- see docs/PLAN.md "Machine Learning
+// Abilities" section 23.
+void test_machine_learning_evaluation_lab_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.evaluation.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.evaluation.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.evaluation.view"),
+            "ml.evaluation.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::EvaluationRunStore runs(records);
+    const auto run = runs.create(
+        "administrator-1", "model-1", "dataset-1",
+        "cpp-review-accuracy", "Score the fine-tuned model's accuracy.",
+        "accuracy");
+    require(!run.id.empty() &&
+                run.model_id == "model-1" &&
+                run.dataset_id == "dataset-1" &&
+                run.status == masterai::EvaluationRunStatus::queued &&
+                run.owner_id == "administrator-1",
+            "a newly created evaluation run must start queued against its "
+            "model and dataset with its owner recorded");
+    require(runs.list().size() == 1U,
+            "the created evaluation run was not visible in list()");
+
+    bool rejected_empty_model = false;
+    try {
+        runs.create("administrator-1", "", "dataset-1", "no model", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_model = true;
+    }
+    require(rejected_empty_model,
+            "create() must reject an evaluation run with no target model id");
+
+    bool rejected_empty_dataset = false;
+    try {
+        runs.create("administrator-1", "model-1", "", "no dataset", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_dataset = true;
+    }
+    require(rejected_empty_dataset,
+            "create() must reject an evaluation run with no target dataset "
+            "id");
+
+    require(runs.set_status(run.id, masterai::EvaluationRunStatus::running),
+            "set_status() rejected a known evaluation run id");
+    require(runs.find(run.id)->status == masterai::EvaluationRunStatus::running,
+            "set_status() did not persist the new status");
+    require(!runs.set_status("nonexistent-run",
+                             masterai::EvaluationRunStatus::completed),
+            "set_status() must no-op for an unknown evaluation run id, not "
+            "throw");
+
+    masterai::EvaluationRunStore reloaded(records);
+    const auto reloaded_run = reloaded.find(run.id);
+    require(reloaded_run.has_value() &&
+                reloaded_run->name == "cpp-review-accuracy" &&
+                reloaded_run->status == masterai::EvaluationRunStatus::running,
+            "EvaluationRunStore did not restore a persisted evaluation run "
+            "after reload");
+
+    require(runs.remove(run.id),
+            "remove() rejected a known evaluation run id");
+    require(runs.list().empty(), "remove() did not delete the evaluation run");
+    require(!runs.remove(run.id),
+            "remove() must no-op for an already-removed evaluation run id, "
+            "not throw");
+
+    const auto json = masterai::evaluation_run_json(run);
+    require(json.find("\"name\":\"cpp-review-accuracy\"") != std::string::npos &&
+                json.find("\"category\":\"accuracy\"") != std::string::npos,
+            "evaluation_run_json did not report the run's own fields");
+}
+
+void test_machine_learning_experiment_tracking_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.experiments.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.experiments.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.experiments.view"),
+            "ml.experiments.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::ExperimentStore experiments(records);
+    const auto experiment = experiments.create(
+        "administrator-1", "project-1", "model-1", "dataset-1",
+        "lora-rank-sweep", "Compare LoRA rank 8 vs 16 on the fine-tune.");
+    require(!experiment.id.empty() &&
+                experiment.project_id == "project-1" &&
+                experiment.model_id == "model-1" &&
+                experiment.dataset_id == "dataset-1" &&
+                experiment.status == masterai::ExperimentStatus::queued &&
+                experiment.owner_id == "administrator-1",
+            "a newly created experiment must start queued against its "
+            "project and model with its owner recorded");
+    require(experiments.list().size() == 1U,
+            "the created experiment was not visible in list()");
+
+    bool rejected_empty_project = false;
+    try {
+        experiments.create("administrator-1", "", "model-1", "dataset-1",
+                           "no project", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_project = true;
+    }
+    require(rejected_empty_project,
+            "create() must reject an experiment with no target project id");
+
+    bool rejected_empty_model = false;
+    try {
+        experiments.create("administrator-1", "project-1", "", "dataset-1",
+                           "no model", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_model = true;
+    }
+    require(rejected_empty_model,
+            "create() must reject an experiment with no target model id");
+
+    const auto no_dataset = experiments.create(
+        "administrator-1", "project-1", "model-1", "", "no dataset needed",
+        "");
+    require(no_dataset.dataset_id.empty(),
+            "create() must allow an experiment with no target dataset id");
+
+    require(experiments.set_status(experiment.id,
+                                   masterai::ExperimentStatus::running),
+            "set_status() rejected a known experiment id");
+    require(experiments.find(experiment.id)->status ==
+                masterai::ExperimentStatus::running,
+            "set_status() did not persist the new status");
+    require(!experiments.set_status("nonexistent-experiment",
+                                    masterai::ExperimentStatus::completed),
+            "set_status() must no-op for an unknown experiment id, not "
+            "throw");
+
+    masterai::ExperimentStore reloaded(records);
+    const auto reloaded_experiment = reloaded.find(experiment.id);
+    require(reloaded_experiment.has_value() &&
+                reloaded_experiment->name == "lora-rank-sweep" &&
+                reloaded_experiment->status ==
+                    masterai::ExperimentStatus::running,
+            "ExperimentStore did not restore a persisted experiment after "
+            "reload");
+
+    require(experiments.remove(experiment.id),
+            "remove() rejected a known experiment id");
+    require(experiments.list().size() == 1U,
+            "remove() did not delete the experiment");
+    require(!experiments.remove(experiment.id),
+            "remove() must no-op for an already-removed experiment id, not "
+            "throw");
+
+    const auto json = masterai::experiment_json(no_dataset);
+    require(json.find("\"name\":\"no dataset needed\"") != std::string::npos &&
+                json.find("\"datasetId\":\"\"") != std::string::npos,
+            "experiment_json did not report the experiment's own fields");
+}
+
+void test_machine_learning_fine_tuning_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.finetuning.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.finetuning.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.finetuning.view"),
+            "ml.finetuning.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::FineTuningJobStore jobs(records);
+    const auto job = jobs.create("administrator-1", "project-1", "model-1",
+                                 "dataset-1", "cpp-assistant-tune",
+                                 "Adapt the base model for C++ code review.",
+                                 "code_assistant");
+    require(!job.id.empty() && job.project_id == "project-1" &&
+                job.model_id == "model-1" && job.dataset_id == "dataset-1" &&
+                job.method == "code_assistant" &&
+                job.status == masterai::FineTuningJobStatus::draft &&
+                job.owner_id == "administrator-1",
+            "a newly created fine-tuning job must start draft against its "
+            "base model and dataset with its owner recorded");
+    require(jobs.list().size() == 1U,
+            "the created fine-tuning job was not visible in list()");
+
+    bool rejected_empty_model = false;
+    try {
+        jobs.create("administrator-1", "project-1", "", "dataset-1",
+                   "no model", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_model = true;
+    }
+    require(rejected_empty_model,
+            "create() must reject a fine-tuning job with no base model id");
+
+    bool rejected_empty_dataset = false;
+    try {
+        jobs.create("administrator-1", "project-1", "model-1", "",
+                   "no dataset", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_dataset = true;
+    }
+    require(rejected_empty_dataset,
+            "create() must reject a fine-tuning job with no dataset id");
+
+    const auto no_project = jobs.create("administrator-1", "", "model-1",
+                                        "dataset-1", "no project needed", "",
+                                        "");
+    require(no_project.project_id.empty(),
+            "create() must allow a fine-tuning job with no target project "
+            "id");
+
+    require(jobs.set_status(job.id, masterai::FineTuningJobStatus::running),
+            "set_status() rejected a known fine-tuning job id");
+    require(jobs.find(job.id)->status ==
+                masterai::FineTuningJobStatus::running,
+            "set_status() did not persist the new status");
+    require(!jobs.set_status("nonexistent-fine-tuning-job",
+                             masterai::FineTuningJobStatus::completed),
+            "set_status() must no-op for an unknown fine-tuning job id, not "
+            "throw");
+
+    masterai::FineTuningJobStore reloaded(records);
+    const auto reloaded_job = reloaded.find(job.id);
+    require(reloaded_job.has_value() &&
+                reloaded_job->name == "cpp-assistant-tune" &&
+                reloaded_job->status == masterai::FineTuningJobStatus::running,
+            "FineTuningJobStore did not restore a persisted fine-tuning job "
+            "after reload");
+
+    require(jobs.remove(job.id),
+            "remove() rejected a known fine-tuning job id");
+    require(jobs.list().size() == 1U,
+            "remove() did not delete the fine-tuning job");
+    require(!jobs.remove(job.id),
+            "remove() must no-op for an already-removed fine-tuning job id, "
+            "not throw");
+
+    const auto json = masterai::fine_tuning_job_json(no_project);
+    require(json.find("\"name\":\"no project needed\"") != std::string::npos &&
+                json.find("\"projectId\":\"\"") != std::string::npos,
+            "fine_tuning_job_json did not report the fine-tuning job's own "
+            "fields");
+}
+
+void test_machine_learning_model_builder_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.modelbuilder.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.modelbuilder.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.modelbuilder.view"),
+            "ml.modelbuilder.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::ModelBuilderConfigStore configs(records);
+    const auto config = configs.create(
+        "administrator-1", "project-1", "model-1", "cpp-assistant-build",
+        "Adapt the base model into a new C++ assistant configuration.",
+        "imported_base_model");
+    require(!config.id.empty() && config.project_id == "project-1" &&
+                config.base_model_id == "model-1" &&
+                config.source_type == "imported_base_model" &&
+                config.status == masterai::ModelBuilderConfigStatus::draft &&
+                config.owner_id == "administrator-1",
+            "a newly created model builder configuration must start draft "
+            "against its project/base model with its owner recorded");
+    require(configs.list().size() == 1U,
+            "the created model builder configuration was not visible in "
+            "list()");
+
+    bool rejected_empty_source_type = false;
+    try {
+        configs.create("administrator-1", "project-1", "", "no source type",
+                      "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_source_type = true;
+    }
+    require(rejected_empty_source_type,
+            "create() must reject a model builder configuration with no "
+            "source type");
+
+    const auto no_project_or_base = configs.create(
+        "administrator-1", "", "", "no project or base model needed", "",
+        "template");
+    require(no_project_or_base.project_id.empty() &&
+                no_project_or_base.base_model_id.empty(),
+            "create() must allow a model builder configuration with no "
+            "target project id or base model id");
+
+    require(configs.set_status(config.id,
+                               masterai::ModelBuilderConfigStatus::ready),
+            "set_status() rejected a known model builder configuration id");
+    require(configs.find(config.id)->status ==
+                masterai::ModelBuilderConfigStatus::ready,
+            "set_status() did not persist the new status");
+    require(!configs.set_status(
+                "nonexistent-model-builder-config",
+                masterai::ModelBuilderConfigStatus::submitted),
+            "set_status() must no-op for an unknown model builder "
+            "configuration id, not throw");
+
+    masterai::ModelBuilderConfigStore reloaded(records);
+    const auto reloaded_config = reloaded.find(config.id);
+    require(reloaded_config.has_value() &&
+                reloaded_config->name == "cpp-assistant-build" &&
+                reloaded_config->status ==
+                    masterai::ModelBuilderConfigStatus::ready,
+            "ModelBuilderConfigStore did not restore a persisted model "
+            "builder configuration after reload");
+
+    require(configs.remove(config.id),
+            "remove() rejected a known model builder configuration id");
+    require(configs.list().size() == 1U,
+            "remove() did not delete the model builder configuration");
+    require(!configs.remove(config.id),
+            "remove() must no-op for an already-removed model builder "
+            "configuration id, not throw");
+
+    const auto json = masterai::model_builder_config_json(no_project_or_base);
+    require(json.find("\"name\":\"no project or base model needed\"") !=
+                    std::string::npos &&
+                json.find("\"projectId\":\"\"") != std::string::npos &&
+                json.find("\"baseModelId\":\"\"") != std::string::npos,
+            "model_builder_config_json did not report the model builder "
+            "configuration's own fields");
+}
+
 }  // namespace
 
 int main() {
@@ -4792,6 +5377,20 @@ int main() {
             test_machine_learning_dataset_manager_lifecycle);
         run("Machine Learning subject knowledge manager lifecycle",
             test_machine_learning_subject_knowledge_manager_lifecycle);
+        run("Machine Learning data labeling lifecycle",
+            test_machine_learning_data_labeling_lifecycle);
+        run("Machine Learning data preparation lifecycle",
+            test_machine_learning_data_preparation_lifecycle);
+        run("Machine Learning training jobs lifecycle",
+            test_machine_learning_training_jobs_lifecycle);
+        run("Machine Learning evaluation lab lifecycle",
+            test_machine_learning_evaluation_lab_lifecycle);
+        run("Machine Learning experiment tracking lifecycle",
+            test_machine_learning_experiment_tracking_lifecycle);
+        run("Machine Learning fine-tuning lifecycle",
+            test_machine_learning_fine_tuning_lifecycle);
+        run("Machine Learning model builder lifecycle",
+            test_machine_learning_model_builder_lifecycle);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

@@ -118,7 +118,8 @@ std::string application_script() {
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
-        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,cfg,report]=await Promise.all([api('/api/v1/users/me'),"
+        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,cfg,report]="
+        "await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
         "api('/api/v1/models').catch(()=>({models:[]})),"
@@ -136,6 +137,14 @@ std::string application_script() {
         "api('/api/v1/ml/models').catch(()=>({models:[]})),"
         "api('/api/v1/ml/datasets').catch(()=>({datasets:[]})),"
         "api('/api/v1/ml/subjects').catch(()=>({subjects:[]})),"
+        "api('/api/v1/ml/label-tasks').catch(()=>({labelTasks:[]})),"
+        "api('/api/v1/ml/prep-jobs').catch(()=>({prepJobs:[]})),"
+        "api('/api/v1/ml/training-jobs').catch(()=>({trainingJobs:[]})),"
+        "api('/api/v1/ml/evaluation-runs').catch(()=>({evaluationRuns:[]})),"
+        "api('/api/v1/ml/experiments').catch(()=>({experiments:[]})),"
+        "api('/api/v1/ml/fine-tuning-jobs').catch(()=>({fineTuningJobs:[]})),"
+        "api('/api/v1/ml/model-builder-configs').catch("
+        "()=>({modelBuilderConfigs:[]})),"
         // 403/503 for anyone who isn't an administrator, or when no
         // settings.json path is known to the running server -- both are
         // quiet, expected no-ops here exactly like the ml.* fetches above.
@@ -151,7 +160,14 @@ std::string application_script() {
         "renderBenchmarks(b.benchmarks);renderDownloads(d.downloads);"
         "renderUsers(u.users);renderMlDashboard(ml);renderMlProjects(mlp.projects);"
         "renderMlModels(mlm.models);renderMlDatasets(mld.datasets);"
-        "renderMlSubjects(mls.subjects);renderSystemConfig(cfg);"
+        "renderMlSubjects(mls.subjects);"
+        "renderMlLabelTasks(mllt.labelTasks);renderMlPrepJobs(mlpj.prepJobs);"
+        "renderMlTrainingJobs(mltj.trainingJobs);"
+        "renderMlEvaluationRuns(mler.evaluationRuns);"
+        "renderMlExperiments(mlex.experiments);"
+        "renderMlFineTuningJobs(mlft.fineTuningJobs);"
+        "renderMlModelBuilderConfigs(mlmb.modelBuilderConfigs);"
+        "renderSystemConfig(cfg);"
         "renderSystemReport(report);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
         // Chat offers every downloaded, verified model whose backend/format
@@ -746,6 +762,297 @@ std::string application_script() {
         "encodeURIComponent(btn.dataset.deleteMlSubject)+'/delete','POST');"
         "await load();}"
         "catch(x){showSystemError('Delete subject failed: '+x.message);}});}}"
+        // Data Labeling (docs/PLAN.md "Machine Learning Abilities" section
+        // 14): each row carries its own status dropdown, mirroring the
+        // Subject Knowledge Manager's review-status pattern above, plus a
+        // Delete button.
+        "const LABEL_TASK_STATUSES=['queued','in_progress','in_review',"
+        "'completed'];"
+        "function renderMlLabelTasks(tasks){const el=q('#mlLabelTasksList');"
+        "if(!el)return;"
+        "if(!tasks.length){el.innerHTML='<p>No labeling tasks created "
+        "yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Dataset','Label mode','Assignee',"
+        "'Status','Set status',''],"
+        "tasks.map(x=>[esc(x.name),esc(x.datasetId),esc(x.labelMode),"
+        "esc(x.assigneeId),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-label-task-status-for=\"'+x.id+'\">'+"
+        "LABEL_TASK_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-label-task-status=\"'+x.id+"
+        "'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-label-task=\"'+x.id+"
+        "'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-label-task-status]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applyLabelTaskStatus;"
+        "const status=el.querySelector("
+        "'[data-label-task-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/label-tasks/'+encodeURIComponent(id)+"
+        "'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update labeling task status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll('[data-delete-ml-label-task]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/label-tasks/'+"
+        "encodeURIComponent(btn.dataset.deleteMlLabelTask)+'/delete',"
+        "'POST');await load();}"
+        "catch(x){showSystemError('Delete labeling task failed: '+"
+        "x.message);}});}}"
+        // Data Preparation (docs/PLAN.md "Machine Learning Abilities"
+        // section 15): same status-dropdown-plus-Delete pattern as Data
+        // Labeling above.
+        "const PREP_JOB_STATUSES=['pending','running','completed','failed'];"
+        "function renderMlPrepJobs(jobs){const el=q('#mlPrepJobsList');"
+        "if(!el)return;"
+        "if(!jobs.length){el.innerHTML='<p>No preparation jobs created "
+        "yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Dataset','Operation','Status',"
+        "'Set status',''],"
+        "jobs.map(x=>[esc(x.name),esc(x.datasetId),esc(x.operation),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-prep-job-status-for=\"'+x.id+'\">'+"
+        "PREP_JOB_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-prep-job-status=\"'+x.id+"
+        "'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-prep-job=\"'+x.id+"
+        "'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-prep-job-status]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applyPrepJobStatus;"
+        "const status=el.querySelector("
+        "'[data-prep-job-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/prep-jobs/'+encodeURIComponent(id)+"
+        "'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update preparation job status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll('[data-delete-ml-prep-job]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/prep-jobs/'+"
+        "encodeURIComponent(btn.dataset.deleteMlPrepJob)+'/delete',"
+        "'POST');await load();}"
+        "catch(x){showSystemError('Delete preparation job failed: '+"
+        "x.message);}});}}"
+        // Training Jobs (docs/PLAN.md "Machine Learning Abilities" section
+        // 16): same status-dropdown-plus-Delete pattern as Data Labeling/
+        // Data Preparation above, with the status list matching section
+        // 16's eleven lifecycle states.
+        "const TRAINING_JOB_STATUSES=['draft','queued','preparing','running',"
+        "'paused','canceling','canceled','failed','completed',"
+        "'awaiting_evaluation','archived'];"
+        "function renderMlTrainingJobs(jobs){const el=q('#mlTrainingJobsList');"
+        "if(!el)return;"
+        "if(!jobs.length){el.innerHTML='<p>No training jobs created "
+        "yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Project','Model','Dataset','Training "
+        "type','Status','Set status',''],"
+        "jobs.map(x=>[esc(x.name),esc(x.projectId),esc(x.modelId),"
+        "esc(x.datasetId),esc(x.trainingType),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-training-job-status-for=\"'+x.id+'\">'+"
+        "TRAINING_JOB_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-training-job-status=\"'+x.id+"
+        "'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-training-job=\"'+x.id+"
+        "'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-training-job-status]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applyTrainingJobStatus;"
+        "const status=el.querySelector("
+        "'[data-training-job-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/training-jobs/'+encodeURIComponent(id)+"
+        "'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update training job status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-training-job]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/training-jobs/'+"
+        "encodeURIComponent(btn.dataset.deleteMlTrainingJob)+'/delete',"
+        "'POST');await load();}"
+        "catch(x){showSystemError('Delete training job failed: '+"
+        "x.message);}});}}"
+        // Evaluation Lab (docs/PLAN.md "Machine Learning Abilities" section
+        // 23): same status-dropdown-plus-Delete pattern as Training Jobs
+        // above.
+        "const EVALUATION_RUN_STATUSES=['queued','running','completed',"
+        "'failed','canceled'];"
+        "function renderMlEvaluationRuns(runs){const el=q('#mlEvaluationRunsList');"
+        "if(!el)return;"
+        "if(!runs.length){el.innerHTML='<p>No evaluation runs created "
+        "yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Model','Dataset','Category','Status',"
+        "'Set status',''],"
+        "runs.map(x=>[esc(x.name),esc(x.modelId),esc(x.datasetId),"
+        "esc(x.category),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-evaluation-run-status-for=\"'+x.id+'\">'+"
+        "EVALUATION_RUN_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-evaluation-run-status=\"'+x.id+"
+        "'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-evaluation-run=\"'+x.id+"
+        "'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-evaluation-run-status]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applyEvaluationRunStatus;"
+        "const status=el.querySelector("
+        "'[data-evaluation-run-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/evaluation-runs/'+encodeURIComponent(id)+"
+        "'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update evaluation run status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-evaluation-run]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/evaluation-runs/'+"
+        "encodeURIComponent(btn.dataset.deleteMlEvaluationRun)+'/delete',"
+        "'POST');await load();}"
+        "catch(x){showSystemError('Delete evaluation run failed: '+"
+        "x.message);}});}}"
+        // Experiment Tracking (docs/PLAN.md "Machine Learning Abilities"
+        // section 25): same status-dropdown-plus-Delete pattern as
+        // Evaluation Lab above.
+        "const EXPERIMENT_STATUSES=['queued','running','completed',"
+        "'failed','canceled'];"
+        "function renderMlExperiments(experiments){const el=q('#mlExperimentsList');"
+        "if(!el)return;"
+        "if(!experiments.length){el.innerHTML='<p>No experiments created "
+        "yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Project','Model','Dataset','Status',"
+        "'Set status',''],"
+        "experiments.map(x=>[esc(x.name),esc(x.projectId),esc(x.modelId),"
+        "esc(x.datasetId),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-experiment-status-for=\"'+x.id+'\">'+"
+        "EXPERIMENT_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-experiment-status=\"'+x.id+"
+        "'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-experiment=\"'+x.id+"
+        "'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-experiment-status]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applyExperimentStatus;"
+        "const status=el.querySelector("
+        "'[data-experiment-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/experiments/'+encodeURIComponent(id)+"
+        "'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update experiment status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-experiment]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/experiments/'+"
+        "encodeURIComponent(btn.dataset.deleteMlExperiment)+'/delete',"
+        "'POST');await load();}"
+        "catch(x){showSystemError('Delete experiment failed: '+"
+        "x.message);}});}}"
+        // Fine-Tuning Interface (docs/PLAN.md "Machine Learning Abilities"
+        // section 18): same status-dropdown-plus-Delete pattern as Training
+        // Jobs above, reusing that section's eleven-state lifecycle since
+        // fine-tuning is a training-job variant.
+        "const FINE_TUNING_JOB_STATUSES=['draft','queued','preparing',"
+        "'running','paused','canceling','canceled','failed','completed',"
+        "'awaiting_evaluation','archived'];"
+        "function renderMlFineTuningJobs(jobs){"
+        "const el=q('#mlFineTuningJobsList');if(!el)return;"
+        "if(!jobs.length){el.innerHTML='<p>No fine-tuning jobs created "
+        "yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Project','Base model','Dataset',"
+        "'Method','Status','Set status',''],"
+        "jobs.map(x=>[esc(x.name),esc(x.projectId),esc(x.modelId),"
+        "esc(x.datasetId),esc(x.method),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-fine-tuning-job-status-for=\"'+x.id+'\">'+"
+        "FINE_TUNING_JOB_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-fine-tuning-job-status=\"'+x.id+"
+        "'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-fine-tuning-job=\"'+x.id+"
+        "'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-fine-tuning-job-status]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applyFineTuningJobStatus;"
+        "const status=el.querySelector("
+        "'[data-fine-tuning-job-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/fine-tuning-jobs/'+encodeURIComponent(id)+"
+        "'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update fine-tuning job status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-fine-tuning-job]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/fine-tuning-jobs/'+"
+        "encodeURIComponent(btn.dataset.deleteMlFineTuningJob)+'/delete',"
+        "'POST');await load();}"
+        "catch(x){showSystemError('Delete fine-tuning job failed: '+"
+        "x.message);}});}}"
+        // Model Builder Interface (docs/PLAN.md "Machine Learning
+        // Abilities" section 9): same status-dropdown-plus-Delete pattern
+        // as Fine-Tuning above, with its own five-state design-time
+        // lifecycle (draft/configuring/ready/submitted/archived) instead of
+        // the eleven-state job lifecycle, since a builder configuration
+        // never runs.
+        "const MODEL_BUILDER_CONFIG_STATUSES=['draft','configuring','ready',"
+        "'submitted','archived'];"
+        "function renderMlModelBuilderConfigs(configs){"
+        "const el=q('#mlModelBuilderConfigsList');if(!el)return;"
+        "if(!configs.length){el.innerHTML='<p>No model builder "
+        "configurations created yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Project','Base model','Source type',"
+        "'Status','Set status',''],"
+        "configs.map(x=>[esc(x.name),esc(x.projectId),esc(x.baseModelId),"
+        "esc(x.sourceType),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-model-builder-config-status-for=\"'+x.id+'\">'+"
+        "MODEL_BUILDER_CONFIG_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-model-builder-config-status=\"'+"
+        "x.id+'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-model-builder-config=\"'+"
+        "x.id+'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-model-builder-config-status]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applyModelBuilderConfigStatus;"
+        "const status=el.querySelector("
+        "'[data-model-builder-config-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/model-builder-configs/'+"
+        "encodeURIComponent(id)+'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update model builder configuration "
+        "status failed: '+x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-model-builder-config]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/model-builder-configs/'+"
+        "encodeURIComponent(btn.dataset.deleteMlModelBuilderConfig)+"
+        "'/delete','POST');await load();}"
+        "catch(x){showSystemError('Delete model builder configuration "
+        "failed: '+x.message);}});}}"
         // Each row gets its own Start/resume, Pause, Stop, and Remove buttons
         // wired directly to that job's id -- nothing to hand-type, unlike the
         // old single manual 'Download job ID' field this replaces. The State
@@ -1583,7 +1890,58 @@ std::string application_script() {
         "e=>submit(e,'/api/v1/ml/subjects',()=>({name:q('#mlSubjectName').value,"
         "description:q('#mlSubjectDescription').value,"
         "scope:q('#mlSubjectScope').value,"
-        "targetAudience:q('#mlSubjectTargetAudience').value})));}});";
+        "targetAudience:q('#mlSubjectTargetAudience').value})));"
+        "if(q('#newMlLabelTask'))q('#newMlLabelTask').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/label-tasks',"
+        "()=>({datasetId:q('#mlLabelTaskDatasetId').value,"
+        "name:q('#mlLabelTaskName').value,"
+        "description:q('#mlLabelTaskDescription').value,"
+        "labelMode:q('#mlLabelTaskLabelMode').value,"
+        "assigneeId:q('#mlLabelTaskAssigneeId').value})));"
+        "if(q('#newMlPrepJob'))q('#newMlPrepJob').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/prep-jobs',"
+        "()=>({datasetId:q('#mlPrepJobDatasetId').value,"
+        "name:q('#mlPrepJobName').value,"
+        "description:q('#mlPrepJobDescription').value,"
+        "operation:q('#mlPrepJobOperation').value})));"
+        "if(q('#newMlTrainingJob'))q('#newMlTrainingJob').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/training-jobs',"
+        "()=>({projectId:q('#mlTrainingJobProjectId').value,"
+        "modelId:q('#mlTrainingJobModelId').value,"
+        "datasetId:q('#mlTrainingJobDatasetId').value,"
+        "name:q('#mlTrainingJobName').value,"
+        "description:q('#mlTrainingJobDescription').value,"
+        "trainingType:q('#mlTrainingJobTrainingType').value})));"
+        "if(q('#newMlEvaluationRun'))q('#newMlEvaluationRun').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/evaluation-runs',"
+        "()=>({modelId:q('#mlEvaluationRunModelId').value,"
+        "datasetId:q('#mlEvaluationRunDatasetId').value,"
+        "name:q('#mlEvaluationRunName').value,"
+        "description:q('#mlEvaluationRunDescription').value,"
+        "category:q('#mlEvaluationRunCategory').value})));"
+        "if(q('#newMlExperiment'))q('#newMlExperiment').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/experiments',"
+        "()=>({projectId:q('#mlExperimentProjectId').value,"
+        "modelId:q('#mlExperimentModelId').value,"
+        "datasetId:q('#mlExperimentDatasetId').value,"
+        "name:q('#mlExperimentName').value,"
+        "description:q('#mlExperimentDescription').value})));"
+        "if(q('#newMlFineTuningJob'))q('#newMlFineTuningJob').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/fine-tuning-jobs',"
+        "()=>({modelId:q('#mlFineTuningJobModelId').value,"
+        "datasetId:q('#mlFineTuningJobDatasetId').value,"
+        "projectId:q('#mlFineTuningJobProjectId').value,"
+        "name:q('#mlFineTuningJobName').value,"
+        "description:q('#mlFineTuningJobDescription').value,"
+        "method:q('#mlFineTuningJobMethod').value})));"
+        "if(q('#newMlModelBuilderConfig'))"
+        "q('#newMlModelBuilderConfig').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/model-builder-configs',"
+        "()=>({sourceType:q('#mlModelBuilderConfigSourceType').value,"
+        "baseModelId:q('#mlModelBuilderConfigBaseModelId').value,"
+        "projectId:q('#mlModelBuilderConfigProjectId').value,"
+        "name:q('#mlModelBuilderConfigName').value,"
+        "description:q('#mlModelBuilderConfigDescription').value})));}});";
 }
 
 // Presents the native OS account sign-in form without embedding credentials.
@@ -1953,6 +2311,218 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<h2>Subject packages</h2>"
             "<div id=\"mlSubjectsList\">Loading...</div>"
             "</div></section>";
+    } else if (section == "ml-label-tasks") {
+        // Phase 41 (docs/PLAN.md "Machine Learning Abilities" section 14):
+        // create and list labeling tasks against a registered dataset, and
+        // move them through a lifecycle status. Only the identity/target-
+        // dataset/label-mode/assignment/status fields LabelTaskStore
+        // actually persists are collected here -- see that class's comment
+        // in masterai.hpp for the label-record features deferred to a later
+        // phase.
+        body =
+            "<section id=\"panel-ml-label-tasks\" class=\"panel\"><div>"
+            "<h2>New labeling task</h2>"
+            "<form id=\"newMlLabelTask\">"
+            "<label>Dataset ID<input id=\"mlLabelTaskDatasetId\" required "
+            "placeholder=\"dataset id from Dataset Manager\"></label>"
+            "<label>Name<input id=\"mlLabelTaskName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Description<textarea id=\"mlLabelTaskDescription\" "
+            "rows=\"2\"></textarea></label>"
+            "<label>Label mode<input id=\"mlLabelTaskLabelMode\" "
+            "placeholder=\"e.g. text_category, entity_span, bounding_box\">"
+            "</label>"
+            "<label>Assignee ID<input id=\"mlLabelTaskAssigneeId\" "
+            "placeholder=\"reviewer user id (optional)\"></label>"
+            "<button>Create labeling task</button></form>"
+            "</div><div>"
+            "<h2>Labeling tasks</h2>"
+            "<div id=\"mlLabelTasksList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-prep-jobs") {
+        // Phase 41 (docs/PLAN.md "Machine Learning Abilities" section 15):
+        // create and list data-preparation jobs against a registered
+        // dataset, and move them through a lifecycle status. Only the
+        // identity/target-dataset/operation/status fields
+        // DataPreparationJobStore actually persists are collected here --
+        // see that class's comment in masterai.hpp for the pipeline-step
+        // composition, logging, and reproducibility record deferred to the
+        // phase that actually executes a pipeline.
+        body =
+            "<section id=\"panel-ml-prep-jobs\" class=\"panel\"><div>"
+            "<h2>New data preparation job</h2>"
+            "<form id=\"newMlPrepJob\">"
+            "<label>Dataset ID<input id=\"mlPrepJobDatasetId\" required "
+            "placeholder=\"dataset id from Dataset Manager\"></label>"
+            "<label>Name<input id=\"mlPrepJobName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Description<textarea id=\"mlPrepJobDescription\" "
+            "rows=\"2\"></textarea></label>"
+            "<label>Operation<input id=\"mlPrepJobOperation\" required "
+            "placeholder=\"e.g. remove_duplicates, redact_pii, split_dataset\">"
+            "</label>"
+            "<button>Create preparation job</button></form>"
+            "</div><div>"
+            "<h2>Preparation jobs</h2>"
+            "<div id=\"mlPrepJobsList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-training-jobs") {
+        // Phase 42 (docs/PLAN.md "Machine Learning Abilities" section 16):
+        // create and list training jobs against a registered project and
+        // dataset, and move them through a lifecycle status. Only the
+        // identity/target-project/target-model/target-dataset/training-
+        // type/status fields TrainingJobStore actually persists are
+        // collected here -- see that class's comment in masterai.hpp for
+        // the compute/hyperparameter/scheduling fields deferred to the
+        // phase that actually executes a training run.
+        body =
+            "<section id=\"panel-ml-training-jobs\" class=\"panel\"><div>"
+            "<h2>New training job</h2>"
+            "<form id=\"newMlTrainingJob\">"
+            "<label>Project ID<input id=\"mlTrainingJobProjectId\" required "
+            "placeholder=\"project id from Projects\"></label>"
+            "<label>Model ID<input id=\"mlTrainingJobModelId\" "
+            "placeholder=\"model registry id (optional)\"></label>"
+            "<label>Dataset ID<input id=\"mlTrainingJobDatasetId\" required "
+            "placeholder=\"dataset id from Dataset Manager\"></label>"
+            "<label>Name<input id=\"mlTrainingJobName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Description<textarea id=\"mlTrainingJobDescription\" "
+            "rows=\"2\"></textarea></label>"
+            "<label>Training type<input id=\"mlTrainingJobTrainingType\" "
+            "placeholder=\"e.g. fine_tuning, transfer_learning, lora\">"
+            "</label>"
+            "<button>Create training job</button></form>"
+            "</div><div>"
+            "<h2>Training jobs</h2>"
+            "<div id=\"mlTrainingJobsList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-evaluation-runs") {
+        // Phase 43 (docs/PLAN.md "Machine Learning Abilities" section 23):
+        // create and list evaluation runs against a registered model and
+        // benchmark dataset, and move them through a lifecycle status. Only
+        // the identity/target-model/target-dataset/category/status fields
+        // EvaluationRunStore actually persists are collected here -- see
+        // that class's comment in masterai.hpp for the benchmark-set/human-
+        // evaluation/comparison/numeric-score fields deferred to the phase
+        // that actually executes an evaluation.
+        body =
+            "<section id=\"panel-ml-evaluation-runs\" class=\"panel\"><div>"
+            "<h2>New evaluation run</h2>"
+            "<form id=\"newMlEvaluationRun\">"
+            "<label>Model ID<input id=\"mlEvaluationRunModelId\" required "
+            "placeholder=\"model registry id\"></label>"
+            "<label>Dataset ID<input id=\"mlEvaluationRunDatasetId\" required "
+            "placeholder=\"benchmark dataset id from Dataset Manager\">"
+            "</label>"
+            "<label>Name<input id=\"mlEvaluationRunName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Description<textarea id=\"mlEvaluationRunDescription\" "
+            "rows=\"2\"></textarea></label>"
+            "<label>Category<input id=\"mlEvaluationRunCategory\" "
+            "placeholder=\"e.g. accuracy, f1_score, hallucination_rate\">"
+            "</label>"
+            "<button>Create evaluation run</button></form>"
+            "</div><div>"
+            "<h2>Evaluation runs</h2>"
+            "<div id=\"mlEvaluationRunsList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-experiments") {
+        // Phase 44 (docs/PLAN.md "Machine Learning Abilities" section 25):
+        // create and list experiments tying a registered project and model
+        // (and optionally a dataset) together, and move them through a
+        // lifecycle status. Only the identity/target-project/target-model/
+        // target-dataset/status fields ExperimentStore actually persists are
+        // collected here -- see that class's comment in masterai.hpp for the
+        // version/hyperparameter/metric/artifact/comparison fields deferred
+        // to the phase that actually executes and records a run.
+        body =
+            "<section id=\"panel-ml-experiments\" class=\"panel\"><div>"
+            "<h2>New experiment</h2>"
+            "<form id=\"newMlExperiment\">"
+            "<label>Project ID<input id=\"mlExperimentProjectId\" required "
+            "placeholder=\"project id from Projects\"></label>"
+            "<label>Model ID<input id=\"mlExperimentModelId\" required "
+            "placeholder=\"model registry id\"></label>"
+            "<label>Dataset ID<input id=\"mlExperimentDatasetId\" "
+            "placeholder=\"dataset id from Dataset Manager (optional)\">"
+            "</label>"
+            "<label>Name<input id=\"mlExperimentName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Description<textarea id=\"mlExperimentDescription\" "
+            "rows=\"2\"></textarea></label>"
+            "<button>Create experiment</button></form>"
+            "</div><div>"
+            "<h2>Experiments</h2>"
+            "<div id=\"mlExperimentsList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-fine-tuning-jobs") {
+        // Phase 45 (docs/PLAN.md "Machine Learning Abilities" section 18):
+        // create and list fine-tuning jobs against a registered base model
+        // and fine-tuning dataset, and move them through a lifecycle
+        // status. Only the identity/target-project/target-model/target-
+        // dataset/method/status fields FineTuningJobStore actually
+        // persists are collected here -- see that class's comment in
+        // masterai.hpp for the adapter-method/hyperparameter/checkpoint/
+        // output-model fields deferred to the phase that actually executes
+        // a fine-tuning run.
+        body =
+            "<section id=\"panel-ml-fine-tuning-jobs\" class=\"panel\"><div>"
+            "<h2>New fine-tuning job</h2>"
+            "<form id=\"newMlFineTuningJob\">"
+            "<label>Base model ID<input id=\"mlFineTuningJobModelId\" "
+            "required placeholder=\"model registry id to adapt\"></label>"
+            "<label>Fine-tuning dataset ID<input "
+            "id=\"mlFineTuningJobDatasetId\" required "
+            "placeholder=\"dataset id from Dataset Manager\"></label>"
+            "<label>Project ID<input id=\"mlFineTuningJobProjectId\" "
+            "placeholder=\"project id from Projects (optional)\"></label>"
+            "<label>Name<input id=\"mlFineTuningJobName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Description<textarea id=\"mlFineTuningJobDescription\" "
+            "rows=\"2\"></textarea></label>"
+            "<label>Method<input id=\"mlFineTuningJobMethod\" "
+            "placeholder=\"e.g. subject_specialisation, code_assistant, "
+            "safety_alignment\"></label>"
+            "<button>Create fine-tuning job</button></form>"
+            "</div><div>"
+            "<h2>Fine-tuning jobs</h2>"
+            "<div id=\"mlFineTuningJobsList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-model-builder-configs") {
+        // Phase 46 (docs/PLAN.md "Machine Learning Abilities" section 9):
+        // create and list model builder configurations against an optional
+        // project and optional base model, and move them through a design-
+        // time lifecycle status. Only the identity/target-project/base-
+        // model/source-type/status fields ModelBuilderConfigStore actually
+        // persists are collected here -- see that class's comment in
+        // masterai.hpp for the architecture/layer/tokenizer/optimiser/
+        // scheduling fields deferred to the phase that actually executes a
+        // model build.
+        body =
+            "<section id=\"panel-ml-model-builder-configs\" class=\"panel\">"
+            "<div>"
+            "<h2>New model builder configuration</h2>"
+            "<form id=\"newMlModelBuilderConfig\">"
+            "<label>Source type<input id=\"mlModelBuilderConfigSourceType\" "
+            "required placeholder=\"e.g. template, imported_base_model, "
+            "embedding_model\"></label>"
+            "<label>Base model ID<input "
+            "id=\"mlModelBuilderConfigBaseModelId\" "
+            "placeholder=\"model registry id to start from (optional)\">"
+            "</label>"
+            "<label>Project ID<input id=\"mlModelBuilderConfigProjectId\" "
+            "placeholder=\"project id from Projects (optional)\"></label>"
+            "<label>Name<input id=\"mlModelBuilderConfigName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Description<textarea "
+            "id=\"mlModelBuilderConfigDescription\" rows=\"2\"></textarea>"
+            "</label>"
+            "<button>Create configuration</button></form>"
+            "</div><div>"
+            "<h2>Model builder configurations</h2>"
+            "<div id=\"mlModelBuilderConfigsList\">Loading...</div>"
+            "</div></section>";
     } else if (section == "settings-config") {
         // Phase 30A: administrator-only local-configuration editor backed by
         // GET/POST /api/v1/admin/config (server.cpp's admin_config_get()/
@@ -2166,7 +2736,21 @@ std::string application_page(const UserRecord& user, const std::string& section,
                 nav_link("/app/ml/datasets", "Dataset Manager",
                          section == "ml-datasets") +
                 nav_link("/app/ml/subjects", "Subject Knowledge Manager",
-                         section == "ml-subjects"));
+                         section == "ml-subjects") +
+                nav_link("/app/ml/label-tasks", "Data Labeling",
+                         section == "ml-label-tasks") +
+                nav_link("/app/ml/prep-jobs", "Data Preparation",
+                         section == "ml-prep-jobs") +
+                nav_link("/app/ml/training-jobs", "Training Jobs",
+                         section == "ml-training-jobs") +
+                nav_link("/app/ml/evaluation-runs", "Evaluation Lab",
+                         section == "ml-evaluation-runs") +
+                nav_link("/app/ml/experiments", "Experiment Tracking",
+                         section == "ml-experiments") +
+                nav_link("/app/ml/fine-tuning-jobs", "Fine-Tuning",
+                         section == "ml-fine-tuning-jobs") +
+                nav_link("/app/ml/model-builder-configs", "Model Builder",
+                         section == "ml-model-builder-configs"));
     }
 
     return html_response(

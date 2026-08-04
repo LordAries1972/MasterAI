@@ -2374,8 +2374,13 @@ public:
     // respectively). models_awaiting_approval and failed_training_jobs
     // remain zero (see MachineLearningDashboard's comment above) -- there is
     // no distinct "awaiting approval" state and no training-job system yet.
+    // failed_training_jobs now comes from `training_jobs` (Phase 42) instead
+    // of always reporting zero -- see that store's class comment below for
+    // why counting `failed`-status jobs is the only aggregate meaningful
+    // before an actual training executor exists.
     MachineLearningDashboard dashboard(const class MLProjectStore& projects,
-                                       const class ModelRegistryStore& models) const;
+                                       const class ModelRegistryStore& models,
+                                       const class TrainingJobStore& training_jobs) const;
 
 private:
     std::vector<MachineLearningInterface> interfaces_;
@@ -2635,6 +2640,470 @@ private:
 
 std::string subject_package_json(const SubjectPackage& package);
 std::string subject_packages_json(const std::vector<SubjectPackage>& packages);
+
+// Phase 41: docs/PLAN.md "Machine Learning Abilities" section 14 (Data
+// Labeling Interface). Every labeling task targets one dataset already
+// registered in DatasetStore above. Scoped down from the section's full
+// feature list (label guidelines, keyboard shortcuts, bulk labeling,
+// suggested labels, confidence values, disagreement handling, consensus
+// review, quality sampling, reviewer accuracy metrics, annotation history,
+// label versioning) to identity, the dataset it targets, which of the
+// section's labeling modes it uses (free text -- the mode list is 14 items
+// and growing, not a closed set worth hardcoding into an enum), an
+// optional reviewer assignment, and a lifecycle status. The deferred
+// features all require actual label records to operate on, which this
+// phase doesn't create.
+enum class LabelTaskStatus { queued, in_progress, in_review, completed };
+
+std::string label_task_status_name(LabelTaskStatus status);
+LabelTaskStatus parse_label_task_status(const std::string& status);
+
+struct LabelTask {
+    std::string id;
+    std::string dataset_id;
+    std::string name;
+    std::string description;
+    std::string label_mode;
+    std::string assignee_id;
+    std::string owner_id;
+    LabelTaskStatus status{LabelTaskStatus::queued};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class LabelTaskStore final {
+public:
+    LabelTaskStore() = default;
+    explicit LabelTaskStore(RecordStore& records);
+    LabelTask create(const std::string& owner_id, const std::string& dataset_id,
+                     const std::string& name, const std::string& description,
+                     const std::string& label_mode,
+                     const std::string& assignee_id);
+    std::optional<LabelTask> find(const std::string& id) const;
+    std::vector<LabelTask> list() const;
+    bool set_status(const std::string& id, LabelTaskStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const LabelTask& task);
+    RecordStore* records_{nullptr};
+    std::map<std::string, LabelTask> tasks_;
+    mutable std::mutex mutex_;
+};
+
+std::string label_task_json(const LabelTask& task);
+std::string label_tasks_json(const std::vector<LabelTask>& tasks);
+
+// Phase 41: docs/PLAN.md "Machine Learning Abilities" section 15 (Data
+// Preparation Interface). Each job targets one dataset already registered
+// in DatasetStore above and names which of the section's operations
+// (remove duplicates, normalize whitespace, redact personal information,
+// generate train/validation/test sets, ...) it runs -- again free text
+// rather than a closed enum, matching LabelTask's label_mode above, since
+// section 15 lists 28 operations and reproducible pipelines will need to
+// compose them, not just pick one. Scoped down to identity, the dataset it
+// targets, the operation, and a lifecycle status; the pipeline-step
+// composition, logging, and reproducibility record section 15 also
+// requires belongs to the phase that actually executes a pipeline.
+enum class DataPreparationJobStatus { pending, running, completed, failed };
+
+std::string data_preparation_job_status_name(DataPreparationJobStatus status);
+DataPreparationJobStatus parse_data_preparation_job_status(
+    const std::string& status);
+
+struct DataPreparationJob {
+    std::string id;
+    std::string dataset_id;
+    std::string name;
+    std::string description;
+    std::string operation;
+    std::string owner_id;
+    DataPreparationJobStatus status{DataPreparationJobStatus::pending};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class DataPreparationJobStore final {
+public:
+    DataPreparationJobStore() = default;
+    explicit DataPreparationJobStore(RecordStore& records);
+    DataPreparationJob create(const std::string& owner_id,
+                              const std::string& dataset_id,
+                              const std::string& name,
+                              const std::string& description,
+                              const std::string& operation);
+    std::optional<DataPreparationJob> find(const std::string& id) const;
+    std::vector<DataPreparationJob> list() const;
+    bool set_status(const std::string& id, DataPreparationJobStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const DataPreparationJob& job);
+    RecordStore* records_{nullptr};
+    std::map<std::string, DataPreparationJob> jobs_;
+    mutable std::mutex mutex_;
+};
+
+std::string data_preparation_job_json(const DataPreparationJob& job);
+std::string data_preparation_jobs_json(
+    const std::vector<DataPreparationJob>& jobs);
+
+// Phase 42: docs/PLAN.md "Machine Learning Abilities" section 16 (Training
+// Jobs). Each job belongs to an MLProject and targets a dataset already
+// registered in DatasetStore, mirroring LabelTask/DataPreparationJob's
+// required-target-id pattern above. Scoped down from the section's full
+// field list (compute target, hardware allocation, runtime environment,
+// container image, hyperparameters, environment variables, secrets
+// references, output directory, checkpoint/logging/notification policy,
+// resource/cost ceilings, failure-recovery strategy) to identity, the
+// project/model/dataset it relates to, which training method it uses (free
+// text -- section 17 lists 20 methods depending on model architecture, not
+// a closed set worth hardcoding), and a lifecycle status. None of the
+// deferred fields mean anything before an actual training executor exists
+// to consume them; model_id is likewise optional since a job may target a
+// model not yet registered (Model Builder, still planned). The status enum
+// matches section 16's eleven states exactly, including the operator
+// verbs (queued/preparing/canceling/...) a real job scheduler would report,
+// even though nothing here schedules or runs a job yet -- only records
+// intent and lets an administrator move it through the same states by
+// hand, matching Start/Pause/Resume/Stop/Archive/Delete from section 16's
+// "Administrators should be able to" list.
+enum class TrainingJobStatus {
+    draft,
+    queued,
+    preparing,
+    running,
+    paused,
+    canceling,
+    canceled,
+    failed,
+    completed,
+    awaiting_evaluation,
+    archived
+};
+
+std::string training_job_status_name(TrainingJobStatus status);
+TrainingJobStatus parse_training_job_status(const std::string& status);
+
+struct TrainingJob {
+    std::string id;
+    std::string project_id;
+    std::string model_id;
+    std::string dataset_id;
+    std::string name;
+    std::string description;
+    std::string training_type;
+    std::string owner_id;
+    TrainingJobStatus status{TrainingJobStatus::draft};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class TrainingJobStore final {
+public:
+    TrainingJobStore() = default;
+    explicit TrainingJobStore(RecordStore& records);
+    TrainingJob create(const std::string& owner_id,
+                       const std::string& project_id,
+                       const std::string& model_id,
+                       const std::string& dataset_id,
+                       const std::string& name,
+                       const std::string& description,
+                       const std::string& training_type);
+    std::optional<TrainingJob> find(const std::string& id) const;
+    std::vector<TrainingJob> list() const;
+    bool set_status(const std::string& id, TrainingJobStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const TrainingJob& job);
+    RecordStore* records_{nullptr};
+    std::map<std::string, TrainingJob> jobs_;
+    mutable std::mutex mutex_;
+};
+
+std::string training_job_json(const TrainingJob& job);
+std::string training_jobs_json(const std::vector<TrainingJob>& jobs);
+
+// Phase 43: docs/PLAN.md "Machine Learning Abilities" section 23
+// (Evaluation Lab). Every model must be evaluated before approval or
+// deployment; an EvaluationRun records that a model was (or is being)
+// scored against a benchmark dataset. Mirrors TrainingJob's required-
+// target-id pattern above: model_id and dataset_id are both mandatory,
+// since an evaluation run without a model to score or a benchmark to
+// score it against means nothing. category is free text rather than a
+// closed enum -- section 23 lists 24 evaluation categories (accuracy,
+// F1 score, hallucination rate, safety compliance, ...) and a real
+// evaluation can report more than one, so this is scoped to the single
+// category a given run is organized around, not a full metrics report.
+// Scoped down from the section's full surface (standard/custom benchmark
+// sets, human evaluation, pairwise/blind model comparison, automated
+// scoring, reviewer notes, and the actual numeric score) to identity, the
+// model/dataset it relates to, the category, and a lifecycle status --
+// none of the deferred fields mean anything before an actual evaluation
+// harness exists to produce a score.
+enum class EvaluationRunStatus { queued, running, completed, failed, canceled };
+
+std::string evaluation_run_status_name(EvaluationRunStatus status);
+EvaluationRunStatus parse_evaluation_run_status(const std::string& status);
+
+struct EvaluationRun {
+    std::string id;
+    std::string model_id;
+    std::string dataset_id;
+    std::string name;
+    std::string description;
+    std::string category;
+    std::string owner_id;
+    EvaluationRunStatus status{EvaluationRunStatus::queued};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class EvaluationRunStore final {
+public:
+    EvaluationRunStore() = default;
+    explicit EvaluationRunStore(RecordStore& records);
+    EvaluationRun create(const std::string& owner_id,
+                         const std::string& model_id,
+                         const std::string& dataset_id,
+                         const std::string& name,
+                         const std::string& description,
+                         const std::string& category);
+    std::optional<EvaluationRun> find(const std::string& id) const;
+    std::vector<EvaluationRun> list() const;
+    bool set_status(const std::string& id, EvaluationRunStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const EvaluationRun& run);
+    RecordStore* records_{nullptr};
+    std::map<std::string, EvaluationRun> runs_;
+    mutable std::mutex mutex_;
+};
+
+std::string evaluation_run_json(const EvaluationRun& run);
+std::string evaluation_runs_json(const std::vector<EvaluationRun>& runs);
+
+// Phase 44: docs/PLAN.md "Machine Learning Abilities" section 25
+// (Experiment Tracking). Every training and evaluation run should be
+// recorded as an experiment tying a project, model, and (optionally)
+// dataset together under one auditable identity. Mirrors TrainingJob's
+// required-project pattern and EvaluationRun's required-model pattern:
+// project_id and model_id are both mandatory, since an experiment without
+// a project to organize it or a model it concerns means nothing; dataset_id
+// is optional the same way TrainingJob's model_id is, since not every
+// experiment (e.g. a pure hyperparameter sweep note) is tied to one
+// dataset. Scoped down from the section's full surface (source-code/
+// configuration/container version, hyperparameters, random seed, hardware,
+// runtime, training/validation/evaluation metrics, checkpoints, logs,
+// artifacts, tags, and side-by-side comparison) to identity, the project/
+// model/dataset it relates to, and a lifecycle status -- none of the
+// deferred fields mean anything before an actual training/evaluation
+// executor exists to produce them.
+enum class ExperimentStatus { queued, running, completed, failed, canceled };
+
+std::string experiment_status_name(ExperimentStatus status);
+ExperimentStatus parse_experiment_status(const std::string& status);
+
+struct Experiment {
+    std::string id;
+    std::string project_id;
+    std::string model_id;
+    std::string dataset_id;
+    std::string name;
+    std::string description;
+    std::string owner_id;
+    ExperimentStatus status{ExperimentStatus::queued};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class ExperimentStore final {
+public:
+    ExperimentStore() = default;
+    explicit ExperimentStore(RecordStore& records);
+    Experiment create(const std::string& owner_id,
+                      const std::string& project_id,
+                      const std::string& model_id,
+                      const std::string& dataset_id,
+                      const std::string& name,
+                      const std::string& description);
+    std::optional<Experiment> find(const std::string& id) const;
+    std::vector<Experiment> list() const;
+    bool set_status(const std::string& id, ExperimentStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const Experiment& experiment);
+    RecordStore* records_{nullptr};
+    std::map<std::string, Experiment> experiments_;
+    mutable std::mutex mutex_;
+};
+
+std::string experiment_json(const Experiment& experiment);
+std::string experiments_json(const std::vector<Experiment>& experiments);
+
+// Phase 45: docs/PLAN.md "Machine Learning Abilities" section 18
+// (Fine-Tuning Interface). Fine-tuning always starts from an existing base
+// model and an existing fine-tuning dataset -- unlike TrainingJob's
+// optional model_id (a training job may target a model not yet
+// registered), a FineTuningJob without a base model to adapt or a dataset
+// to adapt it with means nothing, so both model_id and dataset_id are
+// mandatory here. project_id stays optional, mirroring TrainingJob's own
+// optional field, since a one-off fine-tuning run need not belong to a
+// tracked project. method is free text rather than a closed enum --
+// section 18 lists ten presets (general instruction tuning, subject
+// specialisation, code assistant, classification, question answering,
+// conversation style, tool-use behavior, structured-output generation,
+// safety alignment, terminology adaptation) and a real fine-tuning job may
+// use a preset the list doesn't name, so this records whichever one an
+// administrator intends rather than constraining it. Scoped down from the
+// section's full surface (base model version, subject package, adapter
+// method, target layers, learning rate, batch size, epoch count, context
+// length, precision, checkpoint strategy, validation dataset, safety
+// dataset, output model name/version, hardware/storage estimate) to
+// identity, the project/model/dataset it relates to, the method, and a
+// lifecycle status -- none of the deferred fields mean anything before an
+// actual fine-tuning executor exists to consume them. The status enum
+// reuses TrainingJob's eleven states (fine-tuning is a training-job
+// variant per section 17/18's overlap) rather than EvaluationRun/
+// Experiment's simpler five, since a real fine-tuning run goes through the
+// same queued/preparing/running/paused/canceling lifecycle a training job
+// does.
+enum class FineTuningJobStatus {
+    draft,
+    queued,
+    preparing,
+    running,
+    paused,
+    canceling,
+    canceled,
+    failed,
+    completed,
+    awaiting_evaluation,
+    archived
+};
+
+std::string fine_tuning_job_status_name(FineTuningJobStatus status);
+FineTuningJobStatus parse_fine_tuning_job_status(const std::string& status);
+
+struct FineTuningJob {
+    std::string id;
+    std::string project_id;
+    std::string model_id;
+    std::string dataset_id;
+    std::string name;
+    std::string description;
+    std::string method;
+    std::string owner_id;
+    FineTuningJobStatus status{FineTuningJobStatus::draft};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class FineTuningJobStore final {
+public:
+    FineTuningJobStore() = default;
+    explicit FineTuningJobStore(RecordStore& records);
+    FineTuningJob create(const std::string& owner_id,
+                         const std::string& project_id,
+                         const std::string& model_id,
+                         const std::string& dataset_id,
+                         const std::string& name,
+                         const std::string& description,
+                         const std::string& method);
+    std::optional<FineTuningJob> find(const std::string& id) const;
+    std::vector<FineTuningJob> list() const;
+    bool set_status(const std::string& id, FineTuningJobStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const FineTuningJob& job);
+    RecordStore* records_{nullptr};
+    std::map<std::string, FineTuningJob> jobs_;
+    mutable std::mutex mutex_;
+};
+
+std::string fine_tuning_job_json(const FineTuningJob& job);
+std::string fine_tuning_jobs_json(const std::vector<FineTuningJob>& jobs);
+
+// Phase 46: docs/PLAN.md "Machine Learning Abilities" section 9 (Model
+// Builder Interface). The full interface guides an administrator through
+// architecture, layer, tokenizer, optimiser, scheduling, and
+// reproducibility configuration (docs/PLAN.md section 9's second list) for
+// eleven starting points (template, existing architecture, imported base
+// model, previous model version, classical ML, neural network, language-
+// model adaptation, embedding model, reranking model, vision model, audio
+// model -- section 9's first list). None of that configuration surface
+// means anything before a real model-construction executor exists to
+// consume it, so this records only identity, the project/base model it
+// relates to, which of the eleven starting points was chosen (free text,
+// like FineTuningJob's method, since an administrator may describe a
+// starting point the list doesn't name), and a lifecycle status. Both
+// project_id and base_model_id stay optional -- a from-template or
+// from-scratch build has neither a tracked project nor an existing model
+// to start from, unlike FineTuningJob where the base model is mandatory.
+// The status enum is its own five states rather than reusing
+// FineTuningJobStatus/TrainingJobStatus's eleven, because a builder
+// configuration is a design-time draft, not a running job: it never
+// queues, runs, or pauses, it only moves from draft through configuration
+// to a submitted training/fine-tuning request or an archived discard.
+enum class ModelBuilderConfigStatus {
+    draft,
+    configuring,
+    ready,
+    submitted,
+    archived
+};
+
+std::string model_builder_config_status_name(ModelBuilderConfigStatus status);
+ModelBuilderConfigStatus parse_model_builder_config_status(const std::string& status);
+
+struct ModelBuilderConfig {
+    std::string id;
+    std::string project_id;
+    std::string base_model_id;
+    std::string name;
+    std::string description;
+    std::string source_type;
+    std::string owner_id;
+    ModelBuilderConfigStatus status{ModelBuilderConfigStatus::draft};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class ModelBuilderConfigStore final {
+public:
+    ModelBuilderConfigStore() = default;
+    explicit ModelBuilderConfigStore(RecordStore& records);
+    ModelBuilderConfig create(const std::string& owner_id,
+                              const std::string& project_id,
+                              const std::string& base_model_id,
+                              const std::string& name,
+                              const std::string& description,
+                              const std::string& source_type);
+    std::optional<ModelBuilderConfig> find(const std::string& id) const;
+    std::vector<ModelBuilderConfig> list() const;
+    bool set_status(const std::string& id, ModelBuilderConfigStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const ModelBuilderConfig& config);
+    RecordStore* records_{nullptr};
+    std::map<std::string, ModelBuilderConfig> configs_;
+    mutable std::mutex mutex_;
+};
+
+std::string model_builder_config_json(const ModelBuilderConfig& config);
+std::string model_builder_configs_json(const std::vector<ModelBuilderConfig>& configs);
 
 struct PerformanceSample {
     std::string name;
