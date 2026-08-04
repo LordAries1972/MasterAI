@@ -33,6 +33,14 @@
     "button{margin-top:.75rem;background:var(--accent);border:none;color:#fff;" \
     "font-weight:600;cursor:pointer;transition:background .15s}" \
     "button:hover{background:var(--accent-hover)}" \
+    /* Compact icon-only action buttons (Machine Learning table rows): \
+       overrides the full-width default above so a row of actions stays \
+       small; the action name lives in the title/aria-label hint. One \
+       icon per action kind, consistent across every ML page. */ \
+    ".iconBtn{width:auto;margin:.1rem .15rem .1rem 0;padding:.35rem .45rem;" \
+    "line-height:0;display:inline-flex;align-items:center;" \
+    "justify-content:center;vertical-align:middle}" \
+    ".iconBtn svg{width:14px;height:14px;fill:currentColor}" \
     "progress{width:100%;height:.6rem;margin-top:.6rem;accent-color:var(--accent)}" \
     "#actionStatus,#status{color:var(--muted);min-height:1.2em}" \
     /* Fixed top-of-viewport banner every action-failure catch block now \
@@ -133,7 +141,7 @@ std::string application_script() {
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
-        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,mlse,mlhs,mlmo,mlck,mldp,cfg,report]="
+        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,mlse,mlhs,mlmo,mlck,mldp,mlcmp,cfg,report]="
         "await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
@@ -184,6 +192,8 @@ std::string application_script() {
         "{checkpoints:[]}),"
         "fetchFor('#mlDeploymentsList','/api/v1/ml/deployments',"
         "{deployments:[]}),"
+        "fetchFor('#mlModelComparisonsList','/api/v1/ml/model-comparisons',"
+        "{modelComparisons:[]}),"
         // 403/503 for anyone who isn't an administrator, or when no
         // settings.json path is known to the running server -- both are
         // quiet, expected no-ops here exactly like the ml.* fetches above.
@@ -215,6 +225,10 @@ std::string application_script() {
         "renderMlModelOptimizations(mlmo.modelOptimizations);"
         "renderMlCheckpoints(mlck.checkpoints);"
         "renderMlDeployments(mldp.deployments);"
+        "renderMlModelComparisons(mlcmp.modelComparisons);"
+        // Every ML list above just re-rendered its rows; swap their text
+        // action buttons for the compact consistent icon set.
+        "iconifyMlButtons();"
         "renderSystemConfig(cfg);"
         "renderSystemReport(report);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
@@ -896,6 +910,75 @@ std::string application_script() {
         "const TRAINING_JOB_STATUSES=['draft','queued','preparing','running',"
         "'paused','canceling','canceled','failed','completed',"
         "'awaiting_evaluation','archived'];"
+        // Compact iconic row actions for every Machine Learning page. The
+        // SVG path data is Bootstrap Icons (bi-trash, bi-check-lg,
+        // bi-check-circle, bi-x-circle, bi-play-fill, bi-eye), embedded
+        // inline so the UI needs no CDN and keeps working offline. One
+        // icon per action kind, applied uniformly: delete=trash,
+        // apply=check, approve=check-circle, reject=x-circle,
+        // run/train/evaluate=play, view=eye. The original button label
+        // becomes the hover hint (title) and the accessible name.
+        "const BI_ICON_PATHS={"
+        "trash:'<path d=\"M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 "
+        "0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 "
+        ".5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z\"/>"
+        "<path d=\"M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 "
+        "1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 "
+        "0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 "
+        "1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z\"/>',"
+        "apply:'<path d=\"M12.736 3.97a.733.733 0 0 1 1.047 0c.286.289.29"
+        ".756.01 1.05L7.88 12.01a.733.733 0 0 1-1.065.02L3.217 8.384a.757"
+        ".757 0 0 1 0-1.06.733.733 0 0 1 1.047 0l3.052 3.093 5.4-6.425a"
+        ".247.247 0 0 1 .02-.022z\"/>',"
+        "approve:'<path d=\"M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14m0 1A8 8 0 "
+        "1 0 8 0a8 8 0 0 0 0 16\"/>"
+        "<path d=\"M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 "
+        "7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l"
+        "3.992-4.99a.75.75 0 0 0-1.071-1.05z\"/>',"
+        "reject:'<path d=\"M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14m0 1A8 8 0 1 "
+        "0 8 0a8 8 0 0 0 0 16\"/>"
+        "<path d=\"M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5"
+        ".5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 "
+        "8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 "
+        "0 0 1 0-.708\"/>',"
+        "run:'<path d=\"m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-"
+        "1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 "
+        "0 0 1 0 1.393\"/>',"
+        "view:'<path d=\"M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 8 5.5S16 8 16 8M"
+        "1.173 8a13 13 0 0 1 1.66-2.043C4.12 4.668 5.88 3.5 8 3.5s3.879 "
+        "1.168 5.168 2.457A13 13 0 0 1 14.828 8q-.086.13-.195.288c-.335"
+        ".48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5s-3.879"
+        "-1.168-5.168-2.457A13 13 0 0 1 1.172 8z\"/>"
+        "<path d=\"M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5M4.5 8a3.5 "
+        "3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0\"/>'};"
+        "const ML_BUTTON_ICONS=[[/^delete/,'trash'],[/^approve/,'approve'],"
+        "[/^reject/,'reject'],[/^apply/,'apply'],[/^run/,'run'],"
+        "[/^view/,'view']];"
+        "function iconifyMlButtons(){"
+        "for(const btn of document.querySelectorAll("
+        "'section[id^=\"panel-ml-\"] button')){"
+        "if(btn.dataset.iconified)continue;"
+        "const key=Object.keys(btn.dataset)[0];if(!key)continue;"
+        "const match=ML_BUTTON_ICONS.find(pair=>pair[0].test(key));"
+        "if(!match)continue;"
+        "const label=btn.textContent.trim();"
+        "btn.title=label;btn.setAttribute('aria-label',label);"
+        "btn.classList.add('iconBtn');"
+        "btn.innerHTML='<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\">'+"
+        "BI_ICON_PATHS[match[1]]+'</svg>';"
+        "btn.dataset.iconified='1';}}"
+        // Phase 56: one shared formatter for real evaluation metrics so
+        // Training Jobs, Evaluation Lab, and prediction results all report
+        // numbers the same way.
+        "function fmtMlMetrics(m){if(!m)return'';"
+        "if(m.task==='classification'){return'accuracy '+"
+        "(100*m.accuracy).toFixed(1)+'%, macro precision '+"
+        "Number(m.macroPrecision).toFixed(3)+', macro recall '+"
+        "Number(m.macroRecall).toFixed(3)+', macro F1 '+"
+        "Number(m.macroF1).toFixed(3)+' over '+m.evaluatedRows+' rows.';}"
+        "return'MSE '+Number(m.mse).toPrecision(4)+', MAE '+"
+        "Number(m.mae).toPrecision(4)+', R\\u00b2 '+"
+        "Number(m.rSquared).toFixed(3)+' over '+m.evaluatedRows+' rows.';}"
         "function renderMlTrainingJobs(jobs){const el=q('#mlTrainingJobsList');"
         "if(!el)return;"
         "if(!jobs.length){el.innerHTML='<p>No training jobs created "
@@ -912,8 +995,29 @@ std::string application_script() {
         "'</option>').join('')+'</select> '+"
         "'<button type=\"button\" data-apply-training-job-status=\"'+x.id+"
         "'\">Apply</button>',"
+        "'<button type=\"button\" data-run-ml-training-job=\"'+x.id+"
+        "'\">Train now</button> '+"
         "'<button type=\"button\" data-delete-ml-training-job=\"'+x.id+"
         "'\">Delete</button>']));"
+        // Phase 56: "Train now" invokes the real training executor and
+        // shows the genuine result (method, loss, held-out metrics) in the
+        // panel below the table.
+        "for(const btn of el.querySelectorAll('[data-run-ml-training-job]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const out=q('#mlTrainingRunResult');"
+        "if(out)out.textContent='Training...';btn.disabled=true;"
+        "try{const r=await api('/api/v1/ml/training-jobs/'+"
+        "encodeURIComponent(btn.dataset.runMlTrainingJob)+'/run','POST',{});"
+        "if(out)out.textContent='Trained '+r.method+' over '+r.epochs+"
+        "' epochs on '+r.trainRows+' rows (final loss '+"
+        "Number(r.finalLoss).toPrecision(4)+'). '+"
+        "(r.evaluatedOnTest?'Held-out ('+r.testRows+' rows): '"
+        ":'No held-out rows; metrics use training data: ')+"
+        "fmtMlMetrics(r.metrics)+' Model ID: '+r.modelId;"
+        "await load();}"
+        "catch(x){if(out)out.textContent='';"
+        "showSystemError('Training failed: '+x.message);}"
+        "finally{btn.disabled=false;}});}"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-training-job-status]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
@@ -953,8 +1057,33 @@ std::string application_script() {
         "'</option>').join('')+'</select> '+"
         "'<button type=\"button\" data-apply-evaluation-run-status=\"'+x.id+"
         "'\">Apply</button>',"
+        "'<button type=\"button\" data-run-ml-evaluation=\"'+x.id+"
+        "'\">Evaluate now</button> '+"
+        "'<button type=\"button\" data-view-ml-evaluation=\"'+x.id+"
+        "'\">View result</button> '+"
         "'<button type=\"button\" data-delete-ml-evaluation-run=\"'+x.id+"
         "'\">Delete</button>']));"
+        // Phase 56: "Evaluate now" scores the run's trained model against
+        // its dataset for real; "View result" recalls the stored metrics.
+        "for(const btn of el.querySelectorAll('[data-run-ml-evaluation]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const out=q('#mlEvaluationRunResult');"
+        "if(out)out.textContent='Evaluating...';btn.disabled=true;"
+        "try{const r=await api('/api/v1/ml/evaluation-runs/'+"
+        "encodeURIComponent(btn.dataset.runMlEvaluation)+'/run','POST',{});"
+        "if(out)out.textContent='Evaluation complete: '+fmtMlMetrics(r.metrics);"
+        "await load();}"
+        "catch(x){if(out)out.textContent='';"
+        "showSystemError('Evaluation failed: '+x.message);}"
+        "finally{btn.disabled=false;}});}"
+        "for(const btn of el.querySelectorAll('[data-view-ml-evaluation]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const out=q('#mlEvaluationRunResult');"
+        "try{const r=await api('/api/v1/ml/evaluation-runs/'+"
+        "encodeURIComponent(btn.dataset.viewMlEvaluation)+'/result');"
+        "if(out)out.textContent='Stored result: '+fmtMlMetrics(r.metrics);}"
+        "catch(x){showSystemError('No stored result for this run yet: '+"
+        "x.message);}});}"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-evaluation-run-status]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
@@ -1480,6 +1609,85 @@ std::string application_script() {
         "encodeURIComponent(btn.dataset.deleteMlDeployment)+"
         "'/delete','POST');await load();}"
         "catch(x){showSystemError('Delete deployment failed: '+"
+        "x.message);}});}}"
+        // Model Comparison (docs/PLAN.md "Machine Learning Abilities"
+        // section 27): the same status-dropdown pattern as Evaluation Lab,
+        // plus Phase 57's real "Compare now"/"View result" actions.
+        "const MODEL_COMPARISON_STATUSES=['queued','running','completed',"
+        "'failed','canceled'];"
+        // One shared formatter for a stored comparison result so the run
+        // and view actions describe the winner identically.
+        "function fmtMlComparison(r){if(!r)return'';"
+        "const verdict=r.winner==='tie'?'Tie on '+r.primaryMetric:"
+        "(r.winner==='candidate'?'Candidate':'Baseline')+' wins on '+"
+        "r.primaryMetric;"
+        "return verdict+' (baseline '+Number(r.baselineValue).toPrecision(4)+"
+        "', candidate '+Number(r.candidateValue).toPrecision(4)+"
+        "', delta '+Number(r.delta).toPrecision(4)+'). '+"
+        "'Baseline '+r.baseline.modelId+': '+fmtMlMetrics(r.baseline.metrics)+"
+        "' Candidate '+r.candidate.modelId+': '+"
+        "fmtMlMetrics(r.candidate.metrics);}"
+        "function renderMlModelComparisons(comparisons){"
+        "const el=q('#mlModelComparisonsList');if(!el)return;"
+        "if(!comparisons.length){el.innerHTML='<p>No model comparisons "
+        "created yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Baseline model','Candidate model',"
+        "'Benchmark dataset','Status','Set status',''],"
+        "comparisons.map(x=>[esc(x.name),esc(x.baselineModelId),"
+        "esc(x.candidateModelId),esc(x.datasetId),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-comparison-status-for=\"'+x.id+'\">'+"
+        "MODEL_COMPARISON_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-comparison-status=\"'+x.id+"
+        "'\">Apply</button>',"
+        "'<button type=\"button\" data-run-ml-comparison=\"'+x.id+"
+        "'\">Compare now</button> '+"
+        "'<button type=\"button\" data-view-ml-comparison=\"'+x.id+"
+        "'\">View result</button> '+"
+        "'<button type=\"button\" data-delete-ml-comparison=\"'+x.id+"
+        "'\">Delete</button>']));"
+        // Phase 57: "Compare now" scores both trained artifacts against the
+        // shared benchmark for real; "View result" recalls the stored
+        // verdict.
+        "for(const btn of el.querySelectorAll('[data-run-ml-comparison]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const out=q('#mlModelComparisonResult');"
+        "if(out)out.textContent='Comparing...';btn.disabled=true;"
+        "try{const r=await api('/api/v1/ml/model-comparisons/'+"
+        "encodeURIComponent(btn.dataset.runMlComparison)+'/run','POST',{});"
+        "if(out)out.textContent='Comparison complete: '+"
+        "fmtMlComparison(r.result);await load();}"
+        "catch(x){if(out)out.textContent='';"
+        "showSystemError('Comparison failed: '+x.message);}"
+        "finally{btn.disabled=false;}});}"
+        "for(const btn of el.querySelectorAll('[data-view-ml-comparison]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const out=q('#mlModelComparisonResult');"
+        "try{const r=await api('/api/v1/ml/model-comparisons/'+"
+        "encodeURIComponent(btn.dataset.viewMlComparison)+'/result');"
+        "if(out)out.textContent='Stored result: '+fmtMlComparison(r.result);}"
+        "catch(x){showSystemError('No stored result for this comparison "
+        "yet: '+x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-comparison-status]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const id=btn.dataset.applyComparisonStatus;"
+        "const status=el.querySelector("
+        "'[data-comparison-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/model-comparisons/'+"
+        "encodeURIComponent(id)+'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update comparison status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-comparison]')){"
+        "btn.addEventListener('click',async()=>{"
+        "try{await api('/api/v1/ml/model-comparisons/'+"
+        "encodeURIComponent(btn.dataset.deleteMlComparison)+"
+        "'/delete','POST');await load();}"
+        "catch(x){showSystemError('Delete comparison failed: '+"
         "x.message);}});}}"
         // Each row gets its own Start/resume, Pause, Stop, and Remove buttons
         // wired directly to that job's id -- nothing to hand-type, unlike the
@@ -2340,6 +2548,43 @@ std::string application_script() {
         "source:q('#mlDatasetSource').value,"
         "license:q('#mlDatasetLicense').value,"
         "dataFormat:q('#mlDatasetFormat').value})));"
+        // Phase 56: dataset content upload -- posts the CSV to the real
+        // ingestion endpoint and shows the parsed profile it returns.
+        "if(q('#newMlDatasetContent'))q('#newMlDatasetContent')"
+        ".addEventListener('submit',async e=>{e.preventDefault();"
+        "const out=q('#mlDatasetContentResult');"
+        "out.textContent='Uploading and validating...';"
+        "try{const r=await api('/api/v1/ml/datasets/'+"
+        "encodeURIComponent(q('#mlDatasetContentId').value.trim())+'/content',"
+        "'POST',{csv:q('#mlDatasetContentCsv').value,"
+        "targetColumn:q('#mlDatasetContentTarget').value.trim()});"
+        "out.textContent='Stored '+r.rows+' rows: '+r.featureColumns.length+"
+        "' feature column(s) ['+r.featureColumns.join(', ')+'], target \\''+"
+        "r.targetColumn+'\\' ('+r.task+"
+        "(r.task==='classification'?', classes: '+r.classes.join(', '):'')+"
+        "').';await load();}"
+        "catch(x){out.textContent='';"
+        "showSystemError('Upload dataset content failed: '+x.message);}});"
+        // Phase 56: live prediction form -- parses the feature JSON locally
+        // for a clear error, then calls the real prediction endpoint.
+        "if(q('#mlPredictForm'))q('#mlPredictForm')"
+        ".addEventListener('submit',async e=>{e.preventDefault();"
+        "const out=q('#mlPredictResult');"
+        "let features;"
+        "try{features=JSON.parse(q('#mlPredictFeatures').value);}"
+        "catch(x){showSystemError('Feature values must be a valid JSON "
+        "object.');return;}"
+        "out.textContent='Predicting...';"
+        "try{const r=await api('/api/v1/ml/models/'+"
+        "encodeURIComponent(q('#mlPredictModelId').value.trim())+'/predict',"
+        "'POST',{features});"
+        "if(r.task==='classification'){"
+        "out.textContent='Predicted class: '+r.label+' ('+r.classes.map("
+        "(c,i)=>c+' '+(100*r.probabilities[i]).toFixed(1)+'%').join(', ')+')';}"
+        "else{out.textContent='Predicted value: '+"
+        "Number(r.value).toPrecision(6);}}"
+        "catch(x){out.textContent='';"
+        "showSystemError('Prediction failed: '+x.message);}});"
         "if(q('#newMlSubject'))q('#newMlSubject').addEventListener('submit',"
         "e=>submit(e,'/api/v1/ml/subjects',()=>({name:q('#mlSubjectName').value,"
         "description:q('#mlSubjectDescription').value,"
@@ -2461,7 +2706,15 @@ std::string application_script() {
         "name:q('#mlDeploymentName').value,"
         "description:q('#mlDeploymentDescription').value,"
         "environment:q('#mlDeploymentEnvironment').value,"
-        "strategy:q('#mlDeploymentStrategy').value})));}});";
+        "strategy:q('#mlDeploymentStrategy').value})));"
+        "if(q('#newMlModelComparison'))"
+        "q('#newMlModelComparison').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/model-comparisons',"
+        "()=>({baselineModelId:q('#mlModelComparisonBaselineModelId').value,"
+        "candidateModelId:q('#mlModelComparisonCandidateModelId').value,"
+        "datasetId:q('#mlModelComparisonDatasetId').value,"
+        "name:q('#mlModelComparisonName').value,"
+        "description:q('#mlModelComparisonDescription').value})));}});";
 }
 
 // Presents the native OS account sign-in form without embedding credentials.
@@ -2777,6 +3030,19 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "placeholder=\"where this model came from\"></label>"
             "<label>License<input id=\"mlModelLicense\"></label>"
             "<button>Register model</button></form>"
+            // Phase 56: live prediction against a trained model's persisted
+            // weights. Feature values are entered as JSON keyed by column
+            // name so the caller never has to know the internal ordering.
+            "<h2>Predict with a trained model</h2>"
+            "<form id=\"mlPredictForm\">"
+            "<label>Model ID (a model produced by a training run)"
+            "<input id=\"mlPredictModelId\" required></label>"
+            "<label>Feature values (JSON object, e.g. "
+            "{&quot;sepal_length&quot;:5.1,&quot;sepal_width&quot;:3.5})"
+            "<textarea id=\"mlPredictFeatures\" rows=\"3\" required>"
+            "</textarea></label>"
+            "<button>Predict</button></form>"
+            "<p id=\"mlPredictResult\"></p>"
             "</div><div>"
             "<h2>Registered models</h2>"
             "<div id=\"mlModelsList\">Loading...</div>"
@@ -2804,6 +3070,21 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Data format<input id=\"mlDatasetFormat\" "
             "placeholder=\"e.g. JSONL, CSV\"></label>"
             "<button>Register dataset</button></form>"
+            // Phase 56: real content upload. The CSV is fully parsed and
+            // validated server-side before it is stored, and the returned
+            // profile (rows, columns, task) is shown below the form.
+            "<h2>Upload dataset content (CSV)</h2>"
+            "<form id=\"newMlDatasetContent\">"
+            "<label>Dataset ID<input id=\"mlDatasetContentId\" required "
+            "placeholder=\"dataset id from the list on the right\"></label>"
+            "<label>Target column (the column to predict; blank uses the "
+            "last column)<input id=\"mlDatasetContentTarget\"></label>"
+            "<label>CSV content (header row first; feature columns must be "
+            "numeric)<textarea id=\"mlDatasetContentCsv\" rows=\"6\" required "
+            "placeholder=\"sepal_length,sepal_width,species&#10;"
+            "5.1,3.5,setosa&#10;6.2,2.9,versicolor\"></textarea></label>"
+            "<button>Upload content</button></form>"
+            "<p id=\"mlDatasetContentResult\"></p>"
             "</div><div>"
             "<h2>Registered datasets</h2>"
             "<div id=\"mlDatasetsList\">Loading...</div>"
@@ -2916,6 +3197,13 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</div><div>"
             "<h2>Training jobs</h2>"
             "<div id=\"mlTrainingJobsList\">Loading...</div>"
+            // Phase 56: the real training executor reports its genuine
+            // result (method, final loss, held-out metrics) here after a
+            // "Train now" click.
+            "<h2>Last training result</h2>"
+            "<p id=\"mlTrainingRunResult\">No training run in this session "
+            "yet. Click \"Train now\" on a job whose dataset has uploaded "
+            "CSV content.</p>"
             "</div></section>";
     } else if (section == "ml-evaluation-runs") {
         // Phase 43 (docs/PLAN.md "Machine Learning Abilities" section 23):
@@ -2946,6 +3234,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</div><div>"
             "<h2>Evaluation runs</h2>"
             "<div id=\"mlEvaluationRunsList\">Loading...</div>"
+            // Phase 56: the real evaluation harness reports its genuine
+            // metrics here after an "Evaluate now" or "View result" click.
+            "<h2>Last evaluation result</h2>"
+            "<p id=\"mlEvaluationRunResult\">No evaluation shown yet. Click "
+            "\"Evaluate now\" on a run whose model has been trained.</p>"
             "</div></section>";
     } else if (section == "ml-experiments") {
         // Phase 44 (docs/PLAN.md "Machine Learning Abilities" section 25):
@@ -3321,6 +3614,46 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<h2>Deployments</h2>"
             "<div id=\"mlDeploymentsList\">Loading...</div>"
             "</div></section>";
+    } else if (section == "ml-model-comparisons") {
+        // Phase 57 (docs/PLAN.md "Machine Learning Abilities" section 27):
+        // a REAL executor page like Training Jobs' "Train now" -- "Compare
+        // now" evaluates both trained artifacts against the shared
+        // benchmark dataset and reports the measured winner. Every field is
+        // labeled with what it must reference so the form stays
+        // self-explanatory.
+        body =
+            "<section id=\"panel-ml-model-comparisons\" class=\"panel\">"
+            "<div>"
+            "<h2>New model comparison</h2>"
+            "<form id=\"newMlModelComparison\">"
+            "<label>Name<input id=\"mlModelComparisonName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Baseline model ID<input "
+            "id=\"mlModelComparisonBaselineModelId\" required "
+            "placeholder=\"id of the registered model to compare against\">"
+            "</label>"
+            "<label>Candidate model ID<input "
+            "id=\"mlModelComparisonCandidateModelId\" required "
+            "placeholder=\"id of the registered model being evaluated\">"
+            "</label>"
+            "<label>Benchmark dataset ID<input "
+            "id=\"mlModelComparisonDatasetId\" required "
+            "placeholder=\"id of the dataset both models are scored on\">"
+            "</label>"
+            "<label>Description<textarea "
+            "id=\"mlModelComparisonDescription\" rows=\"2\"></textarea>"
+            "</label>"
+            "<button>Create model comparison</button></form>"
+            "</div><div>"
+            "<h2>Model comparisons</h2>"
+            "<div id=\"mlModelComparisonsList\">Loading...</div>"
+            // Phase 57: the real comparison verdict renders here after a
+            // "Compare now" or "View result" click.
+            "<h3>Comparison result</h3>"
+            "<p id=\"mlModelComparisonResult\">No comparison shown yet. "
+            "Click \"Compare now\" on a comparison whose two models have "
+            "both been trained.</p>"
+            "</div></section>";
     } else if (section == "settings-config") {
         // Phase 30A: administrator-only local-configuration editor backed by
         // GET/POST /api/v1/admin/config (server.cpp's admin_config_get()/
@@ -3575,7 +3908,10 @@ std::string application_page(const UserRecord& user, const std::string& section,
                          section == "ml-checkpoints") +
                 nav_link("/app/ml/deployments",
                          "Deployment Manager",
-                         section == "ml-deployments"));
+                         section == "ml-deployments") +
+                nav_link("/app/ml/model-comparisons",
+                         "Model Comparison",
+                         section == "ml-model-comparisons"));
     }
 
     return html_response(
@@ -3614,7 +3950,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "list-style-position:outside;padding:.15rem 0;user-select:none}"
         ".sidebarSection summary:hover{color:var(--text)}"
         ".sidebarSection>div{margin-top:.15rem}"
-        "#content{flex:1;padding:1.5rem;overflow-y:auto;max-width:1200px;"
+        // The content pane spans the full remaining browser width (no fixed
+        // max-width cap), so every panel stretches consistently to the
+        // window at any browser size -- the .panel grid below re-flows its
+        // cards to fill whatever width this yields, and the chat page keeps
+        // its own comfortable reading cap via #chatShell's max-width.
+        "#content{flex:1;padding:1.5rem;overflow-y:auto;"
         "display:flex;flex-direction:column;min-height:0}"
         "#actionStatus{margin-bottom:1rem;flex:none}"
         // An empty status line still reserved a full line of height (see the

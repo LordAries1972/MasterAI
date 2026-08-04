@@ -470,7 +470,11 @@ bool role_allows(const UserRole role, const std::string& permission) {
           // Phase 55 (docs/PLAN.md "Machine Learning Abilities" section 34,
           // Deployment Manager): administrator-only, matching every other
           // ml.* permission above.
-          "ml.deployments.view", "ml.deployments.manage"}},
+          "ml.deployments.view", "ml.deployments.manage",
+          // Phase 57 (docs/PLAN.md "Machine Learning Abilities" section 27,
+          // Model Comparison): administrator-only, matching every other
+          // ml.* permission above.
+          "ml.comparisons.view", "ml.comparisons.manage"}},
         {UserRole::developer,
          {"identity.read", "models.read", "models.load", "tokens.create",
           "ide.connect", "mcp.connect", "mcp.invoke", "mcp.tools.invoke",

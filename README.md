@@ -299,11 +299,15 @@ The current source includes native implementations for:
   training and fine-tuning jobs, evaluations, experiments, model-builder
   configurations, instruction and synthetic-data records, vector stores,
   RAG configurations, subject exams, hyperparameter searches,
-  model-optimization runs, training checkpoints, and deployments. These are
-  real authorized administrative records; they do not yet execute training,
-  generate embeddings, populate vector indexes, run an end-to-end RAG
-  pipeline, administer exams, run searches or optimizations, capture
-  checkpoints, or promote deployments.
+  model-optimization runs, training checkpoints, and deployments — plus a
+  real execution engine (Phases 56-57) that ingests validated CSV dataset
+  content, trains tabular models by gradient descent with genuine loss
+  curves and held-out metrics, captures measured-loss checkpoints, scores
+  trained models with real evaluation metrics, compares two trained models
+  on a shared benchmark with a measured winner, and serves live predictions
+  from persisted weight artifacts. LLM fine-tuning, embedding generation,
+  populated vector indexes, end-to-end RAG execution, exam administration,
+  hyperparameter search execution, and deployment promotion do not run yet.
 
 Implementation does not automatically mean operational certification. The next
 section records the distinction.
@@ -358,8 +362,8 @@ Status below reflects the evidence recorded in
 | 39 | ML model registry and dataset manager | Implemented at a scoped-down level |
 | 40 | Subject Knowledge Manager | Implemented at a scoped-down level |
 | 41 | Data labeling and preparation | Implemented at a scoped-down level |
-| 42 | Training Jobs | Implemented at a scoped-down level; no training executor |
-| 43 | Evaluation Lab | Implemented at a scoped-down level; no scoring harness |
+| 42 | Training Jobs | Implemented; real tabular training executor (Phase 56) |
+| 43 | Evaluation Lab | Implemented; real tabular scoring harness (Phase 56) |
 | 44 | Experiment Tracking | Implemented at a scoped-down level |
 | 45 | Fine-Tuning Interface | Implemented at a scoped-down level; no fine-tuning executor |
 | 46 | Model Builder | Implemented at a scoped-down level; no construction executor |
@@ -372,6 +376,8 @@ Status below reflects the evidence recorded in
 | 53 | Model Optimization | Implemented at a scoped-down record level; no optimizer executor |
 | 54 | Checkpoint Management | Implemented at a scoped-down retention-record level; no checkpoint capture |
 | 55 | Deployment Manager | Implemented at a scoped-down approval-record level; no deployment executor |
+| 56 | Real ML execution engine (tabular training, evaluation, prediction) | Implemented |
+| 57 | Model Comparison (real baseline-vs-candidate benchmark executor) | Implemented |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -413,15 +419,27 @@ backend batching, measured worker affinity, KV compression/prefix sharing,
 and transparent live cascade execution. Phase 31 and Phases 32–36 remain
 planned.
 
-Phases 37–50 establish the current Machine Learning administration layer.
-Administrators can manage durable, permission-gated records through native
-web pages and `/api/v1/ml/*` routes, with lifecycle, review, approval,
-reload, and deletion behavior covered by native tests. This is deliberately
-not represented as an operating training platform: no training or
-fine-tuning executor, embedding generator, populated vector index, complete
-evaluation harness, or executable RAG pipeline exists yet. For the concepts,
-current workflows, exact capability boundary, and a sequential teaching
-guide, read [How to Use Machine Learning and Models with MasterAI](docs/HowToUse-MachineLearning.md).
+Phases 37–55 establish the Machine Learning administration layer:
+administrators manage durable, permission-gated records through native web
+pages and `/api/v1/ml/*` routes, with lifecycle, review, approval, reload,
+and deletion behavior covered by native tests. Phase 56 adds the module's
+first real execution engine on top of those records: administrators upload
+CSV dataset content (validated server-side), run Training Jobs that
+actually train tabular models by gradient descent (linear regression, and
+logistic/softmax classification) with genuine loss curves, deterministic
+held-out splits, measured-loss checkpoints, and persisted weight artifacts;
+run Evaluation Lab scoring that produces real accuracy/precision/recall/F1/
+confusion-matrix or MSE/MAE/R² metrics; and serve live predictions from any
+trained model through the Model Registry, all surviving server restarts.
+Phase 57 extends that engine with Model Comparison: a baseline and a
+candidate model are both evaluated against one shared benchmark dataset,
+and the stored verdict reports both metric sets, the primary-metric delta,
+and the measured winner.
+The honest remaining boundary: LLM fine-tuning execution, embedding
+generation, populated vector indexes, and executable RAG pipelines do not
+exist yet. For the concepts, current workflows, exact capability boundary,
+and a sequential teaching guide, read
+[How to Use Machine Learning and Models with MasterAI](docs/HowToUse-MachineLearning.md).
 
 No release may be called production-ready until the functional, security,
 migration, recovery, MCP conformance, performance, resource-ceiling, retrieval,
@@ -848,15 +866,30 @@ administration area at `/app/ml`. Its current pages manage scoped lifecycle
 records for projects, registered models, datasets, subject knowledge,
 labeling, data preparation, training and fine-tuning jobs, evaluation,
 experiments, model building, instruction examples, synthetic data, vector
-stores, and RAG configurations.
+stores, RAG configurations, subject exams, hyperparameter searches,
+model-optimization runs, training checkpoints, deployments, and model
+comparisons.
 
-The present Phase 50 boundary is a governed control plane, not an end-to-end
-training engine. Creating or advancing a job records administrative intent
-and state; it does not run a training framework. Likewise, registering a
-vector store or RAG configuration does not generate embeddings, populate an
-index, execute retrieval, or prove grounded output. Approved externally
-trained models must still be deliberately packaged as verified GGUF artifacts
-in the inference model tree before MasterAI can serve them.
+Since Phase 56, the module executes real machine learning for tabular data:
+uploading CSV content to a dataset makes it trainable, "Train now" on a
+training job runs actual gradient-descent optimization (linear regression
+for numeric targets, logistic/softmax classification for categorical ones)
+with a genuine loss curve, a deterministic held-out split, and measured-loss
+checkpoints; "Evaluate now" on an evaluation run computes real
+accuracy/precision/recall/F1/confusion-matrix or MSE/MAE/R² scores; and the
+Model Registry serves live predictions from the persisted learned weights.
+Since Phase 57, "Compare now" on a Model Comparison evaluates a baseline
+and a candidate model against the same benchmark dataset and stores the
+measured verdict — both metric sets, the macro-F1 (classification) or MSE
+(regression) delta, and the winner.
+
+The honest boundary that remains: creating or advancing the other job types
+records administrative intent and state, not execution. Registering a vector
+store or RAG configuration does not generate embeddings, populate an index,
+execute retrieval, or prove grounded output, and LLM fine-tuning does not
+run. Approved externally trained models must still be deliberately packaged
+as verified GGUF artifacts in the inference model tree before MasterAI can
+serve them for chat.
 
 For a classroom-style explanation of machine learning, model preparation,
 the current interfaces, exact limitations, existing-model setup, and the

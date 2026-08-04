@@ -905,6 +905,95 @@ Current phase status:
   `test_machine_learning_foundation_dashboard`'s fixed exclusion list
   stays frozen at Phase 42's interface set, so these phases change
   nothing there.
+- Phase 56: Implemented (2026-08-05) — the Machine Learning module's first
+  REAL execution layer (`src/ml_engine.cpp`): nothing in this phase records
+  intent, everything computes. (1) Real dataset content: `POST/GET
+  /api/v1/ml/datasets/{id}/content` (`DatasetContentStore`) uploads CSV
+  against a registered dataset, fully parsed and validated server-side
+  (`parse_tabular_csv` — header row, quoted fields, numeric feature
+  enforcement, 8 MiB cap, ≤64 classes) with a returned profile (rows,
+  feature columns, task, classes). (2) Real training: `POST
+  /api/v1/ml/training-jobs/{id}/run` trains the job's dataset by full-batch
+  gradient descent on standardized features — linear regression for numeric
+  targets, logistic/softmax classification for categorical targets — moving
+  the job through queued/preparing/running/awaiting_evaluation for real,
+  recording a genuine per-epoch loss curve, capturing `TrainingCheckpoint`
+  records with actually measured losses, persisting the learned weights as
+  a reloadable artifact (`TrainedModelStore`, keyed by model registry id,
+  full-precision round-trip), and registering/advancing the model registry
+  entry to the `evaluation` state. Held-out metrics come from a
+  deterministic seeded split whose standardization statistics use the
+  training rows only. (3) Real evaluation: `POST
+  /api/v1/ml/evaluation-runs/{id}/run` scores a trained artifact against
+  any schema-matching dataset — accuracy, macro precision/recall/F1, and a
+  confusion matrix for classification; MSE, MAE, and R² for regression —
+  storing the result (`EvaluationResultStore`) behind `GET
+  /api/v1/ml/evaluation-runs/{id}/result`. (4) Live prediction: `GET
+  /api/v1/ml/models/{id}/artifact` reports what was learned and `POST
+  /api/v1/ml/models/{id}/predict` serves real predictions (winning class
+  plus per-class probabilities, or the predicted value) from the persisted
+  weights, surviving server restarts. Web UI: Dataset Manager gains a
+  validated CSV upload form, Training Jobs a "Train now" action with a
+  genuine result panel, Evaluation Lab "Evaluate now"/"View result"
+  actions, and Model Registry a prediction form; all ML row actions were
+  also converted to compact, consistent Bootstrap-Icons icon buttons
+  (embedded SVG paths, no CDN) with hover hints.
+  `test_machine_learning_real_training_and_prediction` proves the engine
+  actually learns: >90% held-out accuracy on a separable classification
+  set, R² > 0.99 recovering a known line, identical predictions from a
+  reloaded artifact, and parser rejection of malformed CSV. Honest
+  boundary: this executor covers tabular classification/regression;
+  LLM fine-tuning, knowledge ingestion, embeddings-based vector search,
+  and the remaining executor surfaces are still `Planned`.
+- Phase 57: Implemented (2026-08-05) — Model Comparison (section 27) as
+  the module's second REAL executor, built directly on Phase 56's
+  evaluation machinery rather than the scoped-down roster pattern. A
+  `ModelComparison` record (`ModelComparisonStore`, `ml_model_comparisons`)
+  names a mandatory baseline model, a mandatory (and necessarily
+  different) candidate model, and a mandatory shared benchmark dataset,
+  moving through Evaluation Lab's five run states via `GET/POST
+  /api/v1/ml/model-comparisons` and the `/status`/`/delete` routes, gated
+  by new administrator-only `ml.comparisons.view`/`ml.comparisons.manage`
+  permissions. `POST /api/v1/ml/model-comparisons/{id}/run` executes for
+  real: both trained artifacts are loaded from `TrainedModelStore`, scored
+  against the benchmark dataset's actual uploaded CSV via
+  `evaluate_tabular_model`, and `tabular_model_comparison_json`
+  (`src/ml_engine.cpp`) reports both full metric sets plus a measured
+  verdict — primary metric macro F1 for classification and MSE for
+  regression, the candidate-minus-baseline delta, and the winner (an
+  exact tie is reported as `tie`, never a picked side); a cross-task
+  comparison is rejected. Results persist in `ComparisonResultStore`
+  (`ml_comparison_results`), recalled by `GET .../result` and deleted with
+  their comparison. Missing artifacts or dataset content return 409 with
+  an actionable detail, and a failed run lands the record in `failed`.
+  Web UI: a new administrator-only "Model Comparison" page
+  (`/app/ml/model-comparisons`) with a fully labeled create form
+  (baseline/candidate/benchmark IDs), the standard status/actions table
+  with "Compare now"/"View result" icon actions, and a verdict panel;
+  additionally, the workspace content pane's fixed 1200px width cap was
+  removed so every panel now spans the full browser width consistently
+  at any window size (chat keeps its own reading-width cap). Honest
+  boundary against section 27's wishlist: hallucination rate, safety,
+  latency/throughput/GPU cost, and blind response comparison only apply
+  to generative models this tabular engine does not train — everything
+  this phase reports is computed from real evaluations.
+  `test_machine_learning_model_comparison_lifecycle_and_execution` covers
+  the administrator-only permissions, the record-shape rules (missing
+  name/ids rejected, self-comparison rejected), lifecycle/reload/remove,
+  and the executor's verdicts: a correctly trained model must beat a
+  label-flipped one, swapping baseline/candidate must swap the winner,
+  identical metrics must tie, cross-task comparisons must throw, and
+  stored results must round-trip and die on remove. The dashboard
+  roster's `model-comparison` interface entry intentionally still reports
+  `planned`, exactly as Phases 43-56 left their roster entries — the
+  dashboard test's exclusion list stays frozen at Phase 42's interface
+  set. Windows x64 Debug and Release builds completed and
+  `masterai_core_tests` passed; as part of this validation the Phase 30
+  arena poison assertions in `test_phase_thirty_request_arena_allocation_
+  and_poison` were wrapped in `#ifndef NDEBUG`, since masterai.hpp has
+  always documented ArenaHandle's generation tracking as compiling out
+  under NDEBUG and the Release suite could therefore never pass that
+  debug-only assertion.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -4962,10 +5051,25 @@ environment and strategy fields, and the same three-state
 pending/approved/rejected approval lifecycle Phases 49-50 use, since
 section 34 explicitly names approval as part of the deployment record,
 not the runtime/target-node/rollback/health-status record a real
-deployment executor will attach. Every other capability in this section
-(Training Methods execution, Knowledge Ingestion, Model Comparison,
-Inference Endpoints, and everything else through section 51) remains
-`Planned`: no implementation has started.
+deployment executor will attach. Phase 56 breaks the scoped-down pattern:
+it is the module's first real execution layer (src/ml_engine.cpp). Dataset
+Manager entries now hold real uploaded CSV content, Training Jobs actually
+train tabular models (gradient-descent linear regression and logistic/
+softmax classification) with genuine loss curves, held-out metrics, and
+measured-loss checkpoints, Evaluation Lab actually scores trained models
+(accuracy/precision/recall/F1/confusion matrix or MSE/MAE/R²) and stores
+the results, and the Model Registry serves live predictions from persisted
+learned weights — see the Phase 56 entry in the phase list above for the
+full surface. Phase 57 continues the real-executor pattern with Model
+Comparison (section 27): a comparison record names a baseline model, a
+candidate model, and a shared benchmark dataset, and running it scores
+both trained artifacts against that dataset's real uploaded content and
+stores a measured verdict — both metric sets, the primary-metric delta
+(macro F1 for classification, MSE for regression), and the winner — see
+the Phase 57 entry above for the full surface and its honest boundary.
+Every other capability in this section (LLM fine-tuning execution,
+Knowledge Ingestion, Inference Endpoints, and everything else through
+section 51) remains `Planned`: no implementation has started.
 
 This section extends the plan with an administrator-only Machine Learning
 administration and model-development module, covering the full lifecycle

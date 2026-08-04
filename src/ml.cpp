@@ -3142,4 +3142,172 @@ std::string deployments_json(const std::vector<Deployment>& deployments) {
     return body + "]";
 }
 
+// Phase 57: docs/PLAN.md "Machine Learning Abilities" section 27 (Model
+// Comparison) -- see ModelComparisonStore's class comment in masterai.hpp.
+// The record store lives here with its scoped-down siblings; the real
+// comparison executor (tabular_model_comparison_json and
+// ComparisonResultStore) lives in ml_engine.cpp with the rest of the
+// computing layer.
+std::string model_comparison_status_name(const ModelComparisonStatus status) {
+    switch (status) {
+        case ModelComparisonStatus::queued: return "queued";
+        case ModelComparisonStatus::running: return "running";
+        case ModelComparisonStatus::completed: return "completed";
+        case ModelComparisonStatus::failed: return "failed";
+        case ModelComparisonStatus::canceled: return "canceled";
+    }
+    throw std::runtime_error("invalid model comparison status");
+}
+
+ModelComparisonStatus parse_model_comparison_status(const std::string& status) {
+    if (status == "queued") return ModelComparisonStatus::queued;
+    if (status == "running") return ModelComparisonStatus::running;
+    if (status == "completed") return ModelComparisonStatus::completed;
+    if (status == "failed") return ModelComparisonStatus::failed;
+    if (status == "canceled") return ModelComparisonStatus::canceled;
+    throw std::runtime_error("stored model comparison status is invalid");
+}
+
+ModelComparisonStore::ModelComparisonStore(RecordStore& records)
+    : records_(&records) {
+    restore();
+}
+
+void ModelComparisonStore::restore() {
+    for (const auto& item : records_->list("ml_model_comparisons")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 7U) {
+            throw std::runtime_error(
+                "persisted model comparison record field count is wrong");
+        }
+        ModelComparison comparison;
+        comparison.id = item.first;
+        comparison.baseline_model_id = fields[0];
+        comparison.candidate_model_id = fields[1];
+        comparison.dataset_id = fields[2];
+        comparison.name = fields[3];
+        comparison.description = fields[4];
+        comparison.owner_id = fields[5];
+        comparison.status = parse_model_comparison_status(fields[6]);
+        comparisons_[comparison.id] = comparison;
+    }
+}
+
+void ModelComparisonStore::persist(const ModelComparison& comparison) {
+    records_->put(
+        "ml_model_comparisons", comparison.id,
+        pack({comparison.baseline_model_id, comparison.candidate_model_id,
+              comparison.dataset_id, comparison.name, comparison.description,
+              comparison.owner_id,
+              model_comparison_status_name(comparison.status)}));
+}
+
+ModelComparison ModelComparisonStore::create(
+    const std::string& owner_id, const std::string& baseline_model_id,
+    const std::string& candidate_model_id, const std::string& dataset_id,
+    const std::string& name, const std::string& description) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("model comparison name is invalid");
+    }
+    if (baseline_model_id.empty()) {
+        throw std::invalid_argument(
+            "model comparison baseline model id is required");
+    }
+    if (candidate_model_id.empty()) {
+        throw std::invalid_argument(
+            "model comparison candidate model id is required");
+    }
+    // Comparing a model against itself always produces a tie and would only
+    // clutter the run history, so it is rejected as a record-shape error.
+    if (baseline_model_id == candidate_model_id) {
+        throw std::invalid_argument(
+            "model comparison baseline and candidate must be different models");
+    }
+    if (dataset_id.empty()) {
+        throw std::invalid_argument(
+            "model comparison benchmark dataset id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    ModelComparison comparison;
+    comparison.id = random_id();
+    comparison.baseline_model_id = baseline_model_id;
+    comparison.candidate_model_id = candidate_model_id;
+    comparison.dataset_id = dataset_id;
+    comparison.name = name;
+    comparison.description = description;
+    comparison.owner_id = owner_id;
+    comparison.status = ModelComparisonStatus::queued;
+    comparison.created_at_epoch_seconds = epoch_seconds();
+    comparison.updated_at_epoch_seconds = comparison.created_at_epoch_seconds;
+    comparisons_[comparison.id] = comparison;
+    if (records_) persist(comparison);
+    return comparison;
+}
+
+std::optional<ModelComparison> ModelComparisonStore::find(
+    const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = comparisons_.find(id);
+    return found != comparisons_.end()
+               ? std::optional<ModelComparison>(found->second)
+               : std::nullopt;
+}
+
+std::vector<ModelComparison> ModelComparisonStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ModelComparison> result;
+    result.reserve(comparisons_.size());
+    for (const auto& item : comparisons_) result.push_back(item.second);
+    return result;
+}
+
+bool ModelComparisonStore::set_status(const std::string& id,
+                                      const ModelComparisonStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = comparisons_.find(id);
+    if (found == comparisons_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool ModelComparisonStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = comparisons_.find(id);
+    if (found == comparisons_.end()) return false;
+    comparisons_.erase(found);
+    if (records_) records_->erase("ml_model_comparisons", id);
+    return true;
+}
+
+std::string model_comparison_json(const ModelComparison& comparison) {
+    return "{\"id\":\"" + json_escape(comparison.id) +
+           "\",\"baselineModelId\":\"" +
+           json_escape(comparison.baseline_model_id) +
+           "\",\"candidateModelId\":\"" +
+           json_escape(comparison.candidate_model_id) + "\",\"datasetId\":\"" +
+           json_escape(comparison.dataset_id) + "\",\"name\":\"" +
+           json_escape(comparison.name) + "\",\"description\":\"" +
+           json_escape(comparison.description) + "\",\"ownerId\":\"" +
+           json_escape(comparison.owner_id) + "\",\"status\":\"" +
+           model_comparison_status_name(comparison.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(comparison.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(comparison.updated_at_epoch_seconds) + "}";
+}
+
+std::string model_comparisons_json(
+    const std::vector<ModelComparison>& comparisons) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& comparison : comparisons) {
+        if (!first) body += ",";
+        first = false;
+        body += model_comparison_json(comparison);
+    }
+    return body + "]";
+}
+
 }  // namespace masterai

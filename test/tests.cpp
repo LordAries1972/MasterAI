@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -2702,6 +2703,11 @@ void test_phase_thirty_request_arena_allocation_and_poison() {
     }
     require(threw, "RequestArena::allocate_or_throw did not throw on exhaustion");
 
+    // Poison checks are debug-build-only by design: masterai.hpp documents
+    // that ArenaHandle's generation tracking compiles out entirely under
+    // NDEBUG, so asserting stale-handle invalidation in a Release build
+    // would demand behavior the header deliberately does not provide.
+#ifndef NDEBUG
     // Poison check: a handle issued before reset() must go invalid after.
     masterai::RequestArena poison_arena(64U);
     auto handle = masterai::allocate_handle<std::uint64_t>(poison_arena);
@@ -2724,6 +2730,7 @@ void test_phase_thirty_request_arena_allocation_and_poison() {
     require(!outlived_handle.valid(),
             "ArenaHandle stayed valid after its arena was destroyed -- debug poison check did "
             "not trigger");
+#endif
 }
 
 // Phase 30: FixedSizePool basic acquire/release/shrink behavior -- pointers
@@ -6005,6 +6012,312 @@ void test_machine_learning_deployment_lifecycle() {
             "deployment_json did not report the deployment's own fields");
 }
 
+// Phase 56: the ML engine must actually learn, not just record intent. A
+// linearly separable classification dataset must train to high held-out
+// accuracy, a linear regression must recover a known line, artifacts must
+// survive a store reload with identical predictions, and the CSV parser
+// must reject malformed content instead of fabricating a dataset.
+void test_machine_learning_real_training_and_prediction() {
+    // Two clearly separable classes: "low" clusters near x1 ~ 0-2,
+    // "high" near x1 ~ 4-6, so a converged classifier must score near
+    // 100% on the held-out split -- anything else means it didn't learn.
+    std::string csv = "x1,x2,label\n";
+    for (int index = 0; index < 20; ++index) {
+        csv += std::to_string(0.1 * index) + "," +
+               std::to_string(1.0 + 0.05 * index) + ",low\n";
+        csv += std::to_string(4.0 + 0.1 * index) + "," +
+               std::to_string(3.0 + 0.05 * index) + ",high\n";
+    }
+    const auto data = masterai::parse_tabular_csv(csv, "label");
+    require(data.classification && data.class_labels.size() == 2U &&
+                data.features.size() == 40U &&
+                data.feature_names.size() == 2U &&
+                data.target_name == "label",
+            "parse_tabular_csv did not build the classification dataset");
+
+    masterai::TabularTrainingOptions options;
+    options.epochs = 300U;
+    options.learning_rate = 0.5;
+    options.test_fraction = 0.25;
+    masterai::TrainedTabularModel model;
+    const auto report = masterai::train_tabular_model(data, options, model);
+    require(report.loss_history.size() == 300U &&
+                report.final_loss < report.loss_history.front(),
+            "gradient descent must actually reduce the training loss");
+    require(report.evaluated_on_test && report.test_rows == 10U &&
+                report.metrics.accuracy > 0.9,
+            "a separable dataset must reach high held-out accuracy");
+    require(model.method == "logistic_regression" &&
+                model.weights.size() == 2U && model.weights[0].size() == 3U,
+            "a two-class target must train logistic regression weights");
+
+    // Live predictions on obvious points from each cluster.
+    const auto low = masterai::predict_tabular(model, {0.2, 1.1});
+    const auto high = masterai::predict_tabular(model, {4.8, 3.9});
+    require(low.label == "low" && high.label == "high" &&
+                low.class_probabilities.size() == 2U,
+            "the trained classifier must separate the two clusters");
+
+    // Artifact round-trip: a reloaded model must predict identically.
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::TrainedModelStore artifacts(records);
+    model.model_id = "model-56";
+    model.training_job_id = "job-56";
+    artifacts.put(model);
+    const auto reloaded = masterai::TrainedModelStore(records).find("model-56");
+    require(reloaded.has_value() &&
+                reloaded->feature_names == model.feature_names &&
+                reloaded->class_labels == model.class_labels,
+            "TrainedModelStore did not restore the persisted artifact");
+    const auto again = masterai::predict_tabular(*reloaded, {4.8, 3.9});
+    require(again.label == "high" &&
+                std::fabs(again.class_probabilities[0] -
+                          high.class_probabilities[0]) < 1e-9,
+            "a reloaded artifact must produce identical predictions");
+
+    // Standalone evaluation over the full dataset, plus its JSON form.
+    const auto metrics = masterai::evaluate_tabular_model(*reloaded, data);
+    require(metrics.classification && metrics.evaluated_rows == 40U &&
+                metrics.accuracy > 0.9 && metrics.confusion.size() == 2U,
+            "evaluate_tabular_model did not score the full dataset");
+    const auto metrics_json = masterai::tabular_evaluation_metrics_json(metrics);
+    require(metrics_json.find("\"accuracy\":") != std::string::npos &&
+                metrics_json.find("\"confusionMatrix\":") != std::string::npos,
+            "tabular_evaluation_metrics_json missed classification fields");
+
+    // Regression: y = 3x + 2 must be recovered almost exactly.
+    std::string regression_csv = "x,y\n";
+    for (int index = 0; index < 30; ++index) {
+        regression_csv += std::to_string(0.5 * index) + "," +
+                          std::to_string(3.0 * 0.5 * index + 2.0) + "\n";
+    }
+    const auto regression_data = masterai::parse_tabular_csv(regression_csv, "");
+    require(!regression_data.classification &&
+                regression_data.target_name == "y",
+            "an all-numeric last column must select the regression task");
+    masterai::TabularTrainingOptions regression_options;
+    regression_options.epochs = 500U;
+    regression_options.learning_rate = 0.2;
+    masterai::TrainedTabularModel regression_model;
+    const auto regression_report = masterai::train_tabular_model(
+        regression_data, regression_options, regression_model);
+    require(regression_model.method == "linear_regression" &&
+                regression_report.metrics.r_squared > 0.99,
+            "linear regression must fit a perfect line with R^2 near 1");
+    const auto predicted = masterai::predict_tabular(regression_model, {10.0});
+    require(std::fabs(predicted.value - 32.0) < 1.0,
+            "the regression must recover y = 3x + 2 near x = 10");
+
+    // The parser must reject bad content, never invent a dataset.
+    bool rejected_feature = false;
+    try {
+        masterai::parse_tabular_csv("a,b\nx,1\ny,2\nz,3\n", "b");
+    } catch (const std::exception&) {
+        rejected_feature = true;
+    }
+    require(rejected_feature,
+            "a non-numeric feature column must be rejected");
+    bool rejected_target = false;
+    try {
+        masterai::parse_tabular_csv("a,b\n1,2\n3,4\n", "missing");
+    } catch (const std::exception&) {
+        rejected_target = true;
+    }
+    require(rejected_target, "an unknown target column must be rejected");
+
+    // Dataset content and evaluation result stores round-trip.
+    masterai::DatasetContentStore content(records);
+    content.put("dataset-56", csv, "label");
+    const auto stored = content.find("dataset-56");
+    require(stored.has_value() && stored->csv == csv &&
+                stored->target_column == "label",
+            "DatasetContentStore did not round-trip the uploaded CSV");
+    require(content.remove("dataset-56") && !content.find("dataset-56"),
+            "DatasetContentStore remove() did not delete the content");
+    masterai::EvaluationResultStore results(records);
+    results.put("run-56", metrics_json);
+    require(results.find("run-56").value_or("") == metrics_json,
+            "EvaluationResultStore did not round-trip the metrics");
+}
+
+// Phase 57: docs/PLAN.md "Machine Learning Abilities" section 27 (Model
+// Comparison) -- the same permission/lifecycle/reload/remove guarantees as
+// Phase 55's test for the record store, plus proof the comparison executor
+// computes a real verdict: a converged model must beat an undertrained one
+// on the shared benchmark, identical metrics must report a tie, and a
+// cross-task comparison must be rejected.
+void test_machine_learning_model_comparison_lifecycle_and_execution() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.comparisons.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.comparisons.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.comparisons.view"),
+            "ml.comparisons.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::ModelComparisonStore comparisons(records);
+    const auto comparison = comparisons.create(
+        "administrator-1", "model-a", "model-b", "dataset-1",
+        "candidate-vs-production",
+        "Does the retrained candidate beat the production model?");
+    require(!comparison.id.empty() &&
+                comparison.name == "candidate-vs-production" &&
+                comparison.baseline_model_id == "model-a" &&
+                comparison.candidate_model_id == "model-b" &&
+                comparison.dataset_id == "dataset-1" &&
+                comparison.status ==
+                    masterai::ModelComparisonStatus::queued &&
+                comparison.owner_id == "administrator-1",
+            "a newly created comparison must start queued with its owner "
+            "recorded");
+    require(comparisons.list().size() == 1U,
+            "the created comparison was not visible in list()");
+
+    // Record-shape rules: name, both model ids, and the benchmark dataset
+    // are mandatory, and the two models must actually differ.
+    const auto rejects = [&comparisons](const std::string& baseline,
+                                        const std::string& candidate,
+                                        const std::string& dataset,
+                                        const std::string& name) {
+        try {
+            comparisons.create("administrator-1", baseline, candidate,
+                               dataset, name, "");
+        } catch (const std::invalid_argument&) {
+            return true;
+        }
+        return false;
+    };
+    require(rejects("model-a", "model-b", "dataset-1", ""),
+            "create() must reject a comparison with no name");
+    require(rejects("", "model-b", "dataset-1", "no-baseline"),
+            "create() must reject a comparison with no baseline model id");
+    require(rejects("model-a", "", "dataset-1", "no-candidate"),
+            "create() must reject a comparison with no candidate model id");
+    require(rejects("model-a", "model-b", "", "no-dataset"),
+            "create() must reject a comparison with no benchmark dataset id");
+    require(rejects("model-a", "model-a", "dataset-1", "self-comparison"),
+            "create() must reject comparing a model against itself");
+
+    require(comparisons.set_status(comparison.id,
+                                   masterai::ModelComparisonStatus::completed),
+            "set_status() rejected a known comparison id");
+    require(!comparisons.set_status("nonexistent-comparison",
+                                    masterai::ModelComparisonStatus::failed),
+            "set_status() must no-op for an unknown comparison id, not throw");
+
+    masterai::ModelComparisonStore reloaded(records);
+    const auto reloaded_comparison = reloaded.find(comparison.id);
+    require(reloaded_comparison.has_value() &&
+                reloaded_comparison->candidate_model_id == "model-b" &&
+                reloaded_comparison->status ==
+                    masterai::ModelComparisonStatus::completed,
+            "ModelComparisonStore did not restore a persisted comparison "
+            "after reload");
+
+    const auto json = masterai::model_comparison_json(comparison);
+    require(json.find("\"name\":\"candidate-vs-production\"") !=
+                    std::string::npos &&
+                json.find("\"baselineModelId\":\"model-a\"") !=
+                    std::string::npos &&
+                json.find("\"candidateModelId\":\"model-b\"") !=
+                    std::string::npos &&
+                json.find("\"datasetId\":\"dataset-1\"") != std::string::npos,
+            "model_comparison_json did not report the comparison's own "
+            "fields");
+
+    require(comparisons.remove(comparison.id) &&
+                comparisons.list().empty() &&
+                !comparisons.remove(comparison.id),
+            "remove() must delete a known comparison and no-op afterwards");
+
+    // Real execution: two models scored on the same separable benchmark.
+    // The "weak" model trains on a label-flipped copy of the data (same
+    // features, same label set, opposite meaning), so on the true benchmark
+    // it is confidently wrong -- a genuinely worse model, not a
+    // slightly-slower learner an easy dataset would let tie.
+    std::string csv = "x1,x2,label\n";
+    std::string flipped_csv = "x1,x2,label\n";
+    for (int index = 0; index < 20; ++index) {
+        const std::string low_row = std::to_string(0.1 * index) + "," +
+                                    std::to_string(1.0 + 0.05 * index);
+        const std::string high_row = std::to_string(4.0 + 0.1 * index) + "," +
+                                     std::to_string(3.0 + 0.05 * index);
+        csv += low_row + ",low\n" + high_row + ",high\n";
+        flipped_csv += low_row + ",high\n" + high_row + ",low\n";
+    }
+    const auto data = masterai::parse_tabular_csv(csv, "label");
+    const auto flipped_data = masterai::parse_tabular_csv(flipped_csv, "label");
+    masterai::TabularTrainingOptions options;
+    options.epochs = 300U;
+    options.learning_rate = 0.5;
+    options.test_fraction = 0.0;
+    masterai::TrainedTabularModel weak;
+    masterai::train_tabular_model(flipped_data, options, weak);
+    weak.model_id = "model-weak";
+    masterai::TrainedTabularModel strong;
+    masterai::train_tabular_model(data, options, strong);
+    strong.model_id = "model-strong";
+
+    const auto weak_metrics = masterai::evaluate_tabular_model(weak, data);
+    const auto strong_metrics = masterai::evaluate_tabular_model(strong, data);
+    require(strong_metrics.macro_f1 > weak_metrics.macro_f1,
+            "the correctly trained model must outscore the label-flipped "
+            "one, or this comparison proves nothing");
+    const auto result_json = masterai::tabular_model_comparison_json(
+        weak, weak_metrics, strong, strong_metrics);
+    require(result_json.find("\"winner\":\"candidate\"") !=
+                    std::string::npos &&
+                result_json.find("\"primaryMetric\":\"macroF1\"") !=
+                    std::string::npos &&
+                result_json.find("\"baseline\":{\"modelId\":\"model-weak\"") !=
+                    std::string::npos &&
+                result_json.find(
+                    "\"candidate\":{\"modelId\":\"model-strong\"") !=
+                    std::string::npos,
+            "the comparison verdict must name the measurably better model "
+            "as the winner");
+    // Reversed roles must flip the verdict to the baseline side.
+    const auto reversed_json = masterai::tabular_model_comparison_json(
+        strong, strong_metrics, weak, weak_metrics);
+    require(reversed_json.find("\"winner\":\"baseline\"") !=
+                std::string::npos,
+            "swapping baseline and candidate must swap the winner");
+    // Identical metric sets are an honest tie, never a picked side.
+    const auto tie_json = masterai::tabular_model_comparison_json(
+        strong, strong_metrics, weak, strong_metrics);
+    require(tie_json.find("\"winner\":\"tie\"") != std::string::npos,
+            "identical primary metrics must report a tie");
+
+    // A classification model cannot be compared against a regression model.
+    masterai::TabularEvaluationMetrics regression_metrics;
+    regression_metrics.classification = false;
+    bool rejected_cross_task = false;
+    try {
+        masterai::tabular_model_comparison_json(weak, weak_metrics, strong,
+                                                regression_metrics);
+    } catch (const std::exception&) {
+        rejected_cross_task = true;
+    }
+    require(rejected_cross_task,
+            "a cross-task comparison must be rejected, not scored");
+
+    // Stored results round-trip and die on remove, like evaluation results.
+    masterai::ComparisonResultStore stored_results(records);
+    stored_results.put("comparison-57", result_json);
+    require(stored_results.find("comparison-57").value_or("") == result_json,
+            "ComparisonResultStore did not round-trip the result");
+    require(stored_results.remove("comparison-57") &&
+                !stored_results.find("comparison-57") &&
+                !stored_results.remove("comparison-57"),
+            "ComparisonResultStore remove() must delete once and no-op "
+            "afterwards");
+}
+
 }  // namespace
 
 int main() {
@@ -6160,6 +6473,10 @@ int main() {
             test_machine_learning_checkpoint_lifecycle);
         run("Machine Learning deployment lifecycle",
             test_machine_learning_deployment_lifecycle);
+        run("Machine Learning real training and prediction",
+            test_machine_learning_real_training_and_prediction);
+        run("Machine Learning model comparison lifecycle and execution",
+            test_machine_learning_model_comparison_lifecycle_and_execution);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

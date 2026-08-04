@@ -3694,6 +3694,270 @@ private:
 std::string deployment_json(const Deployment& deployment);
 std::string deployments_json(const std::vector<Deployment>& deployments);
 
+// Phase 56: docs/PLAN.md "Machine Learning Abilities" -- the first REAL
+// execution layer for the module. Everything above this comment records
+// intent; everything below actually computes. The engine trains genuine
+// models (gradient-descent linear regression for numeric targets,
+// softmax/logistic classification for categorical targets) on tabular CSV
+// datasets uploaded against a DatasetStore entry, evaluates them on a
+// held-out split with real metrics, persists the learned weights as a
+// reloadable artifact tied to a ModelRegistryStore entry, and serves live
+// predictions from those weights. Implemented in src/ml_engine.cpp.
+
+// A parsed tabular dataset: every feature column must be numeric; the
+// target column decides the task (all-numeric -> regression, otherwise
+// classification with targets stored as class-label indices).
+struct TabularDataset {
+    std::vector<std::string> feature_names;
+    std::string target_name;
+    bool classification{false};
+    std::vector<std::string> class_labels;      // classification only
+    std::vector<std::vector<double>> features;  // row-major, one row per example
+    std::vector<double> targets;                // class index or numeric value
+};
+
+// Parses CSV text (header row required, quoted fields supported) into a
+// TabularDataset. target_column names the label column; empty selects the
+// last column. Throws std::runtime_error with a human-readable reason on
+// any structural problem (missing column, non-numeric feature, too few
+// rows, ...).
+TabularDataset parse_tabular_csv(const std::string& csv,
+                                 const std::string& target_column);
+
+// Raw uploaded content for one DatasetStore entry, keyed by dataset id.
+// Kept as the original CSV plus the chosen target column so training and
+// evaluation always re-parse from the exact bytes the administrator
+// approved, not a lossy intermediate form.
+class DatasetContentStore final {
+public:
+    struct Content {
+        std::string csv;
+        std::string target_column;
+    };
+    DatasetContentStore() = default;
+    explicit DatasetContentStore(RecordStore& records);
+    void put(const std::string& dataset_id, const std::string& csv,
+             const std::string& target_column);
+    std::optional<Content> find(const std::string& dataset_id) const;
+    bool remove(const std::string& dataset_id);
+
+private:
+    RecordStore* records_{nullptr};
+};
+
+// JSON profile of a parsed dataset (row/column counts, task, classes) for
+// the upload response and the dataset-content GET endpoint.
+std::string tabular_dataset_profile_json(const std::string& dataset_id,
+                                         const TabularDataset& data);
+
+// Hyperparameters for one training run. Every field has a working default
+// so a bare "run" request trains sensibly.
+struct TabularTrainingOptions {
+    std::uint32_t epochs{200};
+    double learning_rate{0.05};
+    double test_fraction{0.2};   // held-out share, [0, 0.9]
+    std::uint32_t seed{42};      // deterministic shuffle/split
+    std::uint32_t checkpoint_interval{50};  // epochs between checkpoints
+};
+
+// The learned model: standardization statistics plus weight rows (one row
+// of n_features+1 values including bias for regression; one row per class
+// for classification). This is the artifact that gets persisted and later
+// reloaded for evaluation and prediction.
+struct TrainedTabularModel {
+    std::string model_id;         // owning ModelRegistryEntry id
+    std::string training_job_id;  // job that produced it
+    std::string method;  // "linear_regression" | "logistic_regression" |
+                         // "softmax_regression"
+    bool classification{false};
+    std::vector<std::string> feature_names;
+    std::string target_name;
+    std::vector<std::string> class_labels;
+    std::vector<double> feature_means;
+    std::vector<double> feature_stddevs;
+    std::vector<std::vector<double>> weights;
+    std::uint64_t trained_at_epoch_seconds{0};
+};
+
+// Real evaluation metrics computed against actual labels: classification
+// reports accuracy plus macro precision/recall/F1 and a confusion matrix;
+// regression reports MSE, MAE, and R-squared.
+struct TabularEvaluationMetrics {
+    bool classification{false};
+    std::size_t evaluated_rows{0};
+    double accuracy{0.0};
+    double macro_precision{0.0};
+    double macro_recall{0.0};
+    double macro_f1{0.0};
+    std::vector<std::vector<std::size_t>> confusion;  // [actual][predicted]
+    double mse{0.0};
+    double mae{0.0};
+    double r_squared{0.0};
+};
+
+// Outcome of one real training run: the per-epoch loss curve (cross-entropy
+// for classification, mean squared error for regression), the split sizes,
+// and the held-out metrics (computed on the training rows when the split
+// leaves no test rows, flagged by evaluated_on_test).
+struct TabularTrainingReport {
+    std::vector<double> loss_history;
+    double final_loss{0.0};
+    std::size_t train_rows{0};
+    std::size_t test_rows{0};
+    bool evaluated_on_test{false};
+    TabularEvaluationMetrics metrics;
+};
+
+// Trains by full-batch gradient descent on standardized features. Picks the
+// method from the dataset's task (regression vs 2-class vs k-class). Fills
+// `model` (except model_id/training_job_id, which the caller owns) and
+// returns the report. Throws std::runtime_error on an untrainable dataset.
+TabularTrainingReport train_tabular_model(const TabularDataset& data,
+                                          const TabularTrainingOptions& options,
+                                          TrainedTabularModel& model);
+
+// Scores an existing model against a dataset with the same schema (feature
+// names must match; classification labels must be known to the model).
+// Throws std::runtime_error on schema mismatch.
+TabularEvaluationMetrics evaluate_tabular_model(const TrainedTabularModel& model,
+                                                const TabularDataset& data);
+
+// One live prediction. For classification, label/class_probabilities are
+// filled and value is the winning class index; for regression, value is
+// the predicted number.
+struct TabularPrediction {
+    double value{0.0};
+    std::string label;
+    std::vector<double> class_probabilities;
+};
+
+// Predicts from raw (unstandardized) feature values ordered like
+// model.feature_names. Throws std::runtime_error on arity mismatch.
+TabularPrediction predict_tabular(const TrainedTabularModel& model,
+                                  const std::vector<double>& features);
+
+// Persisted trained-model artifacts, keyed by ModelRegistryEntry id, so a
+// model trained in one server run predicts in the next.
+class TrainedModelStore final {
+public:
+    TrainedModelStore() = default;
+    explicit TrainedModelStore(RecordStore& records);
+    void put(const TrainedTabularModel& model);
+    std::optional<TrainedTabularModel> find(const std::string& model_id) const;
+    bool remove(const std::string& model_id);
+
+private:
+    RecordStore* records_{nullptr};
+};
+
+// Stored results of executed evaluation runs, keyed by EvaluationRun id --
+// the "actual numeric score" Evaluation Lab was scoped down without.
+class EvaluationResultStore final {
+public:
+    EvaluationResultStore() = default;
+    explicit EvaluationResultStore(RecordStore& records);
+    void put(const std::string& run_id, const std::string& metrics_json);
+    std::optional<std::string> find(const std::string& run_id) const;
+    bool remove(const std::string& run_id);
+
+private:
+    RecordStore* records_{nullptr};
+};
+
+std::string tabular_evaluation_metrics_json(const TabularEvaluationMetrics& metrics);
+std::string tabular_training_report_json(const TabularTrainingReport& report,
+                                         const TrainedTabularModel& model);
+std::string trained_tabular_model_summary_json(const TrainedTabularModel& model);
+std::string tabular_prediction_json(const TabularPrediction& prediction,
+                                    const TrainedTabularModel& model);
+
+// Phase 57: docs/PLAN.md "Machine Learning Abilities" section 27 (Model
+// Comparison) -- a REAL executor phase like Phase 56, not a scoped-down
+// roster record. A comparison names two registered models (a baseline and
+// a candidate) plus one shared benchmark dataset; running it evaluates
+// both trained artifacts against that dataset's real uploaded content via
+// Phase 56's evaluate_tabular_model and stores a genuine side-by-side
+// result: both metric sets, the per-metric primary delta, and the winner
+// (macro F1 decides classification, MSE decides regression). Scoped
+// honestly against section 27's full wishlist: hallucination rate,
+// safety, latency/throughput/GPU cost, and blind response comparison only
+// mean something for generative models, which this tabular engine does
+// not train -- what IS here computes every number it reports. The record
+// itself follows EvaluationRun's shape: baseline/candidate/dataset ids
+// are all mandatory (a comparison without two models and a shared
+// benchmark means nothing), baseline and candidate must differ, and the
+// lifecycle reuses Evaluation Lab's five run states since a comparison
+// executes like an evaluation, not an approval workflow.
+enum class ModelComparisonStatus { queued, running, completed, failed, canceled };
+
+std::string model_comparison_status_name(ModelComparisonStatus status);
+ModelComparisonStatus parse_model_comparison_status(const std::string& status);
+
+struct ModelComparison {
+    std::string id;
+    std::string baseline_model_id;
+    std::string candidate_model_id;
+    std::string dataset_id;
+    std::string name;
+    std::string description;
+    std::string owner_id;
+    ModelComparisonStatus status{ModelComparisonStatus::queued};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class ModelComparisonStore final {
+public:
+    ModelComparisonStore() = default;
+    explicit ModelComparisonStore(RecordStore& records);
+    ModelComparison create(const std::string& owner_id,
+                           const std::string& baseline_model_id,
+                           const std::string& candidate_model_id,
+                           const std::string& dataset_id,
+                           const std::string& name,
+                           const std::string& description);
+    std::optional<ModelComparison> find(const std::string& id) const;
+    std::vector<ModelComparison> list() const;
+    bool set_status(const std::string& id, ModelComparisonStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const ModelComparison& comparison);
+    RecordStore* records_{nullptr};
+    std::map<std::string, ModelComparison> comparisons_;
+    mutable std::mutex mutex_;
+};
+
+std::string model_comparison_json(const ModelComparison& comparison);
+std::string model_comparisons_json(
+    const std::vector<ModelComparison>& comparisons);
+
+// Stored results of executed comparisons, keyed by ModelComparison id --
+// the same pattern as EvaluationResultStore, in its own collection so a
+// comparison result and an evaluation result can never collide.
+class ComparisonResultStore final {
+public:
+    ComparisonResultStore() = default;
+    explicit ComparisonResultStore(RecordStore& records);
+    void put(const std::string& comparison_id, const std::string& result_json);
+    std::optional<std::string> find(const std::string& comparison_id) const;
+    bool remove(const std::string& comparison_id);
+
+private:
+    RecordStore* records_{nullptr};
+};
+
+// Builds the real side-by-side comparison JSON from two models' metrics
+// against the same benchmark: both metric sets, the primary-metric name
+// and delta (candidate minus baseline), and the winner. Throws
+// std::runtime_error if the two metric sets are for different tasks.
+std::string tabular_model_comparison_json(
+    const TrainedTabularModel& baseline,
+    const TabularEvaluationMetrics& baseline_metrics,
+    const TrainedTabularModel& candidate,
+    const TabularEvaluationMetrics& candidate_metrics);
+
 struct PerformanceSample {
     std::string name;
     std::uint64_t operations{0};

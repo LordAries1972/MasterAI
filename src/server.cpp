@@ -336,6 +336,13 @@ public:
         ml_training_checkpoints =
             std::make_unique<TrainingCheckpointStore>(records);
         ml_deployments = std::make_unique<DeploymentStore>(records);
+        // Phase 56: real ML execution stores (see ml_engine.cpp).
+        ml_dataset_content = std::make_unique<DatasetContentStore>(records);
+        ml_trained_models = std::make_unique<TrainedModelStore>(records);
+        ml_evaluation_results = std::make_unique<EvaluationResultStore>(records);
+        // Phase 57: real model comparison (see ml_engine.cpp).
+        ml_model_comparisons = std::make_unique<ModelComparisonStore>(records);
+        ml_comparison_results = std::make_unique<ComparisonResultStore>(records);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -1155,8 +1162,68 @@ public:
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_model_not_found\"}");
             }
+            // Phase 56: the learned-weight artifact dies with its registry
+            // entry.
+            ml_trained_models->remove(id);
             audit.append("ml.model.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 56: real trained-model surface. GET /artifact reports what
+        // was actually learned (method, schema, classes, trained-at); POST
+        // /predict runs a live prediction through the persisted weights.
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/models/", 0U) == 0U &&
+            request.target.size() > 9U &&
+            request.target.compare(request.target.size() - 9U, 9U,
+                                   "/artifact") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.models.view")) return *denied;
+            const auto id = request.target.substr(
+                18U, request.target.size() - 18U - 9U);
+            const auto model = ml_trained_models->find(id);
+            if (!model) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_model_not_trained\"}");
+            }
+            return response(200, "OK",
+                            trained_tabular_model_summary_json(*model));
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/models/", 0U) == 0U &&
+            request.target.size() > 8U &&
+            request.target.compare(request.target.size() - 8U, 8U,
+                                   "/predict") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.models.view")) return *denied;
+            const auto id = request.target.substr(
+                18U, request.target.size() - 18U - 8U);
+            const auto model = ml_trained_models->find(id);
+            if (!model) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_model_not_trained\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                // Features arrive as an object keyed by column name so a
+                // caller never has to know the model's internal ordering.
+                const auto& object = root.required("features").as_object();
+                std::vector<double> features;
+                features.reserve(model->feature_names.size());
+                for (const auto& name : model->feature_names) {
+                    const auto found = object.find(name);
+                    if (found == object.end()) {
+                        throw std::runtime_error("missing feature \"" + name +
+                                                 "\"");
+                    }
+                    features.push_back(found->second.as_double());
+                }
+                const auto prediction = predict_tabular(*model, features);
+                return response(200, "OK",
+                                tabular_prediction_json(prediction, *model));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_prediction\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
         }
         // Phase 39: Dataset Manager (docs/PLAN.md "Machine Learning
         // Abilities" section 10), scoped to identity/provenance/approval
@@ -1228,8 +1295,72 @@ public:
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_dataset_not_found\"}");
             }
+            // Phase 56: uploaded CSV content dies with its dataset entry.
+            ml_dataset_content->remove(id);
             audit.append("ml.dataset.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 56: real dataset content. POST uploads CSV bytes against a
+        // registered dataset (validated by a full parse before anything is
+        // stored); GET reports the parsed profile (row count, feature
+        // columns, task, classes). This is what makes a Dataset trainable
+        // instead of being a name in a list.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/datasets/", 0U) == 0U &&
+            request.target.size() > 8U &&
+            request.target.compare(request.target.size() - 8U, 8U,
+                                   "/content") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.datasets.import")) return *denied;
+            const auto id = request.target.substr(
+                20U, request.target.size() - 20U - 8U);
+            if (!ml_datasets->find(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_dataset_not_found\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                const auto csv = root.required("csv").as_string();
+                const auto* target = root.optional("targetColumn");
+                const auto target_column =
+                    target ? target->as_string() : std::string{};
+                // Parse before storing so bad content is rejected now, not
+                // at training time.
+                const auto parsed = parse_tabular_csv(csv, target_column);
+                ml_dataset_content->put(id, csv, target_column);
+                audit.append("ml.dataset.content", user->id, "success", id);
+                return response(200, "OK",
+                                tabular_dataset_profile_json(id, parsed));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_dataset_content\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/datasets/", 0U) == 0U &&
+            request.target.size() > 8U &&
+            request.target.compare(request.target.size() - 8U, 8U,
+                                   "/content") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.datasets.view")) return *denied;
+            const auto id = request.target.substr(
+                20U, request.target.size() - 20U - 8U);
+            const auto content = ml_dataset_content->find(id);
+            if (!content) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_dataset_content_not_found\"}");
+            }
+            try {
+                const auto parsed =
+                    parse_tabular_csv(content->csv, content->target_column);
+                return response(200, "OK",
+                                tabular_dataset_profile_json(id, parsed));
+            } catch (const std::exception& error) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_dataset_content_unreadable\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
         }
         // Phase 40: Subject Knowledge Manager (docs/PLAN.md "Machine
         // Learning Abilities" section 12), scoped to identity/scope/
@@ -1541,6 +1672,122 @@ public:
             audit.append("ml.training_job.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
         }
+        // Phase 56: the real training executor. POST .../run trains the
+        // job's dataset content by gradient descent right now: the job
+        // moves through queued -> preparing -> running for real, the loss
+        // curve comes from actual optimization steps, checkpoints record
+        // genuinely measured losses, the learned weights persist as a
+        // reloadable artifact, and the model registry entry (created here
+        // if the job named none) lands in the evaluation state. Runs
+        // synchronously: the accepted dataset sizes (<= 8 MiB CSV) train in
+        // well under a request timeout.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/training-jobs/", 0U) == 0U &&
+            request.target.size() > 4U &&
+            request.target.compare(request.target.size() - 4U, 4U,
+                                   "/run") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.training.manage")) return *denied;
+            const auto id = request.target.substr(
+                25U, request.target.size() - 25U - 4U);
+            const auto job = ml_training_jobs->find(id);
+            if (!job) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_training_job_not_found\"}");
+            }
+            const auto content = ml_dataset_content->find(job->dataset_id);
+            if (!content) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_dataset_has_no_content\",\"detail\":"
+                    "\"upload CSV content to the job's dataset first\"}");
+            }
+            TabularTrainingOptions options;
+            try {
+                if (!request.body.empty()) {
+                    auto root = parse_json(request.body);
+                    const auto integer_field = [&root](const char* field,
+                                                       const std::uint32_t fallback) {
+                        const auto* value = root.optional(field);
+                        return value ? static_cast<std::uint32_t>(value->as_integer())
+                                     : fallback;
+                    };
+                    options.epochs = integer_field("epochs", options.epochs);
+                    options.seed = integer_field("seed", options.seed);
+                    options.checkpoint_interval = integer_field(
+                        "checkpointInterval", options.checkpoint_interval);
+                    if (const auto* rate = root.optional("learningRate")) {
+                        options.learning_rate = rate->as_double();
+                    }
+                    if (const auto* fraction = root.optional("testFraction")) {
+                        options.test_fraction = fraction->as_double();
+                    }
+                }
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_training_options\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+            // Real lifecycle transitions, recorded as they happen.
+            ml_training_jobs->set_status(id, TrainingJobStatus::queued);
+            ml_training_jobs->set_status(id, TrainingJobStatus::preparing);
+            TrainedTabularModel model;
+            TabularTrainingReport report;
+            try {
+                const auto data =
+                    parse_tabular_csv(content->csv, content->target_column);
+                ml_training_jobs->set_status(id, TrainingJobStatus::running);
+                report = train_tabular_model(data, options, model);
+            } catch (const std::exception& error) {
+                ml_training_jobs->set_status(id, TrainingJobStatus::failed);
+                audit.append("ml.training_job.run", user->id, "failure", id);
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_training_failed\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+            // Attach the result to the job's registry entry, or register
+            // the newly trained model if the job never named one.
+            std::string model_id = job->model_id;
+            if (model_id.empty() || !ml_models->find(model_id)) {
+                const auto entry = ml_models->create(
+                    user->id, job->name + "-model", job->name + " (trained)",
+                    "1", "masterai-tabular",
+                    model.classification ? "classification" : "regression",
+                    "masterai-tabular-v1", "training-job:" + job->id, "");
+                model_id = entry.id;
+            }
+            model.model_id = model_id;
+            model.training_job_id = job->id;
+            ml_trained_models->put(model);
+            // Trained models wait for Evaluation Lab review before approval,
+            // matching the dashboard's models-awaiting-evaluation count.
+            ml_models->set_state(model_id, ModelRegistryState::evaluation);
+            // Checkpoint records carry genuinely measured losses from the
+            // finished run, capped at ten so a 10000-epoch run doesn't
+            // flood the checkpoint list.
+            if (options.checkpoint_interval > 0U && !report.loss_history.empty()) {
+                std::size_t stride = options.checkpoint_interval;
+                const std::size_t epochs = report.loss_history.size();
+                if (epochs / stride > 10U) stride = epochs / 10U;
+                for (std::size_t epoch = stride; epoch <= epochs; epoch += stride) {
+                    char loss_text[32];
+                    std::snprintf(loss_text, sizeof(loss_text), "%.6g",
+                                  report.loss_history[epoch - 1U]);
+                    ml_training_checkpoints->create(
+                        user->id, job->id,
+                        job->name + " epoch " + std::to_string(epoch),
+                        "captured by the Phase 56 training executor",
+                        "epoch " + std::to_string(epoch) + ", training loss " +
+                            loss_text);
+                }
+            }
+            ml_training_jobs->set_status(id,
+                                         TrainingJobStatus::awaiting_evaluation);
+            audit.append("ml.training_job.run", user->id, "success", id);
+            return response(200, "OK",
+                            tabular_training_report_json(report, model));
+        }
         // Phase 43: Evaluation Lab (docs/PLAN.md "Machine Learning
         // Abilities" section 23), scoped to identity/target-model/target-
         // dataset/category/status fields -- see EvaluationRunStore's class
@@ -1617,8 +1864,81 @@ public:
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_evaluation_run_not_found\"}");
             }
+            // Phase 56: an executed run's stored metrics die with it.
+            ml_evaluation_results->remove(id);
             audit.append("ml.evaluation_run.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 56: the real evaluation harness. POST .../run scores the
+        // run's trained model against the run's dataset content right now
+        // and stores the genuine metrics (accuracy/precision/recall/F1 and
+        // confusion matrix, or MSE/MAE/R-squared); GET .../result returns
+        // them later. This is the "actual numeric score" Evaluation Lab
+        // was originally scoped down without.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/evaluation-runs/", 0U) == 0U &&
+            request.target.size() > 4U &&
+            request.target.compare(request.target.size() - 4U, 4U,
+                                   "/run") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.evaluation.manage")) return *denied;
+            const auto id = request.target.substr(
+                27U, request.target.size() - 27U - 4U);
+            const auto run = ml_evaluation_runs->find(id);
+            if (!run) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_evaluation_run_not_found\"}");
+            }
+            const auto model = ml_trained_models->find(run->model_id);
+            if (!model) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_model_not_trained\",\"detail\":"
+                    "\"run a training job for this model first\"}");
+            }
+            const auto content = ml_dataset_content->find(run->dataset_id);
+            if (!content) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_dataset_has_no_content\",\"detail\":"
+                    "\"upload CSV content to the run's dataset first\"}");
+            }
+            ml_evaluation_runs->set_status(id, EvaluationRunStatus::running);
+            try {
+                const auto data =
+                    parse_tabular_csv(content->csv, content->target_column);
+                const auto metrics = evaluate_tabular_model(*model, data);
+                const auto metrics_json = tabular_evaluation_metrics_json(metrics);
+                ml_evaluation_results->put(id, metrics_json);
+                ml_evaluation_runs->set_status(id, EvaluationRunStatus::completed);
+                audit.append("ml.evaluation_run.run", user->id, "success", id);
+                return response(200, "OK",
+                                "{\"runId\":\"" + json_escape(id) +
+                                    "\",\"metrics\":" + metrics_json + "}");
+            } catch (const std::exception& error) {
+                ml_evaluation_runs->set_status(id, EvaluationRunStatus::failed);
+                audit.append("ml.evaluation_run.run", user->id, "failure", id);
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_evaluation_failed\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/evaluation-runs/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/result") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.evaluation.view")) return *denied;
+            const auto id = request.target.substr(
+                27U, request.target.size() - 27U - 7U);
+            const auto metrics_json = ml_evaluation_results->find(id);
+            if (!metrics_json) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_evaluation_result_not_found\"}");
+            }
+            return response(200, "OK",
+                            "{\"runId\":\"" + json_escape(id) +
+                                "\",\"metrics\":" + *metrics_json + "}");
         }
         // Phase 44: Experiment Tracking (docs/PLAN.md "Machine Learning
         // Abilities" section 25), scoped to identity/target-project/target-
@@ -2590,6 +2910,173 @@ public:
             audit.append("ml.deployment.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
         }
+        // Phase 57: Model Comparison (docs/PLAN.md "Machine Learning
+        // Abilities" section 27) -- a real executor like Phase 56's
+        // training/evaluation endpoints. POST .../run evaluates both trained
+        // artifacts against the comparison's shared benchmark dataset right
+        // now and stores the genuine side-by-side result (both metric sets,
+        // primary-metric delta, winner); GET .../result recalls it later.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/model-comparisons") {
+            if (auto denied = forbidden_unless(user->role, "ml.comparisons.view")) return *denied;
+            return response(
+                200, "OK",
+                "{\"modelComparisons\":" +
+                    model_comparisons_json(ml_model_comparisons->list()) + "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/model-comparisons") {
+            if (auto denied = forbidden_unless(user->role, "ml.comparisons.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto baseline_model_id =
+                    root.required("baselineModelId").as_string();
+                const auto candidate_model_id =
+                    root.required("candidateModelId").as_string();
+                const auto dataset_id = root.required("datasetId").as_string();
+                const auto* description = root.optional("description");
+                const auto comparison = ml_model_comparisons->create(
+                    user->id, baseline_model_id, candidate_model_id,
+                    dataset_id, name,
+                    description ? description->as_string() : std::string{});
+                audit.append("ml.model_comparison.create", user->id,
+                             "success", comparison.id);
+                return response(201, "Created",
+                                model_comparison_json(comparison));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_model_comparison\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/model-comparisons/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.comparisons.manage")) return *denied;
+            const auto id = request.target.substr(
+                29U, request.target.size() - 29U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_model_comparison_status(
+                    root.required("status").as_string());
+                if (!ml_model_comparisons->set_status(id, status)) {
+                    return response(
+                        404, "Not Found",
+                        "{\"error\":\"ml_model_comparison_not_found\"}");
+                }
+                audit.append("ml.model_comparison.status", user->id,
+                             "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_model_comparison_status\","
+                    "\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/model-comparisons/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.comparisons.manage")) return *denied;
+            const auto id = request.target.substr(
+                29U, request.target.size() - 29U - 7U);
+            if (!ml_model_comparisons->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_model_comparison_not_found\"}");
+            }
+            // An executed comparison's stored result dies with it, exactly
+            // like an evaluation run's stored metrics.
+            ml_comparison_results->remove(id);
+            audit.append("ml.model_comparison.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/model-comparisons/", 0U) == 0U &&
+            request.target.size() > 4U &&
+            request.target.compare(request.target.size() - 4U, 4U,
+                                   "/run") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.comparisons.manage")) return *denied;
+            const auto id = request.target.substr(
+                29U, request.target.size() - 29U - 4U);
+            const auto comparison = ml_model_comparisons->find(id);
+            if (!comparison) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_model_comparison_not_found\"}");
+            }
+            const auto baseline =
+                ml_trained_models->find(comparison->baseline_model_id);
+            const auto candidate =
+                ml_trained_models->find(comparison->candidate_model_id);
+            if (!baseline || !candidate) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_model_not_trained\",\"detail\":"
+                    "\"both compared models need a trained artifact; run "
+                    "their training jobs first\"}");
+            }
+            const auto content =
+                ml_dataset_content->find(comparison->dataset_id);
+            if (!content) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_dataset_has_no_content\",\"detail\":"
+                    "\"upload CSV content to the comparison's benchmark "
+                    "dataset first\"}");
+            }
+            ml_model_comparisons->set_status(id, ModelComparisonStatus::running);
+            try {
+                const auto data =
+                    parse_tabular_csv(content->csv, content->target_column);
+                const auto baseline_metrics =
+                    evaluate_tabular_model(*baseline, data);
+                const auto candidate_metrics =
+                    evaluate_tabular_model(*candidate, data);
+                const auto result_json = tabular_model_comparison_json(
+                    *baseline, baseline_metrics, *candidate, candidate_metrics);
+                ml_comparison_results->put(id, result_json);
+                ml_model_comparisons->set_status(
+                    id, ModelComparisonStatus::completed);
+                audit.append("ml.model_comparison.run", user->id, "success",
+                             id);
+                return response(200, "OK",
+                                "{\"comparisonId\":\"" + json_escape(id) +
+                                    "\",\"result\":" + result_json + "}");
+            } catch (const std::exception& error) {
+                ml_model_comparisons->set_status(id,
+                                                 ModelComparisonStatus::failed);
+                audit.append("ml.model_comparison.run", user->id, "failure",
+                             id);
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_model_comparison_failed\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/model-comparisons/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/result") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.comparisons.view")) return *denied;
+            const auto id = request.target.substr(
+                29U, request.target.size() - 29U - 7U);
+            const auto result_json = ml_comparison_results->find(id);
+            if (!result_json) {
+                return response(
+                    404, "Not Found",
+                    "{\"error\":\"ml_model_comparison_result_not_found\"}");
+            }
+            return response(200, "OK",
+                            "{\"comparisonId\":\"" + json_escape(id) +
+                                "\",\"result\":" + *result_json + "}");
+        }
         if (request.method == "GET" && request.target == "/models") {
             return workloads->model_inventory_page();
         }
@@ -2739,6 +3226,11 @@ public:
             if (target == "/app/ml/deployments") {
                 return is_administrator
                            ? application_page(*user, "ml-deployments")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/model-comparisons") {
+                return is_administrator
+                           ? application_page(*user, "ml-model-comparisons")
                            : response(302, "Found", "", {"Location: /app"});
             }
             if (target == "/app/report/system") {
@@ -4280,6 +4772,13 @@ private:
     std::unique_ptr<ModelOptimizationStore> ml_model_optimizations;
     std::unique_ptr<TrainingCheckpointStore> ml_training_checkpoints;
     std::unique_ptr<DeploymentStore> ml_deployments;
+    // Phase 56: the real ML execution layer's stores -- uploaded dataset
+    // content, learned weight artifacts, and executed evaluation results.
+    std::unique_ptr<DatasetContentStore> ml_dataset_content;
+    std::unique_ptr<TrainedModelStore> ml_trained_models;
+    std::unique_ptr<EvaluationResultStore> ml_evaluation_results;
+    std::unique_ptr<ModelComparisonStore> ml_model_comparisons;
+    std::unique_ptr<ComparisonResultStore> ml_comparison_results;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
     std::unique_ptr<DownloadManager> downloads;

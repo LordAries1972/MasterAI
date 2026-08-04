@@ -834,21 +834,34 @@ The Machine Learning administration foundation currently records and manages sco
 - hyperparameter searches;
 - model-optimization runs;
 - training checkpoints;
-- deployments.
+- deployments;
+- model comparisons (whose **Compare now** action is a real executor — see below).
 
 These are valuable control-plane records. They establish identity, ownership, intent, relationships, status, review, and approval boundaries.
 
+Since Phase 56, the module also contains a **real execution engine** for tabular machine learning, extended by Phase 57. This is genuine computation, not record-keeping:
+
+- **Dataset content ingestion** — uploading CSV text to a registered dataset parses and validates it completely (header row, numeric feature enforcement, quoted fields, an 8 MiB cap) before anything is stored, and returns a real profile: row count, feature columns, the target column, and whether the task is classification or regression.
+- **A real training executor** — running a training job performs actual full-batch gradient descent on standardized features: linear regression when the target column is numeric, logistic or softmax classification when it is categorical. The job's lifecycle transitions (`queued → preparing → running → awaiting_evaluation`) happen for real, the per-epoch loss curve comes from real optimization steps, and checkpoint records carry genuinely measured losses.
+- **Persisted learned weights** — every completed run stores the trained weights, standardization statistics, and schema as a reloadable artifact tied to a Model Registry entry, so a model trained today still predicts correctly after a server restart.
+- **A real evaluation harness** — running an evaluation scores a trained model against any schema-matching dataset and stores genuine metrics: accuracy, macro precision/recall/F1, and a confusion matrix for classification; MSE, MAE, and R² for regression.
+- **Live prediction** — the Model Registry serves real predictions (the winning class with per-class probabilities, or the predicted numeric value) computed from the persisted weights.
+- **A real comparison harness (Phase 57)** — a Model Comparison names a baseline model, a candidate model, and one shared benchmark dataset; **Compare now** evaluates both trained artifacts against that dataset's real content and stores a measured verdict: both full metric sets, the primary-metric delta (macro F1 for classification, MSE for regression), and the winner. An exact tie is reported as a tie, and comparing a classification model against a regression model is rejected.
+
+Section 10.7 walks through this end to end. The engine's own honest boundary: it trains **tabular** models. It does not fine-tune language models — that remains planned, and the boundary list below still applies to everything it names.
+
 ### 10.2 What must not be assumed yet
 
-At the plan's current Phase 55 boundary, the following must not be represented as an operating end-to-end training platform:
+At the plan's current Phase 57 boundary, the tabular engine described in 10.1 is real, but the following must still not be represented as an operating end-to-end platform:
 
-- a training executor that launches and monitors real framework jobs;
-- complete dataset import, immutable version publication, and transformation execution;
+- training or fine-tuning of **language models** (the real executor covers tabular classification and regression only);
+- external training-framework integration (PyTorch, llama.cpp finetune, ...);
+- immutable dataset version publication and transformation execution (Data Preparation jobs still record intent only);
 - real label-record editing and consensus review;
-- automated checkpoint capture, resume, comparison, or promotion;
-- fine-tuning or adapter execution;
-- full experiment metric and artifact capture;
-- automated model scoring, exam administration, or computed exam results;
+- checkpoint **weight** capture and resume (Phase 56 checkpoints carry genuinely measured losses, but not restorable weight snapshots — the final weights live in the model artifact);
+- adapter (LoRA) execution;
+- full experiment metric and artifact capture (Experiment records remain metadata);
+- exam administration or computed exam results;
 - automated hyperparameter search trials or best-result selection;
 - executed quantization, pruning, distillation, or other optimization operations;
 - embedding generation or a populated vector index;
@@ -856,7 +869,7 @@ At the plan's current Phase 55 boundary, the following must not be represented a
 - deployment automation, canary rollout, health monitoring, or automatic rollback;
 - continual learning from user conversations.
 
-Creating a Training Job or Fine-Tuning Job record records administrative intent and lifecycle state. It does not train a model. Creating a Vector Store record does not generate embeddings or index documents. Likewise, a Subject Exam record does not administer questions, a Hyperparameter Search record does not run trials, a Model Optimization record does not quantize anything, a Checkpoint record does not save weights, and an approved Deployment record does not route a single request — each is a governed statement of intent and approval that a future executor will attach real evidence to.
+Creating a Fine-Tuning Job record still records administrative intent and lifecycle state; it does not adapt a language model. Creating a Vector Store record does not generate embeddings or index documents. Likewise, a Subject Exam record does not administer questions, a Hyperparameter Search record does not run trials, a Model Optimization record does not quantize anything, and an approved Deployment record does not route a single request — each is a governed statement of intent and approval that a future executor will attach real evidence to. The deliberate exceptions since Phases 56-57: a Training Job whose dataset has uploaded CSV content, run through **Train now**, genuinely trains; an Evaluation Run executed through **Evaluate now** genuinely scores; and a Model Comparison executed through **Compare now** genuinely measures which of two trained models is better on a shared benchmark.
 
 ### 10.3 Two model catalogs with different purposes
 
@@ -873,13 +886,14 @@ Use MasterAI now to:
 
 - define and track the controlled ML project;
 - register datasets, subjects, examples, jobs, experiments, and approvals as the supported fields permit;
+- upload tabular CSV data and train, evaluate, compare, and serve real classification/regression models end to end (Section 10.7);
 - keep ordinary users away from ML administration;
 - run and compare verified GGUF inference models;
 - test prompts and authorized project context;
 - benchmark a model on the same host;
 - serve an approved specialized GGUF after it has been trained and converted by a controlled external workflow.
 
-Do not yet use MasterAI as proof that a model was actually trained merely because a job status was changed to `completed`.
+Do not use a manually changed status as proof that anything ran. Trust the executor's own evidence instead: a Phase 56 training run leaves a real loss curve, held-out metrics, measured-loss checkpoints, and a weight artifact behind — a hand-edited status leaves nothing.
 
 ### 10.5 Current Machine Learning classroom map
 
@@ -889,13 +903,13 @@ The current administrator pages are easiest to understand as a chain of controll
 |---|---|---|---|
 | Dashboard | `/app/ml` | Shows real counts and the interface roadmap | A zero count is real; a planned tag is not a hidden implementation |
 | Projects | `/app/ml/projects` | Organizes one ML objective and lifecycle | Does not allocate compute or storage |
-| Model Registry | `/app/ml/models` | Tracks model identity, provenance summary, and state | Is not the deployable GGUF inventory |
-| Dataset Manager | `/app/ml/datasets` | Tracks dataset identity, source, purpose, and approval | Does not import records or publish immutable versions yet |
+| Model Registry | `/app/ml/models` | Tracks model identity, provenance summary, and state; serves live predictions from trained tabular artifacts | Is not the deployable GGUF inventory |
+| Dataset Manager | `/app/ml/datasets` | Tracks dataset identity, source, purpose, and approval; holds real validated CSV content for tabular training | Does not publish immutable versions or ingest non-tabular corpora yet |
 | Subject Knowledge | `/app/ml/subjects` | Tracks a domain package and review status | Does not ingest its documents yet |
 | Data Labeling | `/app/ml/label-tasks` | Tracks a target dataset, label mode, and task status | Does not yet store or edit the full label records |
 | Data Preparation | `/app/ml/prep-jobs` | Tracks a target dataset, operation, and job status | Does not execute transformations |
-| Training Jobs | `/app/ml/training-jobs` | Tracks intended project/model/dataset/method and lifecycle | Does not launch training |
-| Evaluation Lab | `/app/ml/evaluation-runs` | Tracks the candidate, dataset, category, and run status | Does not calculate benchmark scores |
+| Training Jobs | `/app/ml/training-jobs` | Tracks project/model/dataset/method and lifecycle; **Train now** really trains a tabular model by gradient descent | Trains tabular models only — it does not fine-tune language models |
+| Evaluation Lab | `/app/ml/evaluation-runs` | Tracks the candidate, dataset, category, and run status; **Evaluate now** really computes and stores metrics | Scores tabular models only — no LLM benchmark suites yet |
 | Experiment Tracking | `/app/ml/experiments` | Relates a project, model, optional dataset, and lifecycle | Does not yet capture the full metrics/artifact bundle |
 | Fine-Tuning | `/app/ml/fine-tuning-jobs` | Tracks base model, dataset, method, and job lifecycle | Does not train an adapter or modify weights |
 | Model Builder | `/app/ml/model-builder-configs` | Tracks a proposed source type and design lifecycle | Does not construct or train the architecture |
@@ -906,8 +920,9 @@ The current administrator pages are easiest to understand as a chain of controll
 | Subject Examination | `/app/ml/subject-exams` | Tracks an exam for a registered subject package, its question format, and review lifecycle | Does not administer questions or compute scores |
 | Hyperparameter Optimization | `/app/ml/hyperparameter-searches` | Tracks a search over a training job's settings, its strategy, and job lifecycle | Does not run trials or select a best result |
 | Model Optimization | `/app/ml/model-optimizations` | Tracks an intended operation (quantization, pruning, ...) against a registered model | Does not transform any model artifact |
-| Checkpoint Management | `/app/ml/checkpoints` | Tracks a checkpoint record for a training job with an active/pinned/archived retention state | Does not capture, resume, compare, or promote real weights |
+| Checkpoint Management | `/app/ml/checkpoints` | Tracks checkpoint records; Phase 56 training runs create them automatically with genuinely measured losses | Records measured losses, not restorable weight snapshots; no resume or promotion |
 | Deployment Manager | `/app/ml/deployments` | Tracks an intended promotion of a registered model to an environment, with strategy and approval | Does not serve, monitor, or roll back anything |
+| Model Comparison | `/app/ml/model-comparisons` | Names a baseline model, candidate model, and shared benchmark; **Compare now** really evaluates both and stores the measured winner | Compares trained tabular models only — no latency, safety, or blind response comparison for language models |
 
 The order in Section 12 intentionally moves between these pages according to the actual development lifecycle, rather than simply following the sidebar order.
 
@@ -948,7 +963,39 @@ For example, a legitimate completed training job should eventually be supported 
 - the user or service responsible;
 - audit records.
 
-Until an executor attaches that evidence, manually changing a status to `completed` proves only that the record was changed.
+Until an executor attaches that evidence, manually changing a status to `completed` proves only that the record was changed. The Phase 56 tabular executor is the first place this evidence loop closes: a job it ran carries a real loss curve, real held-out metrics, real checkpoint losses, and a real weight artifact — and its statuses were set by the executor, not by hand.
+
+### 10.7 Hands-on lesson: train, evaluate, and use a real tabular model
+
+This is the first fully executable machine-learning workflow inside MasterAI. It uses the classic supervised-learning loop from Section 2 on your own CSV data. Everything in this lesson computes for real.
+
+```mermaid
+flowchart LR
+    A["1. Register dataset<br/>(Dataset Manager)"] --> B["2. Upload CSV content<br/>(validated + profiled)"]
+    B --> C["3. Create training job<br/>(Training Jobs)"]
+    C --> D["4. Train now<br/>(gradient descent,<br/>real loss curve)"]
+    D --> E["Model Registry entry<br/>+ persisted weights<br/>(state: evaluation)"]
+    D --> F["Checkpoint records<br/>(measured losses)"]
+    E --> G["5. Evaluate now<br/>(held-out or benchmark<br/>dataset, real metrics)"]
+    G --> H["6. Predict<br/>(live, from persisted<br/>weights)"]
+    E --> I["7. Compare now<br/>(baseline vs candidate<br/>on a shared benchmark)"]
+```
+
+**Step 1 — Prepare a CSV the engine can learn from.** The first row is the header. Every feature column must be numeric (measurements, counts, encoded flags). The target column — what the model should learn to predict — may be numeric (regression: price, temperature, duration) or categorical text (classification: `spam`/`ham`, `low`/`medium`/`high`, species names). At least one feature column, one target column, and two data rows are required; up to 8 MiB and 64 distinct class labels are accepted.
+
+**Step 2 — Register the dataset and upload its content.** In Dataset Manager, register the dataset as before, then use **Upload dataset content (CSV)** with the dataset's ID, the target column name (blank means the last column), and the CSV text. The server parses everything before storing anything; a malformed row or a non-numeric feature cell is rejected with the exact row and column named. A successful upload reports the real profile: row count, feature columns, and the detected task.
+
+**Step 3 — Create a training job for that dataset.** In Training Jobs, create a job whose Dataset ID is the dataset you just filled. The Model ID may be left blank — the executor will register the trained model for you.
+
+**Step 4 — Train.** Click **Train now**. The executor moves the job through `queued → preparing → running` for real, runs full-batch gradient descent (default: 200 epochs, learning rate 0.05, 20% held-out split, seed 42 — all overridable through `POST /api/v1/ml/training-jobs/{id}/run`), and reports the method it chose, the final loss, and the held-out metrics in the result panel. It also creates checkpoint records carrying the actually measured losses, persists the learned weights, and leaves the model registry entry in the `evaluation` state with the job at `awaiting_evaluation` — the honest place for an unreviewed model.
+
+**Step 5 — Evaluate like a professional.** Held-out metrics from training are a good first signal, but Section 9 taught that evaluation should be an independent act. Register a second benchmark dataset with the same columns, upload its content, create an Evaluation Run naming the trained model and the benchmark dataset, and click **Evaluate now**. The harness computes real metrics — accuracy, macro precision/recall/F1, and a confusion matrix for classification; MSE, MAE, and R² for regression — and stores them permanently behind **View result**.
+
+**Step 6 — Predict.** In Model Registry, use **Predict with a trained model**: enter the trained model's ID and the feature values as a JSON object keyed by column name (for example `{"sepal_length":5.1,"sepal_width":3.5}`). Classification returns the winning label with every class probability; regression returns the predicted value. Because the weights are persisted, this works across server restarts.
+
+**Step 7 — Compare two models like a scientist.** Section 9 also taught that a single score means little without a controlled comparison. Train a second model — a different feature set, different hyperparameters, or newer data — then open **Model Comparison**, create a comparison naming the current model as the baseline, the new model as the candidate, and one shared benchmark dataset (both models must have been trained, and the benchmark must have uploaded content matching both schemas), and click **Compare now**. The harness evaluates *both* trained artifacts against the *same* rows — the only fair test — and stores a verdict: each model's full metrics, the primary-metric delta (macro F1 for classification, MSE for regression), and the measured winner. A tie is reported as a tie. This is exactly the controlled experiment a professional would run before replacing a production model, and the stored result behind **View result** is the evidence for that decision.
+
+**What to watch for, in classroom terms.** If the final loss barely moves, the learning rate may be too small or the features uninformative. If training diverges (the run fails with a non-finite loss), lower the learning rate. If held-out accuracy is far below training accuracy, you are overfitting — Section 6.5 applies here exactly as it does to large models. And a constant feature column contributes nothing: the engine standardizes it to zero and its weight never moves.
 
 ---
 
