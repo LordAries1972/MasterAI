@@ -2116,4 +2116,139 @@ std::string synthetic_records_json(
     return body + "]";
 }
 
+// Phase 49: docs/PLAN.md "Machine Learning Abilities" section 21
+// (Embeddings and Vector Stores) -- see VectorStoreStore's class comment in
+// masterai.hpp for the scoped-down field set and the rationale for reusing
+// DatasetApprovalStatus's three-state pending/approved/rejected workflow.
+std::string vector_store_status_name(const VectorStoreStatus status) {
+    switch (status) {
+        case VectorStoreStatus::pending: return "pending";
+        case VectorStoreStatus::approved: return "approved";
+        case VectorStoreStatus::rejected: return "rejected";
+    }
+    throw std::runtime_error("invalid vector store status");
+}
+
+VectorStoreStatus parse_vector_store_status(const std::string& status) {
+    if (status == "pending") return VectorStoreStatus::pending;
+    if (status == "approved") return VectorStoreStatus::approved;
+    if (status == "rejected") return VectorStoreStatus::rejected;
+    throw std::runtime_error("stored vector store status is invalid");
+}
+
+VectorStoreStore::VectorStoreStore(RecordStore& records) : records_(&records) {
+    restore();
+}
+
+void VectorStoreStore::restore() {
+    for (const auto& item : records_->list("ml_vector_stores")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 6U) {
+            throw std::runtime_error(
+                "persisted vector store record field count is wrong");
+        }
+        VectorStore store;
+        store.id = item.first;
+        store.name = fields[0];
+        store.description = fields[1];
+        store.embedding_model = fields[2];
+        store.distance_metric = fields[3];
+        store.owner_id = fields[4];
+        store.status = parse_vector_store_status(fields[5]);
+        stores_[store.id] = store;
+    }
+}
+
+void VectorStoreStore::persist(const VectorStore& store) {
+    records_->put(
+        "ml_vector_stores", store.id,
+        pack({store.name, store.description, store.embedding_model,
+             store.distance_metric, store.owner_id,
+             vector_store_status_name(store.status)}));
+}
+
+VectorStore VectorStoreStore::create(const std::string& owner_id,
+                                     const std::string& name,
+                                     const std::string& description,
+                                     const std::string& embedding_model,
+                                     const std::string& distance_metric) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("vector store name is invalid");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    VectorStore store;
+    store.id = random_id();
+    store.name = name;
+    store.description = description;
+    store.embedding_model = embedding_model;
+    store.distance_metric = distance_metric;
+    store.owner_id = owner_id;
+    store.status = VectorStoreStatus::pending;
+    store.created_at_epoch_seconds = epoch_seconds();
+    store.updated_at_epoch_seconds = store.created_at_epoch_seconds;
+    stores_[store.id] = store;
+    if (records_) persist(store);
+    return store;
+}
+
+std::optional<VectorStore> VectorStoreStore::find(const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = stores_.find(id);
+    return found != stores_.end() ? std::optional<VectorStore>(found->second)
+                                  : std::nullopt;
+}
+
+std::vector<VectorStore> VectorStoreStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<VectorStore> result;
+    result.reserve(stores_.size());
+    for (const auto& item : stores_) result.push_back(item.second);
+    return result;
+}
+
+bool VectorStoreStore::set_status(const std::string& id,
+                                  const VectorStoreStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = stores_.find(id);
+    if (found == stores_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool VectorStoreStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = stores_.find(id);
+    if (found == stores_.end()) return false;
+    stores_.erase(found);
+    if (records_) records_->erase("ml_vector_stores", id);
+    return true;
+}
+
+std::string vector_store_json(const VectorStore& store) {
+    return "{\"id\":\"" + json_escape(store.id) + "\",\"name\":\"" +
+           json_escape(store.name) + "\",\"description\":\"" +
+           json_escape(store.description) + "\",\"embeddingModel\":\"" +
+           json_escape(store.embedding_model) + "\",\"distanceMetric\":\"" +
+           json_escape(store.distance_metric) + "\",\"ownerId\":\"" +
+           json_escape(store.owner_id) + "\",\"status\":\"" +
+           vector_store_status_name(store.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(store.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(store.updated_at_epoch_seconds) + "}";
+}
+
+std::string vector_stores_json(const std::vector<VectorStore>& stores) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& store : stores) {
+        if (!first) body += ",";
+        first = false;
+        body += vector_store_json(store);
+    }
+    return body + "]";
+}
+
 }  // namespace masterai

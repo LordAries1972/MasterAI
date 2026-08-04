@@ -5406,6 +5406,85 @@ void test_machine_learning_synthetic_data_lifecycle() {
             "own fields");
 }
 
+// Phase 49: docs/PLAN.md "Machine Learning Abilities" section 21
+// (Embeddings and Vector Stores) -- a vector store is a standalone
+// registered resource, not a target-scoped content record, so it reuses
+// DatasetStore's three-state pending/approved/rejected approval workflow
+// instead of the five-state reviewer-workflow shape the two tests above
+// use; see VectorStoreStore's class comment in masterai.hpp for the
+// rationale.
+void test_machine_learning_vector_store_lifecycle() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.vectorstores.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.vectorstores.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.vectorstores.view"),
+            "ml.vectorstores.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::VectorStoreStore vector_stores(records);
+    const auto store = vector_stores.create(
+        "administrator-1", "support-docs-index",
+        "Embeddings for support ticket documents.", "text-embedding-3-small",
+        "cosine");
+    require(!store.id.empty() && store.name == "support-docs-index" &&
+                store.embedding_model == "text-embedding-3-small" &&
+                store.distance_metric == "cosine" &&
+                store.status == masterai::VectorStoreStatus::pending &&
+                store.owner_id == "administrator-1",
+            "a newly created vector store must start pending with its "
+            "owner recorded");
+    require(vector_stores.list().size() == 1U,
+            "the created vector store was not visible in list()");
+
+    bool rejected_empty_name = false;
+    try {
+        vector_stores.create("administrator-1", "", "", "", "");
+    } catch (const std::invalid_argument&) {
+        rejected_empty_name = true;
+    }
+    require(rejected_empty_name,
+            "create() must reject a vector store with no name");
+
+    require(vector_stores.set_status(store.id,
+                                     masterai::VectorStoreStatus::approved),
+            "set_status() rejected a known vector store id");
+    require(vector_stores.find(store.id)->status ==
+                masterai::VectorStoreStatus::approved,
+            "set_status() did not persist the new status");
+    require(!vector_stores.set_status("nonexistent-vector-store",
+                                      masterai::VectorStoreStatus::rejected),
+            "set_status() must no-op for an unknown vector store id, not "
+            "throw");
+
+    masterai::VectorStoreStore reloaded(records);
+    const auto reloaded_store = reloaded.find(store.id);
+    require(reloaded_store.has_value() &&
+                reloaded_store->name == "support-docs-index" &&
+                reloaded_store->status == masterai::VectorStoreStatus::approved,
+            "VectorStoreStore did not restore a persisted vector store "
+            "after reload");
+
+    require(vector_stores.remove(store.id),
+            "remove() rejected a known vector store id");
+    require(vector_stores.list().size() == 0U,
+            "remove() did not delete the vector store");
+    require(!vector_stores.remove(store.id),
+            "remove() must no-op for an already-removed vector store id, "
+            "not throw");
+
+    const auto json = masterai::vector_store_json(store);
+    require(json.find("\"name\":\"support-docs-index\"") != std::string::npos &&
+                json.find("\"embeddingModel\":\"text-embedding-3-small\"") !=
+                    std::string::npos &&
+                json.find("\"distanceMetric\":\"cosine\"") != std::string::npos,
+            "vector_store_json did not report the vector store's own "
+            "fields");
+}
+
 }  // namespace
 
 int main() {
@@ -5547,6 +5626,8 @@ int main() {
             test_machine_learning_instruction_training_lifecycle);
         run("Machine Learning synthetic data generation lifecycle",
             test_machine_learning_synthetic_data_lifecycle);
+        run("Machine Learning vector store lifecycle",
+            test_machine_learning_vector_store_lifecycle);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

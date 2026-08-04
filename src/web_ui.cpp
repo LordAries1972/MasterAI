@@ -118,7 +118,7 @@ std::string application_script() {
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
-        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,cfg,report]="
+        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,cfg,report]="
         "await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
@@ -149,6 +149,8 @@ std::string application_script() {
         "()=>({instructionExamples:[]})),"
         "api('/api/v1/ml/synthetic-records').catch("
         "()=>({syntheticRecords:[]})),"
+        "api('/api/v1/ml/vector-stores').catch("
+        "()=>({vectorStores:[]})),"
         // 403/503 for anyone who isn't an administrator, or when no
         // settings.json path is known to the running server -- both are
         // quiet, expected no-ops here exactly like the ml.* fetches above.
@@ -173,6 +175,7 @@ std::string application_script() {
         "renderMlModelBuilderConfigs(mlmb.modelBuilderConfigs);"
         "renderMlInstructionExamples(mlie.instructionExamples);"
         "renderMlSyntheticRecords(mlsr.syntheticRecords);"
+        "renderMlVectorStores(mlvs.vectorStores);"
         "renderSystemConfig(cfg);"
         "renderSystemReport(report);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
@@ -1148,6 +1151,48 @@ std::string application_script() {
         "'/delete','POST');await load();}"
         "catch(x){showSystemError('Delete synthetic record failed: '+"
         "x.message);}});}}"
+        // Embeddings and Vector Stores (docs/PLAN.md "Machine Learning
+        // Abilities" section 21): a vector store is a standalone registered
+        // resource, not a target-scoped content record, so it reuses
+        // Dataset's three-state pending/approved/rejected approval workflow
+        // instead of the five-state reviewer workflow content records use.
+        "const VECTOR_STORE_STATUSES=['pending','approved','rejected'];"
+        "function renderMlVectorStores(stores){"
+        "const el=q('#mlVectorStoresList');if(!el)return;"
+        "if(!stores.length){el.innerHTML='<p>No vector stores registered "
+        "yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Embedding model','Distance metric',"
+        "'Status','Set status',''],"
+        "stores.map(x=>[esc(x.name),esc(x.embeddingModel),"
+        "esc(x.distanceMetric),"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "'<select data-vector-store-status-for=\"'+x.id+'\">'+"
+        "VECTOR_STORE_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select> '+"
+        "'<button type=\"button\" data-apply-vector-store-status=\"'+"
+        "x.id+'\">Apply</button>',"
+        "'<button type=\"button\" data-delete-ml-vector-store=\"'+"
+        "x.id+'\">Delete</button>']));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-vector-store-status]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "const id=btn.dataset.applyVectorStoreStatus;"
+        "const status=el.querySelector("
+        "'[data-vector-store-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/vector-stores/'+"
+        "encodeURIComponent(id)+'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update vector store status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-delete-ml-vector-store]')){"
+        "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
+        "try{await api('/api/v1/ml/vector-stores/'+"
+        "encodeURIComponent(btn.dataset.deleteMlVectorStore)+"
+        "'/delete','POST');await load();}"
+        "catch(x){showSystemError('Delete vector store failed: '+"
+        "x.message);}});}}"
         // Each row gets its own Start/resume, Pause, Stop, and Remove buttons
         // wired directly to that job's id -- nothing to hand-type, unlike the
         // old single manual 'Download job ID' field this replaces. The State
@@ -2052,7 +2097,14 @@ std::string application_script() {
         "name:q('#mlSyntheticRecordName').value,"
         "description:q('#mlSyntheticRecordDescription').value,"
         "generationTechnique:"
-        "q('#mlSyntheticRecordGenerationTechnique').value})));}});";
+        "q('#mlSyntheticRecordGenerationTechnique').value})));"
+        "if(q('#newMlVectorStore'))"
+        "q('#newMlVectorStore').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/vector-stores',"
+        "()=>({name:q('#mlVectorStoreName').value,"
+        "description:q('#mlVectorStoreDescription').value,"
+        "embeddingModel:q('#mlVectorStoreEmbeddingModel').value,"
+        "distanceMetric:q('#mlVectorStoreDistanceMetric').value})));}});";
 }
 
 // Presents the native OS account sign-in form without embedding credentials.
@@ -2698,6 +2750,36 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<h2>Synthetic records</h2>"
             "<div id=\"mlSyntheticRecordsList\">Loading...</div>"
             "</div></section>";
+    } else if (section == "ml-vector-stores") {
+        // Phase 49 (docs/PLAN.md "Machine Learning Abilities" section 21):
+        // register and list vector stores, and move them through the same
+        // three-state pending/approved/rejected approval workflow Dataset
+        // Manager uses, since a vector store is a standalone registered
+        // resource rather than a target-scoped content record. Only the
+        // identity/embedding-model/distance-metric/status fields
+        // VectorStoreStore actually persists are collected here -- see that
+        // class's comment in masterai.hpp for the document-import/chunking/
+        // indexing fields deferred to the phase that actually generates
+        // embeddings.
+        body =
+            "<section id=\"panel-ml-vector-stores\" class=\"panel\">"
+            "<div>"
+            "<h2>New vector store</h2>"
+            "<form id=\"newMlVectorStore\">"
+            "<label>Name<input id=\"mlVectorStoreName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Description<textarea "
+            "id=\"mlVectorStoreDescription\" rows=\"2\"></textarea></label>"
+            "<label>Embedding model<input id=\"mlVectorStoreEmbeddingModel\" "
+            "placeholder=\"e.g. text-embedding-3-small\"></label>"
+            "<label>Distance metric<input "
+            "id=\"mlVectorStoreDistanceMetric\" "
+            "placeholder=\"e.g. cosine, dot_product, euclidean\"></label>"
+            "<button>Create vector store</button></form>"
+            "</div><div>"
+            "<h2>Vector stores</h2>"
+            "<div id=\"mlVectorStoresList\">Loading...</div>"
+            "</div></section>";
     } else if (section == "settings-config") {
         // Phase 30A: administrator-only local-configuration editor backed by
         // GET/POST /api/v1/admin/config (server.cpp's admin_config_get()/
@@ -2931,7 +3013,10 @@ std::string application_page(const UserRecord& user, const std::string& section,
                          section == "ml-instruction-examples") +
                 nav_link("/app/ml/synthetic-records",
                          "Synthetic Data Generation",
-                         section == "ml-synthetic-records"));
+                         section == "ml-synthetic-records") +
+                nav_link("/app/ml/vector-stores",
+                         "Embeddings and Vector Stores",
+                         section == "ml-vector-stores"));
     }
 
     return html_response(

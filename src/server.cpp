@@ -327,6 +327,7 @@ public:
         ml_model_builder_configs = std::make_unique<ModelBuilderConfigStore>(records);
         ml_instruction_examples = std::make_unique<InstructionExampleStore>(records);
         ml_synthetic_records = std::make_unique<SyntheticRecordStore>(records);
+        ml_vector_stores = std::make_unique<VectorStoreStore>(records);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -2018,6 +2019,84 @@ public:
                          id);
             return response(200, "OK", "{\"deleted\":true}");
         }
+        // Phase 49: Embeddings and Vector Stores (docs/PLAN.md "Machine
+        // Learning Abilities" section 21), scoped to identity/embedding-
+        // model/distance-metric/status fields -- see VectorStoreStore's
+        // class comment in masterai.hpp for the document-import/chunking/
+        // indexing fields deferred to the phase that actually generates
+        // embeddings.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/vector-stores") {
+            if (auto denied = forbidden_unless(user->role, "ml.vectorstores.view")) return *denied;
+            return response(200, "OK",
+                            "{\"vectorStores\":" +
+                                vector_stores_json(ml_vector_stores->list()) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/vector-stores") {
+            if (auto denied = forbidden_unless(user->role, "ml.vectorstores.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto store = ml_vector_stores->create(
+                    user->id, name, text_field("description"),
+                    text_field("embeddingModel"), text_field("distanceMetric"));
+                audit.append("ml.vector_store.create", user->id, "success",
+                             store.id);
+                return response(201, "Created", vector_store_json(store));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_vector_store\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/vector-stores/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.vectorstores.manage")) return *denied;
+            const auto id = request.target.substr(
+                25U, request.target.size() - 25U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_vector_store_status(
+                    root.required("status").as_string());
+                if (!ml_vector_stores->set_status(id, status)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_vector_store_not_found\"}");
+                }
+                audit.append("ml.vector_store.status", user->id, "success",
+                             id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_vector_store_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/vector-stores/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.vectorstores.manage")) return *denied;
+            const auto id = request.target.substr(
+                25U, request.target.size() - 25U - 7U);
+            if (!ml_vector_stores->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_vector_store_not_found\"}");
+            }
+            audit.append("ml.vector_store.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
         if (request.method == "GET" && request.target == "/models") {
             return workloads->model_inventory_page();
         }
@@ -2132,6 +2211,11 @@ public:
             if (target == "/app/ml/synthetic-records") {
                 return is_administrator
                            ? application_page(*user, "ml-synthetic-records")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/vector-stores") {
+                return is_administrator
+                           ? application_page(*user, "ml-vector-stores")
                            : response(302, "Found", "", {"Location: /app"});
             }
             if (target == "/app/report/system") {
@@ -3666,6 +3750,7 @@ private:
     std::unique_ptr<ModelBuilderConfigStore> ml_model_builder_configs;
     std::unique_ptr<InstructionExampleStore> ml_instruction_examples;
     std::unique_ptr<SyntheticRecordStore> ml_synthetic_records;
+    std::unique_ptr<VectorStoreStore> ml_vector_stores;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
     std::unique_ptr<DownloadManager> downloads;

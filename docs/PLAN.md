@@ -710,6 +710,37 @@ Current phase status:
   entries — `test_machine_learning_foundation_dashboard`'s fixed exclusion
   list stays frozen at Phase 42's interface set, so this phase changes
   nothing there.
+- Phase 49: Implemented at a scoped-down level (2026-08-05) — Embeddings and
+  Vector Stores (section 21 below), scoped down to identity, a free-text
+  embedding model name and a free-text distance metric (section 21 lists
+  "Register embedding models" and "Select distance metric" as operations
+  without naming closed sets for either), and a three-state pending/
+  approved/rejected approval lifecycle (`VectorStore`/`VectorStoreStore`,
+  `src/ml.cpp`) — not the section's full field list (embedding-model
+  version, vector dimensions, document count, chunk count, storage size,
+  index type, security classification, access permissions, last rebuild
+  date, associated subject packages/agents/deployed models) that only means
+  something once a real document-import/chunking/indexing pipeline exists.
+  Unlike Phases 47-48's target-scoped content records, a vector store is a
+  standalone registered resource like Dataset Manager's own entries, so it
+  carries no required parent id and reuses `DatasetApprovalStatus`'s
+  three-state pending/approved/rejected workflow shape rather than the
+  five-state reviewer workflow content records use, since a vector store is
+  infrastructure to be approved for use, not content to be drafted and
+  reviewed. New administrator-only `ml.vectorstores.view`/
+  `ml.vectorstores.manage` permissions (the `manage` name matches section
+  3's own recommended permission list) gate `GET`/
+  `POST /api/v1/ml/vector-stores`, `POST /api/v1/ml/vector-stores/{id}/status`,
+  and `POST /api/v1/ml/vector-stores/{id}/delete`. New "Embeddings and
+  Vector Stores" (`/app/ml/vector-stores`) entry under the Machine Learning
+  sidebar in `src/web_ui.cpp` lists, creates, and moves stores through
+  status. `test_machine_learning_vector_store_lifecycle` covers the same
+  permission/lifecycle/reload/remove guarantees as Phase 48's test, plus
+  `create()` rejecting an empty name. The dashboard roster's
+  `embeddings-vector-stores` interface entry (`src/ml.cpp`) intentionally
+  still reports `planned`, matching Phases 43-48's own roster entries —
+  `test_machine_learning_foundation_dashboard`'s fixed exclusion list stays
+  frozen at Phase 42's interface set, so this phase changes nothing there.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -4712,11 +4743,29 @@ rejected, archived), not the section's full record (system instruction,
 user instruction, context, expected response, rejected response, tool
 calls, tool results, required output format, difficulty, safety
 classification) that only means something once an actual example record
-exists to hold it. Every other capability in this section (Training
-Methods execution, Subject Examination, Hyperparameter Optimization,
-Synthetic Data, Embeddings and Vector Stores, Retrieval-Augmented
-Generation, deployment, and everything else through section 51) remains
-`Planned`: no implementation has started.
+exists to hold it. Phase 48 implements Synthetic Data Generation (section
+20) at the same scoped-down level — identity, the dataset a record
+targets, a free-text generation technique, and the same five-state
+reviewer-approval lifecycle status Phase 47 uses, not the section's full
+record (generator model, generator version, prompt, generation settings,
+confidence score, original source linkage) that only means something once
+a real generation executor exists. Phase 49 implements Embeddings and
+Vector Stores (section 21) at the same scoped-down level — identity, a
+free-text embedding model name, a free-text distance metric, and a
+three-state pending/approved/rejected approval lifecycle, not the
+section's full field list (embedding-model version, vector dimensions,
+document count, chunk count, storage size, index type, security
+classification, access permissions, last rebuild date, associated subject
+packages/agents/deployed models) that only means something once a real
+document-import/chunking/indexing pipeline exists; unlike Phases 47-48's
+target-scoped content records, a vector store is a standalone registered
+resource like Dataset Manager's own entries, so it reuses
+DatasetApprovalStatus's three-state workflow rather than the five-state
+reviewer workflow content records use. Every other capability in this
+section (Training Methods execution, Subject Examination, Hyperparameter
+Optimization, Retrieval-Augmented Generation, deployment, and everything
+else through section 51) remains `Planned`: no implementation has
+started.
 
 This section extends the plan with an administrator-only Machine Learning
 administration and model-development module, covering the full lifecycle

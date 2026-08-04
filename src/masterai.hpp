@@ -3248,6 +3248,68 @@ private:
 std::string synthetic_record_json(const SyntheticRecord& record);
 std::string synthetic_records_json(const std::vector<SyntheticRecord>& records);
 
+// Phase 49: docs/PLAN.md "Machine Learning Abilities" section 21
+// (Embeddings and Vector Stores). Scoped down from the section's full field
+// list (embedding-model version, vector dimensions, document count, chunk
+// count, storage size, index type, security classification, access
+// permissions, last rebuild date, associated subject packages/agents/
+// deployed models) to identity, a free-text embedding_model field (section
+// 21's "Register embedding models" operation could reference a
+// ModelRegistryStore entry, but nothing yet produces a real embedding model
+// registration to link against, so this stays free text like
+// InstructionExample's subject_classification), a free-text distance_metric
+// field (section 21 lists "Select distance metric" as an operation without
+// naming a closed set), and an approval-status lifecycle -- not the full
+// document-import/chunking/indexing pipeline the section describes, since
+// that requires a real embedding executor. A vector store is a standalone
+// registered resource like Dataset above, not a target-scoped content
+// record like InstructionExample/SyntheticRecord, so it carries no
+// required parent id and reuses Dataset's three-state pending/approved/
+// rejected approval workflow rather than the five-state reviewer workflow
+// content records use, since a vector store is infrastructure to be
+// approved for use, not a content item to be reviewed and possibly
+// rejected outright.
+enum class VectorStoreStatus { pending, approved, rejected };
+
+std::string vector_store_status_name(VectorStoreStatus status);
+VectorStoreStatus parse_vector_store_status(const std::string& status);
+
+struct VectorStore {
+    std::string id;
+    std::string name;
+    std::string description;
+    std::string embedding_model;
+    std::string distance_metric;
+    std::string owner_id;
+    VectorStoreStatus status{VectorStoreStatus::pending};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class VectorStoreStore final {
+public:
+    VectorStoreStore() = default;
+    explicit VectorStoreStore(RecordStore& records);
+    VectorStore create(const std::string& owner_id, const std::string& name,
+                       const std::string& description,
+                       const std::string& embedding_model,
+                       const std::string& distance_metric);
+    std::optional<VectorStore> find(const std::string& id) const;
+    std::vector<VectorStore> list() const;
+    bool set_status(const std::string& id, VectorStoreStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const VectorStore& store);
+    RecordStore* records_{nullptr};
+    std::map<std::string, VectorStore> stores_;
+    mutable std::mutex mutex_;
+};
+
+std::string vector_store_json(const VectorStore& store);
+std::string vector_stores_json(const std::vector<VectorStore>& stores);
+
 struct PerformanceSample {
     std::string name;
     std::uint64_t operations{0};

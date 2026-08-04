@@ -441,7 +441,12 @@ bool role_allows(const UserRole role, const std::string& permission) {
           // Phase 48 (docs/PLAN.md "Machine Learning Abilities" section 20,
           // Synthetic Data Generation): administrator-only, matching every
           // other ml.* permission above.
-          "ml.syntheticdata.view", "ml.syntheticdata.manage"}},
+          "ml.syntheticdata.view", "ml.syntheticdata.manage",
+          // Phase 49 (docs/PLAN.md "Machine Learning Abilities" section 21,
+          // Embeddings and Vector Stores): administrator-only, matching
+          // every other ml.* permission above. "ml.vectorstores.manage" is
+          // one of section 3's own recommended permission names.
+          "ml.vectorstores.view", "ml.vectorstores.manage"}},
         {UserRole::developer,
          {"identity.read", "models.read", "models.load", "tokens.create",
           "ide.connect", "mcp.connect", "mcp.invoke", "mcp.tools.invoke",
