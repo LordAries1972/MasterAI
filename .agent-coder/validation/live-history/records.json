@@ -1,16 +1,5 @@
 [
   {
-    "relativePath": "src/masterai.hpp",
-    "languageId": "cpp",
-    "contentHash": "4806627cdde5e1a33462e9dae811ba32ef916e02fe9881f5c9cf25bf7315bfb4",
-    "documentVersion": 14,
-    "timestampMs": 1785522244431,
-    "outcome": "tool-unavailable",
-    "toolIdentity": "g++/clang++/cl",
-    "durationMs": 0,
-    "diagnosticFingerprints": []
-  },
-  {
     "relativePath": "src/retrieval.cpp",
     "languageId": "cpp",
     "contentHash": "9bb653601f2161d81d8c01f80650f711aead6daeb031debae8c1762924587c9f",
@@ -5491,6 +5480,17 @@
     "timestampMs": 1785858704680,
     "outcome": "tool-unavailable",
     "toolIdentity": "g++/clang++/cl",
+    "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "docs/HowToUse-MachineLearning.md",
+    "languageId": "markdown",
+    "contentHash": "39028ef2d3e80e52371e99a76948f986295e23d96b008a9bf01015434a9bf290",
+    "documentVersion": 2,
+    "timestampMs": 1785859759664,
+    "outcome": "valid",
+    "toolIdentity": "markdown intrinsic grammar",
     "durationMs": 0,
     "diagnosticFingerprints": []
   }

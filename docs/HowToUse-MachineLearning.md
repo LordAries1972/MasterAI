@@ -91,11 +91,11 @@ During training, the system compares the prediction with a desired answer, calcu
 
 ```mermaid
 flowchart LR
-    A[Training example] --> B[Model with current parameters]
-    B --> C[Prediction]
-    C --> D[Loss: compare prediction with target]
-    D --> E[Calculate gradients]
-    E --> F[Optimizer updates parameters]
+    A["Training example"] --> B["Model with current parameters"]
+    B --> C["Prediction"]
+    C --> D["Loss: compare prediction with target"]
+    D --> E["Calculate gradients"]
+    E --> F["Optimizer updates parameters"]
     F --> B
 ```
 
@@ -121,19 +121,19 @@ People often use *the model* to mean the whole product. In practice, the model i
 
 ```mermaid
 flowchart TD
-    S[Approved source data] --> D[Versioned dataset pipeline]
-    D --> T[Training or adaptation]
-    T --> A[Candidate model artifact]
-    A --> E[Evaluation and safety gates]
-    E -->|approved| R[Model registry and deployment package]
-    E -->|rejected| D
-    R --> I[Inference runtime]
-    U[Authorized user request] --> C[MasterAI control plane]
-    P[Policy and identity] --> C
-    K[Authorized project or retrieved knowledge] --> C
+    S["Approved source data"] --> D["Versioned dataset pipeline"]
+    D --> T["Training or adaptation"]
+    T --> A["Candidate model artifact"]
+    A --> E["Evaluation and safety gates"]
+    E -->|"approved"| R["Model registry and deployment package"]
+    E -->|"rejected"| D
+    R --> I["Inference runtime"]
+    U["Authorized user request"] --> C["MasterAI control plane"]
+    P["Policy and identity"] --> C
+    K["Authorized project or retrieved knowledge"] --> C
     C --> I
-    I --> O[Generated result]
-    O --> M[Monitoring and reviewed feedback]
+    I --> O["Generated result"]
+    O --> M["Monitoring and reviewed feedback"]
     M --> D
 ```
 
@@ -247,10 +247,10 @@ A language model does not directly read words. A tokenizer converts text into in
 
 ```mermaid
 flowchart LR
-    A[Raw text: int total = 42;] --> B[Tokenizer]
-    B --> C[Token pieces]
-    C --> D[Token identifiers]
-    D --> E[Model]
+    A["Raw text: int total = 42;"] --> B["Tokenizer"]
+    B --> C["Token pieces"]
+    C --> D["Token identifiers"]
+    D --> E["Model"]
 ```
 
 The tokenizer is part of the model identity. Using the wrong tokenizer changes the input symbols and can make valid weights unusable.
@@ -302,12 +302,12 @@ The weights control how strongly each input influences the result. The bias shif
 
 ```mermaid
 flowchart LR
-    X1[Input x1] -->|weight w1| SUM[Weighted sum plus bias]
-    X2[Input x2] -->|weight w2| SUM
-    X3[Input x3] -->|weight w3| SUM
-    B[Bias b] --> SUM
-    SUM --> ACT[Activation function]
-    ACT --> Y[Output]
+    X1["Input x1"] -->|"weight w1"| SUM["Weighted sum plus bias"]
+    X2["Input x2"] -->|"weight w2"| SUM
+    X3["Input x3"] -->|"weight w3"| SUM
+    B["Bias b"] --> SUM
+    SUM --> ACT["Activation function"]
+    ACT --> Y["Output"]
 ```
 
 A neural network connects many such transformations into layers:
@@ -349,18 +349,18 @@ MasterAI's current local inference path is aimed at GGUF language and programmin
 
 ```mermaid
 flowchart TD
-    A[System instructions] --> P[Prompt assembly]
-    B[Conversation history] --> P
-    C[Authorized project context] --> P
-    D[Current user request] --> P
-    P --> T[Tokenizer]
-    T --> E[Token embeddings and positions]
-    E --> L[Repeated transformer layers]
-    L --> H[Output logits for next token]
-    H --> S[Sampling or deterministic selection]
-    S --> O[Next token]
-    O -->|append and repeat| L
-    O --> X[Stream token to the user]
+    A["System instructions"] --> P["Prompt assembly"]
+    B["Conversation history"] --> P
+    C["Authorized project context"] --> P
+    D["Current user request"] --> P
+    P --> T["Tokenizer"]
+    T --> E["Token embeddings and positions"]
+    E --> L["Repeated transformer layers"]
+    L --> H["Output logits for next token"]
+    H --> S["Sampling or deterministic selection"]
+    S --> O["Next token"]
+    O -->|"append and repeat"| L
+    O --> X["Stream token to the user"]
 ```
 
 The model generates one token at a time. Each new token becomes part of the next step's input until an end token, a configured output limit, cancellation, or an error stops generation.
@@ -381,15 +381,15 @@ Attention(Q, K, V) = softmax(QKᵀ / √d) V
 
 ```mermaid
 flowchart LR
-    A[Token representations] --> Q[Queries]
-    A --> K[Keys]
-    A --> V[Values]
-    Q --> M[Similarity scores]
+    A["Token representations"] --> Q["Queries"]
+    A --> K["Keys"]
+    A --> V["Values"]
+    Q --> M["Similarity scores"]
     K --> M
-    M --> W[Normalized attention weights]
-    W --> C[Weighted combination]
+    M --> W["Normalized attention weights"]
+    W --> C["Weighted combination"]
     V --> C
-    C --> N[Next layer representation]
+    C --> N["Next layer representation"]
 ```
 
 This mechanism helps a model connect names with later references, opening braces with closing logic, or a question with relevant context. It does not guarantee that the attended information is true or that the model will follow it correctly.
@@ -576,14 +576,14 @@ RAG retrieves relevant approved information at request time and includes it in t
 
 ```mermaid
 flowchart LR
-    Q[User question] --> QE[Query processing]
-    QE --> R[Authorized retrieval]
-    DS[(Versioned documents or vector store)] --> R
-    R --> K[Ranked evidence with provenance]
-    K --> P[Prompt assembly]
+    Q["User question"] --> QE["Query processing"]
+    QE --> R["Authorized retrieval"]
+    DS[("Versioned documents or vector store")] --> R
+    R --> K["Ranked evidence with provenance"]
+    K --> P["Prompt assembly"]
     Q --> P
-    P --> M[Model inference]
-    M --> A[Grounded answer and citations]
+    P --> M["Model inference"]
+    M --> A["Grounded answer and citations"]
 ```
 
 Use RAG when knowledge changes, citations are required, documents are private, facts must be deletable, or the subject is too large for a fine-tuning set.
@@ -598,19 +598,19 @@ Fine-tuning is usually a poor way to maintain a frequently changing factual data
 
 ```mermaid
 flowchart TD
-    A[What must improve?] --> B{Current facts or private documents?}
-    B -->|Yes| C[Use project context or RAG]
-    B -->|No| D{Stable repeated behavior, style, format, or terminology?}
-    D -->|Yes| E[Try prompt and examples first]
-    E --> F{Prompt meets evaluation target?}
-    F -->|Yes| G[Keep prompting; avoid training cost]
-    F -->|No| H[Fine-tune or train an adapter]
-    D -->|No| I{Simple measurable prediction?}
-    I -->|Yes| J[Use a classical or small specialized model]
-    I -->|No| K[Reassess task and evidence]
-    C --> L{Also needs specialized behavior?}
-    L -->|Yes| M[Combine RAG with fine-tuning]
-    L -->|No| N[Evaluate RAG alone]
+    A["What must improve?"] --> B{"Current facts or private documents?"}
+    B -->|"Yes"| C["Use project context or RAG"]
+    B -->|"No"| D{"Stable repeated behavior, style, format, or terminology?"}
+    D -->|"Yes"| E["Try prompt and examples first"]
+    E --> F{"Prompt meets evaluation target?"}
+    F -->|"Yes"| G["Keep prompting; avoid training cost"]
+    F -->|"No"| H["Fine-tune or train an adapter"]
+    D -->|"No"| I{"Simple measurable prediction?"}
+    I -->|"Yes"| J["Use a classical or small specialized model"]
+    I -->|"No"| K["Reassess task and evidence"]
+    C --> L{"Also needs specialized behavior?"}
+    L -->|"Yes"| M["Combine RAG with fine-tuning"]
+    L -->|"No"| N["Evaluate RAG alone"]
 ```
 
 ### 7.6 Comparison table
@@ -687,12 +687,12 @@ A controlled preparation pipeline should:
 
 ```mermaid
 flowchart TD
-    A[Approved deduplicated source records] --> B{Group-aware split}
-    B --> C[Training set: fit parameters]
-    B --> D[Validation set: choose settings and stopping point]
-    B --> E[Test set: one final unbiased measurement]
-    C -. no duplicate families .- D
-    D -. no tuning on test .- E
+    A["Approved deduplicated source records"] --> B{"Group-aware split"}
+    B --> C["Training set: fit parameters"]
+    B --> D["Validation set: choose settings and stopping point"]
+    B --> E["Test set: one final unbiased measurement"]
+    C -. "no duplicate families" .-> D
+    D -. "no tuning on test" .-> E
 ```
 
 - **Training data** updates the model.
