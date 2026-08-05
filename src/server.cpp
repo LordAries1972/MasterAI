@@ -355,6 +355,9 @@ public:
         // Phase 57: real model comparison (see ml_engine.cpp).
         ml_model_comparisons = std::make_unique<ModelComparisonStore>(records);
         ml_comparison_results = std::make_unique<ComparisonResultStore>(records);
+        // Phases 58-60: uploaded knowledge sources, their persisted chunks
+        // and hashing vectors, and the index consumed by RAG retrieval.
+        ml_knowledge_index = std::make_unique<KnowledgeIndexStore>(records);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -1571,6 +1574,19 @@ public:
             if (auto denied = forbidden_unless(user->role, "ml.subjects.delete")) return *denied;
             const auto id = request.target.substr(
                 20U, request.target.size() - 20U - 7U);
+            const auto knowledge_documents =
+                ml_knowledge_index->list_documents();
+            if (std::any_of(
+                    knowledge_documents.begin(), knowledge_documents.end(),
+                    [&id](const KnowledgeDocument& document) {
+                        return document.subject_id == id;
+                    })) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_subject_has_knowledge_documents\","
+                    "\"detail\":\"delete the subject's ingested knowledge "
+                    "files first\"}");
+            }
             if (!ml_subjects->remove(id)) {
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_subject_not_found\"}");
@@ -2650,6 +2666,13 @@ public:
             if (auto denied = forbidden_unless(user->role, "ml.vectorstores.manage")) return *denied;
             const auto id = request.target.substr(
                 25U, request.target.size() - 25U - 7U);
+            if (!ml_knowledge_index->chunks_for_store(id).empty()) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_vector_store_has_indexed_documents\","
+                    "\"detail\":\"delete the vector store's ingested "
+                    "knowledge files first\"}");
+            }
             if (!ml_vector_stores->remove(id)) {
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_vector_store_not_found\"}");
@@ -2734,6 +2757,161 @@ public:
             }
             audit.append("ml.rag_config.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phases 58-59: real knowledge-file ingestion and durable vector
+        // indexing. Browser file bytes arrive as bounded JSON text; the
+        // server validates both referenced records before hashing/chunking.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/knowledge-documents") {
+            if (auto denied = forbidden_unless(user->role, "ml.knowledge.view")) return *denied;
+            return response(
+                200, "OK", "{\"knowledgeDocuments\":" +
+                    knowledge_documents_json(
+                        ml_knowledge_index->list_documents()) + "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/knowledge-documents") {
+            if (auto denied = forbidden_unless(user->role, "ml.knowledge.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto subject_id = root.required("subjectId").as_string();
+                const auto vector_store_id =
+                    root.required("vectorStoreId").as_string();
+                if (!ml_subjects->find(subject_id)) {
+                    return response(409, "Conflict",
+                                    "{\"error\":\"ml_subject_not_found\"}");
+                }
+                const auto vector_store =
+                    ml_vector_stores->find(vector_store_id);
+                if (!vector_store) {
+                    return response(
+                        409, "Conflict",
+                        "{\"error\":\"ml_vector_store_not_found\"}");
+                }
+                if (vector_store->embedding_model !=
+                        "authored_hashing_vectorizer_v1" ||
+                    vector_store->distance_metric != "cosine") {
+                    return response(
+                        409, "Conflict",
+                        "{\"error\":\"ml_vector_store_executor_unsupported\","
+                        "\"detail\":\"the local executor requires "
+                        "authored_hashing_vectorizer_v1 with cosine distance\"}");
+                }
+                const auto document = ml_knowledge_index->ingest(
+                    user->id, subject_id, vector_store_id,
+                    root.required("fileName").as_string(),
+                    root.required("mediaType").as_string(),
+                    root.required("content").as_string());
+                audit.append("ml.knowledge.ingest", user->id, "success",
+                             document.id);
+                return response(201, "Created",
+                                knowledge_document_json(document));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_knowledge_document\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/knowledge-documents/", 0U) ==
+                0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.knowledge.manage")) return *denied;
+            const std::string prefix = "/api/v1/ml/knowledge-documents/";
+            const auto id = request.target.substr(
+                prefix.size(), request.target.size() - prefix.size() - 7U);
+            if (!ml_knowledge_index->remove_document(id)) {
+                return response(
+                    404, "Not Found",
+                    "{\"error\":\"ml_knowledge_document_not_found\"}");
+            }
+            audit.append("ml.knowledge.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/vector-stores/", 0U) == 0U &&
+            request.target.size() > 6U &&
+            request.target.compare(request.target.size() - 6U, 6U,
+                                   "/index") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.vectorstores.view")) return *denied;
+            const std::string prefix = "/api/v1/ml/vector-stores/";
+            const auto id = request.target.substr(
+                prefix.size(), request.target.size() - prefix.size() - 6U);
+            if (!ml_vector_stores->find(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_vector_store_not_found\"}");
+            }
+            return response(200, "OK", knowledge_index_profile_json(
+                id, ml_knowledge_index->chunks_for_store(id)));
+        }
+        // Phase 60: execute one approved RAG configuration against its real
+        // populated index and return ranked chunks plus citation-ready
+        // context. The response never fabricates a generated-model answer.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/rag-configs/", 0U) == 0U &&
+            request.target.size() > 6U &&
+            request.target.compare(request.target.size() - 6U, 6U,
+                                   "/query") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.ragconfigs.manage")) return *denied;
+            const std::string prefix = "/api/v1/ml/rag-configs/";
+            const auto id = request.target.substr(
+                prefix.size(), request.target.size() - prefix.size() - 6U);
+            const auto config = ml_rag_configs->find(id);
+            if (!config) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_rag_config_not_found\"}");
+            }
+            if (config->status != RagConfigStatus::approved) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_rag_config_not_approved\",\"detail\":"
+                    "\"approve the RAG configuration before querying it\"}");
+            }
+            const auto vector_store =
+                ml_vector_stores->find(config->vector_store_id);
+            if (!vector_store || vector_store->status != VectorStoreStatus::approved) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_vector_store_not_approved\",\"detail\":"
+                    "\"the RAG configuration needs an approved vector store\"}");
+            }
+            if (vector_store->embedding_model !=
+                    "authored_hashing_vectorizer_v1" ||
+                vector_store->distance_metric != "cosine") {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_vector_store_executor_unsupported\","
+                    "\"detail\":\"the local executor requires "
+                    "authored_hashing_vectorizer_v1 with cosine distance\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                std::size_t top_k = 5U;
+                if (const auto* value = root.optional("topK")) {
+                    const auto requested = value->as_integer();
+                    if (requested < 0) {
+                        throw std::invalid_argument("topK cannot be negative");
+                    }
+                    top_k = static_cast<std::size_t>(requested);
+                }
+                const auto result = retrieve_knowledge(
+                    *ml_knowledge_index, config->vector_store_id,
+                    config->search_strategy,
+                    root.required("query").as_string(), top_k);
+                const auto result_json = rag_retrieval_result_json(result);
+                audit.append("ml.rag.query", user->id, "success", id);
+                return response(200, "OK",
+                                "{\"ragConfigId\":\"" + json_escape(id) +
+                                    "\",\"result\":" + result_json + "}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"ml_rag_query_failed\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
         }
         // Phase 51: Subject Examination System (docs/PLAN.md "Machine
         // Learning Abilities" section 24), scoped to identity/subject-
@@ -5251,6 +5429,7 @@ private:
     std::unique_ptr<EvaluationResultStore> ml_evaluation_results;
     std::unique_ptr<ModelComparisonStore> ml_model_comparisons;
     std::unique_ptr<ComparisonResultStore> ml_comparison_results;
+    std::unique_ptr<KnowledgeIndexStore> ml_knowledge_index;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
     std::unique_ptr<DownloadManager> downloads;

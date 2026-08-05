@@ -4748,11 +4748,9 @@ void test_phase_twentysix_use_prediction_signals() {
             "model_usage_signals_json did not report the recorded signals");
 }
 
-// Machine Learning foundation phase: the registry must report a real,
-// honest empty state (every count zero, only Dashboard "available") rather
-// than fabricating activity, and the permission it's gated behind must be
-// administrator-only -- see MachineLearningRegistry's class comment in
-// masterai.hpp and docs/PLAN.md "Machine Learning Abilities" section 3.
+// Machine Learning dashboard: counts must report a real empty state rather
+// than fabricated activity, and available/planned interface labels must stay
+// aligned with the executor phases that genuinely exist.
 void test_machine_learning_foundation_dashboard() {
     require(masterai::role_allows(masterai::UserRole::administrator,
                                   "ml.dashboard.view") &&
@@ -4792,8 +4790,9 @@ void test_machine_learning_foundation_dashboard() {
     // Dashboard (Phase 37), Projects (Phase 38), Model Registry / Dataset
     // Manager (Phase 39), Subject Knowledge Manager (Phase 40), Data
     // Labeling / Data Preparation (Phase 41), Training Jobs (Phase 42),
-    // and Model Builder (Phase 46, at full section 9 surface) are the only
-    // interfaces with a real backing service so far; every other roadmap
+    // Model Builder (Phase 46), Evaluation Lab (Phase 56), Model Comparison
+    // (Phase 57), and the indexed retrieval surfaces (Phases 58-60) have
+    // real backing services; every other roadmap
     // entry from docs/PLAN.md "Machine Learning Abilities" section 2 must
     // still report planned rather than fabricating readiness ahead of its
     // own phase.
@@ -4805,7 +4804,11 @@ void test_machine_learning_foundation_dashboard() {
             interface.key == "subject-knowledge" ||
             interface.key == "data-labeling" ||
             interface.key == "data-preparation" ||
-            interface.key == "training-jobs") {
+            interface.key == "training-jobs" ||
+            interface.key == "evaluation-lab" ||
+            interface.key == "model-comparison" ||
+            interface.key == "embeddings-vector-stores" ||
+            interface.key == "retrieval-augmented-generation") {
             continue;
         }
         require(interface.status == "planned",
@@ -6876,6 +6879,97 @@ void test_machine_learning_model_comparison_lifecycle_and_execution() {
             "afterwards");
 }
 
+// Phases 58-60: real source ingestion must leave durable hashes, chunks,
+// vectors, and ranked/citable retrieval evidence.
+void test_machine_learning_knowledge_ingestion_and_rag_retrieval() {
+    require(masterai::role_allows(masterai::UserRole::administrator,
+                                  "ml.knowledge.manage") &&
+                !masterai::role_allows(masterai::UserRole::developer,
+                                       "ml.knowledge.manage") &&
+                !masterai::role_allows(masterai::UserRole::viewer,
+                                       "ml.knowledge.view"),
+            "ml.knowledge.* permissions must be administrator-only");
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::KnowledgeIndexStore index(records);
+    const std::string security_text =
+        "Phoenix access policy\n\nAdministrators rotate signing keys every "
+        "ninety days. Emergency credentials are stored in the offline "
+        "vault and every rotation is written to the audit log.";
+    const std::string cooking_text =
+        "Kitchen notes\n\nSourdough bread uses flour, water, salt, and a "
+        "fermented starter. The dough rests before baking.";
+    const auto security = index.ingest(
+        "administrator-1", "security-subject", "approved-vector-store",
+        "security-policy.md", "text/markdown", security_text);
+    const auto cooking = index.ingest(
+        "administrator-1", "cooking-subject", "approved-vector-store",
+        "bread.txt", "text/plain", cooking_text);
+    require(!security.id.empty() &&
+                security.sha256 == masterai::sha256_hex(security_text) &&
+                security.byte_count == security_text.size() &&
+                security.chunk_count > 0U && cooking.chunk_count > 0U,
+            "knowledge ingestion did not record measured source evidence");
+
+    const auto chunks = index.chunks_for_store("approved-vector-store");
+    require(chunks.size() == security.chunk_count + cooking.chunk_count &&
+                !chunks.front().embedding.empty(),
+            "knowledge ingestion did not populate the vector index");
+    const auto result = masterai::retrieve_knowledge(
+        index, "approved-vector-store", "hybrid",
+        "When are signing keys rotated and where are emergency credentials?",
+        3U);
+    require(!result.chunks.empty() &&
+                result.chunks.front().chunk.document_id == security.id &&
+                result.chunks.front().score > 0.0,
+            "hybrid RAG retrieval did not rank the relevant source first");
+    const auto json = masterai::rag_retrieval_result_json(result);
+    require(json.find("security-policy.md#chunk-1") != std::string::npos &&
+                json.find("\"context\":") != std::string::npos &&
+                json.find("\"vectorScore\":") != std::string::npos,
+            "RAG result JSON omitted citations, context, or score evidence");
+
+    masterai::KnowledgeIndexStore reloaded(records);
+    const auto reloaded_document = reloaded.find_document(security.id);
+    const auto repeated = masterai::retrieve_knowledge(
+        reloaded, "approved-vector-store", "hybrid",
+        "signing keys emergency credentials", 1U);
+    require(reloaded_document.has_value() &&
+                reloaded_document->sha256 == security.sha256 &&
+                repeated.chunks.size() == 1U &&
+                repeated.chunks[0].chunk.document_id == security.id,
+            "knowledge index did not survive a store reload");
+
+    require(index.remove_document(security.id) &&
+                !index.find_document(security.id) &&
+                !index.remove_document(security.id),
+            "knowledge document removal did not delete exactly once");
+    require(index.chunks_for_store("approved-vector-store").size() ==
+                cooking.chunk_count,
+            "knowledge document removal left orphaned vector chunks");
+
+    bool rejected_binary = false;
+    try {
+        index.ingest("administrator-1", "subject", "store", "bad.bin",
+                     "application/octet-stream", std::string("a\0b", 3U));
+    } catch (const std::exception&) {
+        rejected_binary = true;
+    }
+    require(rejected_binary,
+            "knowledge ingestion must reject unsupported binary files");
+    bool rejected_strategy = false;
+    try {
+        masterai::retrieve_knowledge(index, "approved-vector-store",
+                                     "invented_strategy", "bread", 3U);
+    } catch (const std::exception&) {
+        rejected_strategy = true;
+    }
+    require(rejected_strategy,
+            "RAG retrieval must reject an unknown search strategy");
+}
+
 }  // namespace
 
 int main() {
@@ -7040,6 +7134,8 @@ int main() {
             test_machine_learning_real_training_and_prediction);
         run("Machine Learning model comparison lifecycle and execution",
             test_machine_learning_model_comparison_lifecycle_and_execution);
+        run("Machine Learning knowledge ingestion and RAG retrieval",
+            test_machine_learning_knowledge_ingestion_and_rag_retrieval);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

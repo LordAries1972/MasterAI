@@ -2518,7 +2518,7 @@ struct MachineLearningInterface {
 
 struct MachineLearningDashboard {
     bool enabled{true};
-    std::string phase{"foundation"};
+    std::string phase{"phase-60"};
     std::vector<MachineLearningInterface> interfaces;
     // active_projects is real: it comes from MLProjectStore::list() (see
     // dashboard() below), not a placeholder. The rest still start at zero
@@ -4168,6 +4168,88 @@ std::string tabular_model_comparison_json(
     const TabularEvaluationMetrics& baseline_metrics,
     const TrainedTabularModel& candidate,
     const TabularEvaluationMetrics& candidate_metrics);
+
+// Phases 58-60: real local knowledge ingestion, vector indexing, and RAG
+// retrieval. Documents are uploaded as bounded text through a browser file
+// picker, hashed, split into overlapping chunks, and embedded by an authored
+// deterministic hashing-vectorizer. The vectors are persisted with the exact
+// source chunks; retrieval therefore produces repeatable evidence without a
+// network service or third-party ML foundation. This is deliberately a local
+// retrieval/context executor, not an LLM fine-tuning or answer-generation
+// executor.
+struct KnowledgeDocument {
+    std::string id;
+    std::string subject_id;
+    std::string vector_store_id;
+    std::string file_name;
+    std::string media_type;
+    std::string sha256;
+    std::string owner_id;
+    std::size_t byte_count{0};
+    std::size_t chunk_count{0};
+    std::uint64_t ingested_at_epoch_seconds{0};
+};
+
+struct KnowledgeChunk {
+    std::string id;
+    std::string document_id;
+    std::string subject_id;
+    std::string vector_store_id;
+    std::string file_name;
+    std::size_t chunk_index{0};
+    std::string text;
+    std::vector<double> embedding;
+};
+
+struct RagRetrievedChunk {
+    KnowledgeChunk chunk;
+    double vector_score{0.0};
+    double keyword_score{0.0};
+    double score{0.0};
+};
+
+struct RagRetrievalResult {
+    std::string query;
+    std::string search_strategy;
+    std::vector<RagRetrievedChunk> chunks;
+};
+
+class KnowledgeIndexStore final {
+public:
+    KnowledgeIndexStore() = default;
+    explicit KnowledgeIndexStore(RecordStore& records);
+    KnowledgeDocument ingest(const std::string& owner_id,
+                             const std::string& subject_id,
+                             const std::string& vector_store_id,
+                             const std::string& file_name,
+                             const std::string& media_type,
+                             const std::string& content);
+    std::optional<KnowledgeDocument> find_document(
+        const std::string& id) const;
+    std::vector<KnowledgeDocument> list_documents() const;
+    std::vector<KnowledgeChunk> chunks_for_store(
+        const std::string& vector_store_id) const;
+    bool remove_document(const std::string& id);
+
+private:
+    void restore();
+    RecordStore* records_{nullptr};
+    std::map<std::string, KnowledgeDocument> documents_;
+    std::map<std::string, KnowledgeChunk> chunks_;
+    mutable std::mutex mutex_;
+};
+
+RagRetrievalResult retrieve_knowledge(
+    const KnowledgeIndexStore& index, const std::string& vector_store_id,
+    const std::string& search_strategy, const std::string& query,
+    std::size_t top_k = 5U);
+std::string knowledge_document_json(const KnowledgeDocument& document);
+std::string knowledge_documents_json(
+    const std::vector<KnowledgeDocument>& documents);
+std::string knowledge_index_profile_json(
+    const std::string& vector_store_id,
+    const std::vector<KnowledgeChunk>& chunks);
+std::string rag_retrieval_result_json(const RagRetrievalResult& result);
 
 struct PerformanceSample {
     std::string name;

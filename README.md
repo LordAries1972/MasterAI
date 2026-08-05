@@ -320,14 +320,16 @@ The current source includes native implementations for:
   configurations, instruction and synthetic-data records, vector stores,
   RAG configurations, subject exams, hyperparameter searches,
   model-optimization runs, training checkpoints, and deployments — plus a
-  real execution engine (Phases 56-57) that ingests validated CSV dataset
+  real execution engine (Phases 56-60) that ingests validated CSV dataset
   content, trains tabular models by gradient descent with genuine loss
   curves and held-out metrics, captures measured-loss checkpoints, scores
   trained models with real evaluation metrics, compares two trained models
-  on a shared benchmark with a measured winner, and serves live predictions
-  from persisted weight artifacts. LLM fine-tuning, embedding generation,
-  populated vector indexes, end-to-end RAG execution, exam administration,
-  hyperparameter search execution, and deployment promotion do not run yet.
+  on a shared benchmark with a measured winner, serves live predictions
+  from persisted weight artifacts, ingests and hashes approved text files,
+  persists a populated authored hashing-vector index, and executes ranked,
+  cited retrieval/context assembly. LLM fine-tuning, learned neural embedding
+  inference, generative RAG answers, exam administration, hyperparameter
+  search execution, and deployment promotion do not run yet.
 
 Implementation does not automatically mean operational certification. The next
 section records the distinction.
@@ -389,8 +391,8 @@ Status below reflects the evidence recorded in
 | 46 | Model Builder | Fully implemented (full section 9 design sheet, basic/advanced modes); no construction executor |
 | 47 | Prompt and Instruction Training | Implemented at a scoped-down metadata level |
 | 48 | Synthetic Data Generation | Implemented at a scoped-down metadata level; no generator |
-| 49 | Embeddings and Vector Stores | Implemented at a scoped-down registry level; no embedding/index pipeline |
-| 50 | Retrieval-Augmented Generation | Implemented at a scoped-down configuration level; no RAG executor |
+| 49 | Embeddings and Vector Stores | Registry implemented; real local hashing-vector index added in Phase 59 |
+| 50 | Retrieval-Augmented Generation | Configuration implemented; real retrieval/context executor added in Phase 60 |
 | 51 | Subject Examination System | Implemented at a scoped-down record level; no exam administration |
 | 52 | Hyperparameter Optimization | Implemented at a scoped-down record level; no search executor |
 | 53 | Model Optimization | Implemented at a scoped-down record level; no optimizer executor |
@@ -398,6 +400,9 @@ Status below reflects the evidence recorded in
 | 55 | Deployment Manager | Implemented at a scoped-down approval-record level; no deployment executor |
 | 56 | Real ML execution engine (tabular training, evaluation, prediction) | Implemented |
 | 57 | Model Comparison (real baseline-vs-candidate benchmark executor) | Implemented |
+| 58 | Knowledge-file ingestion | Implemented; bounded text upload, SHA-256 provenance, durable chunk records |
+| 59 | Local embedding and vector indexing | Implemented; authored 128-dimensional hashing vectors and index profiles |
+| 60 | RAG retrieval and grounded context assembly | Implemented; approved-config query execution with ranked chunks and citations |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -458,9 +463,17 @@ Phase 57 extends that engine with Model Comparison: a baseline and a
 candidate model are both evaluated against one shared benchmark dataset,
 and the stored verdict reports both metric sets, the primary-metric delta,
 and the measured winner.
-The honest remaining boundary: LLM fine-tuning execution, embedding
-generation, populated vector indexes, and executable RAG pipelines do not
-exist yet. For the concepts, current workflows, exact capability boundary,
+Phases 58–60 add a second evidence-producing path: administrators select a
+local text, Markdown, CSV, JSON, or JSONL file in the Subject Knowledge
+Manager; MasterAI bounds and hashes the accepted UTF-8 text content, creates overlapping
+chunks, persists authored 128-dimensional hashing vectors, and exposes a
+measured vector-store profile. An approved RAG configuration can then run
+hybrid, vector, or keyword retrieval and return ranked source chunks plus a
+citation-ready context package.
+The honest remaining boundary: these authored hashing vectors are a real
+local index, not a learned neural embedding model, and the RAG executor
+retrieves and assembles grounded context but does not generate an LLM answer.
+LLM fine-tuning still does not execute. For the concepts, current workflows, exact capability boundary,
 and a sequential teaching guide, read
 [How to Use Machine Learning and Models with MasterAI](docs/HowToUse-MachineLearning.md).
 
@@ -927,11 +940,22 @@ and a candidate model against the same benchmark dataset and stores the
 measured verdict — both metric sets, the macro-F1 (classification) or MSE
 (regression) delta, and the winner.
 
+Since Phases 58–60, the Subject Knowledge Manager uses a native browser file
+dialog to ingest bounded text sources into a selected vector store. The
+server records the source filename, media type, byte count, SHA-256 digest,
+and real chunk count, then persists deterministic 128-dimensional hashing
+vectors. The RAG page executes approved hybrid, vector-only, or keyword-only
+retrieval and displays the ranked scores, source citations, exact source
+text, and assembled context. Dataset upload and all cross-record ML forms now
+use file dialogs and named selectors instead of requiring pasted file content
+or copied opaque IDs.
+
 The honest boundary that remains: creating or advancing the other job types
-records administrative intent and state, not execution. Registering a vector
-store or RAG configuration does not generate embeddings, populate an index,
-execute retrieval, or prove grounded output, and LLM fine-tuning does not
-run. Approved externally trained models must still be deliberately packaged
+records administrative intent and state, not execution. Creating an empty
+vector-store record alone does not populate it, and RAG retrieval does not
+generate or validate a model-authored answer. The local hashing vectorizer is
+not a learned semantic embedding model. LLM fine-tuning does not run.
+Approved externally trained models must still be deliberately packaged
 as verified GGUF artifacts in the inference model tree before MasterAI can
 serve them for chat.
 
@@ -1265,10 +1289,10 @@ Near-term work is:
    measured worker affinity, live cascade routing, and broader zero-copy use.
 7. Implement the still-planned performance Phases 31–36 in prerequisite
    order, beginning with storage tiering and scratch-volume management.
-8. Extend the Machine Learning foundation beyond Phase 50 metadata into
-   evidence-producing ingestion, execution, evaluation, embedding/vector,
-   and RAG workflows without allowing lifecycle state to substitute for
-   proof that work ran successfully.
+8. Extend the Phase 60 Machine Learning executors with learned neural
+   embedding adapters, governed LLM fine-tuning, generated-answer RAG
+   evaluation, and the remaining planned job executors without allowing
+   lifecycle state to substitute for proof that work ran successfully.
 
 Outstanding operational certification also includes:
 

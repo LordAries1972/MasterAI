@@ -8,7 +8,7 @@
 
 **Project basis:** This guide is derived from the architecture, security rules, model lifecycle, Machine Learning Abilities, and phased implementation status in [PLAN.md](PLAN.md). Where the plan describes a future capability, this guide labels it as planned rather than presenting it as currently executable.
 
-**Last aligned with the plan:** 5 August 2026, through the scoped Phase 55 Machine Learning foundation.
+**Last aligned with the plan:** 6 August 2026, through Phase 60 knowledge ingestion, local vector indexing, and grounded retrieval.
 
 ---
 
@@ -619,7 +619,7 @@ flowchart TD
 |---|---:|---:|---:|---:|---|
 | Prompting | No | Per request | Only if supplied | Low | Usable through chat |
 | Project context | No | Re-indexed project state | Evidence disclosure is possible | Low to medium | Lexical foundation exists |
-| Full semantic RAG | No | Update/re-index documents | Strong fit | Medium | Planned beyond current metadata foundation |
+| Local hashing-vector RAG | No | Re-ingest changed documents | Stable source citations | Low to medium | Executable retrieval/context assembly through Phase 60; not neural semantic embeddings or answer generation |
 | Adapter or LoRA fine-tuning | Yes, partially | Static until retrained | Weak by itself | Medium | Job records exist; executor is not yet implemented |
 | Full fine-tuning | Yes | Static until retrained | Weak by itself | High | Planned executor |
 | Foundation training | Yes, from initialization | Static until retrained | Weak by itself | Extreme | Initial-release non-goal |
@@ -847,12 +847,15 @@ Since Phase 56, the module also contains a **real execution engine** for tabular
 - **A real evaluation harness** — running an evaluation scores a trained model against any schema-matching dataset and stores genuine metrics: accuracy, macro precision/recall/F1, and a confusion matrix for classification; MSE, MAE, and R² for regression.
 - **Live prediction** — the Model Registry serves real predictions (the winning class with per-class probabilities, or the predicted numeric value) computed from the persisted weights.
 - **A real comparison harness (Phase 57)** — a Model Comparison names a baseline model, a candidate model, and one shared benchmark dataset; **Compare now** evaluates both trained artifacts against that dataset's real content and stores a measured verdict: both full metric sets, the primary-metric delta (macro F1 for classification, MSE for regression), and the winner. An exact tie is reported as a tie, and comparing a classification model against a regression model is rejected.
+- **Real knowledge ingestion (Phase 58)** — the Subject Knowledge Manager accepts a selected local UTF-8 text, Markdown, CSV, JSON, or JSONL file up to 2 MiB. The server hashes the exact accepted text content with SHA-256, creates overlapping text chunks, and records the source filename, media type, byte count, chunk count, owner, subject, and target vector store.
+- **A populated local vector index (Phase 59)** — every source chunk receives a persisted 128-dimensional vector from MasterAI's independently authored deterministic hashing vectorizer. Index profiles report the actual document count, chunk count, dimensions, and indexed text bytes, and the source/chunk/vector records survive restart together.
+- **Executable grounded retrieval (Phase 60)** — an approved RAG configuration can execute hybrid, vector-only, or keyword-only retrieval against an approved populated vector store. The result contains ranked source chunks, vector and keyword score components, stable citations, exact evidence text, and an assembled context package.
 
 Section 10.7 walks through this end to end. The engine's own honest boundary: it trains **tabular** models. It does not fine-tune language models — that remains planned, and the boundary list below still applies to everything it names.
 
 ### 10.2 What must not be assumed yet
 
-At the plan's current Phase 57 boundary, the tabular engine described in 10.1 is real, but the following must still not be represented as an operating end-to-end platform:
+At the plan's current Phase 60 boundary, the tabular engine and local retrieval engine described in 10.1 are real, but the following must still not be represented as an operating end-to-end platform:
 
 - training or fine-tuning of **language models** (the real executor covers tabular classification and regression only);
 - external training-framework integration (PyTorch, llama.cpp finetune, ...);
@@ -864,12 +867,12 @@ At the plan's current Phase 57 boundary, the tabular engine described in 10.1 is
 - exam administration or computed exam results;
 - automated hyperparameter search trials or best-result selection;
 - executed quantization, pruning, distillation, or other optimization operations;
-- embedding generation or a populated vector index;
-- a complete executable RAG pipeline;
+- learned neural embedding-model inference (Phase 59 uses a real, deterministic hashing vectorizer rather than a transformer embedding model);
+- LLM answer generation from the Phase 60 context package, automated groundedness judging, or a complete generative RAG answer pipeline;
 - deployment automation, canary rollout, health monitoring, or automatic rollback;
 - continual learning from user conversations.
 
-Creating a Fine-Tuning Job record still records administrative intent and lifecycle state; it does not adapt a language model. Creating a Vector Store record does not generate embeddings or index documents. Likewise, a Subject Exam record does not administer questions, a Hyperparameter Search record does not run trials, a Model Optimization record does not quantize anything, and an approved Deployment record does not route a single request — each is a governed statement of intent and approval that a future executor will attach real evidence to. The deliberate exceptions since Phases 56-57: a Training Job whose dataset has uploaded CSV content, run through **Train now**, genuinely trains; an Evaluation Run executed through **Evaluate now** genuinely scores; and a Model Comparison executed through **Compare now** genuinely measures which of two trained models is better on a shared benchmark.
+Creating a Fine-Tuning Job record still records administrative intent and lifecycle state; it does not adapt a language model. Creating an empty Vector Store record alone does not index anything: a source file must be deliberately ingested through Subject Knowledge Manager. Likewise, a Subject Exam record does not administer questions, a Hyperparameter Search record does not run trials, a Model Optimization record does not quantize anything, and an approved Deployment record does not route a single request — each is a governed statement of intent and approval that a future executor will attach real evidence to. The deliberate executor exceptions through Phase 60 are tabular training, evaluation, prediction and comparison, plus bounded knowledge ingestion, persistent hashing-vector indexing, and evidence-bearing retrieval/context assembly.
 
 ### 10.3 Two model catalogs with different purposes
 
@@ -887,6 +890,7 @@ Use MasterAI now to:
 - define and track the controlled ML project;
 - register datasets, subjects, examples, jobs, experiments, and approvals as the supported fields permit;
 - upload tabular CSV data and train, evaluate, compare, and serve real classification/regression models end to end (Section 10.7);
+- ingest approved text sources, inspect their populated local vector index, and test citation-bearing retrieval (Section 10.8);
 - keep ordinary users away from ML administration;
 - run and compare verified GGUF inference models;
 - test prompts and authorized project context;
@@ -998,6 +1002,23 @@ flowchart LR
 **What to watch for, in classroom terms.** If the final loss barely moves, the learning rate may be too small or the features uninformative. If training diverges (the run fails with a non-finite loss), lower the learning rate. If held-out accuracy is far below training accuracy, you are overfitting — Section 6.5 applies here exactly as it does to large models. And a constant feature column contributes nothing: the engine standardizes it to zero and its weight never moves.
 
 ---
+
+### 10.8 Hands-on lesson: ingest knowledge and test grounded retrieval
+
+This workflow creates retrieval evidence. It does not train a language model and does not ask one to generate an answer.
+
+1. Open **Machine Learning → Subject Knowledge Manager** and create a subject package with a narrow scope. Move it through review according to your governance process.
+2. Open **Machine Learning → Embeddings and Vector Stores**. Create a vector store, name its embedding method clearly (for the built-in executor, use `authored_hashing_vectorizer_v1`), choose `cosine`, and approve the resource.
+3. Return to **Subject Knowledge Manager**. Under **Ingest a knowledge file**, choose the subject and vector store from their named selectors. Use the file dialog to select a `.txt`, `.md`, `.csv`, `.json`, or `.jsonl` source no larger than 2 MiB, then select **Ingest and index file**.
+4. Verify the returned filename, SHA-256 digest, byte count, and chunk count. These are execution evidence. A lifecycle label by itself is not.
+5. Return to **Embeddings and Vector Stores** and select **View index**. Confirm that document count, chunk count, indexed byte count, vector dimensions, and method match what you ingested.
+6. Open **Machine Learning → Retrieval-Augmented Generation**. Create a RAG configuration using the populated store and one of the implemented strategies: `hybrid`, `vector`, or `keyword`. Approve the configuration before testing it.
+7. In **Test retrieval**, select the approved configuration, enter a question whose answer exists in the source, choose 1–20 chunks, and run retrieval.
+8. Inspect every returned citation, score, and source excerpt. Confirm the first results actually support the question. The assembled context is suitable input for a later generation step, but Phase 60 deliberately does not fabricate an answer or claim groundedness on a model's behalf.
+9. Repeat with a question whose answer is absent. Zero results or low-quality evidence is an important negative test; do not treat any retrieved text as proof merely because it ranked first.
+10. When a source becomes obsolete, delete the ingested knowledge document. MasterAI removes its persisted chunks and vectors with it, preventing that source from appearing in later retrieval.
+
+The built-in hashing vectorizer is local, deterministic, restart-stable, and useful for lexical/term-overlap similarity. It is not equivalent to a learned transformer embedding model and should not be described as one. A later adapter may add learned semantic embeddings while retaining the same provenance, approval, and citation boundaries.
 
 ## 11. Sequential lesson: set up an existing model for MasterAI
 
@@ -1287,7 +1308,7 @@ If RAG is selected, the current administration foundation can register the inten
 /app/ml/rag-configs
 ```
 
-Record the search strategy and, where applicable, its registered vector store. The current Phase 50 record and approval lifecycle do not execute query rewriting, retrieval, reranking, context assembly, citation checking, or grounding tests. Specify and validate those behaviors in a controlled external workflow until the planned executor exists.
+Record the implemented search strategy (`hybrid`, `vector`, or `keyword`) and its registered vector store. Phases 58–60 can ingest selected local text files, populate the authored hashing-vector index, rank source chunks, and assemble citation-bearing context as shown in Section 10.8. They do not rewrite queries, use a learned neural embedding model, rerank with a separate model, generate an LLM answer, or judge that answer's groundedness; validate those later-stage behaviors separately.
 
 **Exit condition:** The method is justified against simpler alternatives.
 

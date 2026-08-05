@@ -787,6 +787,7 @@ Current phase status:
   still reports `planned`, matching Phases 43-48's own roster entries —
   `test_machine_learning_foundation_dashboard`'s fixed exclusion list stays
   frozen at Phase 42's interface set, so this phase changes nothing there.
+  Phase 59 later changes this entry to `available` when the real index lands.
 - Phase 50: Implemented at a scoped-down level (2026-08-05) — Retrieval-
   Augmented Generation (section 22 below), scoped down to identity, a
   free-text search strategy (section 22 lists "Search strategy" as a
@@ -821,7 +822,8 @@ Current phase status:
   (`src/ml.cpp`) intentionally still reports `planned`, matching Phases
   43-49's own roster entries — `test_machine_learning_foundation_dashboard`'s
   fixed exclusion list stays frozen at Phase 42's interface set, so this
-  phase changes nothing there.
+  phase changes nothing there. Phase 60 later changes this entry to
+  `available` when retrieval/context execution lands.
 - Phase 51: Implemented at a scoped-down level (2026-08-05) — the Subject
   Examination System (section 24 below), scoped down to identity, a
   mandatory `subject_id` referencing a `SubjectPackageStore` entry (an
@@ -1030,16 +1032,48 @@ Current phase status:
   label-flipped one, swapping baseline/candidate must swap the winner,
   identical metrics must tie, cross-task comparisons must throw, and
   stored results must round-trip and die on remove. The dashboard
-  roster's `model-comparison` interface entry intentionally still reports
-  `planned`, exactly as Phases 43-56 left their roster entries — the
-  dashboard test's exclusion list stays frozen at Phase 42's interface
-  set. Windows x64 Debug and Release builds completed and
+  roster's `model-comparison` interface entry now reports `available`
+  because the executor exists. Windows x64 Debug and Release builds completed and
   `masterai_core_tests` passed; as part of this validation the Phase 30
   arena poison assertions in `test_phase_thirty_request_arena_allocation_
   and_poison` were wrapped in `#ifndef NDEBUG`, since masterai.hpp has
   always documented ArenaHandle's generation tracking as compiling out
   under NDEBUG and the Release suite could therefore never pass that
   debug-only assertion.
+- Phase 58: Implemented (2026-08-06) — Knowledge Ingestion (section 13)
+  now accepts real administrator-selected `.txt`, Markdown, CSV, JSON, and
+  JSONL sources through Subject Knowledge Manager. `POST
+  /api/v1/ml/knowledge-documents` validates the referenced subject package
+  and vector store, rejects binary/unsupported content and files above
+  2 MiB, hashes the exact accepted UTF-8 text content with SHA-256, creates
+  bounded overlapping chunks, and persists source provenance plus chunk records in
+  `ml_knowledge_documents`/`ml_knowledge_chunks`. List/delete APIs and the
+  UI expose measured byte/chunk counts and remove a document's chunks with
+  it. `ml.knowledge.view/manage` remain administrator-only and mutations
+  are audited.
+- Phase 59: Implemented (2026-08-06) — the Embeddings and Vector Stores
+  surface now has a real populated local index. Each Phase 58 chunk receives
+  a persisted 128-dimensional L2-normalized vector from MasterAI's
+  independently authored deterministic feature-hashing vectorizer
+  (`src/ml_knowledge.cpp`); `GET /api/v1/ml/vector-stores/{id}/index`
+  reports the actual method, dimensions, document count, chunk count, and
+  indexed text bytes. This is genuine vector generation and cosine search,
+  but it is not a learned transformer embedding model and must not be
+  described as equivalent semantic quality.
+- Phase 60: Implemented (2026-08-06) — approved RAG configurations with an
+  approved populated vector store can execute through `POST
+  /api/v1/ml/rag-configs/{id}/query`. The executor supports the implemented
+  `hybrid`, `vector` (including legacy `vector_only`), and `keyword`
+  (including legacy `keyword_only`) strategies,
+  bounds queries and `topK`, ranks persisted source chunks, and returns
+  vector score, keyword score, combined score, stable source citation,
+  exact evidence text, and a citation-ready context package. The RAG UI
+  provides an evidence panel and named record selectors. Phase 60 is a real
+  retrieval/context executor; it deliberately does not generate an LLM
+  answer or claim that a later answer is grounded. Dataset ingestion now
+  uses a native browser CSV file dialog rather than pasted text, knowledge
+  ingestion uses a bounded multi-format file dialog, and ML foreign-key
+  forms use populated record selectors instead of copied opaque IDs.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -5178,9 +5212,11 @@ both trained artifacts against that dataset's real uploaded content and
 stores a measured verdict — both metric sets, the primary-metric delta
 (macro F1 for classification, MSE for regression), and the winner — see
 the Phase 57 entry above for the full surface and its honest boundary.
-Every other capability in this section (LLM fine-tuning execution,
-Knowledge Ingestion, Inference Endpoints, and everything else through
-section 51) remains `Planned`: no implementation has started.
+Phases 58-60 add bounded knowledge-file ingestion, persisted authored
+hashing-vector indexes, and approved RAG retrieval/context execution. Learned
+neural embedding inference, LLM fine-tuning and RAG answer generation,
+Inference Endpoints, and every other executor not named above remain
+`Planned`: a metadata record or lifecycle transition is not execution proof.
 
 This section extends the plan with an administrator-only Machine Learning
 administration and model-development module, covering the full lifecycle

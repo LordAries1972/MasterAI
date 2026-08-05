@@ -50,6 +50,7 @@ add_library(masterai_core STATIC
     ../src/performance_cli.cpp
     ../src/ml.cpp
     ../src/ml_engine.cpp
+    ../src/ml_knowledge.cpp
     ../src/http_support.cpp
     ../src/integration_http.cpp
     ../src/web_ui.cpp

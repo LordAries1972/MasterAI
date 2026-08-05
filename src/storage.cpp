@@ -474,7 +474,10 @@ bool role_allows(const UserRole role, const std::string& permission) {
           // Phase 57 (docs/PLAN.md "Machine Learning Abilities" section 27,
           // Model Comparison): administrator-only, matching every other
           // ml.* permission above.
-          "ml.comparisons.view", "ml.comparisons.manage"}},
+          "ml.comparisons.view", "ml.comparisons.manage",
+          // Phases 58-60: source ingestion/index inspection and deletion.
+          // RAG execution itself remains under ml.ragconfigs.manage.
+          "ml.knowledge.view", "ml.knowledge.manage"}},
         {UserRole::developer,
          {"identity.read", "models.read", "models.load", "tokens.create",
           "ide.connect", "mcp.connect", "mcp.invoke", "mcp.tools.invoke",
