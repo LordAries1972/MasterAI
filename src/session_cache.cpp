@@ -41,6 +41,9 @@ struct Entry {
     SessionFingerprint fingerprint;
     std::string last_prompt;
     unsigned int slot_id{0};
+    // Exact count reported by RunnerSupervisor for last_prompt. Optional so
+    // callers reconstructing older/test-only state never fabricate a count.
+    std::optional<std::uint64_t> prompt_token_count;
     std::chrono::steady_clock::time_point last_used;
 };
 
@@ -126,6 +129,10 @@ public:
         }
         decision.reuse = true;
         decision.slot_id = entry.slot_id;
+        if (entry.prompt_token_count.has_value()) {
+            decision.reusable_prefix_tokens = *entry.prompt_token_count;
+            decision.reusable_prefix_tokens_exact = true;
+        }
         decision.invalidation_reason = SessionInvalidationReason::none;
         return decision;
     }
@@ -133,7 +140,8 @@ public:
     unsigned int record(const std::string& chat_id,
                         const SessionFingerprint& fingerprint,
                         const std::string& generation_prompt,
-                        std::optional<unsigned int> reused_slot) {
+                        std::optional<unsigned int> reused_slot,
+                        std::optional<std::uint64_t> prompt_token_count) {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto now = std::chrono::steady_clock::now();
         auto existing = by_chat_.find(chat_id);
@@ -143,6 +151,7 @@ public:
             order_.splice(order_.end(), order_, existing->second);
             existing->second->fingerprint = fingerprint;
             existing->second->last_prompt = generation_prompt;
+            existing->second->prompt_token_count = prompt_token_count;
             existing->second->last_used = now;
             if (reused_slot.has_value()) {
                 existing->second->slot_id = *reused_slot;
@@ -151,7 +160,8 @@ public:
         }
         const unsigned int slot_id =
             reused_slot.has_value() ? *reused_slot : allocate_slot_locked();
-        Entry entry{chat_id, fingerprint, generation_prompt, slot_id, now};
+        Entry entry{chat_id, fingerprint, generation_prompt, slot_id,
+                    prompt_token_count, now};
         order_.push_back(std::move(entry));
         auto position = std::prev(order_.end());
         by_chat_[chat_id] = position;
@@ -220,8 +230,10 @@ SessionDecision PromptSessionManager::try_reuse(
 unsigned int PromptSessionManager::record(
     const std::string& chat_id, const SessionFingerprint& fingerprint,
     const std::string& generation_prompt,
-    std::optional<unsigned int> reused_slot) {
-    return state_->record(chat_id, fingerprint, generation_prompt, reused_slot);
+    std::optional<unsigned int> reused_slot,
+    std::optional<std::uint64_t> prompt_token_count) {
+    return state_->record(chat_id, fingerprint, generation_prompt, reused_slot,
+                          prompt_token_count);
 }
 
 void PromptSessionManager::release(const std::string& chat_id) {

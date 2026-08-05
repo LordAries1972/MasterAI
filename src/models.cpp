@@ -679,6 +679,11 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
         "--model", model_file.string(), "--host", "127.0.0.1",
         "--port", std::to_string(port), "--ctx-size", std::to_string(context_length),
         "--parallel", std::to_string(parallel_slots)};
+    if (tuning.continuous_batching) {
+        // llama-server performs the actual compatible token-step batching;
+        // MasterAI's RequestScheduler remains the admission/fairness layer.
+        arguments.emplace_back("--cont-batching");
+    }
     // Phase 19: calibrated launch tuning. Every branch below is skipped at
     // its default value, so a caller passing the default LaunchTuning{}
     // reproduces exactly the pre-Phase-19 argument list.
@@ -765,6 +770,23 @@ void ModelUsagePredictor::set_waiting_request_count(
     auto& entry = signals_[model_id];
     entry.model_id = model_id;
     entry.waiting_request_count = count;
+}
+
+void ModelUsagePredictor::increment_waiting(const std::string& model_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto& entry = signals_[model_id];
+    entry.model_id = model_id;
+    if (entry.waiting_request_count !=
+        std::numeric_limits<std::uint32_t>::max()) {
+        ++entry.waiting_request_count;
+    }
+}
+
+void ModelUsagePredictor::decrement_waiting(const std::string& model_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto& entry = signals_[model_id];
+    entry.model_id = model_id;
+    if (entry.waiting_request_count > 0U) --entry.waiting_request_count;
 }
 
 std::vector<ModelUsageSignals> ModelUsagePredictor::snapshot() const {

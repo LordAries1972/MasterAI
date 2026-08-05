@@ -288,7 +288,7 @@ bool retrieval_strategy_has_adapter(const RetrievalStrategy strategy) noexcept {
     }
 }
 
-std::vector<std::pair<RetrievalStrategy, std::string>>
+const std::vector<std::pair<RetrievalStrategy, std::string>>&
 disabled_retrieval_strategy_reasons() {
     static const std::vector<RetrievalStrategy> all_strategies{
         RetrievalStrategy::exact_symbol, RetrievalStrategy::exact_text,
@@ -298,13 +298,16 @@ disabled_retrieval_strategy_reasons() {
         RetrievalStrategy::type_reference, RetrievalStrategy::git_diff,
         RetrievalStrategy::dependency_neighbour,
         RetrievalStrategy::conversation_memory};
-    std::vector<std::pair<RetrievalStrategy, std::string>> reasons;
-    for (const auto strategy : all_strategies) {
-        if (retrieval_strategy_has_adapter(strategy)) continue;
-        reasons.emplace_back(
-            strategy, "no adapter: " + to_string(strategy) +
-                          " has no implementation wired to retrieval yet");
-    }
+    static const std::vector<std::pair<RetrievalStrategy, std::string>> reasons = [] {
+        std::vector<std::pair<RetrievalStrategy, std::string>> value;
+        for (const auto strategy : all_strategies) {
+            if (retrieval_strategy_has_adapter(strategy)) continue;
+            value.emplace_back(
+                strategy, "no adapter: " + to_string(strategy) +
+                              " has no implementation wired to retrieval yet");
+        }
+        return value;
+    }();
     return reasons;
 }
 
@@ -378,37 +381,67 @@ std::uint64_t RetrievalPlanner::uncached_invocation_count() const noexcept {
 RetrievalOutcome RetrievalPlanner::retrieve(
     const RetrievalRequest& request) const {
     const auto key = request_key(request);
-    std::promise<RetrievalOutcome> promise;
-    std::shared_future<RetrievalOutcome> future;
+    auto state = std::make_shared<InflightRetrieval>();
     bool leader = false;
     {
         std::lock_guard<std::mutex> lock(inflight_mutex_);
         const auto found = inflight_.find(key);
         if (found != inflight_.end()) {
-            future = found->second;
+            state = found->second;
+            ++state->followers;
         } else {
             leader = true;
-            future = promise.get_future().share();
-            inflight_.emplace(key, future);
+            inflight_.emplace(key, state);
         }
     }
-    if (!leader) return future.get();
+    if (!leader) {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        state->ready.wait(lock, [&state] { return state->completed; });
+        if (state->exception) std::rethrow_exception(state->exception);
+        return *state->outcome;
+    }
 
     uncached_invocations_.fetch_add(1U, std::memory_order_relaxed);
     RetrievalOutcome outcome;
     try {
         outcome = retrieve_uncached(request);
     } catch (...) {
-        std::lock_guard<std::mutex> lock(inflight_mutex_);
-        inflight_.erase(key);
-        promise.set_exception(std::current_exception());
+        bool publish = false;
+        {
+            std::lock_guard<std::mutex> lock(inflight_mutex_);
+            const auto found = inflight_.find(key);
+            publish = found != inflight_.end() && found->second->followers > 0U;
+            inflight_.erase(key);
+        }
+        if (publish) {
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->exception = std::current_exception();
+                state->completed = true;
+            }
+            state->ready.notify_all();
+        }
         throw;
     }
+    bool publish = false;
     {
         std::lock_guard<std::mutex> lock(inflight_mutex_);
+        const auto found = inflight_.find(key);
+        publish = found != inflight_.end() && found->second->followers > 0U;
         inflight_.erase(key);
     }
-    promise.set_value(outcome);
+    // The overwhelmingly common single-caller path avoids constructing a
+    // promise/shared-future state or copying a full RetrievalOutcome into a
+    // result nobody observes. Concurrent followers wait on this one small
+    // condition-variable state and receive the same immutable result.
+    if (publish) {
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->outcome = outcome;
+            state->completed = true;
+        }
+        state->ready.notify_all();
+    }
     return outcome;
 }
 
@@ -423,6 +456,12 @@ RetrievalEvaluationReport evaluate_retrieval_quality(
         const auto started = std::chrono::steady_clock::now();
         const auto hybrid = planner.retrieve(request);
         const auto elapsed = std::chrono::steady_clock::now() - started;
+        const auto hybrid_microseconds = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(elapsed)
+                .count());
+        report.hybrid_total_microseconds += hybrid_microseconds;
+        report.hybrid_highest_case_microseconds = std::max(
+            report.hybrid_highest_case_microseconds, hybrid_microseconds);
         if (elapsed > request.deadline + std::chrono::milliseconds(100)) {
             ++report.deadline_violations;
         }
@@ -442,9 +481,81 @@ RetrievalEvaluationReport evaluate_retrieval_quality(
         }
         if (hybrid_hit) ++report.hybrid_hits;
 
-        const auto baseline = indexes.search_text(
-            request.project.id, item.query_text,
-            static_cast<std::size_t>(request.maximum_total_chunks));
+        // Faithful Phase 16 strategy baseline: before Phase 24's staged
+        // sticky sufficiency, identifier, exact-phrase, and per-token
+        // lexical probes all ran for the request. The result quality check
+        // remains the original literal full-query baseline below, while the
+        // elapsed time includes the complete old fan-out workload.
+        const auto baseline_started = std::chrono::steady_clock::now();
+        const auto baseline_tokens = identifier_tokens(item.query_text, 6U);
+        std::map<std::string, IndexChunk> baseline_fused;
+        std::mutex baseline_mutex;
+        const auto merge_baseline = [&](const IndexSearchResult& result) {
+            std::lock_guard<std::mutex> lock(baseline_mutex);
+            for (const auto& chunk : result.chunks) {
+                baseline_fused.emplace(chunk.id, chunk);
+            }
+        };
+        std::vector<std::function<void()>> baseline_tasks;
+        for (const auto& token : baseline_tokens) {
+            baseline_tasks.push_back([&, token] {
+                merge_baseline(indexes.search_symbol(
+                    request.project.id, token,
+                    static_cast<std::size_t>(request.maximum_total_chunks)));
+            });
+        }
+        IndexSearchResult baseline;
+        baseline_tasks.push_back([&] {
+            baseline = indexes.search_text(
+                request.project.id, item.query_text,
+                static_cast<std::size_t>(request.maximum_total_chunks));
+            merge_baseline(baseline);
+        });
+        for (const auto& token : baseline_tokens) {
+            baseline_tasks.push_back([&, token] {
+                merge_baseline(indexes.search_text(
+                    request.project.id, token,
+                    static_cast<std::size_t>(request.maximum_total_chunks)));
+            });
+        }
+        // Phase 16 dispatched its independent probes through this same
+        // bounded two-worker shape. Include scheduling/join cost so the
+        // comparison is end-to-end rather than raw search calls versus a
+        // complete Phase 24 planner invocation.
+        DeadlineTaskPool baseline_pool(
+            std::move(baseline_tasks),
+            baseline_started + request.deadline, 2U);
+        // Phase 16 also fused duplicate chunks and materialized an admitted
+        // context, so include that work rather than timing raw searches
+        // against Phase 24's complete RetrievalOutcome construction.
+        std::string baseline_context;
+        std::map<std::string, std::uint64_t> baseline_per_source;
+        std::uint64_t baseline_chunks = 0U;
+        for (const auto& [id, chunk] : baseline_fused) {
+            static_cast<void>(id);
+            auto& source_count = baseline_per_source[chunk.relative_path];
+            const std::string framed =
+                "\n\n[Project context: " + chunk.relative_path + " @" +
+                std::to_string(chunk.offset) + "]\n" + chunk.text;
+            if (baseline_chunks >= request.maximum_total_chunks ||
+                source_count >= request.maximum_chunks_per_source ||
+                baseline_context.size() + framed.size() >
+                    request.maximum_context_bytes) {
+                continue;
+            }
+            baseline_context += framed;
+            ++source_count;
+            ++baseline_chunks;
+        }
+        volatile std::size_t baseline_sink = baseline_context.size();
+        static_cast<void>(baseline_sink);
+        const auto baseline_microseconds = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - baseline_started).count());
+        report.phase_sixteen_total_microseconds += baseline_microseconds;
+        report.phase_sixteen_highest_case_microseconds = std::max(
+            report.phase_sixteen_highest_case_microseconds,
+            baseline_microseconds);
         const bool baseline_hit = std::any_of(
             baseline.chunks.begin(), baseline.chunks.end(),
             [&](const IndexChunk& chunk) {
@@ -454,6 +565,11 @@ RetrievalEvaluationReport evaluate_retrieval_quality(
             });
         if (baseline_hit) ++report.full_text_hits;
     }
+    report.latency_improved = report.cases > 0U &&
+                              report.hybrid_total_microseconds <
+                                  report.phase_sixteen_total_microseconds &&
+                              report.hybrid_highest_case_microseconds <
+                                  report.phase_sixteen_highest_case_microseconds;
     report.improved = report.cases > 0U &&
                       report.hybrid_hits > report.full_text_hits &&
                       report.deadline_violations == 0U &&
@@ -501,8 +617,6 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
     const auto path_tokens = path_like_tokens(trimmed_query, 4U);
     const auto per_step_results = std::max<std::size_t>(
         4U, static_cast<std::size_t>(request.maximum_total_chunks));
-    const auto interactive_workers = workers_for(request.priority, 2U);
-
     std::mutex mutex;
     // Phase 30: RetrievalCandidate objects for this call's fused evidence
     // set are pool-allocated (FixedSizePool) instead of living directly as
@@ -521,7 +635,11 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
     // (including the early-return branches above/below) via RAII, since
     // this pool -- and its lease -- are scoped to this one call.
     const bool interactive_pool = request.priority == RetrievalPriority::interactive;
-    FixedSizePool<RetrievalCandidate> candidate_pool(32U);
+    // Retrieval usually stops after one exact hit. Grow one candidate at a
+    // time so that fast path does not construct/reserve a 32-object block;
+    // the pool remains bounded by maximum_total_chunks through fusion and
+    // still reports every byte it actually reserves to MemoryBudgetManager.
+    FixedSizePool<RetrievalCandidate> candidate_pool(1U);
     std::string candidate_pool_lease;
     if (memory_ != nullptr) {
         candidate_pool.on_reserved_bytes_changed =
@@ -555,7 +673,7 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
     // addresses this arena instead of carrying its own copy. Corroborating
     // hits from a later strategy only bump the score (see the `else`
     // branch), never append a second copy of already-captured bytes.
-    std::string arena;
+    std::vector<std::uint8_t> arena;
     const auto merge = [&](const std::string& source,
                           const IndexSearchResult& result,
                           const double base_score, const std::string& reason) {
@@ -568,7 +686,7 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
                 reference.segment_key = "retrieval-arena";
                 reference.offset = arena.size();
                 reference.length = chunk.text.size();
-                arena += chunk.text;
+                arena.insert(arena.end(), chunk.text.begin(), chunk.text.end());
                 IndexChunk metadata = chunk;
                 metadata.text.clear();  // bytes now live only in `arena`
                 // Phase 30: acquire() from the pool above instead of
@@ -590,20 +708,23 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
         }
     };
 
-    // Stage 1 (interactive): exact symbol matches.
-    std::vector<std::function<void()>> symbol_tasks;
-    symbol_tasks.reserve(tokens.size());
+    // Stage 1 (interactive): exact symbol matches. These are in-memory,
+    // sub-millisecond index probes; creating/joining a worker pool costs
+    // more than the lookup on small/medium indexes. Run them inline and
+    // stop at the first sufficient hit. Broader lexical work below retains
+    // bounded task parallelism where the per-task cost can amortize it.
+    bool partial = false;
     for (const auto& token : tokens) {
-        symbol_tasks.push_back([&, token]() {
-            merge("exact_symbol",
-                  indexes_.search_symbol(request.project.id, token,
-                                         per_step_results),
-                  3.0, "identifier " + token + " matched by exact boundary");
-        });
+        if (std::chrono::steady_clock::now() >= deadline) {
+            partial = true;
+            break;
+        }
+        merge("exact_symbol",
+              indexes_.search_symbol(request.project.id, token,
+                                     per_step_results),
+              3.0, "identifier " + token + " matched by exact boundary");
+        if (!fused.empty()) break;
     }
-    DeadlineTaskPool symbol_pool(std::move(symbol_tasks), deadline,
-                                interactive_workers);
-    bool partial = !symbol_pool.all_completed();
 
     std::string strategy = tokens.empty() ? "none" : "exact_symbol";
     // "Least expensive sufficient": exact symbol matches are the cheapest,
@@ -613,34 +734,27 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
 
     // Stage 2 (interactive): exact literal text, then filename/path match.
     if (!sufficient && std::chrono::steady_clock::now() < deadline) {
-        DeadlineTaskPool text_pool(
-            {[&]() {
-                merge("exact_text",
-                      indexes_.search_text(request.project.id, trimmed_query,
-                                           per_step_results),
-                      2.5, "literal query text matched");
-            }},
-            deadline, 1U);
-        partial = partial || !text_pool.all_completed();
+        merge("exact_text",
+              indexes_.search_text(request.project.id, trimmed_query,
+                                   per_step_results),
+              2.5, "literal query text matched");
         strategy = strategy == "none" ? "exact_text" : "hybrid";
         sufficient = !fused.empty();
     }
 
     if (!sufficient && !path_tokens.empty() &&
         std::chrono::steady_clock::now() < deadline) {
-        std::vector<std::function<void()>> path_match_tasks;
-        path_match_tasks.reserve(path_tokens.size());
         for (const auto& token : path_tokens) {
-            path_match_tasks.push_back([&, token]() {
-                merge("filename_path",
-                      indexes_.search_path(request.project.id, token,
-                                           per_step_results),
-                      2.0, "path fragment " + token + " matched");
-            });
+            if (std::chrono::steady_clock::now() >= deadline) {
+                partial = true;
+                break;
+            }
+            merge("filename_path",
+                  indexes_.search_path(request.project.id, token,
+                                       per_step_results),
+                  2.0, "path fragment " + token + " matched");
+            if (!fused.empty()) break;
         }
-        DeadlineTaskPool path_pool(std::move(path_match_tasks), deadline,
-                                   interactive_workers);
-        partial = partial || !path_pool.all_completed();
         strategy = strategy == "none" ? "filename_path" : "hybrid";
         sufficient = !fused.empty();
     }
@@ -718,8 +832,9 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
     // calls; building the SharedBuffer/BufferView here (after every merge()
     // call has finished appending) and handing it in by const reference
     // keeps that lifetime obviously correct without any extra copying.
-    SharedBuffer arena_buffer = SharedBuffer::copy_from(arena.data(), arena.size());
-    BufferView arena_view(arena_buffer, 0U, arena.size());
+    const auto arena_size = arena.size();
+    SharedBuffer arena_buffer(std::move(arena));
+    BufferView arena_view(arena_buffer, 0U, arena_size);
 
     return stamp_common(ContextBudgeter::apply(
         std::move(ranked), arena_view, strategy, partial,

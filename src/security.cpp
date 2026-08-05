@@ -39,6 +39,45 @@ std::string hex_encode(const std::uint8_t* bytes, const std::size_t size) {
     return result;
 }
 
+#if defined(_WIN32)
+// Response-time optimization: BCrypt algorithm-provider handles are
+// documented thread-safe and designed to be opened once and shared;
+// opening/closing a provider is by far the most expensive part of a short
+// hash. sha256_hex() runs on every authenticated request (session-token
+// lookup hashes the cookie token), so the old open-per-call pattern paid
+// that provider setup cost on every single request. These providers are
+// opened lazily on first use and kept for the process lifetime; if the
+// opening lambda throws, C++ static-local rules leave the initialization
+// incomplete so the next call retries rather than caching a null handle.
+BCRYPT_ALG_HANDLE cached_sha256_provider() {
+    static const BCRYPT_ALG_HANDLE provider = [] {
+        BCRYPT_ALG_HANDLE handle = nullptr;
+        if (BCryptOpenAlgorithmProvider(&handle, BCRYPT_SHA256_ALGORITHM,
+                                        nullptr, 0) < 0) {
+            throw std::runtime_error("BCrypt SHA-256 provider open failed");
+        }
+        return handle;
+    }();
+    return provider;
+}
+
+// Same lifetime policy as cached_sha256_provider(), for the HMAC-flagged
+// provider PBKDF2 password hashing/verification uses.
+BCRYPT_ALG_HANDLE cached_hmac_sha256_provider() {
+    static const BCRYPT_ALG_HANDLE provider = [] {
+        BCRYPT_ALG_HANDLE handle = nullptr;
+        if (BCryptOpenAlgorithmProvider(&handle, BCRYPT_SHA256_ALGORITHM,
+                                        nullptr,
+                                        BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0) {
+            throw std::runtime_error(
+                "BCrypt HMAC-SHA256 provider open failed");
+        }
+        return handle;
+    }();
+    return provider;
+}
+#endif
+
 #if defined(__linux__)
 // Opens and binds one Linux kernel SHA-256 provider socket for both memory and
 // file hashing so the AF_ALG setup policy is implemented once.
@@ -115,17 +154,17 @@ std::string sha256_hex(const std::string& value) {
         static_cast<std::size_t>(std::numeric_limits<ULONG>::max())) {
         throw std::invalid_argument("SHA-256 input is too large");
     }
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    // Uses the process-lifetime cached provider (see cached_sha256_provider)
+    // instead of opening/closing one per call -- this function runs on every
+    // authenticated request, so provider reuse directly improves response
+    // times.
+    const BCRYPT_ALG_HANDLE algorithm = cached_sha256_provider();
     BCRYPT_HASH_HANDLE hash = nullptr;
     DWORD hash_object_size = 0;
     DWORD returned = 0;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0 ||
-        BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+    if (BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
                           reinterpret_cast<PUCHAR>(&hash_object_size),
                           sizeof(hash_object_size), &returned, 0) < 0) {
-        if (algorithm != nullptr) {
-            BCryptCloseAlgorithmProvider(algorithm, 0);
-        }
         throw std::runtime_error("BCrypt SHA-256 initialization failed");
     }
     std::vector<std::uint8_t> hash_object(hash_object_size);
@@ -138,11 +177,9 @@ std::string sha256_hex(const std::string& value) {
         if (hash != nullptr) {
             BCryptDestroyHash(hash);
         }
-        BCryptCloseAlgorithmProvider(algorithm, 0);
         throw std::runtime_error("BCrypt SHA-256 operation failed");
     }
     BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(algorithm, 0);
 #elif defined(__linux__)
     const int algorithm_socket =
         open_sha256_socket("Linux AF_ALG SHA-256");
@@ -174,21 +211,20 @@ std::string sha256_file_hex(
     std::array<std::uint8_t, 32> digest{};
     std::vector<char> buffer(1024U * 1024U);
 #if defined(_WIN32)
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    // Shares the process-lifetime cached provider with sha256_hex() -- one
+    // provider open per process instead of one per hashed file.
+    const BCRYPT_ALG_HANDLE algorithm = cached_sha256_provider();
     BCRYPT_HASH_HANDLE hash = nullptr;
     DWORD object_size = 0;
     DWORD returned = 0;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0 ||
-        BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+    if (BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
                           reinterpret_cast<PUCHAR>(&object_size), sizeof(object_size),
                           &returned, 0) < 0) {
-        if (algorithm != nullptr) BCryptCloseAlgorithmProvider(algorithm, 0);
         throw std::runtime_error("BCrypt file SHA-256 initialization failed");
     }
     std::vector<std::uint8_t> object(object_size);
     if (BCryptCreateHash(algorithm, &hash, object.data(), object_size,
                          nullptr, 0, 0) < 0) {
-        BCryptCloseAlgorithmProvider(algorithm, 0);
         throw std::runtime_error("BCrypt file SHA-256 hash creation failed");
     }
     while (input) {
@@ -198,7 +234,6 @@ std::string sha256_file_hex(
             BCryptHashData(hash, reinterpret_cast<PUCHAR>(buffer.data()),
                            static_cast<ULONG>(count), 0) < 0) {
             BCryptDestroyHash(hash);
-            BCryptCloseAlgorithmProvider(algorithm, 0);
             throw std::runtime_error("BCrypt file SHA-256 update failed");
         }
         if (count > 0 && progress && !size_error) {
@@ -210,11 +245,9 @@ std::string sha256_file_hex(
         BCryptFinishHash(hash, digest.data(),
                          static_cast<ULONG>(digest.size()), 0) < 0) {
         BCryptDestroyHash(hash);
-        BCryptCloseAlgorithmProvider(algorithm, 0);
         throw std::runtime_error("BCrypt file SHA-256 completion failed");
     }
     BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(algorithm, 0);
 #elif defined(__linux__)
     const int algorithm_socket =
         open_sha256_socket("Linux AF_ALG file SHA-256");
@@ -331,11 +364,10 @@ std::vector<std::uint8_t> pbkdf2_hmac_sha256_32(
     const std::string& password, const std::vector<std::uint8_t>& salt,
     const unsigned int iterations) {
 #if defined(_WIN32)
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
-                                    nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0) {
-        throw std::runtime_error("BCrypt PBKDF2 initialization failed");
-    }
+    // Uses the process-lifetime cached HMAC provider (see
+    // cached_hmac_sha256_provider) instead of opening/closing one per
+    // password check.
+    const BCRYPT_ALG_HANDLE algorithm = cached_hmac_sha256_provider();
     std::vector<std::uint8_t> derived(kPasswordHashBytes);
     const NTSTATUS status = BCryptDeriveKeyPBKDF2(
         algorithm,
@@ -343,7 +375,6 @@ std::vector<std::uint8_t> pbkdf2_hmac_sha256_32(
         static_cast<ULONG>(password.size()),
         const_cast<PUCHAR>(salt.data()), static_cast<ULONG>(salt.size()),
         iterations, derived.data(), static_cast<ULONG>(derived.size()), 0);
-    BCryptCloseAlgorithmProvider(algorithm, 0);
     if (status < 0) throw std::runtime_error("BCrypt PBKDF2 derivation failed");
     return derived;
 #elif defined(__linux__)

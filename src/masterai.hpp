@@ -409,6 +409,7 @@ public:
                                        std::uint64_t offset,
                                        std::uint64_t length,
                                        AsyncReadCancellationToken& token) = 0;
+    virtual std::size_t queue_depth() const noexcept = 0;
 };
 
 #ifdef _WIN32
@@ -426,10 +427,12 @@ public:
     AsyncReadResult read_range(const std::filesystem::path& path,
                                std::uint64_t offset, std::uint64_t length,
                                AsyncReadCancellationToken& token) override;
+    std::size_t queue_depth() const noexcept override { return queue_depth_; }
 
 private:
     class State;
     std::unique_ptr<State> state_;
+    std::size_t queue_depth_{1U};
 };
 #else
 // POSIX fallback backend: a bounded std::thread worker pool issuing
@@ -447,10 +450,12 @@ public:
     AsyncReadResult read_range(const std::filesystem::path& path,
                                std::uint64_t offset, std::uint64_t length,
                                AsyncReadCancellationToken& token) override;
+    std::size_t queue_depth() const noexcept override { return queue_depth_; }
 
 private:
     class State;
     std::unique_ptr<State> state_;
+    std::size_t queue_depth_{1U};
 };
 #endif
 
@@ -501,6 +506,30 @@ struct CoalescedReadPlan {
 std::vector<CoalescedReadPlan> coalesce_read_requests(
     const std::vector<CoalescedReadRequest>& requests,
     std::uint64_t max_gap_bytes = 0U);
+
+// Result of a bounded multi-range operation. `results` is always in the
+// caller's original request order; `physical_reads` discloses coalescing,
+// and `peak_temporary_bytes` proves the configured scratch ceiling was
+// respected. A request larger than the ceiling is rejected individually
+// rather than violating the process memory bound.
+struct AsyncReadBatchResult {
+    std::vector<AsyncReadResult> results;
+    std::size_t physical_reads{0U};
+    std::uint64_t peak_temporary_bytes{0U};
+    bool cancelled{false};
+};
+
+// Coalesces adjacent same-file ranges, then issues only independent plans
+// in parallel up to both reader.queue_depth() and maximum_temporary_bytes.
+// No thread-per-file behavior: at most queue_depth worker futures exist in
+// one wave, and each settled wave releases its merged buffers before the
+// next begins.
+AsyncReadBatchResult read_file_ranges(
+    IAsyncFileReader& reader,
+    const std::vector<CoalescedReadRequest>& requests,
+    AsyncReadCancellationToken& token,
+    std::uint64_t maximum_temporary_bytes = 16ULL * 1024ULL * 1024ULL,
+    std::uint64_t maximum_coalescing_gap_bytes = 4096U);
 
 // Reads [offset, offset+length) of `path` using `reader` if non-null and
 // the read completes without cancellation or failure; otherwise
@@ -1352,6 +1381,8 @@ public:
     void set_pinned(const std::string& model_id, bool pinned);
     void set_waiting_request_count(const std::string& model_id,
                                    std::uint32_t count);
+    void increment_waiting(const std::string& model_id);
+    void decrement_waiting(const std::string& model_id);
     std::vector<ModelUsageSignals> snapshot() const;
 
 private:
@@ -1430,28 +1461,34 @@ enum class ModelLoadMode {
 
 std::string to_string(ModelLoadMode mode);
 
-// Phase 26: selective pre-touch policy for a model's weight pages. Only
-// "none" (do nothing extra) and "full" (via the existing --mlock flag,
-// already wired through LaunchTuning::allow_memory_lock) are backend-
-// actionable against llama-server today. "metadata"/"first_use"/
-// "layer_window" are accepted policy values -- a calibration profile or an
-// administrator may request them -- but this build has no llama-server flag
-// that pre-touches only a model's metadata, only first-use layers, or a
-// sliding layer window, so they currently behave exactly like "none" until
-// such a flag/adapter exists. See pretouch_gap_reason() below: callers that
-// want to surface this gap (e.g. an admin diagnostic) get an explicit
-// explanation instead of a silently faked finer granularity.
+// Phase 26: selective pre-touch policy for model weight pages. MasterAI
+// realizes metadata/first-use/layer-window through read-only mapped windows
+// before backend startup; full remains the backend's --mlock path.
 enum class PreTouchLevel { none, metadata, first_use, layer_window, full };
 
 std::string to_string(PreTouchLevel level);
-// True only for none/full -- the two levels that actually change what gets
-// launched. See the PreTouchLevel comment above for why the other three
-// are accepted-but-inert today.
+// True for every currently implemented policy level.
 bool pre_touch_level_backend_actionable(PreTouchLevel level) noexcept;
-// Returns an explanation when `level` is accepted policy but not yet
-// backend-actionable; std::nullopt for none/full, which really do behave as
-// documented.
+// Returns an explanation only for an unknown enum value.
 std::optional<std::string> pretouch_gap_reason(PreTouchLevel level);
+
+struct PreTouchReport {
+    PreTouchLevel level{PreTouchLevel::none};
+    std::uint64_t file_bytes{0U};
+    std::uint64_t bytes_touched{0U};
+    std::uint64_t pages_touched{0U};
+    std::uint64_t elapsed_microseconds{0U};
+    bool cancelled{false};
+};
+
+// Read-only, chunk-mapped selective pre-touch. Cancellation/yield are
+// checked between bounded mapping windows and pages; no mapping survives
+// the call. maximum_bytes==0 uses the selected policy's safe default.
+PreTouchReport pre_touch_model_file(
+    const std::filesystem::path& model_file, PreTouchLevel level,
+    const std::atomic_bool& cancellation,
+    const std::function<bool()>& should_yield = {},
+    std::uint64_t maximum_bytes = 0U);
 
 // Phase 26: chooses a concrete ModelLoadMode from real evidence --
 // StorageLatencyProfile (Phase 21) and the RAM headroom MemoryBudgetManager
@@ -1502,6 +1539,11 @@ struct LaunchTuning {
     unsigned int ubatch_tokens{0};
     ModelLoadMode load_mode{ModelLoadMode::mapped};
     PreTouchLevel pre_touch{PreTouchLevel::none};
+    // Phase 25: asks a compatible llama-server to collect compatible slot
+    // work into its continuous token-generation batch. Kept default-off;
+    // HttpServer enables it only after AdvancedOptimizationRegistry admits
+    // the measured `continuous_batching` candidate.
+    bool continuous_batching{false};
 };
 
 // Forward declaration only: RunnerSupervisor below stores an optional
@@ -1622,6 +1664,18 @@ struct GenerationOptions {
     double temperature{0.2};
     std::uint64_t seed{1};
     std::vector<std::string> stop_sequences;
+    // Anti-repetition sampling controls, forwarded to the llama.cpp runner.
+    // Without an explicit repeat penalty small instruct models (seen with
+    // the Qwen2.5 family) can fall into an unbounded loop, restating the
+    // same sentences until max_tokens is exhausted instead of ending their
+    // turn. repeat_last_n is how many recent tokens the penalty considers.
+    double repeat_penalty{1.1};
+    unsigned int repeat_last_n{256};
+    // Nucleus/top-k sampling bounds (llama.cpp's own defaults); kept
+    // explicit here so every generation runs under known sampling settings
+    // rather than whatever the runner build's defaults happen to be.
+    double top_p{0.95};
+    unsigned int top_k{40};
     // Phase 18: when cache_prompt is true, slot_id selects the llama.cpp
     // server's own internal KV-cache slot to reuse instead of always
     // re-evaluating the whole prompt from token zero. Left at their safe
@@ -1728,6 +1782,12 @@ private:
     CacheManager* tokenization_cache_{nullptr};
     std::string model_sha256_;
     std::string special_token_policy_{"default"};
+    // Phase 25: number of live /completion calls admitted to the external
+    // runner and the calibrated ceiling. A default/off launch keeps the
+    // historical exclusive value of one; an admitted continuous-batching
+    // launch raises it to the configured --parallel slot count.
+    unsigned int active_generations_{0U};
+    unsigned int maximum_parallel_generations_{1U};
 };
 
 struct ProjectRecord {
@@ -1770,6 +1830,13 @@ struct ChatMessage {
     ChatRole role{ChatRole::user};
     std::string content;
     std::uint64_t created_at_epoch_seconds{0};
+    // Tokens attributable to this message: for a user message, the prompt
+    // tokens the runner evaluated for that turn (history + template +
+    // attachments included); for an assistant message, the tokens it
+    // generated. 0 means "not recorded" (older persisted messages, or a
+    // turn that failed before the runner reported counts) and is simply
+    // not displayed by the web UI.
+    std::uint64_t token_count{0};
 };
 
 struct ChatRecord {
@@ -1792,8 +1859,18 @@ public:
     ChatRecord create(const std::string& owner_id,
                       const std::string& project_id,
                       const std::string& model_id);
+    // token_count is the runner-reported token figure for this message (see
+    // ChatMessage::token_count); callers that don't have one yet (the user
+    // message is appended before generation runs) pass the default 0 and can
+    // back-fill via set_last_message_tokens() once the runner reports it.
     void append(const std::string& chat_id, ChatRole role,
-                const std::string& content);
+                const std::string& content, std::uint64_t token_count = 0);
+    // Back-fills token_count on the most recent message with the given role
+    // (used for the user message of the turn that just generated, whose
+    // prompt-token figure only exists after the runner ran). No-op if the
+    // chat has no such message.
+    void set_last_message_tokens(const std::string& chat_id, ChatRole role,
+                                 std::uint64_t token_count);
     // Switches which model future messages in this chat are generated with;
     // past messages/history are untouched. Returns false (no-op) if the chat
     // doesn't exist or isn't owned by owner_id, so the caller can turn that
@@ -1830,6 +1907,78 @@ private:
     // Guards chats_ against concurrent create/append/find/list calls.
     mutable std::mutex mutex_;
 };
+
+// One remembered detail about a user (a name, a preference, a suggestion,
+// a personal fact). Captured either explicitly ("save to memory: ..." in a
+// chat message, or the memory API) or automatically from phrasing like
+// "my name is ..." -- see extract_memory_directive() /
+// extract_automatic_memories(). Recalled details are injected into every
+// chat turn as bounded user-provided context, so they work with any model
+// without granting persisted text system-instruction priority.
+struct UserMemoryRecord {
+    std::string id;
+    std::string owner_id;
+    // The remembered detail itself, normalized to a single trimmed line.
+    std::string content;
+    // "manual" for the explicit command/API, "auto" for pattern capture.
+    std::string source;
+    std::uint64_t created_at_epoch_seconds{0};
+};
+
+// Durable per-user memory of important chat details. All operations are
+// owner-scoped: one user can never see or delete another user's memories.
+class UserMemoryStore final {
+public:
+    UserMemoryStore() = default;
+    explicit UserMemoryStore(RecordStore& records);
+    // Stores one detail. Content is trimmed and single-lined; duplicates
+    // (case-insensitive, same owner) return the existing record instead of
+    // storing twice. When the per-user cap is reached the oldest "auto"
+    // memory is evicted first so explicit saves always succeed; if every
+    // slot is an explicit save, the oldest of those is evicted instead.
+    UserMemoryRecord add(const std::string& owner_id,
+                         const std::string& content,
+                         const std::string& source);
+    // Newest first, so the recall budget below keeps the freshest details.
+    std::vector<UserMemoryRecord> list_for_owner(
+        const std::string& owner_id) const;
+    bool remove(const std::string& id, const std::string& owner_id);
+    // Builds the bounded "[Saved user details]" reference block prepended to
+    // the current user turn -- oldest first for stable reading order, newest
+    // kept when max_bytes forces a cut. Empty string when the user has no
+    // memories or the byte budget cannot fit the fixed explanatory header.
+    std::string recall_context(const std::string& owner_id,
+                               std::size_t max_bytes) const;
+
+private:
+    void restore();
+    void persist(const UserMemoryRecord& memory);
+    // Frees one slot for add() when the per-user cap is reached; drops the
+    // oldest automatic capture first. Caller must hold mutex_.
+    void evict_oldest(const std::string& owner_id);
+    std::map<std::string, UserMemoryRecord> memories_;
+    RecordStore* records_{nullptr};
+    // Guards memories_ against concurrent add/list/remove calls.
+    mutable std::mutex mutex_;
+};
+
+// Detects an explicit "save to memory: <detail>" (or "remember this:
+// <detail>") request anywhere in a chat message, case-insensitively, and
+// returns the trimmed detail after the colon. std::nullopt when the message
+// contains no directive or the detail is empty. Works entirely server-side,
+// so it behaves identically with every model.
+std::optional<std::string> extract_memory_directive(const std::string& message);
+
+// True when the message is ONLY the directive (so the chat handler can
+// confirm the save directly instead of running inference on it).
+bool memory_directive_is_whole_message(const std::string& message);
+
+// Scans one user chat message for self-disclosed details worth remembering
+// automatically -- "my name is ...", "call me ...", "i live in ...",
+// "i work at ...", "i prefer ...", "my email is ...", and similar phrasing
+// -- and returns them restated in third person ("The user's name is ...").
+// Bounded: at most three captures per message, each capped in length.
+std::vector<std::string> extract_automatic_memories(const std::string& message);
 
 struct AttachmentRecord {
     std::string id;
@@ -2324,6 +2473,13 @@ public:
     // credit counter seeded from each class's configured weight, always
     // preferring any non-empty cancellation_shutdown queue first.
     std::optional<ScheduledTicket> next_ready();
+    // Production queue hand-off: waits until this exact admitted ticket is
+    // selected by the same weighted-fair policy as next_ready(). Returns
+    // false if cancellation, residence expiry, or backpressure removed it.
+    // The short timed wait observes an atomic cancellation flag without a
+    // second callback/cancellation mechanism.
+    bool wait_until_ready(const ScheduledTicket& ticket,
+                          const std::atomic_bool& cancellation);
     void complete(const ScheduledTicket& ticket);
     // Removes a still-queued ticket before it was ever returned by
     // next_ready(); returns false if it was already running or unknown.
@@ -4328,14 +4484,21 @@ private:
     std::atomic_bool cancelled_{false};
 };
 
-enum class WarmupOutcome { completed, cancelled, skipped_low_memory };
+enum class WarmupOutcome {
+    completed,
+    cancelled,
+    skipped_low_memory,
+    skipped_system_pressure
+};
 
 // Phase 26: runs `step` (one bounded unit of warm-up work -- e.g. a short
 // generate() call that faults model weights and primes the runner's
 // KV-cache machinery) repeatedly until `step` returns true (warm-up is
 // done), `token` is cancelled, MemoryBudgetManager reports the process
 // should not be doing background work right now (permits_background_work()
-// -- the same signal Phase 14's pressure model already exposes), or
+// -- the same signal Phase 14's pressure model already exposes), the
+// caller's optional thermal/storage/interactive pressure probe asks it to
+// yield, or
 // `maximum_steps` is exhausted. Checked *between* steps only, never
 // mid-step -- the same cooperative-cancellation shape as DeadlineTaskPool
 // in retrieval.cpp, deliberately not a second worker-pool implementation
@@ -4347,7 +4510,9 @@ enum class WarmupOutcome { completed, cancelled, skipped_low_memory };
 WarmupOutcome run_cancellable_warmup(const std::function<bool()>& step,
                                      WarmupCancellationToken& token,
                                      const MemoryBudgetManager& memory,
-                                     std::size_t maximum_steps = 64U);
+                                     std::size_t maximum_steps = 64U,
+                                     const std::function<bool()>&
+                                         should_yield = {});
 
 class BoundedWorkQueue final {
 public:
@@ -4546,7 +4711,7 @@ bool retrieval_strategy_has_adapter(RetrievalStrategy strategy) noexcept;
 // paired with a human-readable "no adapter" reason -- used to populate
 // RetrievalOutcome::disabled_strategy_reasons without duplicating the list
 // at each call site.
-std::vector<std::pair<RetrievalStrategy, std::string>>
+const std::vector<std::pair<RetrievalStrategy, std::string>>&
 disabled_retrieval_strategy_reasons();
 
 // Phase 24: coarse worker-budget tag for a retrieval request/stage.
@@ -4679,8 +4844,15 @@ private:
     // returns, so this is a join for genuinely concurrent duplicate work,
     // never a standing cache (repeated sequential calls always re-run).
     mutable std::mutex inflight_mutex_;
-    mutable std::map<std::string, std::shared_future<RetrievalOutcome>>
-        inflight_;
+    struct InflightRetrieval final {
+        std::mutex mutex;
+        std::condition_variable ready;
+        std::optional<RetrievalOutcome> outcome;
+        std::exception_ptr exception;
+        bool completed{false};
+        std::size_t followers{0U};
+    };
+    mutable std::map<std::string, std::shared_ptr<InflightRetrieval>> inflight_;
 };
 
 // Applies per-source and total chunk/byte caps to already-ranked candidates.
@@ -4717,6 +4889,11 @@ struct RetrievalEvaluationReport {
     std::uint64_t full_text_hits{0};
     std::uint64_t deadline_violations{0};
     std::uint64_t context_budget_violations{0};
+    std::uint64_t hybrid_total_microseconds{0};
+    std::uint64_t phase_sixteen_total_microseconds{0};
+    std::uint64_t hybrid_highest_case_microseconds{0};
+    std::uint64_t phase_sixteen_highest_case_microseconds{0};
+    bool latency_improved{false};
     bool improved{false};
 };
 
@@ -4788,6 +4965,7 @@ struct CacheCategoryStatus {
     // Phase 22 segmented-eviction/negative-cache visibility.
     std::uint64_t protected_entries{0};
     std::uint64_t pinned_entries{0};
+    std::uint64_t streaming_entries{0};
     std::uint64_t negative_entries{0};
     std::uint64_t admission_rejections{0};
 };
@@ -4819,6 +4997,11 @@ public:
 
     std::optional<std::string> get(CacheCategory category, const CacheKey& key);
     void put(CacheCategory category, const CacheKey& key, std::string value);
+    // Streaming entries represent one-pass scan/read-ahead data. They are
+    // persisted and checksummed like ordinary entries but never promoted
+    // to protected on a hit and are evicted before probationary data.
+    void put_streaming(CacheCategory category, const CacheKey& key,
+                       std::string value);
     // Phase 22: pinned entries are exempt from capacity-driven eviction
     // (administrator/streaming use only -- never a substitute for the
     // version-bound key already making staleness impossible) until
@@ -4853,6 +5036,8 @@ public:
     static std::string to_json(const CacheStatus& status);
 
 private:
+    void put_with_disposition(CacheCategory category, const CacheKey& key,
+                              std::string value, bool streaming);
     class State;
     std::unique_ptr<State> state_;
 };
@@ -4931,6 +5116,14 @@ struct SessionDecision {
     // through the now-cached RunnerSupervisor::tokenize() (Phase 23
     // tokenization cache) itself.
     std::size_t reusable_prefix_bytes{0};
+    // Exact tokenizer-reported token count for the reusable prior prompt.
+    // PromptSessionManager does not tokenize text itself: record() receives
+    // the count returned by the runner for the successful prior turn and
+    // try_reuse() returns that stored value only after the byte-prefix and
+    // fingerprint checks above succeed. `reusable_prefix_tokens_exact` is
+    // false for legacy/test callers that recorded no token count.
+    std::uint64_t reusable_prefix_tokens{0};
+    bool reusable_prefix_tokens_exact{false};
     // Byte offset into generation_prompt where it stops matching the
     // recorded prior prompt -- 0 when there is no prior session at all,
     // equal to reusable_prefix_bytes on both a clean prefix-extension
@@ -5090,7 +5283,9 @@ public:
     unsigned int record(const std::string& chat_id,
                         const SessionFingerprint& fingerprint,
                         const std::string& generation_prompt,
-                        std::optional<unsigned int> reused_slot);
+                        std::optional<unsigned int> reused_slot,
+                        std::optional<std::uint64_t> prompt_token_count =
+                            std::nullopt);
     // Drops any session state for `chat_id` (model unload, chat deletion, or
     // a cancelled/failed generation that must not be reused next turn).
     void release(const std::string& chat_id);

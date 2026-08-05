@@ -87,7 +87,7 @@ void AdvancedOptimizationRegistry::initialize_features() {
         {"continuous_batching",
          "Weighted-fair multi-priority inference scheduling and continuous "
          "batching for compatible requests.",
-         false, true, false, std::nullopt},
+         false, true, true, std::nullopt},
         {"speculative_decoding",
          "Speculative decoding with exact target/draft compatibility, "
          "separate memory accounting, and quality parity checks.",

@@ -4,6 +4,8 @@
 // controller from growing its own subtly different response or escaping code.
 #include "server_internal.hpp"
 
+#include <array>
+
 namespace masterai::server_internal {
 namespace {
 
@@ -55,16 +57,37 @@ void append_json_control_escape(const char character, Output& output) {
 // quietly escape the same input differently.
 template <typename Output>
 void append_json_escaped(const std::string& value, Output& output) {
-    for (const char character : value) {
-        if (static_cast<unsigned char>(character) < 0x20U) {
-            append_json_control_escape(character, output);
-            continue;
+    // Precalculated per-byte "needs escaping" table: the only bytes JSON
+    // strings ever escape are '"', '\\', and the control range below 0x20.
+    // Every possible input byte (0-255) has an answer in the table, so the
+    // per-byte work is one indexed load. Clean stretches between escapes are
+    // then appended as whole runs with one bulk insert instead of one
+    // push_back per byte -- every streamed chat token passes through here,
+    // making this a directly response-time-visible path.
+    static constexpr auto needs_escape = [] {
+        std::array<bool, 256> table{};
+        for (unsigned int byte = 0U; byte < 0x20U; ++byte) {
+            table[byte] = true;
         }
-        if (character == '"' || character == '\\') {
+        table[static_cast<unsigned char>('"')] = true;
+        table[static_cast<unsigned char>('\\')] = true;
+        return table;
+    }();
+    std::size_t run_start = 0U;
+    for (std::size_t index = 0U; index < value.size(); ++index) {
+        const auto byte = static_cast<unsigned char>(value[index]);
+        if (!needs_escape[byte]) continue;
+        output.insert(output.end(), value.begin() + run_start,
+                      value.begin() + index);
+        if (byte < 0x20U) {
+            append_json_control_escape(value[index], output);
+        } else {
             output.push_back('\\');
+            output.push_back(value[index]);
         }
-        output.push_back(character);
+        run_start = index + 1U;
     }
+    output.insert(output.end(), value.begin() + run_start, value.end());
 }
 
 }  // namespace

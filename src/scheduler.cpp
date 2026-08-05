@@ -3,7 +3,9 @@
 // and honestly does not (backend continuous batching) deliver.
 #include "masterai.hpp"
 
+#include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <deque>
 #include <mutex>
 
@@ -101,9 +103,14 @@ public:
     }
 
     std::mutex mutex;
+    std::condition_variable condition;
     std::map<SchedulingClass, ClassState> classes;
     std::size_t global_concurrency_limit;
     std::uint64_t next_id{1};
+    // Tickets selected on behalf of another waiting request. Their running
+    // accounting was already incremented by select_ready_locked(); the
+    // owning waiter merely consumes the hand-off marker.
+    std::map<std::uint64_t, ScheduledTicket> dispatched;
 
     std::size_t total_occupancy_locked() const {
         std::size_t total = 0U;
@@ -131,6 +138,69 @@ public:
             }
         }
         return expired;
+    }
+
+    bool queued_locked(const ScheduledTicket& ticket) const {
+        const auto& queue = classes.at(ticket.klass).queue;
+        return std::any_of(queue.begin(), queue.end(),
+                           [&](const QueuedItem& item) {
+                               return item.id == ticket.id;
+                           });
+    }
+
+    std::optional<ScheduledTicket> select_ready_locked() {
+        auto& urgent = classes[SchedulingClass::cancellation_shutdown];
+        if (!urgent.queue.empty() &&
+            urgent.running < urgent.policy.concurrency_allowance) {
+            const auto item = urgent.queue.front();
+            urgent.queue.pop_front();
+            urgent.reserved_memory_bytes -= item.memory_bytes;
+            ++urgent.running;
+            return ScheduledTicket{item.id,
+                                   SchedulingClass::cancellation_shutdown};
+        }
+        for (auto& [klass, state] : classes) {
+            if (klass != SchedulingClass::cancellation_shutdown &&
+                !state.queue.empty()) {
+                state.credit += static_cast<long long>(state.policy.weight);
+            }
+        }
+        for (int pass = 0; pass < 2; ++pass) {
+            for (const auto klass : kAllClasses) {
+                if (klass == SchedulingClass::cancellation_shutdown) continue;
+                auto& state = classes[klass];
+                if (state.queue.empty() ||
+                    state.running >= state.policy.concurrency_allowance ||
+                    state.credit <= 0) {
+                    continue;
+                }
+                const auto item = state.queue.front();
+                state.queue.pop_front();
+                state.reserved_memory_bytes -= item.memory_bytes;
+                state.credit -= static_cast<long long>(state.policy.weight);
+                ++state.running;
+                return ScheduledTicket{item.id, klass};
+            }
+            bool eligible_without_credit = false;
+            for (const auto klass : kAllClasses) {
+                if (klass == SchedulingClass::cancellation_shutdown) continue;
+                const auto& state = classes[klass];
+                if (!state.queue.empty() &&
+                    state.running < state.policy.concurrency_allowance &&
+                    state.credit <= 0) {
+                    eligible_without_credit = true;
+                }
+            }
+            if (!eligible_without_credit) break;
+            for (const auto klass : kAllClasses) {
+                if (klass == SchedulingClass::cancellation_shutdown) continue;
+                auto& state = classes[klass];
+                if (!state.queue.empty()) {
+                    state.credit += static_cast<long long>(state.policy.weight);
+                }
+            }
+        }
+        return std::nullopt;
     }
 };
 
@@ -207,79 +277,53 @@ SchedulingAdmission RequestScheduler::admit(SchedulingClass klass,
     ticket.klass = klass;
     result.admitted = true;
     result.ticket = ticket;
+    state_->condition.notify_all();
     return result;
 }
 
 std::optional<ScheduledTicket> RequestScheduler::next_ready() {
     std::lock_guard<std::mutex> lock(state_->mutex);
     state_->expire_stale_locked();
+    return state_->select_ready_locked();
+}
 
-    // Cancellation/shutdown work always preempts weighted selection.
-    auto& urgent = state_->classes[SchedulingClass::cancellation_shutdown];
-    if (!urgent.queue.empty() &&
-        urgent.running < urgent.policy.concurrency_allowance) {
-        const auto item = urgent.queue.front();
-        urgent.queue.pop_front();
-        urgent.reserved_memory_bytes -= item.memory_bytes;
-        ++urgent.running;
-        return ScheduledTicket{item.id, SchedulingClass::cancellation_shutdown};
-    }
-
-    // Deficit-round-robin over the remaining classes in priority order:
-    // every eligible class earns `weight` credit each pass; the first
-    // class (in priority order) whose queue is non-empty, has running
-    // capacity, and has positive credit is selected and its credit spent.
-    // This lets a low-weight background class still make guaranteed
-    // progress instead of starving outright, while a high-weight
-    // interactive class is selected far more often.
-    for (auto& [klass, state] : state_->classes) {
-        if (klass == SchedulingClass::cancellation_shutdown) continue;
-        if (!state.queue.empty()) {
-            state.credit += static_cast<long long>(state.policy.weight);
+bool RequestScheduler::wait_until_ready(
+    const ScheduledTicket& ticket, const std::atomic_bool& cancellation) {
+    std::unique_lock<std::mutex> lock(state_->mutex);
+    for (;;) {
+        const auto handed_off = state_->dispatched.find(ticket.id);
+        if (handed_off != state_->dispatched.end()) {
+            state_->dispatched.erase(handed_off);
+            return true;
         }
-    }
-    for (int pass = 0; pass < 2; ++pass) {
-        for (const auto klass : kAllClasses) {
-            if (klass == SchedulingClass::cancellation_shutdown) continue;
-            auto& state = state_->classes[klass];
-            if (state.queue.empty()) continue;
-            if (state.running >= state.policy.concurrency_allowance) continue;
-            if (state.credit <= 0) continue;
-            const auto item = state.queue.front();
-            state.queue.pop_front();
-            state.reserved_memory_bytes -= item.memory_bytes;
-            state.credit -= static_cast<long long>(state.policy.weight);
-            ++state.running;
-            return ScheduledTicket{item.id, klass};
-        }
-        // Second pass: nothing had positive credit yet everything eligible
-        // was skipped only for lack of credit -- grant one more round so a
-        // low-weight class with a non-empty queue is never starved
-        // indefinitely by classes that keep re-earning credit faster.
-        bool any_creditless_eligible = false;
-        for (const auto klass : kAllClasses) {
-            if (klass == SchedulingClass::cancellation_shutdown) continue;
-            auto& state = state_->classes[klass];
-            if (state.queue.empty()) continue;
-            if (state.running >= state.policy.concurrency_allowance) continue;
-            if (state.credit <= 0) any_creditless_eligible = true;
-        }
-        if (!any_creditless_eligible) break;
-        for (const auto klass : kAllClasses) {
-            if (klass == SchedulingClass::cancellation_shutdown) continue;
-            auto& state = state_->classes[klass];
-            if (!state.queue.empty()) {
-                state.credit += static_cast<long long>(state.policy.weight);
+        if (cancellation.load(std::memory_order_acquire)) {
+            auto& queue = state_->classes[ticket.klass].queue;
+            for (auto iterator = queue.begin(); iterator != queue.end(); ++iterator) {
+                if (iterator->id != ticket.id) continue;
+                state_->classes[ticket.klass].reserved_memory_bytes -=
+                    iterator->memory_bytes;
+                queue.erase(iterator);
+                state_->condition.notify_all();
+                return false;
             }
         }
+        state_->expire_stale_locked();
+        if (!state_->queued_locked(ticket)) return false;
+        const auto selected = state_->select_ready_locked();
+        if (selected.has_value()) {
+            if (selected->id == ticket.id) return true;
+            state_->dispatched[selected->id] = *selected;
+            state_->condition.notify_all();
+        }
+        state_->condition.wait_for(lock, std::chrono::milliseconds(5));
     }
-    return std::nullopt;
 }
 
 void RequestScheduler::complete(const ScheduledTicket& ticket) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     auto& state = state_->classes[ticket.klass];
     if (state.running > 0U) --state.running;
+    state_->condition.notify_all();
 }
 
 bool RequestScheduler::cancel(const ScheduledTicket& ticket) {
@@ -290,6 +334,7 @@ bool RequestScheduler::cancel(const ScheduledTicket& ticket) {
         if (iterator->id != ticket.id) continue;
         state.reserved_memory_bytes -= iterator->memory_bytes;
         state.queue.erase(iterator);
+        state_->condition.notify_all();
         return true;
     }
     return false;

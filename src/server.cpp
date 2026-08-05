@@ -277,6 +277,7 @@ public:
         records.open();
         advanced_optimizations =
             std::make_unique<AdvancedOptimizationRegistry>(records);
+        model_usage = std::make_unique<ModelUsagePredictor>();
         const auto hardware = probe_hardware(value.runtime_root);
         const auto profile =
             value.resource_profile == "minimal"
@@ -296,6 +297,11 @@ public:
         memory_policy.critical_percent = value.critical_memory_percent;
         memory = std::make_unique<MemoryBudgetManager>(
             memory_policy, hardware);
+        auto scheduling_policies = default_scheduling_policies();
+        scheduling_policies[SchedulingClass::interactive_chat]
+            .concurrency_allowance = memory_policy.maximum_active_inference;
+        request_scheduler = std::make_unique<RequestScheduler>(
+            std::move(scheduling_policies), 256U);
         users = std::make_unique<UserStore>(records);
         sessions = std::make_unique<SessionStore>(records);
         api_tokens = std::make_unique<ApiTokenStore>(records);
@@ -316,6 +322,10 @@ public:
                 *users, *api_tokens, *projects, *mcp,
                 *mcp_outbound_registry, *mcp_outbound_gateway, *ide, audit);
         chats = std::make_unique<ChatStore>(records);
+        // User memory is independent of the selected inference backend: the
+        // server captures, persists, recalls, and manages details before a
+        // model-specific prompt is assembled.
+        user_memories = std::make_unique<UserMemoryStore>(records);
         ml_projects = std::make_unique<MLProjectStore>(records);
         ml_models = std::make_unique<ModelRegistryStore>(records);
         ml_datasets = std::make_unique<DatasetStore>(records);
@@ -553,6 +563,9 @@ public:
                        request.target.rfind("/api/v1/chats", 0U) == 0U) {
                 required_scope = "chats.read";
             } else if (request.method == "GET" &&
+                       request.target == "/api/v1/memories") {
+                required_scope = "chats.read";
+            } else if (request.method == "GET" &&
                        request.target.rfind("/api/v1/benchmarks", 0U) == 0U) {
                 required_scope = "benchmarks.read";
             } else if (request.method == "GET" &&
@@ -589,6 +602,9 @@ public:
                 required_scope = "projects.write";
             } else if (request.method == "POST" &&
                        request.target.rfind("/api/v1/chats", 0U) == 0U) {
+                required_scope = "chats.write";
+            } else if (request.method == "POST" &&
+                       request.target.rfind("/api/v1/memories", 0U) == 0U) {
                 required_scope = "chats.write";
             } else if (request.method == "POST" &&
                        request.target == "/api/v1/attachments") {
@@ -683,6 +699,40 @@ public:
         }
         if (request.method == "GET" && request.target == "/api/v1/models") {
             return workloads->model_inventory();
+        }
+        if (request.method == "GET" &&
+            request.target == "/api/v1/models/usage-signals") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            return response(200, "OK", model_usage_signals_json(
+                                           model_usage->snapshot()));
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/models/usage-signals") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                const auto body = parse_json(request.body);
+                if (body.as_object().size() != 2U) {
+                    throw std::runtime_error("unexpected usage-signal field");
+                }
+                const auto model_id = body.required("modelId").as_string();
+                if (!find_model(model_id).has_value()) {
+                    throw std::runtime_error("unknown model id");
+                }
+                model_usage->set_pinned(
+                    model_id, body.required("pinned").as_boolean());
+                audit.append("model.usage_pin", user->id, "success", model_id);
+                return response(200, "OK", model_usage_signals_json(
+                                               model_usage->snapshot()));
+            } catch (const std::exception&) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_usage_signal_request\"}");
+            }
         }
         // Lets the chat UI show a one-shot "model warmed" confirmation once
         // the runner actually finishes loading, instead of silently going
@@ -3484,6 +3534,36 @@ public:
         if (request.method == "GET" && request.target == "/api/v1/chats") {
             return list_chats(*user);
         }
+        if (request.method == "GET" &&
+            request.target == "/api/v1/system/scheduler") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            return response(200, "OK", RequestScheduler::to_json(
+                                           request_scheduler->status()));
+        }
+        if (request.method == "GET" &&
+            request.target == "/api/v1/memories") {
+            return list_user_memories(*user);
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/memories") {
+            if (auto denied = forbidden_unless(user->role, "chats.write")) {
+                return *denied;
+            }
+            return create_user_memory(request, *user);
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/memories/", 0U) == 0U &&
+            request.target.size() > 24U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "chats.write")) {
+                return *denied;
+            }
+            return delete_user_memory(request, *user);
+        }
         // Single-chat message history, added for the sidebar's chat-history
         // panel: matches "/api/v1/chats/{id}" exactly (no further path
         // segments), so it never collides with the "/messages" POST route
@@ -4020,6 +4100,61 @@ private:
         return response(200, "OK", body + "]}");
     }
 
+    // Lists only the authenticated user's remembered details. Memory reuses
+    // the established chats.read/chats.write policy because it is part of
+    // that user's chat state rather than an administrator-owned resource.
+    std::string list_user_memories(const UserRecord& user) const {
+        std::string body{"{\"memories\":["};
+        bool first = true;
+        for (const auto& record : user_memories->list_for_owner(user.id)) {
+            if (!first) body += ",";
+            first = false;
+            body += "{\"id\":\"" + json_escape(record.id) +
+                    "\",\"content\":\"" + json_escape(record.content) +
+                    "\",\"source\":\"" + json_escape(record.source) +
+                    "\",\"createdAtEpochSeconds\":" +
+                    std::to_string(record.created_at_epoch_seconds) + "}";
+        }
+        return response(200, "OK", body + "]}");
+    }
+
+    // Adds a manual detail outside the chat-command path so the browser can
+    // offer a small, inspectable memory manager without duplicating storage
+    // or normalization rules in JavaScript.
+    std::string create_user_memory(Request& request, const UserRecord& user) {
+        try {
+            const auto root = parse_json(request.body);
+            if (root.as_object().size() != 1U) {
+                throw std::runtime_error("unexpected memory field");
+            }
+            const auto record = user_memories->add(
+                user.id, root.required("content").as_string(), "manual");
+            audit.append("chat.memory_create", user.id, "success", record.id);
+            return response(
+                201, "Created",
+                "{\"id\":\"" + json_escape(record.id) +
+                    "\",\"content\":\"" + json_escape(record.content) +
+                    "\",\"source\":\"" + json_escape(record.source) +
+                    "\",\"createdAtEpochSeconds\":" +
+                    std::to_string(record.created_at_epoch_seconds) + "}");
+        } catch (const std::exception&) {
+            return response(400, "Bad Request",
+                            "{\"error\":\"invalid_memory_request\"}");
+        }
+    }
+
+    std::string delete_user_memory(Request& request, const UserRecord& user) {
+        const std::string prefix{"/api/v1/memories/"};
+        const auto memory_id = request.target.substr(
+            prefix.size(), request.target.size() - prefix.size() - 7U);
+        if (!user_memories->remove(memory_id, user.id)) {
+            return response(404, "Not Found",
+                            "{\"error\":\"memory_not_found\"}");
+        }
+        audit.append("chat.memory_delete", user.id, "success", memory_id);
+        return response(200, "OK", "{\"deleted\":true}");
+    }
+
     // Full message history for one chat, used by the sidebar to render a
     // conversation when the operator selects it from the chat-history list.
     // ChatStore already keeps every message in memory (see send_chat_message
@@ -4051,7 +4186,9 @@ private:
             body += "{\"role\":\"" + std::string(role_name(message.role)) +
                     "\",\"content\":\"" + json_escape(message.content) +
                     "\",\"createdAtEpochSeconds\":" +
-                    std::to_string(message.created_at_epoch_seconds) + "}";
+                    std::to_string(message.created_at_epoch_seconds) +
+                    ",\"tokenCount\":" +
+                    std::to_string(message.token_count) + "}";
         }
         // Deliberately NOT warm_model_async() here: this fires mid-page-load
         // (openChat() is called from load(), before the browser has
@@ -4205,29 +4342,6 @@ private:
         }).detach();
     }
 
-    // Phase 30A deliverable 3: bounded, lock-free admission against
-    // MemoryPolicy::maximum_active_inference (compare-and-swap retry loop
-    // rather than a mutex since this is checked on every chat request).
-    // Returns false without incrementing anything once the configured number
-    // of concurrent generations is already in flight -- the cpu_only/minimal
-    // profile's "one active request" default becomes a real ceiling instead
-    // of a validated-but-unread policy field.
-    bool try_admit_inference_slot() const {
-        const auto limit = memory->policy().maximum_active_inference;
-        auto current = active_inference_count.load(std::memory_order_relaxed);
-        while (current < limit) {
-            if (active_inference_count.compare_exchange_weak(
-                    current, current + 1U, std::memory_order_acq_rel)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    void release_inference_slot() const noexcept {
-        active_inference_count.fetch_sub(1U, std::memory_order_acq_rel);
-    }
-
     // Releases whatever runner_weights lease admit_runner_weights() last
     // granted, if any. Safe to call even when nothing is currently held
     // (MemoryBudgetManager::release() is itself a no-op on an unknown/empty
@@ -4303,7 +4417,8 @@ private:
         // and its one authoritative memory lease.
         std::lock_guard<std::mutex> load_lock(model_load_mutex);
         const auto current = inference->metrics();
-        if (current.state == RunnerState::ready &&
+        if ((current.state == RunnerState::ready ||
+             current.state == RunnerState::busy) &&
             current.model_id == model_id) {
             return;
         }
@@ -4339,6 +4454,9 @@ private:
                     model->manifest.required_gpu_backend);
                 tuning = launch_tuning_from_profile(profile);
             }
+            tuning.continuous_batching =
+                advanced_optimizations != nullptr &&
+                advanced_optimizations->is_enabled("continuous_batching");
             const unsigned int parallel_slots =
                 configuration.session_reuse_enabled
                     ? configuration.session_reuse_max_slots
@@ -4528,10 +4646,6 @@ private:
 
     std::string send_chat_message(Request& request, const UserRecord& user,
                                   const NativeSocket stream_socket) {
-        if (inference == nullptr) {
-            return response(503, "Service Unavailable",
-                            "{\"error\":\"inference_backend_not_configured\"}");
-        }
         const std::string prefix{"/api/v1/chats/"};
         const auto chat_id = request.target.substr(
             prefix.size(), request.target.size() - prefix.size() - 9U);
@@ -4539,10 +4653,86 @@ private:
         if (!chat) {
             return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
         }
+
+        // Parse and validate the user's message before touching the runner.
+        // A whole-message "save to memory:" command is a server operation,
+        // so it remains fast and works even when no inference backend is
+        // configured or the selected model is currently unloaded.
+        JsonValue root;
+        std::string prompt;
+        try {
+            root = parse_json(request.body);
+            if (root.as_object().size() < 1U ||
+                root.as_object().size() > 2U) {
+                throw std::runtime_error("unexpected message field");
+            }
+            prompt = root.required("content").as_string();
+            if (prompt.empty()) {
+                throw std::runtime_error("empty message");
+            }
+        } catch (const std::exception&) {
+            return response(400, "Bad Request",
+                            "{\"error\":\"invalid_chat_message\"}");
+        }
+
+        const auto explicit_memory = extract_memory_directive(prompt);
+        if (explicit_memory) {
+            const auto record =
+                user_memories->add(user.id, *explicit_memory, "manual");
+            audit.append("chat.memory_create", user.id, "success", record.id);
+            if (memory_directive_is_whole_message(prompt)) {
+                const std::string confirmation =
+                    "Saved to memory: " + record.content;
+                chats->append(chat_id, ChatRole::user, prompt);
+                chats->append(chat_id, ChatRole::assistant, confirmation);
+                if (stream_socket != invalid_socket) {
+                    const std::string header =
+                        "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: application/x-ndjson; charset=utf-8\r\n"
+                        "Transfer-Encoding: chunked\r\nConnection: close\r\n"
+                        "Cache-Control: no-store\r\n"
+                        "X-Content-Type-Options: nosniff\r\n"
+                        "X-Frame-Options: DENY\r\n"
+                        "Referrer-Policy: no-referrer\r\n\r\n";
+                    if (!send_all(stream_socket, header)) return {};
+                    send_chunk(stream_socket,
+                               "{\"type\":\"token\",\"content\":\"" +
+                                   json_escape(confirmation) + "\"}\n");
+                    send_chunk(stream_socket,
+                               "{\"type\":\"complete\",\"promptTokens\":0,"
+                               "\"generatedTokens\":0,\"memorySaved\":true}\n");
+                    send_all(stream_socket, "0\r\n\r\n");
+                    return {};
+                }
+                return response(200, "OK",
+                                "{\"content\":\"" +
+                                    json_escape(confirmation) +
+                                    "\",\"promptTokens\":0,"
+                                    "\"generatedTokens\":0,"
+                                    "\"memorySaved\":true}");
+            }
+        } else {
+            // Automatic capture is deliberately deterministic and bounded;
+            // it records only recognized self-disclosure phrasing and never
+            // asks a model to decide what should be persisted.
+            for (const auto& detail : extract_automatic_memories(prompt)) {
+                const auto record = user_memories->add(user.id, detail, "auto");
+                audit.append("chat.memory_auto_capture", user.id, "success",
+                             record.id);
+            }
+        }
+
+        if (inference == nullptr) {
+            return response(503, "Service Unavailable",
+                            "{\"error\":\"inference_backend_not_configured\"}");
+        }
         bool stream_started = false;
         std::string query_id;
         std::string memory_lease_id;
-        bool inference_slot_admitted = false;
+        std::optional<ScheduledTicket> scheduler_ticket;
+        bool scheduler_running = false;
+        bool model_waiting_recorded = false;
+        std::atomic_bool cancellation{false};
         // Tokens are streamed to the client as they arrive, so a client
         // watching the reply has already seen this text by the time
         // anything below can fail (a dropped runner connection, a policy
@@ -4551,26 +4741,12 @@ private:
         // read on screen.
         std::string streamed_text;
         try {
-            // Phase 30A: one of, at most, MemoryPolicy::maximum_active_inference
-            // concurrent generations -- checked before touching the runner at
-            // all, so a rejection under the cpu_only/minimal one-slot default
-            // never contends with, or interrupts, whichever generation is
-            // already in flight.
-            if (!try_admit_inference_slot()) {
-                throw std::runtime_error(
-                    "the server is already running its maximum number of "
-                    "concurrent inference requests; try again once the "
-                    "current reply finishes");
-            }
-            inference_slot_admitted = true;
             query_id = queries.begin(user.id, chat->project_id, chat->model_id);
             queries.transition(query_id, QueryStage::authentication,
                                QueryStatus::accepted);
             ensure_model_loaded(chat->model_id);
             queries.transition(query_id, QueryStage::normalization,
                                QueryStatus::accepted);
-            const auto root = parse_json(request.body);
-            const auto prompt = root.required("content").as_string();
             queries.transition(query_id, QueryStage::classification,
                                QueryStatus::accepted);
             queries.transition(query_id, QueryStage::retrieval_planning,
@@ -4585,6 +4761,20 @@ private:
             // chats->find_for_owner(), so a membership/policy change is
             // reflected on the very next message.
             auto inference_prompt = assemble_inference_prompt(root, *chat, user);
+            // Saved details are user-provided reference data, not trusted
+            // system instructions. Keep them inside the current user turn,
+            // clearly delimited and under a strict byte budget, so every
+            // model can use relevant facts without granting persisted text
+            // a higher instruction priority than the live request.
+            const auto recalled = user_memories->recall_context(user.id, 4096U);
+            if (!recalled.empty()) {
+                inference_prompt = recalled + "\n[Current user message]\n" +
+                                   inference_prompt;
+                if (inference_prompt.size() > configuration.max_request_bytes) {
+                    throw std::runtime_error(
+                        "assembled chat context exceeds policy");
+                }
+            }
             if (configuration.retrieval_enabled && !chat->project_id.empty()) {
                 if (const auto project = projects->find(chat->project_id)) {
                     // Phase 17: a repeated question against an unchanged
@@ -4631,11 +4821,58 @@ private:
                 model ? model->manifest.architecture : std::string(),
                 chat->messages, inference_prompt, stop_sequence);
             chats->append(chat_id, ChatRole::user, prompt);
-            std::atomic_bool cancellation{false};
             GenerationOptions options;
             options.max_tokens = configuration.chat_max_reply_tokens;
             if (!stop_sequence.empty()) {
                 options.stop_sequences.push_back(stop_sequence);
+            }
+            // Fit the reply budget inside the model's context window. The
+            // configured chat_max_reply_tokens can exceed what is actually
+            // left after the prompt (history + attachments + chat template),
+            // and letting the runner discover that mid-generation either
+            // fails the request outright (large attachments read as an
+            // opaque "system error") or triggers llama.cpp context shifting,
+            // which discards the oldest tokens -- including the chat
+            // template's own structure -- and reliably degrades small
+            // instruct models into repeating themselves until max_tokens.
+            // Counting the prompt up front turns both into either a clear,
+            // actionable error or a correctly bounded generation.
+            try {
+                const auto prompt_token_count =
+                    inference->tokenize(generation_prompt);
+                // Small allowance for special/BOS tokens the plain /tokenize
+                // count may not reflect exactly.
+                constexpr std::uint64_t kContextMarginTokens = 32U;
+                // Below this many tokens of remaining room a reply cannot
+                // say anything useful -- treat it as an overflow instead.
+                constexpr std::uint64_t kMinimumReplyTokens = 16U;
+                const std::uint64_t context_tokens =
+                    configuration.chat_context_length;
+                if (prompt_token_count + kContextMarginTokens +
+                        kMinimumReplyTokens >
+                    context_tokens) {
+                    throw std::runtime_error(
+                        "this message needs about " +
+                        std::to_string(prompt_token_count) +
+                        " prompt tokens but the model's context window is " +
+                        std::to_string(context_tokens) +
+                        " -- remove or shorten an attachment, start a new "
+                        "chat, or raise inference.chatContextLength in "
+                        "Settings");
+                }
+                const auto available = static_cast<unsigned int>(
+                    context_tokens - prompt_token_count -
+                    kContextMarginTokens);
+                if (options.max_tokens > available) {
+                    options.max_tokens = available;
+                }
+            } catch (const std::runtime_error&) {
+                throw;
+            } catch (const std::exception&) {
+                // A failed token count (runner still warming, transient HTTP
+                // error) falls back to the configured budget rather than
+                // failing the whole turn -- the runner itself still enforces
+                // its context limit as the backstop.
             }
             // Phase 18: every field here must still match exactly, and the
             // new prompt must literally extend the slot's last prompt,
@@ -4719,6 +4956,19 @@ private:
                 throw std::runtime_error(admission.diagnostic);
             }
             memory_lease_id = admission.lease_id;
+            const auto scheduling = request_scheduler->admit(
+                SchedulingClass::interactive_chat,
+                memory_estimate.runtime_buffer_bytes +
+                    memory_estimate.kv_bytes_per_sequence +
+                    memory_estimate.transient_bytes +
+                    memory_estimate.safety_margin_bytes);
+            if (!scheduling.admitted || !scheduling.ticket.has_value()) {
+                throw std::runtime_error(
+                    "inference queue admission failed: " + scheduling.reason);
+            }
+            scheduler_ticket = scheduling.ticket;
+            model_usage->increment_waiting(chat->model_id);
+            model_waiting_recorded = true;
             const bool streaming = stream_socket != invalid_socket;
             if (streaming) {
                 const std::string header =
@@ -4744,6 +4994,14 @@ private:
                 send_chunk(stream_socket,
                            "{\"type\":\"status\",\"status\":\"queued\"}\n");
             }
+            if (!request_scheduler->wait_until_ready(*scheduler_ticket,
+                                                     cancellation)) {
+                throw std::runtime_error(
+                    "inference request was cancelled or expired while queued");
+            }
+            model_usage->decrement_waiting(chat->model_id);
+            model_waiting_recorded = false;
+            scheduler_running = true;
             queries.observe_resources(
                 query_id, inference->metrics().resident_memory_bytes);
             queries.transition(query_id, QueryStage::prompt_evaluation,
@@ -4819,7 +5077,8 @@ private:
                         chat_id, fingerprint, generation_prompt,
                         session_decision.reuse
                             ? std::optional<unsigned int>(session_decision.slot_id)
-                            : std::nullopt);
+                            : std::nullopt,
+                        generated.prompt_tokens);
                 }
             }
             queries.transition(query_id, QueryStage::persistence,
@@ -4839,7 +5098,15 @@ private:
                     "runner log for a pre-tokenizer warning); try a "
                     "different quantization or source for this model");
             }
-            chats->append(chat_id, ChatRole::assistant, generated.text);
+            // Persist the runner-reported token figures with the transcript:
+            // the reply's generated count on the assistant message, and the
+            // evaluated prompt count back-filled onto this turn's user
+            // message (appended above, before these numbers existed). The
+            // web UI shows them in each bubble's title row.
+            chats->append(chat_id, ChatRole::assistant, generated.text,
+                          generated.generated_tokens);
+            chats->set_last_message_tokens(chat_id, ChatRole::user,
+                                           generated.prompt_tokens);
             queries.transition(query_id, QueryStage::release,
                                QueryStatus::generating);
             queries.finish(
@@ -4847,8 +5114,9 @@ private:
                                               : QueryStatus::completed);
             memory->release(memory_lease_id);
             memory_lease_id.clear();
-            release_inference_slot();
-            inference_slot_admitted = false;
+            request_scheduler->complete(*scheduler_ticket);
+            scheduler_running = false;
+            model_usage->record_use(chat->model_id, epoch_seconds());
             audit.append("chat.generate", user.id, "success", chat_id);
             if (streaming) {
                 send_chunk(
@@ -4880,9 +5148,17 @@ private:
             if (!memory_lease_id.empty()) {
                 memory->release(memory_lease_id);
             }
-            if (inference_slot_admitted) {
-                release_inference_slot();
-                inference_slot_admitted = false;
+            if (model_waiting_recorded) {
+                model_usage->decrement_waiting(chat->model_id);
+                model_waiting_recorded = false;
+            }
+            if (scheduler_ticket.has_value()) {
+                if (scheduler_running) {
+                    request_scheduler->complete(*scheduler_ticket);
+                } else {
+                    request_scheduler->cancel(*scheduler_ticket);
+                }
+                scheduler_running = false;
             }
             if (configuration.session_reuse_enabled) {
                 prompt_sessions->release(chat_id);
@@ -4947,6 +5223,7 @@ private:
     std::unique_ptr<McpOutboundGateway> mcp_outbound_gateway;
     std::unique_ptr<server_internal::IntegrationHttpController> integrations;
     std::unique_ptr<ChatStore> chats;
+    std::unique_ptr<UserMemoryStore> user_memories;
     std::unique_ptr<MLProjectStore> ml_projects;
     std::unique_ptr<ModelRegistryStore> ml_models;
     std::unique_ptr<DatasetStore> ml_datasets;
@@ -4980,6 +5257,10 @@ private:
     std::unique_ptr<BenchmarkStore> benchmarks;
     std::unique_ptr<server_internal::WorkloadHttpController> workloads;
     std::unique_ptr<MemoryBudgetManager> memory;
+    // Phase 25: the single live admission/fairness/backpressure authority
+    // for inference work. Its interactive concurrency allowance is derived
+    // from MemoryPolicy::maximum_active_inference in the constructor.
+    std::unique_ptr<RequestScheduler> request_scheduler;
     // Serializes the complete single-runner load/unload decision. A browser
     // message arriving during best-effort pre-warm waits for that same
     // bounded load rather than observing `starting` and failing immediately.
@@ -4991,12 +5272,6 @@ private:
     // model_load_mutex because release paths outside load also use it.
     mutable std::mutex runner_admission_mutex;
     mutable std::string runner_weights_lease_id;
-    // Phase 30A deliverable 3 (docs/PLAN.md Phase 30A): enforces
-    // MemoryPolicy::maximum_active_inference (1 under the minimal/cpu_only
-    // profile) as a real admission gate on send_chat_message() instead of
-    // leaving the field validated-but-inert -- see try_admit_inference_slot()
-    // / release_inference_slot() below.
-    mutable std::atomic<std::uint32_t> active_inference_count{0U};
     std::unique_ptr<ProjectIndexService> indexes;
     // Phase 24: constructed once alongside `indexes` (see the constructor)
     // so its in-flight join table actually sees concurrent requests.
@@ -5021,6 +5296,9 @@ private:
     // Phase 20: durable, administrator-controlled evidence/admission state.
     // Declared after records, which outlives it; constructed after open().
     std::unique_ptr<AdvancedOptimizationRegistry> advanced_optimizations;
+    // Phase 26: live, bounded, administrator-inspectable model recency/pin/
+    // preference/waiting evidence. It records only real server events.
+    std::unique_ptr<ModelUsagePredictor> model_usage;
     // Machine Learning foundation phase: same shape as
     // advanced_optimizations above -- always constructible, no persistence,
     // administrator-only. See docs/PLAN.md "Machine Learning Abilities".

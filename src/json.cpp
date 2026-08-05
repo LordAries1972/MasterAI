@@ -4,6 +4,7 @@
 // emits protocol-safe quoted strings for every JSON-producing source unit.
 #include "json.hpp"
 
+#include <array>
 #include <cctype>
 #include <limits>
 #include <sstream>
@@ -381,10 +382,29 @@ JsonValue parse_json(const std::string& input) {
 // Escapes control characters and returns a complete quoted JSON string.
 std::string json_string(const std::string& value) {
     static constexpr char hexadecimal[] = "0123456789abcdef";
+    // Precalculated per-byte "needs escaping" table covering all 256
+    // possible input bytes: only '"', '\\', and controls below 0x20 ever
+    // need escape work. Clean stretches between escapes are appended as
+    // whole runs (one bulk append per run) instead of byte-at-a-time --
+    // this encoder serializes every JSON value the server emits, so large
+    // mostly-clean strings dominate its runtime.
+    static constexpr auto needs_escape = [] {
+        std::array<bool, 256> table{};
+        for (unsigned int byte = 0U; byte < 0x20U; ++byte) {
+            table[byte] = true;
+        }
+        table[static_cast<unsigned char>('"')] = true;
+        table[static_cast<unsigned char>('\\')] = true;
+        return table;
+    }();
     std::string output;
     output.reserve(value.size() + 2U);
     output.push_back('"');
-    for (const unsigned char character : value) {
+    std::size_t run_start = 0U;
+    for (std::size_t index = 0U; index < value.size(); ++index) {
+        const auto character = static_cast<unsigned char>(value[index]);
+        if (!needs_escape[character]) continue;
+        output.append(value, run_start, index - run_start);
         switch (character) {
             case '"': output += "\\\""; break;
             case '\\': output += "\\\\"; break;
@@ -394,16 +414,14 @@ std::string json_string(const std::string& value) {
             case '\r': output += "\\r"; break;
             case '\t': output += "\\t"; break;
             default:
-                if (character < 0x20U) {
-                    output += "\\u00";
-                    output.push_back(hexadecimal[character >> 4U]);
-                    output.push_back(hexadecimal[character & 0x0fU]);
-                } else {
-                    output.push_back(static_cast<char>(character));
-                }
+                output += "\\u00";
+                output.push_back(hexadecimal[character >> 4U]);
+                output.push_back(hexadecimal[character & 0x0fU]);
                 break;
         }
+        run_start = index + 1U;
     }
+    output.append(value, run_start, value.size() - run_start);
     output.push_back('"');
     return output;
 }

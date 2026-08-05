@@ -48,8 +48,13 @@ Current phase status:
   authenticated native login and workspace pages, durable projects/chats,
   Ready-model selection, auto-load, live NDJSON responses, browser
   cancellation, bounded UTF-8 attachments, ownership/integrity rechecks,
-  prompt context assembly, and the transcription adapter boundary are
-  implemented. The end-to-end authenticated chat path is now real-model
+  prompt context assembly, the transcription adapter boundary, and durable
+  owner-scoped user memory are implemented. The memory path recognizes
+  `save to memory: <detail>` without invoking inference, applies bounded
+  deterministic automatic capture for common self-disclosures, recalls the
+  newest details as explicitly labelled user reference data for every model,
+  and exposes inspect/add/delete controls through `/api/v1/memories` and the
+  collapsed chat sidebar. The end-to-end authenticated chat path is now real-model
   validated at the API level: login (local password account), project
   creation, chat creation against `qwen25-coder-3b-q4km`, and a real streamed
   reply all completed through the live server (see Phase 4). Two real-model
@@ -288,33 +293,35 @@ Current phase status:
   admitted: candidate implementations and measurements remain independently
   gated, exactly as this optional phase requires, rather than being
   misrepresented as enabled throughput.
-- Phase 21: Implemented at a scoped-down level (2026-08-01) — native
+- Phase 21: Implementation complete (2026-08-05) — native
   asynchronous storage and prefetch engine. `Win32OverlappedFileReader`
   (IOCP) on Windows and a bounded `PosixPreadPoolReader` fallback on POSIX
   (no Linux `io_uring` adapter), read coalescing, adaptive queue depth keyed
   to a measured `StorageLatencyProfile`, and per-request cancellation are
   implemented and wired into model manifest and index segment reads, with
-  automatic fallback to the prior blocking path. Priority A.
-- Phase 22: Implemented at a scoped-down level (2026-08-01) — hierarchical
+  bounded parallel batch reads, kernel cancellation, and automatic fallback
+  to the prior blocking path. Priority A.
+- Phase 22: Implementation complete (2026-08-05) — hierarchical
   content and model-data caching. `CacheCategory` expands from Phase 17's six
   values to the plan's full 17-category L0–L5 set; each category's
-  `CacheManager::State::Segment` gains probationary/protected/pinned
+  `CacheManager::State::Segment` gains streaming/probationary/protected/pinned
   segmented eviction (a large one-time scan can only evict other
   probationary entries, never the protected working set) plus a single-hash
-  frequency-sketch admission gate that refuses a brand-new candidate rather
+  frequency-sketch admission gate and immutable reference-counted resident L1
+  that refuse a brand-new candidate rather
   than displacing a demonstrably hotter protected entry, and short-lived
   version-bound negative caching (`put_negative()`/`is_negative()`).
   Immutable, checksummed, atomically-published entries and corruption
   quarantine already existed from Phase 17 and are unchanged. Priority A/B.
-- Phase 23: Implemented at a scoped-down level (2026-08-01) — tokenization,
+- Phase 23: Implementation complete (2026-08-05) — tokenization,
   prompt-template, and prompt-fragment caching. A `CacheCategory::tokenization`
   producer/consumer around `RunnerSupervisor::tokenize()`, compiled
   process-lifetime chat-template plans, `PromptSegment`-based segmented
   prompt assembly, a restricted role/route/key intern table, and an extended
-  `PromptSessionManager::try_reuse()` reporting exact byte-level reusable
-  prefix length, divergence offset, invalidation reason, and a configurable
+  `PromptSessionManager::try_reuse()` reporting exact reusable token and byte
+  counts, divergence offset, invalidation reason, and a configurable
   prefix byte ceiling are implemented. Priority A.
-- Phase 24: Implemented at a scoped-down level (2026-08-01) — staged
+- Phase 24: Implementation complete (2026-08-05) — staged
   adaptive retrieval fan-out. Filename/path and recent-change strategies,
   a deterministic request classifier, sticky-sufficiency staged fan-out
   over the existing bounded worker pool with priority tagging, a mutex-
@@ -324,31 +331,34 @@ Current phase status:
   Semantic-embedding, MCP-resource, call-graph, type-reference, git-diff,
   dependency-neighbour, and conversation-memory strategies remain declared
   but disabled pending their adapters, with skip reasons disclosed on
-  `QueryTrace`. Priority B.
-- Phase 25: Implemented at a scoped-down level (2026-08-01) — weighted-fair
+  `QueryTrace`; the authored Release evaluation measured 213 us total/145 us
+  high case versus 736 us/401 us for the Phase 16 bounded-fan-out baseline.
+  Priority B.
+- Phase 25: Implementation complete; activation remains calibrated and
+  default-off (2026-08-05) — weighted-fair
   priority scheduling and backpressure. `RequestScheduler`
   (`src/scheduler.cpp`) implements the plan's eight priority classes
   (cancellation/shutdown through maintenance), per-class weight/queue-depth/
   residence-time/concurrency/memory-allowance policy, deficit-round-robin
   weighted dequeue with cancellation always preempting, and backpressure
   that evicts the lowest-priority still-queued (never running) ticket first
-  when a global concurrency ceiling is set. Real continuous batching of live
-  backend token-generation steps is out of scope this pass — it requires
-  cooperation from the external llama.cpp runner process this control plane
-  launches, and no backend flag for it is validated yet (see the class-level
-  scope note in masterai.hpp); this phase ships the admission/scheduling
-  layer a batching backend can plug into once one exists. Priority C;
+  when a global concurrency ceiling is set. The live chat path now reserves,
+  queues, reports status, waits cancellably, and completes through that
+  scheduler. Compatible llama.cpp runners receive `--cont-batching` only
+  after the Phase 20 registry admits the optimization; the supervisor then
+  permits the calibrated parallel slot count. Priority C;
   superset of the Phase 20 continuous-batching candidate.
-- Phase 26: Implemented at a scoped-down level (2026-08-01) — model loading/
+- Phase 26: Implementation complete (2026-08-05) — model loading/
   mapping modes, selective pre-touch, cancellable background warm-up, and a
   warm-model state machine. `ModelLoadMode`/`PreTouchLevel` are selected
   using Phase 21's `StorageLatencyProfile` plus RAM-ceiling evidence; a
   `WarmModelState` machine is layered onto (not a replacement for) the
   existing `RunnerState`/`ModelState` pair via an explicit, regression-tested
   translation table; background warm-up is cancellable and yields under
-  memory pressure. Only `none`/`full` pre-touch levels are backend-actionable
-  today (`metadata`/`first-use`/`layer-window` are accepted policy that
-  currently behaves like `none`). Priority A (mapping and storage-aware
+  memory pressure. Metadata, first-use, and distributed layer-window
+  pre-touch use bounded read-only mappings; full pre-touch remains the
+  backend `--mlock` path. Live use/wait/pin signals are exposed through
+  administrator routes. Priority A (mapping and storage-aware
   placement) with Priority B warm-up refinements.
 - Phase 27: Implemented at a scoped-down level (2026-08-01) — KV-cache
   accounting, bounded reservation, and deterministic lifecycle. `KvCacheManager`
@@ -1781,6 +1791,9 @@ GET    /api/v1/chats
 POST   /api/v1/chats
 POST   /api/v1/chats/{id}/messages
 POST   /api/v1/chats/{id}/cancel
+GET    /api/v1/memories
+POST   /api/v1/memories
+POST   /api/v1/memories/{id}/delete
 GET    /api/v1/models
 POST   /api/v1/models/{id}/load
 POST   /api/v1/models/{id}/unload
@@ -2205,6 +2218,9 @@ The system must show users which files were used as context.
 - Diff preview.
 - Apply-patch request routed through explicit approval.
 - Source/context disclosure.
+- Per-user remembered details: explicit `save to memory:` command, bounded
+  deterministic self-disclosure capture, model-independent later-turn recall,
+  and visible add/forget management.
 
 ### 14.3 Attachments
 
@@ -3221,8 +3237,14 @@ Status: Complete (validated 2026-08-05). An isolated actual-browser session
 completed authentication, project/chat creation, Ready-model selection, and a
 real streamed model response with no rendered error card. Foreground messages
 now serialize with the bounded pre-warm load, closing the `starting`-state race
-found during this validation. The optional transcription adapter boundary is
-implemented; a whisper.cpp installation remains an optional integration.
+found during this validation. Durable owner-scoped user memory is also wired
+into the chat path independently of inference: a whole-message `save to
+memory:` command is confirmed directly, deterministic self-disclosures are
+captured under fixed limits, saved data is recalled into later turns without
+system-instruction priority, and users can inspect/add/delete entries through
+the Memory sidebar and `/api/v1/memories`. The optional transcription adapter
+boundary is implemented; a whisper.cpp installation remains an optional
+integration.
 
 Deliverables:
 
@@ -3233,6 +3255,7 @@ Deliverables:
 - Streaming responses.
 - Attachments.
 - Context display.
+- Inspectable, owner-scoped remembered user details.
 - Basic voice recording and transcription adapter interface.
 
 Exit criteria:
@@ -3382,6 +3405,14 @@ repeatable Release probe identified canonical JSON encoding as the measured
 hotspot; the accepted optimization is documented with five-run before/after
 evidence. Unmeasured inference/IDE transport ideas remain deliberately
 unchanged (2026-07-29).
+
+The 2026-08-05 maintenance pass additionally removes repeated Windows CNG
+provider opens from authenticated SHA-256/password paths, replaces the
+power-of-two frequency-sketch modulo with a mask, and gives both JSON escape
+paths a complete 256-byte decision table with bulk clean-run copies. These
+changes preserve strict bounds and output semantics and are covered by the
+native correctness suite; they are not credited as new Phase 12 throughput
+evidence until a comparable Release before/after probe is recorded.
 
 Only after measurements:
 
@@ -3979,17 +4010,21 @@ has no unsafe or unevidenced exception.
 
 ### Phase 21 — Native asynchronous storage and prefetch engine
 
-Status: Implemented at a scoped-down level (2026-08-01). `src/async_storage.cpp`
+Status: Implementation complete (2026-08-05). `src/async_storage.cpp`
 provides a real `IAsyncFileReader` interface, a Windows IOCP/overlapped
 `Win32OverlappedFileReader` backend, a POSIX `PosixPreadPoolReader` bounded
 worker-pool backend, a measured `StorageLatencyProfile` probe, an adaptive
 queue-depth policy, a pure read coalescer, and per-request cancellation
-tokens. Wired into `models.cpp` manifest reads and `indexing.cpp` segment
+tokens. `read_file_ranges()` issues coalesced waves bounded by both queue
+depth and temporary bytes, preserves caller order, and reports actual
+physical reads. Windows cancellation reaches `CancelIoEx`. Wired into
+`models.cpp` manifest reads and `indexing.cpp` segment
 reads as an opt-in path with the pre-existing blocking path retained as an
 automatic fallback (`read_file_bytes()`). Deliberately out of scope for this
-pass, and left as follow-on work: a Linux `io_uring` adapter (the POSIX
+pass: a Linux `io_uring` adapter (the POSIX
 `pread` worker pool is used unconditionally on Linux instead, matching this
-plan's own explicitly-allowed fallback), and memory-mapped file regions.
+plan's explicitly-allowed fallback). `MappedBufferView`, shared with Phase
+26/30 rather than duplicated here, supplies bounded memory-mapped regions.
 Windows is the validated build/test target per project convention.
 
 Purpose:
@@ -4030,10 +4065,11 @@ Exit criteria:
 
 ### Phase 22 — Hierarchical content and model-data caching
 
-Status: Implemented at a scoped-down level (2026-08-01) — see the summary
+Status: Implementation complete (2026-08-05) — see the summary
 entry above (`src/cache.cpp`, `src/masterai.hpp`) for the full-category
-expansion, segmented eviction, admission gate, and negative caching that
-shipped. Priority A/B — file-metadata, file-content, and
+expansion, streaming/probationary/protected/pinned eviction, admission gate,
+immutable checksum-validated resident L1, and negative caching that shipped.
+Priority A/B — file-metadata, file-content, and
 model-manifest/verification caches land first (Priority A); embedding,
 reranking, and MCP-resource caches follow once their producers exist
 (Priority B).
@@ -4083,7 +4119,7 @@ Exit criteria:
 
 ### Phase 23 — Tokenization, template, and prompt-fragment caching
 
-Status: Implemented at a scoped-down level (2026-08-01). `RunnerSupervisor::tokenize()`
+Status: Implementation complete (2026-08-05). `RunnerSupervisor::tokenize()`
 (src/inference.cpp) now supports an opt-in `CacheManager`-backed tokenization
 cache (`set_tokenization_cache()`), keyed by content SHA-256 plus the loaded
 model's own verified digest (doubling as the tokenizer/vocabulary
@@ -4101,15 +4137,13 @@ remaining byte-for-byte identical to the old output (see
 rather than silently caching longer (i.e. plausibly arbitrary
 user/file-content) strings. `PromptSessionManager::try_reuse()`
 (src/session_cache.cpp) now returns `SessionDecision` with
-`reusable_prefix_bytes`, `divergence_offset`, an explicit
+`reusable_prefix_bytes`, exact `reusable_prefix_tokens` when the recorded
+session carries its backend token count, `divergence_offset`, an explicit
 `SessionInvalidationReason` enum, and the configured
 `prefix_byte_ceiling` (default 4 MiB, constructor-configurable), still using
-exact-byte-prefix matching only (no fuzzy matching). Scope trim: reported
-prefix size is a byte count, not a token count -- PromptSessionManager
-compares raw prompt strings without tokenizer access, and adding one would
-reintroduce the per-turn runner round trip Phase 18 exists to avoid; a
-caller wanting an actual token count can pass the reused byte range through
-the now-cached `tokenize()` itself.
+exact-byte-prefix matching only (no fuzzy matching). Exact token reuse never
+guesses from bytes: the server records the backend prompt-token count with
+the session, and the decision marks whether that count is exact.
 
 Purpose:
 
@@ -4149,7 +4183,7 @@ Exit criteria:
 
 ### Phase 24 — Advanced retrieval fan-out and adaptive query planning
 
-Status: Implemented at a scoped-down level (2026-08-01). `src/retrieval.cpp`
+Status: Implementation complete (2026-08-05). `src/retrieval.cpp`
 adds a `RetrievalStrategy` enum covering every strategy the spec lists;
 `filename_path` (via each chunk's already-tracked `relative_path`, see the
 new `ProjectIndexer::search_path`/`ProjectIndexService::search_path`) and
@@ -4194,11 +4228,12 @@ evidence fusing into one materialized candidate, concurrent identical
 requests joining into exactly one in-flight computation
 (`RetrievalPlanner::uncached_invocation_count()`, a diagnostic-only counter
 mirroring `SharedBuffer::use_count()`'s convention), and mismatched-identity
-concurrent requests provably NOT joining. Not attempted: an authored
-retrieval evaluation set with measured latency improvement over a Phase 16
-baseline (needs a benchmark corpus this session does not have) and the
-still-outstanding Phase 16 evaluation-set exit criterion it was meant to
-also satisfy.
+concurrent requests provably NOT joining. The authored corpus includes 200
+decoy files and two expected-evidence cases. On the final Windows-x64 Release
+run it measured Phase 24 at 213 us total/145 us high case versus the faithful
+Phase 16 bounded-worker fan-out at 736 us/401 us, with both expected markers
+recovered, no deadline violation, and no context-budget violation. This also
+closes the Phase 16 authored-evaluation requirement.
 
 Purpose:
 
@@ -4248,10 +4283,13 @@ Exit criteria:
 
 ### Phase 25 — Continuous inference batching and request scheduling
 
-Status: Implemented at a scoped-down level (2026-08-01) — see the summary
-entry above (`src/scheduler.cpp`, `RequestScheduler`) for the weighted-fair
-scheduling and backpressure that shipped, and why continuous batching of
-live backend generation steps did not. Priority C — depends on multiple
+Status: Implementation complete; activation remains calibrated and
+default-off (2026-08-05). The live chat route uses `RequestScheduler` for
+memory reservation, weighted-fair queueing, cancellable wait, status,
+dispatch, and completion. `RunnerSupervisor` permits compatible concurrent
+generations up to the calibrated slot count when `--cont-batching` is
+explicitly admitted through Phase 20; otherwise it retains the one-generation
+baseline. Priority C — depends on multiple
 concurrent compatible requests being common enough to benefit measurably;
 superset of the Phase 20 continuous-batching candidate.
 
@@ -4289,15 +4327,15 @@ Exit criteria:
 
 ### Phase 26 — Model loading, mapping, pre-touch, and warm-state management
 
-Status: Implemented at a scoped-down level (2026-08-01). `masterai.hpp`/
+Status: Implementation complete (2026-08-05). `masterai.hpp`/
 `calibration.cpp` add an explicit `ModelLoadMode` (streamed/mapped/resident/
 auto) selected by `CalibrationService::resolve()` from a Phase 21
 `StorageLatencyProfile` plus available-RAM evidence via `select_load_mode()`,
 realized through the existing `--no-mmap`/`--mlock` launch arguments rather
 than new backend flags. A `PreTouchLevel` enum (none/metadata/first-use/
-layer-window/full) is accepted policy end-to-end, but only none/full are
-backend-actionable today (via the same `--mlock`); `pretouch_gap_reason()`
-documents that gap explicitly rather than faking finer granularity.
+layer-window/full) is actionable end-to-end: metadata and first-use touch a
+bounded prefix, layer-window touches bounded distributed mapped windows, and
+full remains the default-off backend `--mlock` path.
 `inference.cpp` adds a `WarmModelState` state machine (Cold/LoadingMetadata/
 MappingWeights/InitialisingBackend/Warming/Ready/Busy/Idle/Draining/
 Evicting/Unloaded/Failed) layered onto `RunnerSupervisor`'s existing
@@ -4306,14 +4344,15 @@ transition graph, and a `translate_runner_state()` baseline table so every
 pre-existing `RunnerState` consumer is unaffected (see the Phase 26
 regression test). `run_cancellable_warmup()` provides cooperative-
 cancellation background warm-up that yields on `MemoryBudgetManager`
-pressure or a `WarmupCancellationToken`. `ModelUsagePredictor` records
+pressure, a caller-supplied thermal/storage/interactive pressure signal, or
+a `WarmupCancellationToken`. `ModelUsagePredictor` records
 recency/pin/project-preference/waiting-request signals, reported via
 `model_usage_signals_json()` following the existing `tuning_profile_json()`
-convention. Deliberately out of scope for this pass: `direct` I/O (no
-validated backend support), and full CLI/HTTP route wiring for the
-use-prediction reporting surface (the recording/reporting API itself is
-implemented and tested, but not yet exposed through a dedicated admin route
-or CLI command). Windows is the validated build/test target per project
+convention. The live server records waiting and successful-use signals and
+exposes administrator-only `GET /api/v1/models/usage-signals` plus audited,
+CSRF-protected pin updates through `POST /api/v1/models/usage-signals`.
+`direct` remains rejected where the external backend has no validated direct
+I/O contract. Windows is the validated build/test target per project
 convention.
 
 Purpose:

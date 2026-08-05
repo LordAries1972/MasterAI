@@ -141,10 +141,11 @@ std::string application_script() {
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
-        "const [me,p,c,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,mlse,mlhs,mlmo,mlck,mldp,mlcmp,cfg,report]="
+        "const [me,p,c,mem,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,mlse,mlhs,mlmo,mlck,mldp,mlcmp,cfg,report]="
         "await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
+        "api('/api/v1/memories').catch(()=>({memories:[]})),"
         "api('/api/v1/models').catch(()=>({models:[]})),"
         "api('/api/v1/benchmarks').catch(()=>({benchmarks:[]})),"
         "api('/api/v1/model-downloads').catch(()=>({downloads:[]})),"
@@ -245,7 +246,7 @@ std::string application_script() {
         "fill('#chatModel',ready,x=>x.id,"
         "x=>(x.diagnostic&&x.diagnostic.startsWith('Warning:')?'\\u26a0\\ufe0f ':'')+"
         "x.displayName+' ('+Math.round(x.recommendedRamMiB/1024)+'GB)');"
-        "renderChatList(c.chats);"
+        "renderChatList(c.chats);renderMemories(mem.memories);"
         // Landing directly on a chat's own URL (/app/chat/<id>) preloads its
         // id into this hidden field server-side; load its history now that
         // the page's other data has arrived.
@@ -320,6 +321,30 @@ std::string application_script() {
         "if(historySection&&historyList){"
         "historySection.hidden=older.length===0;historyList.replaceChildren();"
         "for(const c of older)historyList.append(chatLink(c));}}"
+        // Keeps remembered details inspectable and removable. The section is
+        // collapsed by default in the sidebar, preserving the uncluttered
+        // chat layout while making automatic captures transparent.
+        "function renderMemories(memories){const list=q('#memoryList');if(!list)return;"
+        "list.replaceChildren();if(!memories.length){"
+        "const empty=document.createElement('div');empty.className='memoryEmpty';"
+        "empty.textContent='No saved details.';list.append(empty);return;}"
+        "for(const memory of memories){const row=document.createElement('div');"
+        "row.className='memoryItem';const text=document.createElement('span');"
+        "text.textContent=memory.content;text.title=memory.source==='auto'?"
+        "'Remembered automatically':'Saved explicitly';row.append(text);"
+        "if(q('#newMemory')){const del=document.createElement('button');"
+        "del.type='button';del.className='memoryDeleteBtn';del.textContent='\u00d7';"
+        "del.title='Forget this detail';del.setAttribute('aria-label','Forget detail');"
+        "del.addEventListener('click',async()=>{try{await api('/api/v1/memories/'+"
+        "encodeURIComponent(memory.id)+'/delete','POST');await refreshMemories();}"
+        "catch(x){showSystemError('Could not forget detail: '+x.message);}});"
+        "row.append(del);}list.append(row);}}"
+        "async function refreshMemories(){const data=await api('/api/v1/memories');"
+        "renderMemories(data.memories||[]);}"
+        "async function addMemory(e){e.preventDefault();const input=q('#memoryContent');"
+        "const content=input.value.trim();if(!content)return;try{"
+        "await api('/api/v1/memories','POST',{content});input.value='';"
+        "await refreshMemories();}catch(x){showSystemError('Could not save detail: '+x.message);}}"
         // Loads one chat's full message history (via the GET
         // /api/v1/chats/{id} route) into the chat panel.
         "async function openChat(id){const s=q('#actionStatus');"
@@ -347,7 +372,8 @@ std::string application_script() {
         "modelSelect.value=chat.modelId;}"
         "if(q('#chatProject'))q('#chatProject').disabled=true;"
         "const box=q('#chatMessages');box.replaceChildren();"
-        "for(const message of chat.messages)appendMessage(box,message.role,message.content);"
+        "for(const message of chat.messages)"
+        "appendMessage(box,message.role,message.content,message.tokenCount);"
         "box.scrollTop=box.scrollHeight;"
         // Warming used to be a side effect of the GET above (fired the
         // instant a chat was opened, mid-load -- before the browser had
@@ -370,7 +396,18 @@ std::string application_script() {
         // rather than one run-on paragraph. The raw source is kept on the
         // element itself so streamed tokens can be re-rendered as they
         // arrive (see streamMessage()).
-        "function appendMessage(box,role,content){const p=document.createElement('div');"
+        // Writes the bubble's title row as 'Query (Tokens: N)' / 'Response
+        // (Tokens: N)' -- the count is the runner's own figure for that
+        // message (prompt tokens evaluated for a query, tokens generated
+        // for a response). A count of 0 means "not recorded" (older
+        // messages, or a turn that failed first) and shows no suffix.
+        "function setMsgTokens(msgEl,role,tokens){"
+        "const title=msgEl.querySelector('.chatMsg-responseTitle');"
+        "if(!title)return;"
+        "title.textContent=(role==='assistant'?'Response':'Query')+"
+        "(tokens>0?' (Tokens: '+tokens+')':'');}"
+        "function appendMessage(box,role,content,tokenCount){"
+        "const p=document.createElement('div');"
         "p.className='chatMsg chatMsg-'+role;"
         "if(role==='system'){p.textContent='system: '+content;}"
         "else{p.dataset.raw=content;"
@@ -381,8 +418,11 @@ std::string application_script() {
         // the error card and every other bubble.
         "if(role==='assistant'||role==='user'){const title=document.createElement('div');"
         "title.className='chatMsg-responseTitle';"
-        "title.textContent=role==='assistant'?'Response':'Query';"
-        "p.append(title);}"
+        "p.append(title);"
+        // setMsgTokens() owns the title text so the '(Tokens: N)' suffix
+        // renders identically here and when streamMessage() back-fills the
+        // counts from the stream's 'complete' event.
+        "setMsgTokens(p,role,tokenCount||0);}"
         // Rendered content lives in its own .msgBody child rather than
         // directly in p -- streamMessage() rewrites just that child's
         // innerHTML as tokens arrive, so the copy button appended below
@@ -431,6 +471,19 @@ std::string application_script() {
         // only ever introduces the handful of safe tags below, never raw
         // user/model text as markup.
         "function renderMathExpr(t){"
+        // Structural LaTeX first, before any symbol substitution: row
+        // separators (\\) become line breaks, alignment tabs (a bare &,
+        // which is &amp; by the time this runs on escaped text) vanish,
+        // \begin{...}/\end{...} environment wrappers vanish, \text{}-style
+        // upright-text commands keep just their contents, and \left/\right
+        // delimiter-sizing prefixes vanish. Without these, an align*
+        // environment leaked as literal 'beginalign*' / 'textradius' text.
+        "t=t.replace(/\\\\\\\\\\\\\\\\/g,'<br>');"
+        "t=t.replace(/&amp;/g,'');"
+        "t=t.replace(/\\\\(?:begin|end)\\{[a-zA-Z]+\\*?\\}/g,'');"
+        "t=t.replace(/\\\\(?:text|textbf|textit|mathrm|mathbf|mathit|operatorname)"
+        "\\{([^{}]*)\\}/g,(m,a)=>a);"
+        "t=t.replace(/\\\\(?:left|right)(?=[^a-zA-Z]|$)/g,'');"
         "t=t.replace(/\\\\frac\\{([^{}]*)\\}\\{([^{}]*)\\}/g,"
         "(m,a,b)=>'<span class=\"frac\"><span class=\"fracNum\">'+a+"
         "'</span><span class=\"fracDen\">'+b+'</span></span>');"
@@ -487,6 +540,24 @@ std::string application_script() {
         "const joined=mathLines.join(' ');"
         "const inner=joined.replace(/^\\s*\\\\\\[/,'').replace(/\\\\\\]\\s*$/,'');"
         "html+='<div class=\"mathBlock\">'+renderMathExpr(esc(inner))+'</div>';continue;}"
+        // Bare \\begin{align*}...\\end{align*}-style environments with no
+        // \\[ \\] wrapper (how QWEN typically emits display math) get the
+        // same centered math-block treatment -- renderMathExpr() itself
+        // strips the begin/end wrappers, alignment tabs, and \\text{}.
+        "if(/^\\s*\\\\begin\\{/.test(line)){const mathLines=[line];i++;"
+        "while(i<lines.length&&!/\\\\end\\{[^}]*\\}\\s*$/"
+        ".test(mathLines[mathLines.length-1])){mathLines.push(lines[i]);i++;}"
+        "html+='<div class=\"mathBlock\">'+renderMathExpr(esc(mathLines.join(' ')))+"
+        "'</div>';continue;}"
+        // $$ ... $$ display math (the other delimiter models commonly use),
+        // either on one line or spanning several until the closing $$.
+        "if(/^\\s*\\$\\$/.test(line)){"
+        "const mathLines=[line.replace(/^\\s*\\$\\$/,'')];i++;"
+        "while(i<lines.length&&!/\\$\\$\\s*$/"
+        ".test(mathLines[mathLines.length-1])){mathLines.push(lines[i]);i++;}"
+        "const dollarInner=mathLines.join(' ').replace(/\\$\\$\\s*$/,'');"
+        "html+='<div class=\"mathBlock\">'+renderMathExpr(esc(dollarInner))+"
+        "'</div>';continue;}"
         // A single blank line between two list items (common in model
         // output that puts a blank line after every bullet for readability)
         // must not end the list -- otherwise each item becomes its own
@@ -519,11 +590,47 @@ std::string application_script() {
         "'<li value=\"'+x.n+'\">'+x.text+'</li>').join('')+'</ol>';continue;}"
         "if(line.trim()===''){i++;continue;}"
         "const para=[];"
+        // A math block starting mid-paragraph (\\[, \\begin{...}, or $$ on
+        // its own line right after prose) must end the paragraph, or the
+        // paragraph loop swallows it and it never reaches the block
+        // handlers above.
         "while(i<lines.length&&lines[i].trim()!==''&&!/^```/.test(lines[i])&&"
-        "!/^\\s*[-*]\\s+/.test(lines[i])&&!/^\\s*\\d+[.)]\\s+/.test(lines[i])){"
+        "!/^\\s*[-*]\\s+/.test(lines[i])&&!/^\\s*\\d+[.)]\\s+/.test(lines[i])&&"
+        "!/^\\s*\\\\\\[/.test(lines[i])&&!/^\\s*\\\\begin\\{/.test(lines[i])&&"
+        "!/^\\s*\\$\\$/.test(lines[i])){"
         "para.push(renderInline(lines[i]));i++;}"
         "html+='<p>'+para.join('<br>')+'</p>';}"
         "return html;}"
+        // Streaming re-render helper: instead of wholesale innerHTML
+        // replacement on every token (which destroyed and recreated every
+        // element -- resetting each code block's scroll position to the
+        // top and making its scrollbar flicker), diff the freshly rendered
+        // blocks against the live DOM and touch only what changed. An
+        // unchanged block keeps its exact DOM node (scroll state, copy
+        // button and all); the one block still growing has its <code> text
+        // swapped in place, keeps its horizontal scroll, and follows its
+        // own bottom while the user hasn't scrolled up inside it.
+        "function patchMsgBody(el,html){"
+        "const tpl=document.createElement('template');tpl.innerHTML=html;"
+        "const next=Array.from(tpl.content.children);"
+        "for(let i=0;i<next.length;i++){"
+        "const a=el.children[i],b=next[i];"
+        "if(!a){el.append(b);continue;}"
+        "if(a.tagName==='PRE'&&b.tagName==='PRE'){"
+        "const ac=a.querySelector('code'),bc=b.querySelector('code');"
+        "if(ac&&bc){"
+        "if(ac.textContent!==bc.textContent||ac.className!==bc.className){"
+        // 'At the bottom' is measured before the update so a user who
+        // scrolled up to read stays put; anyone at (or within a few px of)
+        // the bottom keeps following the incoming code.
+        "const follow=a.scrollTop+a.clientHeight>=a.scrollHeight-8;"
+        "const left=a.scrollLeft;"
+        "ac.className=bc.className;ac.textContent=bc.textContent;"
+        "a.scrollLeft=left;"
+        "if(follow)a.scrollTop=a.scrollHeight;}"
+        "continue;}}"
+        "if(a.outerHTML!==b.outerHTML)a.replaceWith(b);}"
+        "while(el.children.length>next.length)el.lastElementChild.remove();}"
         // Escapes text for safe insertion as HTML content elsewhere in this
         // file (table cells built from trusted-looking but user-supplied
         // strings such as display names and diagnostics).
@@ -2329,7 +2436,10 @@ std::string application_script() {
         "q('#messageContent').value='';"
         "const attachmentIds=attachedFiles.map(x=>x.id);"
         "attachedFiles=[];renderAttachChips();"
-        "appendMessage(box,'user',content);box.scrollTop=box.scrollHeight;"
+        // Kept so the stream's 'complete' event below can back-fill this
+        // query bubble's title with the prompt-token count.
+        "const userEl=appendMessage(box,'user',content);"
+        "box.scrollTop=box.scrollHeight;"
         "generation=new AbortController();"
         "assistantEl=appendMessage(box,'assistant','');"
         // Shown until the first token actually streams back -- reasoning
@@ -2351,9 +2461,20 @@ std::string application_script() {
         "if(event.type==='token'){assistantEl.dataset.raw="
         "(assistantEl.dataset.raw||'')+event.content;"
         "const bodyEl=assistantEl.querySelector('.msgBody');"
-        "bodyEl.innerHTML=renderMarkdown(assistantEl.dataset.raw);"
+        // patchMsgBody() diffs against the live DOM instead of rebuilding
+        // it, so code blocks keep their scroll position (and their
+        // scrollbars stop flickering) while tokens stream in.
+        "patchMsgBody(bodyEl,renderMarkdown(assistantEl.dataset.raw));"
         "addCodeCopyButtons(bodyEl);"
         "box.scrollTop=box.scrollHeight;}"
+        // The final stream event carries the runner's real token figures --
+        // promptTokens (whole evaluated prompt, i.e. what this query cost)
+        // and generatedTokens (the reply) -- shown in each bubble's title.
+        "if(event.type==='complete'){"
+        "setMsgTokens(userEl,'user',event.promptTokens||0);"
+        "if(assistantEl)setMsgTokens(assistantEl,'assistant',"
+        "event.generatedTokens||0);"
+        "if(event.memorySaved)refreshMemories().catch(()=>{});}"
         "if(event.type==='error')throw new Error(event.error,"
         "{cause:event.detail});}}}}"
         "catch(x){const cancelled=x.name==='AbortError';"
@@ -2546,6 +2667,7 @@ std::string application_script() {
         "for(const file of files)await attachFile(file);});"
         "if(q('#newMessage'))q('#newMessage').addEventListener('submit',streamMessage);"
         "if(q('#chatModel'))q('#chatModel').addEventListener('change',changeChatModel);"
+        "if(q('#newMemory'))q('#newMemory').addEventListener('submit',addMemory);"
         // Enter sends the message, mirroring every mainstream chat client;
         // Shift+Enter still inserts a newline (the textarea's own default),
         // so multi-line prompts remain possible.
@@ -2883,6 +3005,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
     const bool is_administrator = user.role == UserRole::administrator;
     const bool is_developer = user.role == UserRole::developer;
     const bool can_manage_settings = is_administrator || is_developer;
+    const bool can_write_chat = role_allows(user.role, "chats.write");
     const std::string role_attr =
         is_administrator ? "administrator" : (is_developer ? "developer" : "viewer");
 
@@ -3975,6 +4098,19 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<div id=\"usersList\">Loading...</div></div></section>";
     }
 
+    const std::string memory_controls =
+        "<details id=\"chatMemorySection\"><summary>Memory</summary>"
+        "<p class=\"memoryHelp\">Saved details are available to every model. "
+        "Type <code>save to memory: your detail</code> in chat, or manage them "
+        "here.</p>" +
+        std::string(can_write_chat
+                        ? "<form id=\"newMemory\"><label for=\"memoryContent\">"
+                          "Detail to remember</label><textarea id=\"memoryContent\" "
+                          "rows=\"2\" maxlength=\"512\" required></textarea>"
+                          "<button>Save detail</button></form>"
+                        : "") +
+        "<div id=\"memoryList\">Loading...</div></details>";
+
     std::string sidebar_links =
         nav_link("/app", "+ New chat", section == "chat" && chat_id.empty()) +
         sidebar_section(
@@ -3985,7 +4121,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             // scannable size. Hidden by default; renderChatList() reveals
             // it once there is anything to show.
             "<details id=\"chatHistorySection\" hidden><summary>History</summary>"
-            "<div id=\"chatHistoryList\"></div></details>");
+            "<div id=\"chatHistoryList\"></div></details>" + memory_controls);
     if (can_manage_settings) {
         // Administrator-only entries (system configuration, user
         // management) are appended to this same Settings group instead of
@@ -4152,6 +4288,23 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "text-transform:uppercase;letter-spacing:.06em;cursor:pointer}"
         "#chatHistoryList{display:flex;flex-direction:column;gap:.15rem;"
         "max-height:14rem;overflow-y:auto;margin-top:.4rem}"
+        "#chatMemorySection{margin-top:1rem}"
+        "#chatMemorySection summary{color:var(--muted);font-size:.85rem;"
+        "text-transform:uppercase;letter-spacing:.06em;cursor:pointer}"
+        ".memoryHelp,.memoryEmpty{color:var(--muted);font-size:.75rem;"
+        "line-height:1.4;margin:.45rem 0}"
+        "#newMemory label{margin-top:.4rem}"
+        "#newMemory textarea{font-size:.78rem;resize:vertical}"
+        "#newMemory button{font-size:.78rem;padding:.4rem;margin-top:.4rem}"
+        "#memoryList{display:flex;flex-direction:column;gap:.3rem;"
+        "max-height:12rem;overflow-y:auto;margin-top:.55rem}"
+        ".memoryItem{display:flex;align-items:flex-start;gap:.3rem;"
+        "padding:.4rem;border:1px solid var(--panel-border);border-radius:.4rem;"
+        "font-size:.75rem;line-height:1.35}"
+        ".memoryItem span{flex:1;min-width:0;overflow-wrap:anywhere}"
+        ".memoryDeleteBtn{flex:none;width:1.4rem;height:1.4rem;margin:0;padding:0;"
+        "background:transparent;color:var(--muted);line-height:1}"
+        ".memoryDeleteBtn:hover{background:#3a0a0a;color:#ffd54a}"
         ".panel{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));"
         "gap:1.25rem}"
         // Chat gets its own full-height flex column (centered empty-state

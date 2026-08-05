@@ -143,7 +143,17 @@ The current source includes native implementations for:
 - Process-isolated `llama.cpp` supervision with readiness checks, loopback IPC,
   tokenization, streamed generation, cancellation, unload, logs, and metrics.
 - Authenticated native web pages, projects, chats, model selection,
-  attachments, prompt context assembly, streaming, and cancellation.
+  attachments, prompt context assembly, streaming, and cancellation. Chat
+  bubbles show per-message token counts (prompt tokens on the query,
+  generated tokens on the response), and reply budgets are fitted to the
+  model's context window up front so oversized attachments produce a clear
+  error instead of a runner failure or context-shift repetition loop. Each
+  user also has durable, owner-scoped chat memory: `save to memory: <detail>`
+  stores a detail without invoking the model, common self-disclosures (names,
+  preferences, contact details, work, and suggestions) are captured by
+  deterministic bounded rules, and relevant saved details are supplied as
+  user reference data on later turns regardless of the selected model. The
+  collapsed Memory sidebar makes every capture visible and removable.
 - Resumable, journaled, hash-verified model downloads with quarantine on
   integrity failure.
 - Quick, standard, and extended benchmark profiles with compatible comparison
@@ -250,6 +260,13 @@ The current source includes native implementations for:
   table, and an extended `PromptSessionManager` reuse decision reporting
   exact reusable-prefix length, divergence offset, invalidation reason, and
   a configurable prefix byte ceiling.
+- Low-risk control-plane hot-path reductions: Windows CNG SHA-256/HMAC
+  algorithm-provider handles are reused for the process lifetime instead of
+  reopened for each authenticated request, frequency-sketch slots use a
+  power-of-two mask instead of integer modulo, and both JSON encoders use a
+  complete 256-entry escape table plus bulk clean-run copies. These are
+  implementation optimizations, not new throughput claims; correctness and
+  measured performance gates remain authoritative.
 - Staged, classified retrieval fan-out on top of `RetrievalPlanner`:
   filename/path and recent-change strategies, a deterministic request
   classifier, sticky-sufficiency staged execution, an authorization-scoped
@@ -343,12 +360,12 @@ Status below reflects the evidence recorded in
 | 18 | Prompt-prefix and KV/session reuse | Complete; real repeated-turn prefix reuse validated |
 | 19 | Hardware/model calibration | Comparative Qwen 3B offload/throughput matrix validated; broader semantic-quality scoring remains forward work |
 | 20 | Optional advanced throughput | Complete admission layer; all candidates remain disabled by default |
-| 21 | Native asynchronous storage and prefetch engine | Implemented at a scoped-down level; no Linux `io_uring` adapter |
-| 22 | Hierarchical content and model-data caching | Implemented at a scoped-down level |
-| 23 | Tokenization, template, and prompt-fragment caching | Implemented at a scoped-down level |
-| 24 | Advanced retrieval fan-out and adaptive query planning | Implemented at a scoped-down level; some strategies stubbed pending adapters |
-| 25 | Continuous inference batching and request scheduling | Scheduling/backpressure implemented at a scoped-down level; backend batching pending |
-| 26 | Model loading, mapping, pre-touch, and warm-state management | Implemented at a scoped-down level; two pre-touch levels not yet backend-actionable |
+| 21 | Native asynchronous storage and prefetch engine | Implementation complete; bounded IOCP/`pread` fallback, mapped regions, coalescing, cancellation |
+| 22 | Hierarchical content and model-data caching | Implementation complete; immutable resident L1 and streaming-aware segmented eviction |
+| 23 | Tokenization, template, and prompt-fragment caching | Implementation complete; exact recorded token-prefix reuse |
+| 24 | Advanced retrieval fan-out and adaptive query planning | Implementation complete; authored Release evaluation clears Phase 16 baseline |
+| 25 | Continuous inference batching and request scheduling | Implementation complete; backend activation remains calibrated and default-off |
+| 26 | Model loading, mapping, pre-touch, and warm-state management | Implementation complete; all selective pre-touch levels actionable |
 | 27 | KV-cache compression, placement, and lifecycle management | Accounting/placement/lifecycle implemented at a scoped-down level; compression and prefix sharing gated |
 | 28 | NUMA, processor-group, and topology-aware execution | Discovery and recommendation implemented at a scoped-down level; live affinity pending evidence |
 | 29 | Model tiering, routing, and cascade inference | Decision logic implemented at a scoped-down level; live chat routing/cascade execution pending |
@@ -411,21 +428,19 @@ byte-bounded, security-partitioned `CacheManager` in front of Phase 16
 retrieval results, keyed so that a file change, an index republish, or a
 membership/policy change makes a stale entry unreachable automatically,
 with authenticated `GET/POST /api/v1/system/cache*` administrative routes.
-Both are Windows Debug- and Release-validated; each still has one
-evidence-gathering exit criterion outstanding (see the status table above).
+Both are Windows Debug- and Release-validated; Phase 24's authored evaluation
+also closes Phase 16's previously outstanding evaluation-set criterion.
 
-Phases 21–30 add a first, real (but deliberately
-scoped-down) layer of performance/architecture work on top of Phases 15–19:
+Phases 21–30 add a native performance/architecture layer on top of Phases 15–19:
 an asynchronous storage/prefetch engine, hierarchical and prompt caches,
 staged retrieval fan-out, weighted-fair scheduling, model warm-state
 management, KV-cache governance, hardware-topology decisions, model-routing
 logic, and an immutable shared-buffer/arena architecture with a zero-copy
-chat-streaming write path. The mechanisms are real and tested, but each
-phase retains the explicit scope limits recorded in
-[docs/PLAN.md](docs/PLAN.md), such as Linux `io_uring`, live continuous
-backend batching, measured worker affinity, KV compression/prefix sharing,
-and transparent live cascade execution. Phase 31 and Phases 32–36 remain
-planned.
+chat-streaming write path. Phases 21–26 are implementation-complete; Phases
+27–30 retain the explicit scope limits recorded in [docs/PLAN.md](docs/PLAN.md).
+Linux uses the documented bounded `pread` fallback instead of `io_uring`, and
+continuous batching remains default-off until host/model/backend calibration
+admits it. Phase 31 and Phases 32–36 remain planned.
 
 Phases 37–55 establish the Machine Learning administration layer:
 administrators manage durable, permission-gated records through native web
@@ -697,6 +712,18 @@ directory if you want project-aware context; this is optional — chat also
 works with no project attached. From `/app/chat`, pick the verified model
 from step 4 and send a message.
 
+To save a detail for future conversations, send a message containing only:
+
+```text
+save to memory: I prefer concise answers with C++17 examples.
+```
+
+MasterAI confirms the save directly without running inference. Expand
+**Chats → Memory** in the sidebar to inspect, add, or forget saved details.
+Automatic captures are labelled in their tooltip and use only a small,
+fixed set of self-disclosure phrases; the model does not decide what is
+persisted.
+
 ### Health checks
 
 ```text
@@ -852,6 +879,9 @@ The native service provides browser workflows for:
   first-message loads wait on that same bounded operation, and duplicate
   background warm requests are coalesced
 - Incrementally streamed responses and cancellation
+- Model-independent, per-user remembered chat details with explicit
+  `save to memory:` commands, bounded automatic capture, later-turn recall,
+  and an inspect/add/forget sidebar
 - Bounded UTF-8 source/text attachments
 - Model inventory and suitability, including a cached verification state so
   page loads never block on hashing model files
@@ -862,7 +892,8 @@ The native service provides browser workflows for:
 - Administrative settings and operations
 
 HTTP APIs are versioned under `/api/v1/`. Implemented capability areas include
-authentication, users, projects, chats, models, downloads (including
+authentication, users, projects, chats, user memories (`GET/POST
+/api/v1/memories` and `POST /api/v1/memories/{id}/delete`), models, downloads (including
 `.../model-downloads/{id}/pause`, `.../cancel`, and `.../remove`),
 benchmarks, resources, memory, request metrics, project indexes, MCP
 integrations, IDE connections, and administrator-only Machine Learning
@@ -1120,18 +1151,18 @@ prompt and generation throughput, peak resident memory, quality and
 power/thermal notes, regression decision, and fallback result. Admission is a
 separate action and cannot succeed without a wired native implementation.
 
-A further, scoped-down layer (Phases 21–30) adds asynchronous storage and
-prefetch, hierarchical content caching, tokenization/prompt-fragment caching,
-staged retrieval fan-out, weighted-fair scheduling and backpressure, explicit
-model load/warm-state management, bounded KV-cache lifecycle, topology-aware
-placement decisions, model-tier routing decisions, and an immutable shared-
-buffer/arena memory model with zero-copy chat streaming. These are real,
-test-covered mechanisms, but the plan records which are wired into live paths
-and which remain decision or policy layers awaiting backend integration and
-measurement. None may bypass authorization, integrity, auditing,
-cancellation, quality checks, or memory ceilings.
+The performance layer adds asynchronous/coalesced storage, a hierarchical
+resident/streaming cache, exact token/prefix reuse, staged retrieval fan-out,
+weighted-fair scheduling and calibrated continuous batching, selective model
+pre-touch and warm-state management, bounded KV-cache lifecycle,
+topology-aware placement, model-tier routing, and immutable shared-buffer/
+arena data flow. Phases 21–26 are implementation-complete and wired into the
+live paths described below; backend-specific optimization activation remains
+default-off until the Phase 20 evidence gate admits it. None may bypass
+authorization, integrity, auditing, cancellation, quality checks, or memory
+ceilings.
 
-How a chat request moves through the scoped-down performance layer:
+How a chat request moves through the performance layer:
 
 ```mermaid
 flowchart TD
@@ -1151,12 +1182,13 @@ flowchart TD
     P23 --> P26 --> Runner --> P30_stream --> Client
 ```
 
-Each labeled stage is "Implemented at a scoped-down level" per the status
-table above; the diagram shows where the mechanism sits in the request
-path, not a claim that every listed optimization is fully realized end to
-end. Scheduling, KV governance, topology, and model routing are supporting
-decision layers and are intentionally omitted from this simplified data-flow
-view. See [docs/PLAN.md](docs/PLAN.md) for the itemized scope of each.
+The diagram shows where each mechanism sits in the request path. The Phase 24
+authored Release evaluation measured 213 us total/145 us high case versus 736
+us/401 us for the Phase 16 bounded-fan-out baseline. Continuous batching is
+implemented but remains disabled until host/model/backend-specific evidence
+passes the existing admission gate. Scheduling, KV governance, topology, and
+model routing are supporting layers omitted from this simplified view. See
+[docs/PLAN.md](docs/PLAN.md) for the itemized status and evidence boundaries.
 
 ## Repository layout
 

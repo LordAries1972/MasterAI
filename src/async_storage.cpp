@@ -13,6 +13,7 @@
 #include <deque>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -34,10 +35,14 @@ class BoundedSemaphore final {
 public:
     explicit BoundedSemaphore(const std::size_t permits) : permits_(permits) {}
 
-    void acquire() {
+    bool acquire(const AsyncReadCancellationToken& token) {
         std::unique_lock<std::mutex> lock(mutex_);
-        condition_.wait(lock, [this]() { return permits_ > 0U; });
+        while (permits_ == 0U) {
+            if (token.is_cancelled()) return false;
+            condition_.wait_for(lock, std::chrono::milliseconds(5));
+        }
         --permits_;
+        return true;
     }
 
     void release() {
@@ -58,15 +63,19 @@ private:
 // semaphore permit it acquired.
 class SemaphorePermit final {
 public:
-    explicit SemaphorePermit(BoundedSemaphore& semaphore) : semaphore_(semaphore) {
-        semaphore_.acquire();
+    SemaphorePermit(BoundedSemaphore& semaphore,
+                    const AsyncReadCancellationToken& token)
+        : semaphore_(semaphore), acquired_(semaphore_.acquire(token)) {
     }
-    ~SemaphorePermit() { semaphore_.release(); }
+    ~SemaphorePermit() { if (acquired_) semaphore_.release(); }
     SemaphorePermit(const SemaphorePermit&) = delete;
     SemaphorePermit& operator=(const SemaphorePermit&) = delete;
 
 private:
     BoundedSemaphore& semaphore_;
+    bool acquired_{false};
+public:
+    bool acquired() const noexcept { return acquired_; }
 };
 
 }  // namespace
@@ -201,14 +210,23 @@ std::vector<CoalescedReadPlan> coalesce_read_requests(
 
     for (const auto index : order) {
         const auto& request = requests[index];
-        const auto request_end = request.offset + request.length;
+        const auto request_end =
+            request.length > std::numeric_limits<std::uint64_t>::max() -
+                                 request.offset
+                ? std::numeric_limits<std::uint64_t>::max()
+                : request.offset + request.length;
         if (!plans.empty() && plans.back().path == request.path) {
             auto& plan = plans.back();
             const auto plan_end = plan.offset + plan.length;
             // Merge when the new request starts at or before the current
             // plan's end plus the allowed gap -- i.e. adjacent or
             // overlapping, matching "adjacent...requests" from the spec.
-            if (request.offset <= plan_end + max_gap_bytes) {
+            const auto coalescing_end =
+                max_gap_bytes > std::numeric_limits<std::uint64_t>::max() -
+                                    plan_end
+                    ? std::numeric_limits<std::uint64_t>::max()
+                    : plan_end + max_gap_bytes;
+            if (request.offset <= coalescing_end) {
                 plan.length = std::max(plan_end, request_end) - plan.offset;
                 plan.members.push_back({index, request.offset - plan.offset});
                 continue;
@@ -280,8 +298,12 @@ public:
     AsyncReadResult read_range(const std::filesystem::path& path,
                                const std::uint64_t offset, const std::uint64_t length,
                                AsyncReadCancellationToken& token) {
-        SemaphorePermit permit(in_flight_);
+        SemaphorePermit permit(in_flight_, token);
         AsyncReadResult early;
+        if (!permit.acquired()) {
+            early.cancelled = true;
+            return early;
+        }
         if (token.is_cancelled()) {
             early.cancelled = true;
             return early;
@@ -320,6 +342,16 @@ public:
         // OVERLAPPED operation; worker_loop() reclaims and deletes it once
         // the completion arrives.
         Win32ReadRequest* raw_request = request.release();
+        bool cancellation_requested = false;
+        while (future.wait_for(std::chrono::milliseconds(2)) !=
+               std::future_status::ready) {
+            if (token.is_cancelled() && !cancellation_requested) {
+                // Native cancellation wakes the IOCP completion instead of
+                // waiting for a slow/network read and discarding it later.
+                CancelIoEx(file, &raw_request->overlapped);
+                cancellation_requested = true;
+            }
+        }
         AsyncReadResult result = future.get();
         CloseHandle(file);
         delete raw_request;
@@ -361,7 +393,8 @@ private:
 };
 
 Win32OverlappedFileReader::Win32OverlappedFileReader(const std::size_t queue_depth)
-    : state_(std::make_unique<State>(queue_depth)) {}
+    : state_(std::make_unique<State>(queue_depth)),
+      queue_depth_(std::max<std::size_t>(1U, queue_depth)) {}
 
 Win32OverlappedFileReader::~Win32OverlappedFileReader() = default;
 
@@ -499,7 +532,8 @@ private:
 };
 
 PosixPreadPoolReader::PosixPreadPoolReader(const std::size_t queue_depth)
-    : state_(std::make_unique<State>(queue_depth)) {}
+    : state_(std::make_unique<State>(queue_depth)),
+      queue_depth_(std::max<std::size_t>(1U, queue_depth)) {}
 
 PosixPreadPoolReader::~PosixPreadPoolReader() = default;
 
@@ -585,6 +619,96 @@ std::string read_file_bytes(IAsyncFileReader* reader, const std::filesystem::pat
     const auto actually_read = static_cast<std::size_t>(input.gcount());
     buffer.resize(actually_read);
     return buffer;
+}
+
+AsyncReadBatchResult read_file_ranges(
+    IAsyncFileReader& reader,
+    const std::vector<CoalescedReadRequest>& requests,
+    AsyncReadCancellationToken& token,
+    const std::uint64_t maximum_temporary_bytes,
+    const std::uint64_t maximum_coalescing_gap_bytes) {
+    AsyncReadBatchResult batch;
+    batch.results.resize(requests.size());
+    if (requests.empty()) return batch;
+    if (maximum_temporary_bytes == 0U) {
+        for (auto& result : batch.results) {
+            result.diagnostic = "temporary read memory limit is zero";
+        }
+        return batch;
+    }
+    const auto plans =
+        coalesce_read_requests(requests, maximum_coalescing_gap_bytes);
+    std::size_t cursor = 0U;
+    while (cursor < plans.size() && !token.is_cancelled()) {
+        std::vector<std::size_t> wave;
+        std::uint64_t wave_bytes = 0U;
+        while (cursor < plans.size() && wave.size() < reader.queue_depth()) {
+            const auto& plan = plans[cursor];
+            if (plan.length > maximum_temporary_bytes) {
+                for (const auto& member : plan.members) {
+                    batch.results[member.request_index].diagnostic =
+                        "coalesced read exceeds temporary memory limit";
+                }
+                ++cursor;
+                continue;
+            }
+            if (!wave.empty() && wave_bytes + plan.length >
+                                     maximum_temporary_bytes) {
+                break;
+            }
+            wave.push_back(cursor++);
+            wave_bytes += plan.length;
+        }
+        if (wave.empty()) continue;
+        batch.physical_reads += wave.size();
+        batch.peak_temporary_bytes =
+            std::max(batch.peak_temporary_bytes, wave_bytes);
+        std::vector<std::future<AsyncReadResult>> futures;
+        futures.reserve(wave.size());
+        for (const auto plan_index : wave) {
+            const auto& plan = plans[plan_index];
+            const auto path = plan.path;
+            const auto offset = plan.offset;
+            const auto length = plan.length;
+            futures.push_back(std::async(
+                std::launch::async, [&reader, &token, path, offset, length]() {
+                    return reader.read_range(path, offset, length, token);
+                }));
+        }
+        for (std::size_t index = 0U; index < wave.size(); ++index) {
+            const auto& plan = plans[wave[index]];
+            auto physical = futures[index].get();
+            for (const auto& member : plan.members) {
+                auto& result = batch.results[member.request_index];
+                if (!physical.succeeded || physical.cancelled) {
+                    result.cancelled = physical.cancelled;
+                    result.diagnostic = physical.diagnostic;
+                    continue;
+                }
+                const auto requested_length =
+                    requests[member.request_index].length;
+                if (member.buffer_offset > physical.buffer.size() ||
+                    requested_length > physical.buffer.size() -
+                                           member.buffer_offset) {
+                    result.diagnostic = "coalesced read returned a short range";
+                    continue;
+                }
+                result.buffer = physical.buffer.substr(
+                    static_cast<std::size_t>(member.buffer_offset),
+                    static_cast<std::size_t>(requested_length));
+                result.succeeded = true;
+            }
+        }
+    }
+    batch.cancelled = token.is_cancelled();
+    if (batch.cancelled) {
+        for (auto& result : batch.results) {
+            if (!result.succeeded && result.diagnostic.empty()) {
+                result.cancelled = true;
+            }
+        }
+    }
+    return batch;
 }
 
 }  // namespace masterai

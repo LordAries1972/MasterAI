@@ -110,18 +110,98 @@ std::string to_string(const PreTouchLevel level) {
 }
 
 bool pre_touch_level_backend_actionable(const PreTouchLevel level) noexcept {
-    // See the PreTouchLevel comment in masterai.hpp: only "none" (do
-    // nothing) and "full" (the existing --mlock flag) actually change what
-    // gets launched today.
-    return level == PreTouchLevel::none || level == PreTouchLevel::full;
+    switch (level) {
+        case PreTouchLevel::none:
+        case PreTouchLevel::metadata:
+        case PreTouchLevel::first_use:
+        case PreTouchLevel::layer_window:
+        case PreTouchLevel::full:
+            return true;
+    }
+    return false;
 }
 
 std::optional<std::string> pretouch_gap_reason(const PreTouchLevel level) {
     if (pre_touch_level_backend_actionable(level)) return std::nullopt;
-    return "pre-touch level '" + to_string(level) +
-          "' is accepted policy but has no llama-server flag/adapter yet in "
-          "this build; it currently behaves like 'none' (no extra "
-          "pre-touch) until such a flag/adapter exists";
+    return "unknown pre-touch level '" + to_string(level) + "'";
+}
+
+PreTouchReport pre_touch_model_file(
+    const std::filesystem::path& model_file, const PreTouchLevel level,
+    const std::atomic_bool& cancellation,
+    const std::function<bool()>& should_yield,
+    const std::uint64_t maximum_bytes) {
+    PreTouchReport report;
+    report.level = level;
+    report.file_bytes = std::filesystem::file_size(model_file);
+    if (level == PreTouchLevel::none || report.file_bytes == 0U) return report;
+    const auto started = std::chrono::steady_clock::now();
+    constexpr std::uint64_t page_bytes = 4096U;
+    constexpr std::uint64_t mapping_window_bytes = 4ULL * 1024ULL * 1024ULL;
+    std::uint64_t policy_bytes = 0U;
+    if (maximum_bytes > 0U) {
+        policy_bytes = std::min(maximum_bytes, report.file_bytes);
+    } else if (level == PreTouchLevel::metadata) {
+        policy_bytes = std::min<std::uint64_t>(4ULL * 1024ULL * 1024ULL,
+                                               report.file_bytes);
+    } else if (level == PreTouchLevel::first_use ||
+               level == PreTouchLevel::layer_window) {
+        policy_bytes = std::min<std::uint64_t>(64ULL * 1024ULL * 1024ULL,
+                                               report.file_bytes);
+    } else {
+        policy_bytes = report.file_bytes;
+    }
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+    if (level == PreTouchLevel::layer_window && policy_bytes < report.file_bytes) {
+        const auto windows = std::min<std::uint64_t>(
+            8U, std::max<std::uint64_t>(1U, (policy_bytes + page_bytes - 1U) /
+                                                page_bytes));
+        const auto each = std::min(mapping_window_bytes, policy_bytes / windows);
+        for (std::uint64_t index = 0U; index < windows; ++index) {
+            const auto offset = windows == 1U
+                                    ? 0U
+                                    : index * (report.file_bytes - each) /
+                                          (windows - 1U);
+            const auto length = index + 1U == windows
+                                    ? policy_bytes - each * index
+                                    : each;
+            ranges.emplace_back(offset, length);
+        }
+    } else {
+        for (std::uint64_t offset = 0U; offset < policy_bytes;
+             offset += mapping_window_bytes) {
+            ranges.emplace_back(
+                offset, std::min(mapping_window_bytes, policy_bytes - offset));
+        }
+    }
+    volatile std::uint8_t page_sink = 0U;
+    for (const auto& range : ranges) {
+        if (cancellation.load(std::memory_order_acquire) ||
+            (should_yield && should_yield())) {
+            report.cancelled = true;
+            break;
+        }
+        MappedBufferView mapped(model_file, range.first, range.second);
+        std::uint64_t range_bytes_touched = 0U;
+        for (std::size_t offset = 0U; offset < mapped.size();
+             offset += static_cast<std::size_t>(page_bytes)) {
+            if (cancellation.load(std::memory_order_acquire)) {
+                report.cancelled = true;
+                break;
+            }
+            page_sink = static_cast<std::uint8_t>(page_sink ^ mapped.data()[offset]);
+            ++report.pages_touched;
+            range_bytes_touched += std::min<std::uint64_t>(
+                page_bytes, mapped.size() - offset);
+        }
+        report.bytes_touched += range_bytes_touched;
+        if (report.cancelled) break;
+    }
+    static_cast<void>(page_sink);
+    report.elapsed_microseconds = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count());
+    return report;
 }
 
 // Phase 26: evidence-based load-mode selection. See the declaration in

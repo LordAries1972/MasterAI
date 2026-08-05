@@ -526,11 +526,19 @@ bool WarmModelTracker::apply_idle_timeout(
 WarmupOutcome run_cancellable_warmup(const std::function<bool()>& step,
                                      WarmupCancellationToken& token,
                                      const MemoryBudgetManager& memory,
-                                     const std::size_t maximum_steps) {
+                                     const std::size_t maximum_steps,
+                                     const std::function<bool()>& should_yield) {
     for (std::size_t iteration = 0U; iteration < maximum_steps; ++iteration) {
         if (token.is_cancelled()) return WarmupOutcome::cancelled;
         if (!memory.permits_background_work()) {
             return WarmupOutcome::skipped_low_memory;
+        }
+        // The caller supplies its platform-calibrated composite pressure
+        // signal (interactive demand, thermal state, or rising storage
+        // latency). Keeping those probes outside this primitive avoids
+        // hidden globals and makes every yield decision deterministic.
+        if (should_yield && should_yield()) {
+            return WarmupOutcome::skipped_system_pressure;
         }
         if (step()) return WarmupOutcome::completed;
     }
@@ -801,10 +809,24 @@ void RunnerSupervisor::load(const ModelRecord& model,
     // digest doubles as the tokenizer/vocabulary fingerprint, since a given
     // model file always tokenizes the same text the same way.
     model_sha256_ = model.manifest.model_sha256;
+    active_generations_ = 0U;
+    maximum_parallel_generations_ =
+        tuning.continuous_batching ? parallel_slots : 1U;
     try {
         const auto spec = adapter_.build_launch_spec(
             model, context_length, port, parallel_slots, tuning,
             accelerator_policy);
+        // MasterAI-owned selective pre-touch for levels llama-server cannot
+        // express as flags. Full remains --mlock, avoiding a duplicate full
+        // scan immediately before the backend pins the same pages.
+        if (tuning.pre_touch == PreTouchLevel::metadata ||
+            tuning.pre_touch == PreTouchLevel::first_use ||
+            tuning.pre_touch == PreTouchLevel::layer_window) {
+            std::atomic_bool not_cancelled{false};
+            static_cast<void>(pre_touch_model_file(
+                model.directory / model.manifest.model_file,
+                tuning.pre_touch, not_cancelled));
+        }
         // Phase 26: MappingWeights -- the backend process is about to start
         // reading/mapping the model file per LaunchTuning::load_mode.
         warm_tracker_.enter(WarmModelState::MappingWeights);
@@ -900,21 +922,31 @@ void RunnerSupervisor::unload(const std::uint32_t grace_seconds) noexcept {
     if (forced && !was_failed) warm_tracker_.enter(WarmModelState::Evicting);
     warm_tracker_.enter(WarmModelState::Unloaded);
     metrics_ = {};
+    active_generations_ = 0U;
+    maximum_parallel_generations_ = 1U;
 }
 
-// Returns the configured port only while the runner is ready and optionally
-// reserves it for an exclusive generation request.
+// Returns the configured port while the runner can accept the requested
+// operation. A generation reserves one calibrated parallel slot; ordinary
+// launches retain the historical exclusive limit of one.
 unsigned int RunnerSupervisor::ready_port(const bool mark_busy) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (metrics_.state != RunnerState::ready) {
+    const bool concurrent_ready =
+        metrics_.state == RunnerState::busy &&
+        maximum_parallel_generations_ > 1U;
+    if (metrics_.state != RunnerState::ready && !concurrent_ready) {
         throw std::logic_error("runner is not ready");
     }
     if (mark_busy) {
+        if (active_generations_ >= maximum_parallel_generations_) {
+            throw std::logic_error("runner parallel generation limit reached");
+        }
+        const bool first_generation = active_generations_++ == 0U;
         metrics_.state = RunnerState::busy;
         // Phase 26: Busy is legal from both Ready and Idle (a request can
         // arrive after the idle-timeout sweep already marked the model
         // Idle), so no branching is needed here -- see warm_state_edge().
-        warm_tracker_.enter(WarmModelState::Busy);
+        if (first_generation) warm_tracker_.enter(WarmModelState::Busy);
         warm_tracker_.record_activity(current_epoch_seconds());
     }
     return port_;
@@ -1007,6 +1039,10 @@ GenerationResult RunnerSupervisor::generate(
     if (prompt.empty() || prompt.size() > 16U * 1024U * 1024U ||
         options.max_tokens == 0U || options.max_tokens > 32768U ||
         options.temperature < 0.0 || options.temperature > 2.0 ||
+        options.repeat_penalty < 0.5 || options.repeat_penalty > 2.0 ||
+        options.repeat_last_n > 4096U ||
+        options.top_p <= 0.0 || options.top_p > 1.0 ||
+        options.top_k > 1000U ||
         options.stop_sequences.size() > 16U) {
         throw std::invalid_argument("generation request is outside policy");
     }
@@ -1031,6 +1067,14 @@ GenerationResult RunnerSupervisor::generate(
             std::to_string(options.max_tokens) + ",\"temperature\":" +
             std::to_string(options.temperature) + ",\"seed\":" +
             std::to_string(options.seed) + ",\"stop\":" + stops +
+            // Anti-repetition sampling (see GenerationOptions): without an
+            // explicit repeat penalty some instruct models (notably the
+            // Qwen2.5 family) can loop, restating earlier sentences until
+            // max_tokens runs out instead of ending their turn.
+            ",\"repeat_penalty\":" + std::to_string(options.repeat_penalty) +
+            ",\"repeat_last_n\":" + std::to_string(options.repeat_last_n) +
+            ",\"top_p\":" + std::to_string(options.top_p) +
+            ",\"top_k\":" + std::to_string(options.top_k) +
             ",\"cache_prompt\":" +
             (options.cache_prompt ? "true" : "false");
         if (options.slot_id.has_value()) {
@@ -1063,19 +1107,34 @@ GenerationResult RunnerSupervisor::generate(
             },
             &cancellation, std::chrono::seconds(stall_timeout_seconds));
         if (result.status != 200 && !cancellation.load()) {
-            throw std::runtime_error("runner generation request failed");
+            // Surface the runner's own error body (truncated -- it can carry
+            // a JSON envelope) instead of a bare status: "the request exceeds
+            // the available context size" and similar llama.cpp messages are
+            // exactly what the user needs to see to fix the problem, and the
+            // chat route forwards this text to the browser as `detail`.
+            std::string detail = result.body;
+            if (detail.size() > 400U) detail.resize(400U);
+            throw std::runtime_error(
+                "runner generation request failed (HTTP " +
+                std::to_string(result.status) +
+                (detail.empty() ? ")" : "): " + detail));
         }
         generated.cancelled = cancellation.load();
     } catch (...) {
         std::lock_guard<std::mutex> lock(mutex_);
-        metrics_.state = process_->running() ? RunnerState::ready
-                                             : RunnerState::failed;
+        if (active_generations_ > 0U) --active_generations_;
+        metrics_.state = process_->running()
+                             ? (active_generations_ == 0U ? RunnerState::ready
+                                                          : RunnerState::busy)
+                             : RunnerState::failed;
         // Phase 26: Busy -> Ready and Busy -> Failed are both legal edges
         // (see warm_state_edge()) -- ready_port(true) above already moved
         // the tracker to Busy before this request started.
-        warm_tracker_.enter(metrics_.state == RunnerState::ready
-                                ? WarmModelState::Ready
-                                : WarmModelState::Failed);
+        if (metrics_.state == RunnerState::ready) {
+            warm_tracker_.enter(WarmModelState::Ready);
+        } else if (metrics_.state == RunnerState::failed) {
+            warm_tracker_.enter(WarmModelState::Failed);
+        }
         throw;
     }
     generated.elapsed_microseconds = static_cast<std::uint64_t>(
@@ -1084,11 +1143,16 @@ GenerationResult RunnerSupervisor::generate(
             .count());
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        metrics_.state = process_->running() ? RunnerState::ready
-                                             : RunnerState::failed;
-        warm_tracker_.enter(metrics_.state == RunnerState::ready
-                                ? WarmModelState::Ready
-                                : WarmModelState::Failed);
+        if (active_generations_ > 0U) --active_generations_;
+        metrics_.state = process_->running()
+                             ? (active_generations_ == 0U ? RunnerState::ready
+                                                          : RunnerState::busy)
+                             : RunnerState::failed;
+        if (metrics_.state == RunnerState::ready) {
+            warm_tracker_.enter(WarmModelState::Ready);
+        } else if (metrics_.state == RunnerState::failed) {
+            warm_tracker_.enter(WarmModelState::Failed);
+        }
         if (metrics_.state == RunnerState::ready) {
             warm_tracker_.record_activity(current_epoch_seconds());
         }

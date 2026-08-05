@@ -1,8 +1,8 @@
 // Phase 17: security-partitioned, byte-bounded cache hierarchy.
 // Phase 22: hierarchical (L0-L5) category set, TinyLFU-style bounded
-// admission, segmented (probationary/protected/pinned) eviction, and
-// short-lived negative caching layered on top of the same disk-backed
-// entry format.
+// admission, segmented (streaming/probationary/protected/pinned) eviction,
+// a checksum-validated immutable resident L1, and short-lived negative
+// caching layered on top of the same disk-backed entry format.
 //
 // Every entry is addressed by a CacheKey folding in tenant/user/project
 // identity, the current policy generation, content identity/digest,
@@ -15,7 +15,8 @@
 // and purged.
 //
 // Segmented eviction (Phase 22): each category's entries live in one of
-// three tiers -- probationary (newly admitted / single access), protected
+// four tiers -- streaming (scan/prefetch entries), probationary (newly
+// admitted / single access), protected
 // (promoted after a second access, capped at a fraction of the category
 // budget), or pinned (administrator-exempted from capacity eviction until
 // explicitly unpinned). A one-time scan that floods a category with
@@ -211,6 +212,17 @@ std::string CacheKey::to_cache_id() const {
 
 namespace {
 
+// Rounds up to the next power of two so the sketch can index slots with a
+// single bitwise AND (hash & mask) instead of an integer modulo -- division
+// is one of the slowest ALU operations, and slot_for() runs on every cache
+// get/put admission decision.
+std::size_t round_up_power_of_two(std::size_t value) {
+    if (value < 2U) return 2U;
+    std::size_t result = 1U;
+    while (result < value) result <<= 1U;
+    return result;
+}
+
 // Deliberately simplified single-hash frequency sketch: a fixed-size ring of
 // saturating 4-bit counters (packed two-per-byte) with periodic halving
 // ("aging"), the same reset-under-pressure shape a full multi-hash
@@ -221,7 +233,8 @@ namespace {
 class FrequencySketch {
 public:
     explicit FrequencySketch(std::size_t slots = 8192U)
-        : size_(slots), counters_(new std::atomic<unsigned int>[slots]) {
+        : size_(round_up_power_of_two(slots)), mask_(size_ - 1U),
+          counters_(new std::atomic<unsigned int>[size_]) {
         for (std::size_t i = 0U; i < size_; ++i) {
             counters_[i].store(0U, std::memory_order_relaxed);
         }
@@ -246,7 +259,9 @@ public:
 
 private:
     std::size_t slot_for(const std::string& id) const {
-        return std::hash<std::string>{}(id) % size_;
+        // size_ is always a power of two (see the constructor), so masking
+        // with size_-1 selects a slot without the cost of a modulo.
+        return std::hash<std::string>{}(id) & mask_;
     }
 
     void maybe_age() {
@@ -258,6 +273,8 @@ private:
     }
 
     std::size_t size_;
+    // Always size_ - 1 with size_ a power of two; see slot_for().
+    std::size_t mask_;
     std::unique_ptr<std::atomic<unsigned int>[]> counters_;
     std::atomic<std::uint64_t> total_{0};
 };
@@ -266,7 +283,12 @@ private:
 
 class CacheManager::State final {
 public:
-    enum class Tier { probationary = 0, protected_tier = 1, pinned = 2 };
+    enum class Tier {
+        probationary = 0,
+        protected_tier = 1,
+        pinned = 2,
+        streaming = 3
+    };
 
     struct Entry {
         std::string id;
@@ -276,6 +298,12 @@ public:
         Tier tier{Tier::probationary};
         bool negative{false};
         std::uint64_t expires_epoch{0};
+        // L1 resident object: immutable verified bytes shared by hits until
+        // the persistent file changes. Disk timestamp revalidation below
+        // preserves corruption/tamper quarantine semantics.
+        std::shared_ptr<const std::string> resident_value;
+        std::filesystem::file_time_type persistent_write_time{};
+        bool has_persistent_write_time{false};
         std::chrono::steady_clock::time_point created{
             std::chrono::steady_clock::now()};
     };
@@ -357,9 +385,14 @@ public:
         entry.bytes = header.bytes;
         entry.negative = header.negative;
         entry.expires_epoch = header.expires_epoch;
-        entry.tier = header.tier == 2 ? Tier::pinned
+        entry.tier = header.tier == 3 ? Tier::streaming
+                    : header.tier == 2 ? Tier::pinned
                     : header.tier == 1 ? Tier::protected_tier
                                        : Tier::probationary;
+        std::error_code time_error;
+        entry.persistent_write_time =
+            std::filesystem::last_write_time(path, time_error);
+        entry.has_persistent_write_time = !time_error;
         auto* list = list_for(segment, entry.tier);
         list->push_back(std::move(entry));
         segment.index[list->back().id] = {list, std::prev(list->end())};
@@ -378,6 +411,8 @@ public:
                 return &segment.protected_entries;
             case Tier::pinned:
                 return &segment.pinned_entries;
+            case Tier::streaming:
+                return &segment.entries;
         }
         return &segment.entries;
     }
@@ -439,6 +474,18 @@ public:
     // alone cannot bring the category back under budget. Pinned entries are
     // never touched here.
     void enforce_capacity_locked(CacheCategory category, Segment& segment) {
+        // Streaming entries are deliberately sacrificial: find and evict
+        // them before ordinary probationary data even if a streaming hit
+        // recently moved one toward the MRU end of the shared list.
+        while (segment.used_bytes > policy.maximum_bytes_per_category) {
+            const auto victim = std::find_if(
+                segment.entries.rbegin(), segment.entries.rend(),
+                [](const Entry& entry) { return entry.tier == Tier::streaming; });
+            if (victim == segment.entries.rend()) break;
+            evict_locked(category, segment, &segment.entries,
+                         std::prev(victim.base()));
+            ++segment.evictions;
+        }
         while (segment.used_bytes > policy.maximum_bytes_per_category &&
               !segment.entries.empty()) {
             const auto victim = std::prev(segment.entries.end());
@@ -488,7 +535,18 @@ std::optional<std::string> CacheManager::get(CacheCategory category,
     EntryHeader header;
     std::string value;
     bool read_ok = false;
-    {
+    std::error_code time_error;
+    const auto current_write_time =
+        std::filesystem::last_write_time(path, time_error);
+    const bool resident_valid = iterator->resident_value != nullptr &&
+                                iterator->has_persistent_write_time &&
+                                !time_error &&
+                                current_write_time ==
+                                    iterator->persistent_write_time;
+    if (resident_valid) {
+        value = *iterator->resident_value;
+        read_ok = true;
+    } else {
         std::ifstream input(path, std::ios::binary);
         header = read_entry_header(input);
         input.get();  // consume the header's trailing newline
@@ -498,8 +556,9 @@ std::optional<std::string> CacheManager::get(CacheCategory category,
         }
         read_ok = static_cast<bool>(input);
     }
-    const bool valid =
-        header.valid && read_ok && sha256_hex(value) == header.checksum;
+    const bool valid = resident_valid ||
+                       (header.valid && read_ok &&
+                        sha256_hex(value) == header.checksum);
     if (!valid) {
         // Quarantine-by-deletion: a corrupted or tampered entry is removed
         // and reported as a miss rather than ever being served.
@@ -507,9 +566,18 @@ std::optional<std::string> CacheManager::get(CacheCategory category,
         ++segment.misses;
         return std::nullopt;
     }
+    if (!resident_valid) {
+        iterator->resident_value =
+            std::make_shared<const std::string>(value);
+        std::error_code refreshed_time_error;
+        iterator->persistent_write_time =
+            std::filesystem::last_write_time(path, refreshed_time_error);
+        iterator->has_persistent_write_time = !refreshed_time_error;
+    }
     segment.sketch.record(id);
     ++segment.hits;
-    if (list == &segment.entries) {
+    if (list == &segment.entries &&
+        iterator->tier != CacheManager::State::Tier::streaming) {
         // Second observed access: promote probationary -> protected.
         CacheManager::State::Entry moved = std::move(*iterator);
         moved.tier = CacheManager::State::Tier::protected_tier;
@@ -522,12 +590,30 @@ std::optional<std::string> CacheManager::get(CacheCategory category,
         segment.protected_entries.splice(segment.protected_entries.begin(),
                                          segment.protected_entries, iterator);
     }
+    else if (list == &segment.entries) {
+        // Streaming hit: retain only recency within the sacrificial tier;
+        // never promote it into the protected hot working set.
+        segment.entries.splice(segment.entries.begin(), segment.entries,
+                               iterator);
+    }
     // Pinned entries need no reordering: they are exempt from LRU eviction.
     return value;
 }
 
 void CacheManager::put(CacheCategory category, const CacheKey& key,
                        std::string value) {
+    put_with_disposition(category, key, std::move(value), false);
+}
+
+void CacheManager::put_streaming(CacheCategory category, const CacheKey& key,
+                                 std::string value) {
+    put_with_disposition(category, key, std::move(value), true);
+}
+
+void CacheManager::put_with_disposition(CacheCategory category,
+                                        const CacheKey& key,
+                                        std::string value,
+                                        const bool streaming) {
     const auto id = key.to_cache_id();
     const auto bytes = static_cast<std::uint64_t>(value.size());
     std::lock_guard<std::mutex> lock(state_->mutex);
@@ -536,9 +622,11 @@ void CacheManager::put(CacheCategory category, const CacheKey& key,
         return;  // never large enough to admit, regardless of eviction
     }
     auto existing = segment.index.find(id);
-    CacheManager::State::Tier tier = CacheManager::State::Tier::probationary;
+    CacheManager::State::Tier tier =
+        streaming ? CacheManager::State::Tier::streaming
+                  : CacheManager::State::Tier::probationary;
     if (existing != segment.index.end()) {
-        tier = existing->second.second->tier;
+        if (!streaming) tier = existing->second.second->tier;
         // TinyLFU-style admission gate: if replacing this entry would need
         // to evict a colder-tier entry with the exact same id it can't --
         // same id means same content identity, so this is always a refresh
@@ -561,7 +649,8 @@ void CacheManager::put(CacheCategory category, const CacheKey& key,
         if (victim != nullptr) {
             const auto candidate_frequency = segment.sketch.estimate(id);
             const auto victim_frequency = segment.sketch.estimate(victim->id);
-            if (victim_frequency > candidate_frequency) {
+            if (victim->tier != CacheManager::State::Tier::streaming &&
+                victim_frequency > candidate_frequency) {
                 ++segment.admission_rejections;
                 return;  // best-effort: skip caching rather than evict a hotter entry
             }
@@ -598,6 +687,12 @@ void CacheManager::put(CacheCategory category, const CacheKey& key,
     entry.bytes = bytes;
     entry.memory_lease_id = admission.lease_id;
     entry.tier = tier;
+    entry.resident_value =
+        std::make_shared<const std::string>(std::move(value));
+    std::error_code write_time_error;
+    entry.persistent_write_time = std::filesystem::last_write_time(
+        state_->entry_path(category, id), write_time_error);
+    entry.has_persistent_write_time = !write_time_error;
     auto* list = CacheManager::State::list_for_tier(segment, tier);
     list->push_front(std::move(entry));
     segment.index[id] = {list, list->begin()};
@@ -736,6 +831,11 @@ CacheStatus CacheManager::status() const {
             entry.evictions = segment.evictions;
             entry.protected_entries = segment.protected_entries.size();
             entry.pinned_entries = segment.pinned_entries.size();
+            entry.streaming_entries = static_cast<std::uint64_t>(std::count_if(
+                segment.entries.begin(), segment.entries.end(),
+                [](const CacheManager::State::Entry& item) {
+                    return item.tier == CacheManager::State::Tier::streaming;
+                }));
             entry.admission_rejections = segment.admission_rejections;
             for (const auto* list : {&segment.entries, &segment.protected_entries,
                                      &segment.pinned_entries}) {
@@ -919,6 +1019,8 @@ std::string CacheManager::to_json(const CacheStatus& status) {
                ",\"evictions\":" + std::to_string(value.evictions) +
                ",\"protectedEntries\":" + std::to_string(value.protected_entries) +
                ",\"pinnedEntries\":" + std::to_string(value.pinned_entries) +
+               ",\"streamingEntries\":" +
+               std::to_string(value.streaming_entries) +
                ",\"negativeEntries\":" + std::to_string(value.negative_entries) +
                ",\"admissionRejections\":" +
                std::to_string(value.admission_rejections) +
