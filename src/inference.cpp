@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -1029,6 +1030,96 @@ std::uint64_t RunnerSupervisor::tokenize(const std::string& text) {
                   std::to_string(token_count));
     }
     return token_count;
+}
+
+// Phase 61 learned-embedding boundary. llama.cpp remains an optional,
+// process-isolated adapter: MasterAI sends one bounded string over loopback,
+// accepts only the documented OpenAI-compatible single-vector envelope, and
+// validates every numeric component before returning it to the ML index.
+EmbeddingResult RunnerSupervisor::embed(const std::string& text) {
+    if (text.empty() || text.size() > 1024U * 1024U) {
+        throw std::invalid_argument("embedding input is outside policy");
+    }
+    const auto port = ready_port(true);
+    const auto started = std::chrono::steady_clock::now();
+    EmbeddingResult embedded;
+    try {
+        const auto current = metrics();
+        embedded.model_id = current.model_id;
+        const auto result = local_http(
+            port, "POST", "/v1/embeddings",
+            "{\"input\":\"" + json_escape(text) +
+                "\",\"model\":\"" + json_escape(embedded.model_id) +
+                "\",\"encoding_format\":\"float\"}", {});
+        if (result.status != 200) {
+            std::string detail = result.body;
+            if (detail.size() > 400U) detail.resize(400U);
+            throw std::runtime_error(
+                "runner embedding request failed (HTTP " +
+                std::to_string(result.status) +
+                (detail.empty() ? ")" : "): " + detail));
+        }
+        const auto root = parse_json(result.body);
+        const auto& data = root.required("data").as_array();
+        if (data.size() != 1U) {
+            throw std::runtime_error(
+                "runner embedding response must contain exactly one vector");
+        }
+        const auto& values = data.front().required("embedding").as_array();
+        if (values.empty() || values.size() > 8192U) {
+            throw std::runtime_error(
+                "runner embedding dimensions are outside policy");
+        }
+        double squared = 0.0;
+        embedded.values.reserve(values.size());
+        for (const auto& value : values) {
+            const double component = value.as_double();
+            if (!std::isfinite(component)) {
+                throw std::runtime_error(
+                    "runner embedding contains a non-finite value");
+            }
+            embedded.values.push_back(component);
+            squared += component * component;
+        }
+        if (!std::isfinite(squared) || squared <= 0.0) {
+            throw std::runtime_error(
+                "runner embedding has zero or invalid magnitude");
+        }
+        const double length = std::sqrt(squared);
+        for (auto& value : embedded.values) value /= length;
+        embedded.elapsed_microseconds = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started).count());
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_generations_ > 0U) --active_generations_;
+        metrics_.state = process_->running()
+                             ? (active_generations_ == 0U ? RunnerState::ready
+                                                          : RunnerState::busy)
+                             : RunnerState::failed;
+        if (metrics_.state == RunnerState::ready) {
+            warm_tracker_.enter(WarmModelState::Ready);
+        } else if (metrics_.state == RunnerState::failed) {
+            warm_tracker_.enter(WarmModelState::Failed);
+        }
+        throw;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_generations_ > 0U) --active_generations_;
+        metrics_.state = process_->running()
+                             ? (active_generations_ == 0U ? RunnerState::ready
+                                                          : RunnerState::busy)
+                             : RunnerState::failed;
+        if (metrics_.state == RunnerState::ready) {
+            warm_tracker_.enter(WarmModelState::Ready);
+            warm_tracker_.record_activity(current_epoch_seconds());
+            ++metrics_.requests_completed;
+        } else {
+            warm_tracker_.enter(WarmModelState::Failed);
+        }
+    }
+    return embedded;
 }
 
 GenerationResult RunnerSupervisor::generate(

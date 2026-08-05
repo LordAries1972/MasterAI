@@ -8,7 +8,7 @@
 
 **Project basis:** This guide is derived from the architecture, security rules, model lifecycle, Machine Learning Abilities, and phased implementation status in [PLAN.md](PLAN.md). Where the plan describes a future capability, this guide labels it as planned rather than presenting it as currently executable.
 
-**Last aligned with the plan:** 6 August 2026, through Phase 60 knowledge ingestion, local vector indexing, and grounded retrieval.
+**Last aligned with the plan:** 6 August 2026, through Phase 61 learned embedding adapters and once-per-conversation memory recall.
 
 ---
 
@@ -619,7 +619,8 @@ flowchart TD
 |---|---:|---:|---:|---:|---|
 | Prompting | No | Per request | Only if supplied | Low | Usable through chat |
 | Project context | No | Re-indexed project state | Evidence disclosure is possible | Low to medium | Lexical foundation exists |
-| Local hashing-vector RAG | No | Re-ingest changed documents | Stable source citations | Low to medium | Executable retrieval/context assembly through Phase 60; not neural semantic embeddings or answer generation |
+| Local hashing-vector RAG | No | Re-ingest changed documents | Stable source citations | Low to medium | Executable retrieval/context assembly; authored lexical vectors, not neural semantic embeddings |
+| Local learned-embedding RAG | Uses a verified embedding GGUF for vector generation, not model training | Re-ingest when the source or embedding model changes | Stable source citations plus exact embedding-model provenance | Depends on the installed embedding GGUF and runner configuration | Executable through Phase 61; does not generate an answer |
 | Adapter or LoRA fine-tuning | Yes, partially | Static until retrained | Weak by itself | Medium | Job records exist; executor is not yet implemented |
 | Full fine-tuning | Yes | Static until retrained | Weak by itself | High | Planned executor |
 | Foundation training | Yes, from initialization | Static until retrained | Weak by itself | Extreme | Initial-release non-goal |
@@ -850,12 +851,14 @@ Since Phase 56, the module also contains a **real execution engine** for tabular
 - **Real knowledge ingestion (Phase 58)** — the Subject Knowledge Manager accepts a selected local UTF-8 text, Markdown, CSV, JSON, or JSONL file up to 2 MiB. The server hashes the exact accepted text content with SHA-256, creates overlapping text chunks, and records the source filename, media type, byte count, chunk count, owner, subject, and target vector store.
 - **A populated local vector index (Phase 59)** — every source chunk receives a persisted 128-dimensional vector from MasterAI's independently authored deterministic hashing vectorizer. Index profiles report the actual document count, chunk count, dimensions, and indexed text bytes, and the source/chunk/vector records survive restart together.
 - **Executable grounded retrieval (Phase 60)** — an approved RAG configuration can execute hybrid, vector-only, or keyword-only retrieval against an approved populated vector store. The result contains ranked source chunks, vector and keyword score components, stable citations, exact evidence text, and an assembled context package.
+- **Learned neural embedding inference (Phase 61)** — a vector store can select a verified, ready GGUF from `models/embeddings-code-search/<model-id>/`. MasterAI invokes llama.cpp's local embedding endpoint through the existing isolated runner, validates and L2-normalizes every vector, and persists the exact model id and dimensions. Retrieval refuses to compare vectors made by different models. The authored 128-dimensional hashing vectorizer remains available when a learned model is unnecessary or unavailable.
+- **Once-per-conversation memory recall (Phase 61)** — durable user-memory records are read once when a chat starts and saved as a bounded snapshot on that chat. Later turns and restarts reuse the snapshot instead of querying the durable memory collection again. Facts disclosed during the active chat remain in normal chat history and newly saved durable facts apply automatically to newly created conversations.
 
 Section 10.7 walks through this end to end. The engine's own honest boundary: it trains **tabular** models. It does not fine-tune language models — that remains planned, and the boundary list below still applies to everything it names.
 
 ### 10.2 What must not be assumed yet
 
-At the plan's current Phase 60 boundary, the tabular engine and local retrieval engine described in 10.1 are real, but the following must still not be represented as an operating end-to-end platform:
+At the plan's current Phase 61 boundary, the tabular engine and local retrieval engine described in 10.1 are real, but the following must still not be represented as an operating end-to-end platform:
 
 - training or fine-tuning of **language models** (the real executor covers tabular classification and regression only);
 - external training-framework integration (PyTorch, llama.cpp finetune, ...);
@@ -867,12 +870,12 @@ At the plan's current Phase 60 boundary, the tabular engine and local retrieval 
 - exam administration or computed exam results;
 - automated hyperparameter search trials or best-result selection;
 - executed quantization, pruning, distillation, or other optimization operations;
-- learned neural embedding-model inference (Phase 59 uses a real, deterministic hashing vectorizer rather than a transformer embedding model);
-- LLM answer generation from the Phase 60 context package, automated groundedness judging, or a complete generative RAG answer pipeline;
+- learned-embedding quality or speed without testing the exact installed GGUF on the target hardware (Phase 61 implements the adapter, not a universal quality claim);
+- LLM answer generation from the Phase 60/61 context package, automated groundedness judging, or a complete generative RAG answer pipeline;
 - deployment automation, canary rollout, health monitoring, or automatic rollback;
 - continual learning from user conversations.
 
-Creating a Fine-Tuning Job record still records administrative intent and lifecycle state; it does not adapt a language model. Creating an empty Vector Store record alone does not index anything: a source file must be deliberately ingested through Subject Knowledge Manager. Likewise, a Subject Exam record does not administer questions, a Hyperparameter Search record does not run trials, a Model Optimization record does not quantize anything, and an approved Deployment record does not route a single request — each is a governed statement of intent and approval that a future executor will attach real evidence to. The deliberate executor exceptions through Phase 60 are tabular training, evaluation, prediction and comparison, plus bounded knowledge ingestion, persistent hashing-vector indexing, and evidence-bearing retrieval/context assembly.
+Creating a Fine-Tuning Job record still records administrative intent and lifecycle state; it does not adapt a language model. Creating an empty Vector Store record alone does not index anything: a source file must be deliberately ingested through Subject Knowledge Manager. Likewise, a Subject Exam record does not administer questions, a Hyperparameter Search record does not run trials, a Model Optimization record does not quantize anything, and an approved Deployment record does not route a single request — each is a governed statement of intent and approval that a future executor will attach real evidence to. The deliberate executor exceptions through Phase 61 are tabular training, evaluation, prediction and comparison, bounded knowledge ingestion, authored or learned vector indexing, and evidence-bearing retrieval/context assembly.
 
 ### 10.3 Two model catalogs with different purposes
 
@@ -1008,17 +1011,17 @@ flowchart LR
 This workflow creates retrieval evidence. It does not train a language model and does not ask one to generate an answer.
 
 1. Open **Machine Learning → Subject Knowledge Manager** and create a subject package with a narrow scope. Move it through review according to your governance process.
-2. Open **Machine Learning → Embeddings and Vector Stores**. Create a vector store, name its embedding method clearly (for the built-in executor, use `authored_hashing_vectorizer_v1`), choose `cosine`, and approve the resource.
+2. Open **Machine Learning → Embeddings and Vector Stores**. Create a vector store and choose one embedding method: `authored_hashing_vectorizer_v1`, or a verified Ready model listed from `models/embeddings-code-search/`. Choose `cosine` and approve the resource. A learned model must support pooled embeddings through llama.cpp; choosing a chat-only GGUF is intentionally prevented by the category boundary.
 3. Return to **Subject Knowledge Manager**. Under **Ingest a knowledge file**, choose the subject and vector store from their named selectors. Use the file dialog to select a `.txt`, `.md`, `.csv`, `.json`, or `.jsonl` source no larger than 2 MiB, then select **Ingest and index file**.
 4. Verify the returned filename, SHA-256 digest, byte count, and chunk count. These are execution evidence. A lifecycle label by itself is not.
 5. Return to **Embeddings and Vector Stores** and select **View index**. Confirm that document count, chunk count, indexed byte count, vector dimensions, and method match what you ingested.
 6. Open **Machine Learning → Retrieval-Augmented Generation**. Create a RAG configuration using the populated store and one of the implemented strategies: `hybrid`, `vector`, or `keyword`. Approve the configuration before testing it.
 7. In **Test retrieval**, select the approved configuration, enter a question whose answer exists in the source, choose 1–20 chunks, and run retrieval.
-8. Inspect every returned citation, score, and source excerpt. Confirm the first results actually support the question. The assembled context is suitable input for a later generation step, but Phase 60 deliberately does not fabricate an answer or claim groundedness on a model's behalf.
+8. Inspect every returned citation, score, and source excerpt. Confirm the first results actually support the question. The assembled context is suitable input for a later generation step, but Phase 61 deliberately does not fabricate an answer or claim groundedness on a model's behalf.
 9. Repeat with a question whose answer is absent. Zero results or low-quality evidence is an important negative test; do not treat any retrieved text as proof merely because it ranked first.
 10. When a source becomes obsolete, delete the ingested knowledge document. MasterAI removes its persisted chunks and vectors with it, preventing that source from appearing in later retrieval.
 
-The built-in hashing vectorizer is local, deterministic, restart-stable, and useful for lexical/term-overlap similarity. It is not equivalent to a learned transformer embedding model and should not be described as one. A later adapter may add learned semantic embeddings while retaining the same provenance, approval, and citation boundaries.
+The built-in hashing vectorizer is local, deterministic, restart-stable, and useful for lexical/term-overlap similarity. It is not equivalent to a learned transformer embedding model and should not be described as one. Phase 61's learned adapter can provide semantic embeddings from a suitable verified GGUF while retaining the same approval and citation boundaries. Treat its model id and dimensions as part of the index identity: changing the model requires a new/rebuilt store, and semantic quality must be measured with the exact model and workload you intend to deploy.
 
 ## 11. Sequential lesson: set up an existing model for MasterAI
 
@@ -1308,7 +1311,7 @@ If RAG is selected, the current administration foundation can register the inten
 /app/ml/rag-configs
 ```
 
-Record the implemented search strategy (`hybrid`, `vector`, or `keyword`) and its registered vector store. Phases 58–60 can ingest selected local text files, populate the authored hashing-vector index, rank source chunks, and assemble citation-bearing context as shown in Section 10.8. They do not rewrite queries, use a learned neural embedding model, rerank with a separate model, generate an LLM answer, or judge that answer's groundedness; validate those later-stage behaviors separately.
+Record the implemented search strategy (`hybrid`, `vector`, or `keyword`) and its registered vector store. Phases 58–61 can ingest selected local text files, populate either the authored hashing-vector index or a verified GGUF learned-embedding index, rank source chunks, and assemble citation-bearing context as shown in Section 10.8. They do not rewrite queries, rerank with a separate model, generate an LLM answer, or judge that answer's groundedness; validate those later-stage behaviors separately.
 
 **Exit condition:** The method is justified against simpler alternatives.
 

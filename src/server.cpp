@@ -8,7 +8,9 @@
 #include "json.hpp"
 #include "server_internal.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -355,8 +357,8 @@ public:
         // Phase 57: real model comparison (see ml_engine.cpp).
         ml_model_comparisons = std::make_unique<ModelComparisonStore>(records);
         ml_comparison_results = std::make_unique<ComparisonResultStore>(records);
-        // Phases 58-60: uploaded knowledge sources, their persisted chunks
-        // and hashing vectors, and the index consumed by RAG retrieval.
+        // Phases 58-61: uploaded knowledge sources, their persisted chunks
+        // and authored or learned vectors, and the index consumed by RAG.
         ml_knowledge_index = std::make_unique<KnowledgeIndexStore>(records);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
@@ -2788,20 +2790,20 @@ public:
                         409, "Conflict",
                         "{\"error\":\"ml_vector_store_not_found\"}");
                 }
-                if (vector_store->embedding_model !=
-                        "authored_hashing_vectorizer_v1" ||
-                    vector_store->distance_metric != "cosine") {
+                if (vector_store->distance_metric != "cosine") {
                     return response(
                         409, "Conflict",
                         "{\"error\":\"ml_vector_store_executor_unsupported\","
-                        "\"detail\":\"the local executor requires "
-                        "authored_hashing_vectorizer_v1 with cosine distance\"}");
+                        "\"detail\":\"the local executor requires cosine distance\"}");
                 }
+                const auto vectorize = knowledge_vectorizer(
+                    vector_store->embedding_model);
                 const auto document = ml_knowledge_index->ingest(
                     user->id, subject_id, vector_store_id,
                     root.required("fileName").as_string(),
                     root.required("mediaType").as_string(),
-                    root.required("content").as_string());
+                    root.required("content").as_string(),
+                    vector_store->embedding_model, vectorize);
                 audit.append("ml.knowledge.ingest", user->id, "success",
                              document.id);
                 return response(201, "Created",
@@ -2878,14 +2880,11 @@ public:
                     "{\"error\":\"ml_vector_store_not_approved\",\"detail\":"
                     "\"the RAG configuration needs an approved vector store\"}");
             }
-            if (vector_store->embedding_model !=
-                    "authored_hashing_vectorizer_v1" ||
-                vector_store->distance_metric != "cosine") {
+            if (vector_store->distance_metric != "cosine") {
                 return response(
                     409, "Conflict",
                     "{\"error\":\"ml_vector_store_executor_unsupported\","
-                    "\"detail\":\"the local executor requires "
-                    "authored_hashing_vectorizer_v1 with cosine distance\"}");
+                    "\"detail\":\"the local executor requires cosine distance\"}");
             }
             try {
                 auto root = parse_json(request.body);
@@ -2897,10 +2896,13 @@ public:
                     }
                     top_k = static_cast<std::size_t>(requested);
                 }
+                const auto vectorize = knowledge_vectorizer(
+                    vector_store->embedding_model);
                 const auto result = retrieve_knowledge(
                     *ml_knowledge_index, config->vector_store_id,
                     config->search_strategy,
-                    root.required("query").as_string(), top_k);
+                    root.required("query").as_string(), top_k,
+                    vector_store->embedding_model, vectorize);
                 const auto result_json = rag_retrieval_result_json(result);
                 audit.append("ml.rag.query", user->id, "success", id);
                 return response(200, "OK",
@@ -4415,7 +4417,14 @@ private:
                 return response(409, "Conflict",
                                 "{\"error\":\"model_not_ready\"}");
             }
-            const auto chat = chats->create(user.id, project_id, model_id);
+            // Phase 61 performs the one durable-memory read at conversation
+            // start. The bounded snapshot is stored with the chat and reused
+            // by every turn; later memory changes apply to newly created
+            // chats instead of repeatedly changing an active conversation.
+            const auto memory_context =
+                user_memories->recall_context(user.id, 4096U);
+            const auto chat = chats->create(
+                user.id, project_id, model_id, memory_context);
             audit.append("chat.create", user.id, "success", chat.id);
             warm_model_async(model_id);
             return response(201, "Created",
@@ -4485,6 +4494,37 @@ private:
             if (model.manifest.id == model_id) return model;
         }
         return std::nullopt;
+    }
+
+    // Phase 61 resolves VectorStore::embedding_model into one of exactly two
+    // executor paths. The authored method stays dependency-free; any other
+    // value must be the id of a verified GGUF in the dedicated embeddings
+    // category and is executed only by the existing loopback llama.cpp
+    // supervisor. The lambda rechecks the loaded model for every chunk so a
+    // chat request cannot silently make vectors with a different model.
+    KnowledgeEmbeddingFunction knowledge_vectorizer(
+        const std::string& embedding_model) const {
+        if (embedding_model == "authored_hashing_vectorizer_v1") return {};
+        if (inference == nullptr) {
+            throw std::runtime_error(
+                "the learned embedding backend is not configured");
+        }
+        const auto model = find_model(embedding_model);
+        if (!model || model->state != ModelState::ready ||
+            model->manifest.category != "embeddings-code-search") {
+            throw std::runtime_error(
+                "embedding model must be a verified ready model in the "
+                "embeddings-code-search category");
+        }
+        return [this, embedding_model](const std::string& text) {
+            ensure_model_loaded(embedding_model);
+            const auto result = inference->embed(text);
+            if (result.model_id != embedding_model) {
+                throw std::runtime_error(
+                    "embedding runner model changed during execution");
+            }
+            return result.values;
+        };
     }
 
     // Shared by create_chat() and set_chat_model(): both must reject a
@@ -4672,6 +4712,84 @@ private:
         std::string stop_sequence;
     };
 
+    // True for architectures whose chat template/tokenizer actually reacts
+    // to a reasoning directive placed in the conversation text: Qwen's
+    // documented "/think" and "/no_think" turn suffixes, and gpt-oss's
+    // harmony-style "Reasoning effort: <level>" convention (see
+    // apply_reasoning_directive() below -- this project does not implement
+    // the full Harmony format, see chat_template_for_architecture(), so this
+    // is an approximation of it, not a faithful reproduction). Every other
+    // architecture (llama, gemma, phi3, yi, and anything unrecognized) has
+    // no such hook, so effort/thinking are applied as ordinary sampling
+    // presets instead (see apply_sampling_preset()).
+    static bool architecture_supports_reasoning_directives(
+        const std::string& architecture) {
+        std::string lower = architecture;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) {
+                           return static_cast<char>(std::tolower(c));
+                       });
+        return lower.find("qwen") != std::string::npos ||
+               lower.find("gpt-oss") != std::string::npos;
+    }
+
+    // Folds the user's chosen effort/thinking preference into the latest
+    // turn's own text for a reasoning-capable architecture (see
+    // architecture_supports_reasoning_directives()) -- there is no separate
+    // system-message hook in assemble_chat_prompt()'s template tables, and
+    // both conventions this approximates are themselves ordinarily placed
+    // in-conversation, not in a dedicated system role. Only ever called for
+    // an architecture that passed the check above.
+    static std::string apply_reasoning_directive(
+        const std::string& architecture, const std::string& effort,
+        const std::string& thinking, const std::string& content) {
+        std::string lower = architecture;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) {
+                           return static_cast<char>(std::tolower(c));
+                       });
+        if (lower.find("gpt-oss") != std::string::npos) {
+            std::string header = "Reasoning effort: " + effort + ".";
+            header += (thinking == "on")
+                          ? " Show your reasoning before the final answer."
+                          : " Respond directly without showing your "
+                            "reasoning.";
+            return header + "\n\n" + content;
+        }
+        // Qwen family: the effort level becomes a depth hint alongside the
+        // model's own documented /think /no_think turn suffix.
+        std::string depth =
+            effort == "high"
+                ? "Think through this thoroughly, step by step."
+                : (effort == "low" ? "Keep your reasoning brief."
+                                   : "Think it through at a normal depth.");
+        return content + (thinking == "on" ? (" " + depth + " /think")
+                                            : " /no_think");
+    }
+
+    // Effort/thinking fallback for every architecture that has no reasoning
+    // hook of its own (see architecture_supports_reasoning_directives()):
+    // adjusts ordinary sampling instead, so the two settings still do
+    // something honest rather than silently no-op-ing. "medium" effort
+    // leaves GenerationOptions' own defaults untouched.
+    static void apply_sampling_preset(GenerationOptions& options,
+                                      const std::string& effort,
+                                      const std::string& thinking) {
+        if (effort == "low") {
+            options.temperature = 0.15;
+            options.top_p = 0.85;
+        } else if (effort == "high") {
+            options.temperature = 0.6;
+            options.top_p = 0.97;
+        }
+        if (thinking == "on") {
+            options.temperature = std::max(0.0, options.temperature - 0.05);
+            options.max_tokens = static_cast<unsigned int>(std::min<std::uint64_t>(
+                static_cast<std::uint64_t>(options.max_tokens) * 5ULL / 4ULL,
+                32768ULL));
+        }
+    }
+
     ChatTemplate chat_template_for_architecture(
         const std::string& architecture) const {
         if (architecture == "phi3") {
@@ -4744,8 +4862,13 @@ private:
     std::string assemble_inference_prompt(
         const JsonValue& root, const ChatRecord& chat,
         const UserRecord& user) const {
+        // Bound matches send_chat_message()'s own parse of this same body:
+        // content, attachmentIds, and the optional effort/thinking fields.
+        // Only content/attachmentIds are read here -- effort/thinking are
+        // applied separately, against the model's architecture, once it's
+        // been resolved (see send_chat_message()).
         if (root.as_object().size() < 1U ||
-            root.as_object().size() > 2U) {
+            root.as_object().size() > 4U) {
             throw std::runtime_error("unexpected message field");
         }
         std::string result = root.required("content").as_string();
@@ -4827,9 +4950,24 @@ private:
         const std::string prefix{"/api/v1/chats/"};
         const auto chat_id = request.target.substr(
             prefix.size(), request.target.size() - prefix.size() - 9U);
-        const auto chat = chats->find_for_owner(chat_id, user.id);
+        auto chat = chats->find_for_owner(chat_id, user.id);
         if (!chat) {
             return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
+        }
+
+        // Chats created before Phase 61 have no memory snapshot. Initialize
+        // such a chat once on its first post-upgrade turn, persist even an
+        // empty result, then use only the cached snapshot thereafter.
+        if (!chat->memory_context_initialized) {
+            const auto memory_context =
+                user_memories->recall_context(user.id, 4096U);
+            static_cast<void>(chats->initialize_memory_context(
+                chat_id, user.id, memory_context));
+            chat = chats->find_for_owner(chat_id, user.id);
+            if (!chat) {
+                return response(404, "Not Found",
+                                "{\"error\":\"chat_not_found\"}");
+            }
         }
 
         // Parse and validate the user's message before touching the runner.
@@ -4838,15 +4976,34 @@ private:
         // configured or the selected model is currently unloaded.
         JsonValue root;
         std::string prompt;
+        // Effort/thinking are an optional per-message reasoning preference
+        // the composer's model settings panel sends alongside content (see
+        // application_script()'s streamMessage()) -- default to "medium"/
+        // "off" for any older client or direct API caller that omits them,
+        // so this remains backward compatible.
+        std::string effort = "medium";
+        std::string thinking = "off";
         try {
             root = parse_json(request.body);
             if (root.as_object().size() < 1U ||
-                root.as_object().size() > 2U) {
+                root.as_object().size() > 4U) {
                 throw std::runtime_error("unexpected message field");
             }
             prompt = root.required("content").as_string();
             if (prompt.empty()) {
                 throw std::runtime_error("empty message");
+            }
+            if (const auto* effort_field = root.optional("effort")) {
+                effort = effort_field->as_string();
+                if (effort != "low" && effort != "medium" && effort != "high") {
+                    throw std::runtime_error("invalid effort");
+                }
+            }
+            if (const auto* thinking_field = root.optional("thinking")) {
+                thinking = thinking_field->as_string();
+                if (thinking != "off" && thinking != "on") {
+                    throw std::runtime_error("invalid thinking level");
+                }
             }
         } catch (const std::exception&) {
             return response(400, "Bad Request",
@@ -4944,9 +5101,9 @@ private:
             // clearly delimited and under a strict byte budget, so every
             // model can use relevant facts without granting persisted text
             // a higher instruction priority than the live request.
-            const auto recalled = user_memories->recall_context(user.id, 4096U);
-            if (!recalled.empty()) {
-                inference_prompt = recalled + "\n[Current user message]\n" +
+            if (!chat->memory_context.empty()) {
+                inference_prompt = chat->memory_context +
+                                   "\n[Current user message]\n" +
                                    inference_prompt;
                 if (inference_prompt.size() > configuration.max_request_bytes) {
                     throw std::runtime_error(
@@ -4994,6 +5151,20 @@ private:
             // (see chat_template_for_architecture()) from free-completing an
             // unrelated document instead of answering.
             const auto model = find_model(chat->model_id);
+            // Effort/thinking (see the composer's model settings panel):
+            // a reasoning-capable architecture gets a real directive folded
+            // into this turn's own text before the chat template wraps it;
+            // every other architecture instead gets a sampling-preset
+            // adjustment below, once GenerationOptions exists.
+            const bool reasoning_capable =
+                model.has_value() &&
+                architecture_supports_reasoning_directives(
+                    model->manifest.architecture);
+            if (reasoning_capable) {
+                inference_prompt = apply_reasoning_directive(
+                    model->manifest.architecture, effort, thinking,
+                    inference_prompt);
+            }
             std::string stop_sequence;
             const auto generation_prompt = assemble_chat_prompt(
                 model ? model->manifest.architecture : std::string(),
@@ -5001,6 +5172,9 @@ private:
             chats->append(chat_id, ChatRole::user, prompt);
             GenerationOptions options;
             options.max_tokens = configuration.chat_max_reply_tokens;
+            if (!reasoning_capable) {
+                apply_sampling_preset(options, effort, thinking);
+            }
             if (!stop_sequence.empty()) {
                 options.stop_sequences.push_back(stop_sequence);
             }

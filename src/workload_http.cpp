@@ -250,6 +250,8 @@ std::string WorkloadHttpController::model_inventory() const {
                     json_escape(model.manifest.display_name) +
                     "\",\"category\":\"" +
                     json_escape(model.manifest.category) +
+                    "\",\"architecture\":\"" +
+                    json_escape(model.manifest.architecture) +
                     "\",\"state\":\"" + model_state(model.state) +
                     "\",\"diagnostic\":\"" +
                     json_escape(model.diagnostic) +

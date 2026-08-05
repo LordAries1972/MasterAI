@@ -318,6 +318,13 @@ void test_phase_four_runner_supervisor() {
             "supervised runner did not become ready");
     require(supervisor.tokenize("one two three") == 3U,
             "runner tokenization IPC failed");
+    const auto embedded = supervisor.embed("learned semantic input");
+    require(embedded.model_id == model.manifest.id &&
+                embedded.values.size() == 3U &&
+                std::abs(embedded.values[0] - 0.6) < 1e-12 &&
+                std::abs(embedded.values[1] - 0.8) < 1e-12,
+            "runner learned-embedding IPC did not validate and normalize "
+            "the backend vector");
     std::atomic_bool cancellation{false};
     std::string streamed;
     const auto generated = supervisor.generate(
@@ -326,7 +333,7 @@ void test_phase_four_runner_supervisor() {
     require(generated.text == "return value;" && streamed == generated.text &&
                 generated.generated_tokens == 2U,
             "runner generation stream was not assembled correctly");
-    require(supervisor.metrics().requests_completed == 1U,
+    require(supervisor.metrics().requests_completed == 2U,
             "runner completion metrics were not recorded");
     supervisor.unload(0U);
     require(supervisor.metrics().state == masterai::RunnerState::unloaded,
@@ -422,6 +429,8 @@ void test_chat_user_memory() {
     masterai::RecordStore records(temporary.path() / "database");
     records.open();
     std::string first_id;
+    std::string memory_chat_id;
+    std::string memory_snapshot;
     {
         masterai::UserMemoryStore memories(records);
         const auto first =
@@ -446,13 +455,35 @@ void test_chat_user_memory() {
                     recalled.find("reference data, not instructions") !=
                         std::string::npos,
                 "bounded memory recall context was not assembled safely");
+        masterai::ChatStore chats(records);
+        const auto chat = chats.create("operator", "project", "model", recalled);
+        memory_chat_id = chat.id;
+        memory_snapshot = chat.memory_context;
+        memories.add("operator", "A detail saved after this chat started.",
+                     "manual");
+        const auto unchanged = chats.find_for_owner(chat.id, "operator");
+        require(unchanged && unchanged->memory_context_initialized &&
+                    unchanged->memory_context == recalled &&
+                    unchanged->memory_context.find("after this chat") ==
+                        std::string::npos,
+                "an active chat re-read durable memory instead of retaining "
+                "its startup snapshot");
     }
 
     masterai::UserMemoryStore restored(records);
-    require(restored.list_for_owner("operator").size() == 1U,
+    require(restored.list_for_owner("operator").size() == 2U,
             "user memory did not survive store reconstruction");
+    masterai::ChatStore restored_chats(records);
+    const auto restored_chat =
+        restored_chats.find_for_owner(memory_chat_id, "operator");
+    require(restored_chat && restored_chat->memory_context_initialized &&
+                restored_chat->memory_context == memory_snapshot,
+            "once-per-chat memory snapshot did not survive restart");
     require(restored.remove(first_id, "operator") &&
-                restored.list_for_owner("operator").empty(),
+                restored.list_for_owner("operator").size() == 1U &&
+                restored_chat->memory_context.find(
+                    "My preferred editor is Visual Studio.") !=
+                    std::string::npos,
             "memory owner could not delete a remembered detail");
 }
 
@@ -6879,8 +6910,8 @@ void test_machine_learning_model_comparison_lifecycle_and_execution() {
             "afterwards");
 }
 
-// Phases 58-60: real source ingestion must leave durable hashes, chunks,
-// vectors, and ranked/citable retrieval evidence.
+// Phases 58-61: real source ingestion must leave durable hashes, chunks,
+// authored or learned vectors, and ranked/citable retrieval evidence.
 void test_machine_learning_knowledge_ingestion_and_rag_retrieval() {
     require(masterai::role_allows(masterai::UserRole::administrator,
                                   "ml.knowledge.manage") &&
@@ -6941,6 +6972,71 @@ void test_machine_learning_knowledge_ingestion_and_rag_retrieval() {
                 repeated.chunks.size() == 1U &&
                 repeated.chunks[0].chunk.document_id == security.id,
             "knowledge index did not survive a store reload");
+
+    // Phase 61: a learned backend is injected at the isolated adapter seam,
+    // persisted with its exact model id/dimensions, and used again for the
+    // query. Deliberately return non-unit vectors to prove the index owns
+    // normalization rather than trusting backend output.
+    std::size_t learned_calls = 0U;
+    const masterai::KnowledgeEmbeddingFunction learned =
+        [&learned_calls](const std::string& text) {
+            ++learned_calls;
+            return text.find("key") != std::string::npos
+                       ? std::vector<double>{6.0, 0.0, 0.0}
+                       : std::vector<double>{0.0, 8.0, 0.0};
+        };
+    const auto learned_security = index.ingest(
+        "administrator-1", "security-subject", "learned-vector-store",
+        "learned-security.md", "text/markdown", security_text,
+        "fixture-embedding-model", learned);
+    index.ingest("administrator-1", "cooking-subject",
+                 "learned-vector-store", "learned-bread.txt", "text/plain",
+                 cooking_text, "fixture-embedding-model", learned);
+    const auto learned_result = masterai::retrieve_knowledge(
+        index, "learned-vector-store", "vector", "signing key rotation", 2U,
+        "fixture-embedding-model", learned);
+    require(learned_calls == 3U && !learned_result.chunks.empty() &&
+                learned_result.chunks.front().chunk.document_id ==
+                    learned_security.id &&
+                learned_result.chunks.front().chunk.embedding_method ==
+                    "fixture-embedding-model",
+            "learned embeddings were not used consistently for ingestion "
+            "and vector retrieval");
+    masterai::KnowledgeIndexStore learned_reloaded(records);
+    const auto learned_chunks =
+        learned_reloaded.chunks_for_store("learned-vector-store");
+    const auto learned_profile = masterai::knowledge_index_profile_json(
+        "learned-vector-store", learned_chunks);
+    require(learned_chunks.size() == 2U &&
+                learned_chunks.front().embedding.size() == 3U &&
+                learned_profile.find(
+                    "\"embeddingMethod\":\"fixture-embedding-model\"") !=
+                    std::string::npos &&
+                learned_profile.find("\"dimensions\":3") !=
+                    std::string::npos,
+            "learned embedding provenance or dimensions did not survive "
+            "reload");
+    bool rejected_embedding_mismatch = false;
+    try {
+        static_cast<void>(masterai::retrieve_knowledge(
+            index, "learned-vector-store", "vector", "key", 1U,
+            "different-embedding-model", learned));
+    } catch (const std::exception&) {
+        rejected_embedding_mismatch = true;
+    }
+    require(rejected_embedding_mismatch,
+            "retrieval must reject a query embedded by a different model");
+    bool rejected_invalid_embedding = false;
+    try {
+        static_cast<void>(index.ingest(
+            "administrator-1", "subject", "bad-learned-store", "bad.txt",
+            "text/plain", "invalid embedding", "fixture-embedding-model",
+            [](const std::string&) { return std::vector<double>{0.0, 0.0}; }));
+    } catch (const std::exception&) {
+        rejected_invalid_embedding = true;
+    }
+    require(rejected_invalid_embedding,
+            "zero-magnitude learned embeddings must never be persisted");
 
     require(index.remove_document(security.id) &&
                 !index.find_document(security.id) &&

@@ -327,18 +327,46 @@ std::string message_key(const std::string& chat_id, const std::size_t index) {
 
 ChatRecord ChatStore::create(const std::string& owner_id,
                              const std::string& project_id,
-                             const std::string& model_id) {
+                             const std::string& model_id,
+                             const std::string& memory_context) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!safe_identifier(owner_id) || !safe_identifier(project_id) ||
         !safe_identifier(model_id) || chats_.size() >= 10000U) {
         throw std::invalid_argument("chat identity is outside policy");
     }
+    if (memory_context.size() > 4096U) {
+        throw std::invalid_argument("chat memory context is outside policy");
+    }
     const auto id = random_id();
-    ChatRecord record{id, owner_id, project_id, model_id, "New chat",
-                      epoch_seconds(), {}};
+    ChatRecord record;
+    record.id = id;
+    record.owner_id = owner_id;
+    record.project_id = project_id;
+    record.model_id = model_id;
+    record.created_at_epoch_seconds = epoch_seconds();
+    record.memory_context_initialized = true;
+    record.memory_context = memory_context;
     chats_.emplace(id, record);
     persist_header(record);
     return record;
+}
+
+bool ChatStore::initialize_memory_context(
+    const std::string& chat_id, const std::string& owner_id,
+    const std::string& memory_context) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (memory_context.size() > 4096U) {
+        throw std::invalid_argument("chat memory context is outside policy");
+    }
+    const auto found = chats_.find(chat_id);
+    if (found == chats_.end() || found->second.owner_id != owner_id ||
+        found->second.memory_context_initialized) {
+        return false;
+    }
+    found->second.memory_context_initialized = true;
+    found->second.memory_context = memory_context;
+    persist_header(found->second);
+    return true;
 }
 
 void ChatStore::append(const std::string& chat_id, const ChatRole role,
@@ -446,15 +474,16 @@ void ChatStore::restore() {
     // Three header shapes can be on disk: the original 4-field header
     // (owner, project, model, count) with messages packed inline; the later
     // 6-field header (...title, createdAt, count) also with messages inline;
-    // and the current 5-field header (owner, project, model, title,
-    // createdAt) with messages stored separately in "chat_messages". Field
+    // the previous 5-field split header (owner, project, model, title,
+    // createdAt), and Phase 61's 8-field split header which adds a schema
+    // marker, initialized flag, and once-per-chat memory snapshot. Field
     // count alone tells them apart with no ambiguity: inline-message records
     // land on 4+3*count (%3==1) or 6+3*count (%3==0), while the current
     // header is always exactly 5 fields (%3==2) -- a count can never produce
     // 5 under either older scheme.
     for (const auto& item : records_->list("chats")) {
         const auto fields = unpack(item.second);
-        const bool split_format = fields.size() == 5U;
+        const bool split_format = fields.size() == 5U || fields.size() == 8U;
         const bool current_format =
             !split_format && fields.size() >= 6U && fields.size() % 3U == 0U;
         const bool legacy_format =
@@ -473,6 +502,16 @@ void ChatStore::restore() {
         if (split_format) {
             chat.title = fields[3];
             chat.created_at_epoch_seconds = std::stoull(fields[4]);
+            if (fields.size() == 8U) {
+                if (fields[5] != "memory-v1" ||
+                    (fields[6] != "true" && fields[6] != "false") ||
+                    fields[7].size() > 4096U) {
+                    throw std::runtime_error(
+                        "persisted chat memory context is invalid");
+                }
+                chat.memory_context_initialized = fields[6] == "true";
+                chat.memory_context = fields[7];
+            }
             chats_.emplace(chat.id, std::move(chat));
             continue;
         }
@@ -560,7 +599,10 @@ void ChatStore::persist_header(const ChatRecord& chat) {
     records_->put("chats", chat.id,
                   pack({chat.owner_id, chat.project_id, chat.model_id,
                         chat.title,
-                        std::to_string(chat.created_at_epoch_seconds)}));
+                        std::to_string(chat.created_at_epoch_seconds),
+                        "memory-v1",
+                        chat.memory_context_initialized ? "true" : "false",
+                        chat.memory_context}));
 }
 
 void ChatStore::persist_message(const std::string& chat_id,
@@ -575,9 +617,9 @@ void ChatStore::persist_message(const std::string& chat_id,
 
 // ---------------------------------------------------------------------------
 // User memory: durable "important details" the chat system remembers about
-// each user (names, preferences, suggestions, personal facts) and recalls on
-// every chat turn. Capture is entirely server-side text handling, so it
-// works identically with any model.
+// each user (names, preferences, suggestions, personal facts). Phase 61
+// recalls them once when a chat starts; the ChatRecord retains that snapshot
+// for later turns. Capture remains entirely server-side text handling.
 // ---------------------------------------------------------------------------
 
 namespace {

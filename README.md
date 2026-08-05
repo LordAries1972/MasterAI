@@ -147,12 +147,25 @@ The current source includes native implementations for:
   bubbles show per-message token counts (prompt tokens on the query,
   generated tokens on the response), and reply budgets are fitted to the
   model's context window up front so oversized attachments produce a clear
-  error instead of a runner failure or context-shift repetition loop. Each
+  error instead of a runner failure or context-shift repetition loop. Replies
+  render Markdown links and bare URLs as real clickable anchors. The model
+  picker carries a per-model Effort/Thinking settings panel (opens
+  automatically on selection, persisted in the browser and restored whenever
+  that model is chosen again): for a reasoning-capable architecture (Qwen,
+  gpt-oss) the choice is sent to the model as an explicit reasoning
+  directive, and for every other architecture it is instead applied as a
+  sampling-preset adjustment (temperature/top_p/reply length), so the
+  setting is never a silent no-op. System-error notifications are a
+  contained, auto-fading floating bubble with a copy button rather than a
+  full-width banner. Each
   user also has durable, owner-scoped chat memory: `save to memory: <detail>`
   stores a detail without invoking the model, common self-disclosures (names,
   preferences, contact details, work, and suggestions) are captured by
-  deterministic bounded rules, and relevant saved details are supplied as
-  user reference data on later turns regardless of the selected model. The
+  deterministic bounded rules, and relevant saved details are read once when
+  a conversation starts, then retained as bounded user reference data on that
+  chat for later turns and restarts regardless of the selected model. New
+  durable details apply automatically to newly created conversations; an
+  active conversation retains its own history and startup snapshot. The
   collapsed Memory sidebar makes every capture visible and removable.
 - Resumable, journaled, hash-verified model downloads with quarantine on
   integrity failure.
@@ -320,16 +333,17 @@ The current source includes native implementations for:
   configurations, instruction and synthetic-data records, vector stores,
   RAG configurations, subject exams, hyperparameter searches,
   model-optimization runs, training checkpoints, and deployments — plus a
-  real execution engine (Phases 56-60) that ingests validated CSV dataset
+  real execution engine (Phases 56-61) that ingests validated CSV dataset
   content, trains tabular models by gradient descent with genuine loss
   curves and held-out metrics, captures measured-loss checkpoints, scores
   trained models with real evaluation metrics, compares two trained models
   on a shared benchmark with a measured winner, serves live predictions
   from persisted weight artifacts, ingests and hashes approved text files,
-  persists a populated authored hashing-vector index, and executes ranked,
-  cited retrieval/context assembly. LLM fine-tuning, learned neural embedding
-  inference, generative RAG answers, exam administration, hyperparameter
-  search execution, and deployment promotion do not run yet.
+  persists either authored hashing vectors or validated learned vectors from
+  a verified local embedding GGUF, and executes ranked, cited retrieval/
+  context assembly. LLM fine-tuning, generative RAG answers, exam
+  administration, hyperparameter search execution, and deployment promotion
+  do not run yet.
 
 Implementation does not automatically mean operational certification. The next
 section records the distinction.
@@ -337,7 +351,7 @@ section records the distinction.
 ## Project status
 
 Status below reflects the evidence recorded in
-[docs/PLAN.md](docs/PLAN.md) on **5 August 2026**.
+[docs/PLAN.md](docs/PLAN.md) on **6 August 2026**.
 
 | Phase | Area | Status |
 |---:|---|---|
@@ -403,6 +417,7 @@ Status below reflects the evidence recorded in
 | 58 | Knowledge-file ingestion | Implemented; bounded text upload, SHA-256 provenance, durable chunk records |
 | 59 | Local embedding and vector indexing | Implemented; authored 128-dimensional hashing vectors and index profiles |
 | 60 | RAG retrieval and grounded context assembly | Implemented; approved-config query execution with ranked chunks and citations |
+| 61 | Learned embeddings and once-per-chat memory recall | Implemented; isolated llama.cpp embedding adapter, durable vector provenance, and retained chat memory snapshots |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -463,15 +478,23 @@ Phase 57 extends that engine with Model Comparison: a baseline and a
 candidate model are both evaluated against one shared benchmark dataset,
 and the stored verdict reports both metric sets, the primary-metric delta,
 and the measured winner.
-Phases 58–60 add a second evidence-producing path: administrators select a
+Phases 58–61 add a second evidence-producing path: administrators select a
 local text, Markdown, CSV, JSON, or JSONL file in the Subject Knowledge
 Manager; MasterAI bounds and hashes the accepted UTF-8 text content, creates overlapping
 chunks, persists authored 128-dimensional hashing vectors, and exposes a
 measured vector-store profile. An approved RAG configuration can then run
 hybrid, vector, or keyword retrieval and return ranked source chunks plus a
 citation-ready context package.
-The honest remaining boundary: these authored hashing vectors are a real
-local index, not a learned neural embedding model, and the RAG executor
+Phase 61 lets a Vector Store instead select a verified, ready GGUF from the
+`embeddings-code-search` category. MasterAI loads it through the existing
+isolated llama.cpp runner, validates and normalizes its learned vectors, and
+persists the exact model and dimensions so retrieval cannot silently mix
+embedding spaces. Durable user-memory records are also recalled only when a
+conversation starts; the bounded snapshot is retained with that chat and
+reused on later turns and after restart.
+The honest remaining boundary: the authored fallback is still lexical
+feature hashing, no learned embedding GGUF is installed in this checkout for
+model-specific semantic-quality or latency evidence, and the RAG executor
 retrieves and assembles grounded context but does not generate an LLM answer.
 LLM fine-tuning still does not execute. For the concepts, current workflows, exact capability boundary,
 and a sequential teaching guide, read
@@ -600,6 +623,21 @@ cause of the two errors new installs hit first:
 `model_not_ready` (no model has passed verification yet). Do the steps in
 order.
 
+> [!NOTE]
+> **Where to get `llama-server` / `llama-server.exe`.** MasterAI supervises
+> this executable as a separate, process-isolated runner — it does not
+> vendor, bundle, or build it. Prebuilt archives (CPU, CUDA, Vulkan, and HIP
+> builds, for Windows, Linux, and macOS) are published on the upstream
+> `llama.cpp` project's own GitHub Releases page:
+> https://github.com/ggml-org/llama.cpp/releases. Download the archive
+> matching your OS and backend, extract it anywhere, and note the full path
+> to `llama-server.exe` (Windows) or `llama-server` (Linux/macOS) — you'll
+> need it in step 2 below and again when the configuration wizard in step 3
+> asks for the inference backend path. Building it yourself from the same
+> repository's source is also supported, and is the only way to pin an
+> exact revision (see [ADR-0003](docs/architecture/ADR-0003-release-1-product-baseline.md)
+> for the revision MasterAI's own Phase 4 validation was pinned against).
+
 ### 1. Build the binary
 
 See [Building from source](#building-from-source) above if you have not
@@ -612,11 +650,12 @@ Chat needs two things this repository does not provide: a `llama.cpp`
 server executable and at least one GGUF model with a valid manifest.
 
 - Build or download a version-pinned `llama.cpp` server executable
-  (`llama-server` / `llama-server.exe`) and note its full path. MasterAI
-  supervises it as a separate process; it does not vendor or build it. A
-  convenient (not required) place to keep it is `tools/llama.cpp/` at the
-  repository root — already covered by `.gitignore`'s `*.exe`/`*.dll`
-  patterns, so it never gets committed.
+  (`llama-server` / `llama-server.exe`) and note its full path — see the
+  note above for where to get one. MasterAI supervises it as a separate
+  process; it does not vendor or build it. A convenient (not required)
+  place to keep it is `tools/llama.cpp/` at the repository root — already
+  covered by `.gitignore`'s `*.exe`/`*.dll` patterns, so it never gets
+  committed.
 - Place a GGUF model file under `models/<category>/<model-id>/` (see
   [Models](#models) below for the category list) with a
   `manifest.json` next to it that validates against
@@ -940,21 +979,25 @@ and a candidate model against the same benchmark dataset and stores the
 measured verdict — both metric sets, the macro-F1 (classification) or MSE
 (regression) delta, and the winner.
 
-Since Phases 58–60, the Subject Knowledge Manager uses a native browser file
+Since Phases 58–61, the Subject Knowledge Manager uses a native browser file
 dialog to ingest bounded text sources into a selected vector store. The
 server records the source filename, media type, byte count, SHA-256 digest,
 and real chunk count, then persists deterministic 128-dimensional hashing
-vectors. The RAG page executes approved hybrid, vector-only, or keyword-only
-retrieval and displays the ranked scores, source citations, exact source
-text, and assembled context. Dataset upload and all cross-record ML forms now
+vectors, or learned vectors from a selected verified embedding GGUF through
+the isolated llama.cpp adapter. The RAG page executes approved hybrid,
+vector-only, or keyword-only retrieval and displays the ranked scores, source
+citations, exact source text, and assembled context. Dataset upload and all
+cross-record ML forms now
 use file dialogs and named selectors instead of requiring pasted file content
 or copied opaque IDs.
 
 The honest boundary that remains: creating or advancing the other job types
 records administrative intent and state, not execution. Creating an empty
 vector-store record alone does not populate it, and RAG retrieval does not
-generate or validate a model-authored answer. The local hashing vectorizer is
-not a learned semantic embedding model. LLM fine-tuning does not run.
+generate or validate a model-authored answer. The authored fallback is not a
+learned semantic embedding model, and learned-adapter quality depends on the
+verified embedding GGUF an administrator installs. LLM fine-tuning does not
+run.
 Approved externally trained models must still be deliberately packaged
 as verified GGUF artifacts in the inference model tree before MasterAI can
 serve them for chat.
@@ -1289,8 +1332,8 @@ Near-term work is:
    measured worker affinity, live cascade routing, and broader zero-copy use.
 7. Implement the still-planned performance Phases 31–36 in prerequisite
    order, beginning with storage tiering and scratch-volume management.
-8. Extend the Phase 60 Machine Learning executors with learned neural
-   embedding adapters, governed LLM fine-tuning, generated-answer RAG
+8. Extend the Phase 61 Machine Learning executors with governed LLM
+   fine-tuning, generated-answer RAG
    evaluation, and the remaining planned job executors without allowing
    lifecycle state to substitute for proof that work ran successfully.
 

@@ -83,6 +83,15 @@ int main(int argc, char* argv[]) {
             body = "{\"status\":\"ok\"}";
         } else if (request.rfind("POST /tokenize ", 0U) == 0U) {
             body = "{\"tokens\":[1,2,3]}";
+        } else if (request.rfind("POST /v1/embeddings ", 0U) == 0U) {
+            // Phase 61 fixture: a deterministic, non-unit vector proves the
+            // supervisor parses and normalizes the documented OpenAI-
+            // compatible llama.cpp envelope instead of falling back to the
+            // authored hashing vectorizer.
+            body =
+                "{\"object\":\"list\",\"data\":[{\"object\":"
+                "\"embedding\",\"index\":0,\"embedding\":[3.0,4.0,0.0]}],"
+                "\"model\":\"fake-embedding-model\"}";
         } else if (request.rfind("POST /completion ", 0U) == 0U) {
             // Real llama.cpp servers stream /completion as Server-Sent
             // Events ("data: <json>" lines) -- see inference.cpp's

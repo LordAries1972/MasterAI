@@ -33,6 +33,8 @@
     "button{margin-top:.75rem;background:var(--accent);border:none;color:#fff;" \
     "font-weight:600;cursor:pointer;transition:background .15s}" \
     "button:hover{background:var(--accent-hover)}" \
+    "a{color:var(--accent-hover)}" \
+    "a:hover{text-decoration:none}" \
     /* Compact icon-only action buttons (Machine Learning table rows): \
        overrides the full-width default above so a row of actions stays \
        small; the action name lives in the title/aria-label hint. One \
@@ -43,18 +45,35 @@
     ".iconBtn svg{width:14px;height:14px;fill:currentColor}" \
     "progress{width:100%;height:.6rem;margin-top:.6rem;accent-color:var(--accent)}" \
     "#actionStatus,#status{color:var(--muted);min-height:1.2em}" \
-    /* Fixed top-of-viewport banner every action-failure catch block now \
-       raises through showSystemError() instead of the easy-to-miss \
-       #actionStatus line -- maroon body with yellow text so a failure is \
-       unmissable regardless of which page/section triggered it. */ \
-    "#systemErrorBanner{position:fixed;top:0;left:0;right:0;z-index:9999;" \
+    /* Floating error bubble every action-failure catch block now raises \
+       through showSystemError() instead of the easy-to-miss #actionStatus \
+       line -- maroon body with yellow text so a failure is unmissable, but \
+       pinned to a corner and width-capped (not a full-width top banner) so \
+       it can never blow out over the rest of the page, on the Machine \
+       Learning screens or anywhere else. Auto-fades and hides itself 10 \
+       seconds after the most recent showSystemError() call (see that \
+       function); its close and copy buttons both act immediately instead \
+       of waiting on that timer. */ \
+    "#systemErrorBanner{position:fixed;bottom:1rem;right:1rem;z-index:9999;" \
+    "width:min(24rem,calc(100vw - 2rem));" \
     "background:#3a0a0a;color:#ffd54a;padding:.75rem 1rem;" \
-    "border-bottom:2px solid #ffd54a;box-shadow:0 2px 10px rgba(0,0,0,.4);" \
-    "display:flex;align-items:flex-start;gap:.75rem}" \
+    "border:1px solid #ffd54a;border-radius:.75rem;" \
+    "box-shadow:0 6px 20px rgba(0,0,0,.45);" \
+    "display:flex;flex-direction:column;gap:.5rem;" \
+    "opacity:1;transition:opacity .4s ease}" \
+    "#systemErrorBanner.systemErrorFading{opacity:0}" \
+    "#systemErrorBanner .systemErrorTop{display:flex;align-items:flex-start;" \
+    "gap:.75rem}" \
     "#systemErrorBanner .systemErrorTitle{font-weight:800;letter-spacing:.03em}" \
-    "#systemErrorBanner .systemErrorBody{flex:1;overflow-wrap:anywhere}" \
-    "#systemErrorBanner .systemErrorClose{margin:0;padding:0 .4rem;" \
+    "#systemErrorBanner .systemErrorBody{flex:1;overflow-wrap:anywhere;" \
+    "max-height:12rem;overflow:auto}" \
+    "#systemErrorBanner .systemErrorClose{width:auto;margin:0;padding:0 .4rem;" \
     "background:transparent;color:#ffd54a;font-weight:700;cursor:pointer}" \
+    "#systemErrorBanner .systemErrorActions{display:flex;justify-content:flex-end}" \
+    "#systemErrorBanner .systemErrorCopy{width:auto;margin:0;" \
+    "padding:.3rem .7rem;background:transparent;border:1px solid #ffd54a;" \
+    "color:#ffd54a;font-size:.75rem;border-radius:.4rem;cursor:pointer}" \
+    "#systemErrorBanner .systemErrorCopy:hover{background:rgba(255,213,74,.15)}" \
     ".checkboxLabel{display:flex;align-items:center;gap:.5rem}" \
     ".checkboxLabel input{width:auto}"
 
@@ -64,6 +83,52 @@ std::string application_script() {
     return
         "const q=s=>document.querySelector(s);let csrf='',generation=null,"
         "lastAppliedPreset=null;const downloadSizes={};"
+        // Populated in load() from GET /api/v1/models' own architecture
+        // field, keyed by model id -- lets the composer's model settings
+        // panel (see openModelSettingsPanel()) tell whether the selected
+        // model can actually honor a reasoning/thinking directive or only
+        // ever the sampling-preset fallback (see modelSupportsReasoning()).
+        "let MODEL_ARCHS={};"
+        "const REASONING_ARCHS=['qwen','gpt-oss'];"
+        "function modelSupportsReasoning(modelId){"
+        "const arch=(MODEL_ARCHS[modelId]||'').toLowerCase();"
+        "return REASONING_ARCHS.some(a=>arch.includes(a));}"
+        // Per-model effort/thinking preference, persisted client-side (no
+        // server-side account state needed for a browser-local UI
+        // preference) so the same model reopens with whatever was last
+        // chosen for it, in this chat or any other.
+        "function loadModelSettings(modelId){"
+        "const fallback={effort:'medium',thinking:'off'};if(!modelId)return fallback;"
+        "try{const all=JSON.parse(localStorage.getItem('modelSettings')||'{}');"
+        "return all[modelId]||fallback;}catch(x){return fallback;}}"
+        "function saveModelSettings(modelId,settings){if(!modelId)return;"
+        "let all={};try{all=JSON.parse(localStorage.getItem('modelSettings')||"
+        "'{}');}catch(x){}"
+        "all[modelId]=settings;localStorage.setItem('modelSettings',"
+        "JSON.stringify(all));}"
+        "function saveCurrentModelSettings(){const select=q('#chatModel');"
+        "if(!select||!select.value)return;"
+        "saveModelSettings(select.value,"
+        "{effort:q('#modelEffort').value,thinking:q('#modelThinking').value});}"
+        // Opens (or refreshes) the settings panel for whatever model is
+        // currently selected -- called on every model picker change (a fresh
+        // chat's first choice, a later switch, or an existing chat being
+        // reopened) so the panel's two controls always reflect the model
+        // that's actually about to run, restored from this browser's saved
+        // preference for it rather than whatever the previous model left
+        // behind.
+        "function openModelSettingsPanel(){"
+        "const select=q('#chatModel'),panel=q('#modelSettingsPanel');"
+        "if(!select||!panel||!select.value)return;"
+        "const saved=loadModelSettings(select.value);"
+        "q('#modelEffort').value=saved.effort;q('#modelThinking').value=saved.thinking;"
+        "const note=q('#modelSettingsNote');"
+        "if(note)note.textContent=modelSupportsReasoning(select.value)?"
+        "'This model supports explicit reasoning -- these settings are sent "
+        "to it as reasoning instructions.':"
+        "'This model has no reasoning mode of its own -- these settings "
+        "instead adjust its sampling (temperature and reply length).';"
+        "panel.hidden=false;}"
         // Files attached to the message currently being composed, and the
         // project id they were (or will be) uploaded against -- an existing
         // chat's project is fixed and known once openChat() loads it, but a
@@ -115,23 +180,46 @@ std::string application_script() {
         "if([...el.options].some(x=>x.value===selected))el.value=selected;}"
         // Every action-failure catch block across the app raises through
         // here instead of quietly setting the small #actionStatus line --
-        // a fixed banner pinned to the very top of the viewport, maroon
-        // body/yellow text, titled 'SYSTEM ERROR!' so a failure is
-        // impossible to miss regardless of scroll position or which
-        // section triggered it. Reuses one banner element (created lazily)
-        // so a second failure while the first is still showing just
-        // replaces the message rather than stacking banners.
+        // a floating bubble pinned to a bottom corner, width-capped and
+        // scrollable so a long message is contained rather than blowing out
+        // over the rest of the page (the Machine Learning screens' own
+        // failures included), maroon body/yellow text, titled
+        // 'SYSTEM ERROR!' so it's impossible to miss. A copy button lets the
+        // exact message be pasted elsewhere (bug reports, chat with an
+        // administrator) without retyping it, and the bubble fades out and
+        // hides itself 10 seconds after this call unless closed sooner.
+        // Reuses one bubble element (created lazily) so a second failure
+        // while the first is still showing just replaces the message and
+        // restarts the fade timer rather than stacking bubbles.
         "function showSystemError(message){let el=q('#systemErrorBanner');"
         "if(!el){el=document.createElement('div');el.id='systemErrorBanner';"
+        "const top=document.createElement('div');top.className='systemErrorTop';"
         "const title=document.createElement('div');"
         "title.className='systemErrorTitle';title.textContent='SYSTEM ERROR!';"
         "const body=document.createElement('div');body.className='systemErrorBody';"
         "const close=document.createElement('button');close.type='button';"
         "close.className='systemErrorClose';close.textContent='\\u00d7';"
         "close.setAttribute('aria-label','Dismiss error');"
-        "close.addEventListener('click',()=>{el.hidden=true;});"
-        "el.append(title,body,close);document.body.prepend(el);}"
-        "el.querySelector('.systemErrorBody').textContent=message;el.hidden=false;}"
+        "close.addEventListener('click',()=>hideSystemError(el));"
+        "top.append(title,body,close);"
+        "const actions=document.createElement('div');"
+        "actions.className='systemErrorActions';"
+        "const copyBtn=document.createElement('button');copyBtn.type='button';"
+        "copyBtn.className='systemErrorCopy';copyBtn.textContent='Copy';"
+        "copyBtn.setAttribute('aria-label','Copy error message');"
+        "copyBtn.addEventListener('click',()=>"
+        "copyToClipboard(el.querySelector('.systemErrorBody').textContent,copyBtn));"
+        "actions.append(copyBtn);el.append(top,actions);document.body.append(el);}"
+        "el.querySelector('.systemErrorBody').textContent=message;"
+        "el.hidden=false;el.classList.remove('systemErrorFading');"
+        "if(el._fadeTimer)clearTimeout(el._fadeTimer);"
+        "if(el._hideTimer)clearTimeout(el._hideTimer);"
+        "el._fadeTimer=setTimeout(()=>el.classList.add('systemErrorFading'),9600);"
+        "el._hideTimer=setTimeout(()=>hideSystemError(el),10000);}"
+        "function hideSystemError(el){"
+        "if(el._fadeTimer)clearTimeout(el._fadeTimer);"
+        "if(el._hideTimer)clearTimeout(el._hideTimer);"
+        "el.hidden=true;el.classList.remove('systemErrorFading');}"
         "async function login(e){e.preventDefault();try{const d=await api('/api/v1/auth/login','POST',"
         "{username:q('#username').value,password:q('#password').value});"
         "sessionStorage.setItem('csrf',d.csrfToken);location.href='/app';}"
@@ -223,6 +311,16 @@ std::string application_script() {
         // elements legitimately don't exist -- guard every write instead of
         // assuming every page is present.
         "renderProjects(p.projects);renderModels(m.models);"
+        // Phase 61: vector stores can choose either the always-available
+        // authored backend or a verified GGUF embedding model from the
+        // ordinary model inventory. No opaque model id needs to be typed.
+        "const embeddingSelect=q('#mlVectorStoreEmbeddingModel');"
+        "if(embeddingSelect){embeddingSelect.innerHTML="
+        "'<option value=\"authored_hashing_vectorizer_v1\">MasterAI authored ' +"
+        "'hashing vectorizer v1 (128 dimensions)</option>'+"
+        "m.models.filter(x=>x.category==='embeddings-code-search'&&x.state==='ready')"
+        ".map(x=>'<option value=\"'+esc(x.id)+'\">'+esc(x.displayName)+"
+        "' (learned via llama.cpp)</option>').join('');}"
         "renderBenchmarks(b.benchmarks);renderDownloads(d.downloads);"
         "renderUsers(u.users);renderMlDashboard(ml);renderMlProjects(mlp.projects);"
         "renderMlModels(mlm.models);renderMlDatasets(mld.datasets);"
@@ -287,6 +385,7 @@ std::string application_script() {
         // which can change, so it's left selectable with its recommended RAM
         // shown against its name (and a warning icon when the server's
         // diagnostic flags it) so the user can judge it themselves.
+        "MODEL_ARCHS=Object.fromEntries(m.models.map(x=>[x.id,x.architecture||'']));"
         "const ready=m.models.filter(x=>x.state==='ready');"
         "fill('#chatModel',ready,x=>x.id,"
         "x=>(x.diagnostic&&x.diagnostic.startsWith('Warning:')?'\\u26a0\\ufe0f ':'')+"
@@ -414,7 +513,7 @@ std::string application_script() {
         "placeholder.value=chat.modelId;"
         "placeholder.textContent=chat.modelId+' (not currently loaded)';"
         "modelSelect.append(placeholder);}"
-        "modelSelect.value=chat.modelId;}"
+        "modelSelect.value=chat.modelId;openModelSettingsPanel();}"
         "if(q('#chatProject'))q('#chatProject').disabled=true;"
         "const box=q('#chatMessages');box.replaceChildren();"
         "for(const message of chat.messages)"
@@ -552,11 +651,33 @@ std::string application_script() {
         "t=t.replace(/\\\\([a-zA-Z]+)/g,(m,name)=>"
         "symbols[name]!==undefined?symbols[name]:name);"
         "return t.replace(/[{}]/g,'');}"
-        // Inline span-level formatting within a single line: backtick code
-        // spans, **bold**, and \\(...\\) inline math. Operates on
-        // already-HTML-escaped text so the replacement groups never need
-        // escaping themselves.
-        "function renderInline(text){let t=esc(text);"
+        // Turns Markdown-style [label](url) links and bare http(s):// URLs
+        // into real anchors. Runs on already-HTML-escaped text (same
+        // convention as the rest of renderInline), so a URL/label can never
+        // inject markup of its own -- the only tags this ever introduces are
+        // the <a> wrapper below. A markdown link's own url is matched first
+        // so the bare-URL pass afterward (which requires a preceding
+        // whitespace/paren/line-start boundary) never re-wraps the url this
+        // already placed inside an href=\"...\" attribute. Trailing
+        // punctuation (a period ending the sentence, a closing bracket from
+        // surrounding prose) is peeled off the bare-URL match so it reads
+        // outside the link instead of becoming part of the href.
+        "function linkify(t){"
+        "t=t.replace(/\\[([^\\]<>]+)\\]\\((https?:\\/\\/[^\\s()<>]+)\\)/g,"
+        "(m,label,url)=>'<a href=\"'+url+'\" target=\"_blank\" "
+        "rel=\"noopener noreferrer\">'+label+'</a>');"
+        "t=t.replace(/(^|[\\s(])(https?:\\/\\/[^\\s<>()]+)/g,(m,pre,url)=>{"
+        "let trail='';while(url&&/[.,;:!?]$/.test(url)){"
+        "trail=url.slice(-1)+trail;url=url.slice(0,-1);}"
+        "if(!url)return m;"
+        "return pre+'<a href=\"'+url+'\" target=\"_blank\" "
+        "rel=\"noopener noreferrer\">'+url+'</a>'+trail;});"
+        "return t;}"
+        // Inline span-level formatting within a single line: linkify (see
+        // above), backtick code spans, **bold**, and \\(...\\) inline math.
+        // Operates on already-HTML-escaped text so the replacement groups
+        // never need escaping themselves.
+        "function renderInline(text){let t=esc(text);t=linkify(t);"
         "t=t.replace(/`([^`]+)`/g,(m,c)=>'<code>'+c+'</code>');"
         "t=t.replace(/\\*\\*([^*]+)\\*\\*/g,(m,b)=>'<strong>'+b+'</strong>');"
         "t=t.replace(/\\\\\\((.+?)\\\\\\)/g,"
@@ -2525,7 +2646,10 @@ std::string application_script() {
         "box.scrollTop=box.scrollHeight;"
         "const r=await fetch('/api/v1/chats/'+encodeURIComponent(chatId)+'/messages',"
         "{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},"
-        "body:JSON.stringify({content,attachmentIds}),signal:generation.signal});"
+        "body:JSON.stringify({content,attachmentIds,"
+        "effort:q('#modelEffort')?q('#modelEffort').value:'medium',"
+        "thinking:q('#modelThinking')?q('#modelThinking').value:'off'}),"
+        "signal:generation.signal});"
         "if(!r.ok)throw new Error(await r.text());"
         "const reader=r.body.getReader(),decoder=new TextDecoder();let pending='';"
         "for(;;){const x=await reader.read();if(x.done)break;"
@@ -2643,7 +2767,7 @@ std::string application_script() {
         "if(!defaultId){"
         "const lastChat=chats.find(x=>x.modelId&&ready.some(r=>r.id===x.modelId));"
         "if(lastChat)defaultId=lastChat.modelId;}"
-        "if(defaultId)picker.value=defaultId;}"
+        "if(defaultId){picker.value=defaultId;openModelSettingsPanel();}}"
         // Polls GET /api/v1/runner/status (see server.cpp) so the chat page
         // can announce once, inline, the moment the backend actually
         // finishes loading -- not just the initial 'Using model X' choice.
@@ -2741,7 +2865,16 @@ std::string application_script() {
         "async e=>{const files=[...e.target.files];e.target.value='';"
         "for(const file of files)await attachFile(file);});"
         "if(q('#newMessage'))q('#newMessage').addEventListener('submit',streamMessage);"
-        "if(q('#chatModel'))q('#chatModel').addEventListener('change',changeChatModel);"
+        "if(q('#chatModel'))q('#chatModel').addEventListener('change',"
+        "()=>{changeChatModel();openModelSettingsPanel();});"
+        "if(q('#modelSettingsToggle'))q('#modelSettingsToggle')"
+        ".addEventListener('click',openModelSettingsPanel);"
+        "if(q('#modelSettingsClose'))q('#modelSettingsClose')"
+        ".addEventListener('click',()=>{q('#modelSettingsPanel').hidden=true;});"
+        "if(q('#modelEffort'))q('#modelEffort')"
+        ".addEventListener('change',saveCurrentModelSettings);"
+        "if(q('#modelThinking'))q('#modelThinking')"
+        ".addEventListener('change',saveCurrentModelSettings);"
         "if(q('#newMemory'))q('#newMemory').addEventListener('submit',addMemory);"
         // Enter sends the message, mirroring every mainstream chat client;
         // Shift+Enter still inserts a newline (the textarea's own default),
@@ -3155,6 +3288,29 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<textarea id=\"messageContent\" class=\"composerInput\" rows=\"1\" "
             "placeholder=\"Message MasterAI...\" required></textarea>"
             "<select id=\"chatModel\" class=\"composerModelPicker\"></select>"
+            // Effort/thinking-level panel: opens automatically whenever the
+            // model picker changes (see openModelSettingsPanel()) and can be
+            // reopened afterward with this gear button. Its settings persist
+            // per model id in localStorage (see loadModelSettings()/
+            // saveModelSettings()) and are read back the moment that same
+            // model is chosen again, in this chat or a future one.
+            "<button type=\"button\" id=\"modelSettingsToggle\" "
+            "class=\"composerIconBtn\" title=\"Model settings (effort / "
+            "thinking)\" aria-label=\"Model settings\">&#9881;</button>"
+            "<div id=\"modelSettingsPanel\" class=\"modelSettingsPanel\" hidden>"
+            "<div class=\"modelSettingsPanelHeader\">Model settings"
+            "<button type=\"button\" id=\"modelSettingsClose\" "
+            "class=\"modelSettingsClose\" aria-label=\"Close model settings\">"
+            "&#215;</button></div>"
+            "<label>Effort<select id=\"modelEffort\">"
+            "<option value=\"low\">Low</option>"
+            "<option value=\"medium\" selected>Medium</option>"
+            "<option value=\"high\">High</option></select></label>"
+            "<label>Thinking<select id=\"modelThinking\">"
+            "<option value=\"off\" selected>Off</option>"
+            "<option value=\"on\">On</option></select></label>"
+            "<p id=\"modelSettingsNote\" class=\"modelSettingsNote\"></p>"
+            "</div>"
             "<button type=\"submit\" class=\"composerSendBtn\" title=\"Send\">"
             "&#8593;</button>"
             "<button id=\"cancelMessage\" type=\"button\" class=\"composerIconBtn\" "
@@ -3814,7 +3970,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<div id=\"mlSyntheticRecordsList\">Loading...</div>"
             "</div></section>";
     } else if (section == "ml-vector-stores") {
-        // Phase 49 (docs/PLAN.md "Machine Learning Abilities" section 21):
+        // Phases 49/61 (Machine Learning Abilities section 21):
         // register and list vector stores, and move them through the same
         // three-state pending/approved/rejected approval workflow Dataset
         // Manager uses, since a vector store is a standalone registered
@@ -3822,8 +3978,8 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // identity/embedding-model/distance-metric/status fields
         // VectorStoreStore actually persists are collected here -- see that
         // class's comment in masterai.hpp for the document-import/chunking/
-        // indexing fields deferred to the phase that actually generates
-        // embeddings.
+        // index profile is execution evidence from Phases 59/61; the form
+        // now offers the authored method plus verified ready embedding GGUFs.
         body =
             "<section id=\"panel-ml-vector-stores\" class=\"panel\">"
             "<div>"
@@ -4548,9 +4704,26 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // The composer: a single rounded pill carrying the attach toggle,
         // the message box, the model picker, and send/cancel -- no separate
         // "start chat" form above it.
-        ".composer{display:flex;align-items:center;gap:.4rem;"
+        ".composer{position:relative;display:flex;align-items:center;gap:.4rem;"
         "background:var(--panel);border:1px solid var(--panel-border);"
         "border-radius:1.5rem;padding:.4rem .5rem .4rem 1rem}"
+        // Floats above the composer pill (anchored to its bottom-right
+        // corner via the parent's position:relative above) instead of
+        // pushing the message list around when it opens.
+        ".modelSettingsPanel{position:absolute;bottom:100%;right:0;"
+        "margin-bottom:.5rem;width:14rem;background:var(--panel);"
+        "border:1px solid var(--panel-border);border-radius:.75rem;"
+        "padding:.75rem .9rem;box-shadow:0 8px 24px rgba(0,0,0,.4);"
+        "display:flex;flex-direction:column;gap:.4rem;z-index:20}"
+        ".modelSettingsPanel label{margin-top:.3rem}"
+        ".modelSettingsPanelHeader{display:flex;align-items:center;"
+        "justify-content:space-between;font-size:.75rem;color:var(--muted);"
+        "text-transform:uppercase;letter-spacing:.05em}"
+        ".modelSettingsClose{width:auto;margin:0;padding:0 .3rem;"
+        "background:transparent;color:var(--muted);font-weight:700;"
+        "border:none;cursor:pointer}"
+        ".modelSettingsNote{margin:.2rem 0 0;font-size:.75rem;"
+        "color:var(--muted)}"
         ".composerInput{flex:1;border:none;background:transparent;resize:none;"
         "max-height:8rem;padding:.6rem 0;margin:0;box-shadow:none}"
         ".composerInput:focus{box-shadow:none}"

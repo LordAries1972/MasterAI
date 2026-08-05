@@ -1,4 +1,4 @@
-// Phases 58-60: dependency-free local knowledge ingestion, persisted hashing
+// Phases 58-61: bounded knowledge ingestion, durable authored or learned
 // embeddings, and evidence-bearing retrieval for administrator RAG testing.
 #include "masterai.hpp"
 
@@ -128,7 +128,7 @@ std::vector<std::string> tokens(const std::string& text) {
     return result;
 }
 
-std::vector<double> embed(const std::string& text) {
+std::vector<double> authored_hash_embedding_impl(const std::string& text) {
     std::vector<double> result(embedding_dimensions, 0.0);
     const auto words = tokens(text);
     std::map<std::string, std::size_t> counts;
@@ -146,6 +146,30 @@ std::vector<double> embed(const std::string& text) {
         for (auto& value : result) value /= length;
     }
     return result;
+}
+
+// Treat an embedding backend as untrusted input even though llama.cpp runs
+// on loopback: dimensions, finite values, and non-zero magnitude are checked
+// before normalization so malformed backend output is never persisted.
+std::vector<double> validate_and_normalize_embedding(
+    std::vector<double> values) {
+    if (values.empty() || values.size() > 8192U) {
+        throw std::invalid_argument(
+            "embedding dimensions must be between 1 and 8192");
+    }
+    double squared = 0.0;
+    for (const auto value : values) {
+        if (!std::isfinite(value)) {
+            throw std::invalid_argument("embedding contains a non-finite value");
+        }
+        squared += value * value;
+    }
+    if (!std::isfinite(squared) || squared <= 0.0) {
+        throw std::invalid_argument("embedding has zero or invalid magnitude");
+    }
+    const double length = std::sqrt(squared);
+    for (auto& value : values) value /= length;
+    return values;
 }
 
 double cosine(const std::vector<double>& left,
@@ -224,6 +248,10 @@ bool supported_media_type(const std::string& media_type) {
 
 }  // namespace
 
+std::vector<double> authored_hash_embedding(const std::string& text) {
+    return authored_hash_embedding_impl(text);
+}
+
 KnowledgeIndexStore::KnowledgeIndexStore(RecordStore& records)
     : records_(&records) {
     restore();
@@ -250,7 +278,9 @@ void KnowledgeIndexStore::restore() {
     }
     for (const auto& item : records_->list("ml_knowledge_chunks")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 7U + embedding_dimensions) {
+        const bool legacy = fields.size() == 7U + embedding_dimensions &&
+                            fields[6] == std::to_string(embedding_dimensions);
+        if ((!legacy && fields.size() < 9U)) {
             throw std::runtime_error("persisted knowledge chunk field count is wrong");
         }
         KnowledgeChunk chunk;
@@ -261,13 +291,22 @@ void KnowledgeIndexStore::restore() {
         chunk.file_name = fields[3];
         chunk.chunk_index = static_cast<std::size_t>(std::stoull(fields[4]));
         chunk.text = fields[5];
-        const auto dimensions = static_cast<std::size_t>(std::stoull(fields[6]));
-        if (dimensions != embedding_dimensions) {
-            throw std::runtime_error("persisted knowledge embedding dimension changed");
+        const std::size_t method_field = legacy ? 7U : 6U;
+        const std::size_t dimensions_field = legacy ? 6U : 7U;
+        chunk.embedding_method = legacy ? "authored_hashing_vectorizer_v1"
+                                        : fields[method_field];
+        const auto dimensions = static_cast<std::size_t>(
+            std::stoull(fields[dimensions_field]));
+        const std::size_t values_begin = legacy ? 7U : 8U;
+        if (chunk.embedding_method.empty() || dimensions == 0U ||
+            dimensions > 8192U || fields.size() != values_begin + dimensions) {
+            throw std::runtime_error("persisted knowledge embedding metadata is invalid");
         }
         for (std::size_t index = 0; index < dimensions; ++index) {
-            chunk.embedding.push_back(std::stod(fields[7U + index]));
+            chunk.embedding.push_back(std::stod(fields[values_begin + index]));
         }
+        chunk.embedding = validate_and_normalize_embedding(
+            std::move(chunk.embedding));
         chunks_[chunk.id] = std::move(chunk);
     }
 }
@@ -275,7 +314,9 @@ void KnowledgeIndexStore::restore() {
 KnowledgeDocument KnowledgeIndexStore::ingest(
     const std::string& owner_id, const std::string& subject_id,
     const std::string& vector_store_id, const std::string& file_name,
-    const std::string& media_type, const std::string& content) {
+    const std::string& media_type, const std::string& content,
+    const std::string& embedding_method,
+    const KnowledgeEmbeddingFunction& vectorize) {
     if (subject_id.empty()) throw std::invalid_argument("subject id is required");
     if (vector_store_id.empty()) {
         throw std::invalid_argument("vector store id is required");
@@ -292,6 +333,12 @@ KnowledgeDocument KnowledgeIndexStore::ingest(
     }
     if (content.find('\0') != std::string::npos) {
         throw std::invalid_argument("knowledge file must contain text, not binary data");
+    }
+    if (embedding_method.empty() || embedding_method.size() > 160U) {
+        throw std::invalid_argument("embedding method is invalid");
+    }
+    if (embedding_method != "authored_hashing_vectorizer_v1" && !vectorize) {
+        throw std::invalid_argument("learned embedding backend is unavailable");
     }
     const auto pieces = make_chunks(content);
     if (pieces.empty()) throw std::invalid_argument("knowledge file contains no indexable text");
@@ -318,9 +365,12 @@ KnowledgeDocument KnowledgeIndexStore::ingest(
         chunk.file_name = file_name;
         chunk.chunk_index = index;
         chunk.text = pieces[index];
+        chunk.embedding_method = embedding_method;
         chunk.id = sha256_hex(document.id + ":" + std::to_string(index) +
                               ":" + chunk.text);
-        chunk.embedding = embed(chunk.text);
+        chunk.embedding = validate_and_normalize_embedding(
+            vectorize ? vectorize(chunk.text)
+                      : authored_hash_embedding_impl(chunk.text));
         pending.push_back(std::move(chunk));
     }
 
@@ -337,6 +387,7 @@ KnowledgeDocument KnowledgeIndexStore::ingest(
         std::vector<std::string> fields{
             chunk.document_id, chunk.subject_id, chunk.vector_store_id,
             chunk.file_name, std::to_string(chunk.chunk_index), chunk.text,
+            chunk.embedding_method,
             std::to_string(chunk.embedding.size())};
         for (const auto value : chunk.embedding) fields.push_back(number_field(value));
         chunks_[chunk.id] = chunk;
@@ -391,7 +442,8 @@ bool KnowledgeIndexStore::remove_document(const std::string& id) {
 RagRetrievalResult retrieve_knowledge(
     const KnowledgeIndexStore& index, const std::string& vector_store_id,
     const std::string& search_strategy, const std::string& query,
-    const std::size_t top_k) {
+    const std::size_t top_k, const std::string& embedding_method,
+    const KnowledgeEmbeddingFunction& vectorize) {
     if (vector_store_id.empty()) throw std::invalid_argument("vector store id is required");
     if (query.empty() || query.size() > 8192U) {
         throw std::invalid_argument("RAG query must contain 1 to 8192 bytes");
@@ -415,17 +467,34 @@ RagRetrievalResult retrieve_knowledge(
             "search strategy must be hybrid, vector, or keyword");
     }
 
-    const auto query_embedding = embed(query);
+    const auto stored_chunks = index.chunks_for_store(vector_store_id);
+    for (const auto& chunk : stored_chunks) {
+        if (chunk.embedding_method != embedding_method) {
+            throw std::invalid_argument(
+                "vector store contains embeddings from a different model");
+        }
+    }
+    std::vector<double> query_embedding;
+    if (!keyword_only) {
+        if (embedding_method != "authored_hashing_vectorizer_v1" && !vectorize) {
+            throw std::invalid_argument("learned embedding backend is unavailable");
+        }
+        query_embedding = validate_and_normalize_embedding(
+            vectorize ? vectorize(query)
+                      : authored_hash_embedding_impl(query));
+    }
     const auto query_tokens = tokens(query);
     const std::set<std::string> query_words(query_tokens.begin(), query_tokens.end());
     RagRetrievalResult result;
     result.query = query;
     result.search_strategy = keyword_only ? "keyword" :
                              vector_only ? "vector" : "hybrid";
-    for (const auto& chunk : index.chunks_for_store(vector_store_id)) {
+    for (const auto& chunk : stored_chunks) {
         RagRetrievedChunk retrieved;
         retrieved.chunk = chunk;
-        retrieved.vector_score = cosine(query_embedding, chunk.embedding);
+        retrieved.vector_score = keyword_only
+                                     ? 0.0
+                                     : cosine(query_embedding, chunk.embedding);
         retrieved.keyword_score = keyword_overlap(query_words, chunk.text);
         retrieved.score = keyword_only ? retrieved.keyword_score :
                           vector_only ? retrieved.vector_score :
@@ -471,14 +540,24 @@ std::string knowledge_index_profile_json(
     const std::string& vector_store_id,
     const std::vector<KnowledgeChunk>& chunks) {
     std::set<std::string> documents;
+    std::set<std::string> methods;
+    std::set<std::size_t> dimensions;
     std::size_t bytes = 0U;
     for (const auto& chunk : chunks) {
         documents.insert(chunk.document_id);
+        methods.insert(chunk.embedding_method);
+        dimensions.insert(chunk.embedding.size());
         bytes += chunk.text.size();
     }
+    const std::string method = methods.empty()
+                                   ? "unpopulated"
+                                   : (methods.size() == 1U ? *methods.begin()
+                                                          : "mixed");
+    const std::size_t dimension_count =
+        dimensions.size() == 1U ? *dimensions.begin() : 0U;
     return "{\"vectorStoreId\":\"" + json_escape(vector_store_id) +
-           "\",\"embeddingMethod\":\"authored_hashing_vectorizer_v1\""
-           ",\"dimensions\":" + std::to_string(embedding_dimensions) +
+           "\",\"embeddingMethod\":\"" + json_escape(method) + "\""
+           ",\"dimensions\":" + std::to_string(dimension_count) +
            ",\"documentCount\":" + std::to_string(documents.size()) +
            ",\"chunkCount\":" + std::to_string(chunks.size()) +
            ",\"indexedTextBytes\":" + std::to_string(bytes) + "}";

@@ -51,8 +51,9 @@ Current phase status:
   prompt context assembly, the transcription adapter boundary, and durable
   owner-scoped user memory are implemented. The memory path recognizes
   `save to memory: <detail>` without invoking inference, applies bounded
-  deterministic automatic capture for common self-disclosures, recalls the
-  newest details as explicitly labelled user reference data for every model,
+  deterministic automatic capture for common self-disclosures, and (since
+  Phase 61) recalls the newest details once at conversation creation as an
+  explicitly labelled, persisted user-reference snapshot for every model,
   and exposes inspect/add/delete controls through `/api/v1/memories` and the
   collapsed chat sidebar. The end-to-end authenticated chat path is now real-model
   validated at the API level: login (local password account), project
@@ -71,6 +72,37 @@ Current phase status:
   bounded background pre-warm load instead of rejecting `RunnerState::starting`,
   and duplicate warm requests are coalesced. The optional whisper.cpp adapter
   remains optional and is not part of the browser-chat exit criterion.
+  On 2026-08-06, three further web UI defects/gaps were fixed: (1)
+  `renderInline()`'s Markdown renderer had no link handling at all, so a
+  reply containing `[label](url)` or a bare `http(s)://` URL (seen from
+  Llama-family replies, but affecting every model equally) rendered as
+  literal bracket/paren text instead of a clickable link -- fixed by a new
+  `linkify()` pass that converts both forms to real anchors before the
+  existing bold/code/math inline passes run; (2) the global
+  `#systemErrorBanner` (`showSystemError()`) was a full-viewport-width fixed
+  top banner, which on the Machine Learning pages' own longer failure
+  messages visually overran the rest of the page -- replaced with a
+  width-capped, scrollable, bottom-corner floating bubble that fades out and
+  hides itself 10 seconds after the most recent call, with its own Copy
+  button alongside the existing dismiss button; (3) the composer's model
+  picker gained a settings panel (gear button, opens automatically on every
+  model selection/switch) with Effort (low/medium/high) and Thinking
+  (off/on) controls, persisted per model id in browser `localStorage` and
+  restored whenever that model is chosen again. `POST
+  /api/v1/chats/{id}/messages` now accepts optional `effort`/`thinking`
+  fields (default `medium`/`off`, validated, backward compatible): for a
+  reasoning-capable architecture (`qwen*`, `gpt-oss` --
+  `architecture_supports_reasoning_directives()`) they are folded into the
+  turn's own text as a real reasoning directive (Qwen's documented
+  `/think`/`/no_think` suffix plus a depth hint, or a
+  gpt-oss-harmony-style `Reasoning effort: <level>` header -- this project
+  does not implement the full Harmony format, so this is an approximation of
+  it, not a faithful reproduction); every other architecture instead gets a
+  sampling-preset adjustment (temperature/top_p/max_tokens via
+  `apply_sampling_preset()`) so the settings still do something honest
+  rather than silently no-op-ing. `GET /api/v1/models` now also reports each
+  model's `architecture` field so the panel can show which mode applies to
+  the currently selected model.
 - Phase 6: Complete (validated 2026-08-05) — immutable Hugging Face and
   GitHub Release URL policy, explicit licenses, persistent resumable jobs,
   pinned curl process isolation, journaled progress, SHA-256 promotion or
@@ -1074,6 +1106,33 @@ Current phase status:
   uses a native browser CSV file dialog rather than pasted text, knowledge
   ingestion uses a bounded multi-format file dialog, and ML foreign-key
   forms use populated record selectors instead of copied opaque IDs.
+- Phase 61: Implemented (2026-08-06) — learned neural embedding adapters and
+  once-per-conversation memory recall. A Vector Store may now select either
+  `authored_hashing_vectorizer_v1` or a verified, ready GGUF from the
+  `embeddings-code-search` model category. Learned vectors execute through
+  the existing process-isolated `RunnerSupervisor` and llama.cpp's loopback
+  `POST /v1/embeddings` contract; no third-party control-plane foundation was
+  added. The server bounds input and vector dimensions, rejects empty,
+  non-finite, zero-magnitude, malformed, or multi-vector responses, L2-
+  normalizes before persistence, records the exact embedding model and
+  dimensions with every chunk, migrates Phase 59's 128-dimensional records,
+  and refuses retrieval when query and stored-vector model provenance differ.
+  Keyword-only retrieval does not load an embedding model. The Vector Store
+  page lists only verified ready embedding-category models alongside the
+  authored fallback, and the index profile reports the real method and
+  dimensions. Separately, durable user-memory records are read once when a
+  chat is created, saved as a bounded owner-scoped snapshot in the chat
+  header, and reused on later turns and after restart. Legacy chats perform
+  one lazy snapshot on their first post-upgrade turn. Details learned during
+  an active conversation remain available through its ordinary message
+  history and become durable context for newly created chats; the durable
+  memory collection is no longer queried on every turn. Native Windows x64
+  Debug and Release tests prove the llama.cpp response contract with a
+  deterministic isolated fake,
+  normalization, persistence/reload, model-mismatch and invalid-vector
+  rejection, and memory-snapshot stability. No learned embedding GGUF is
+  installed in this checkout, so semantic-quality/latency evidence remains a
+  per-model deployment gate rather than a fabricated Phase 61 result.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -3274,23 +3333,32 @@ now serialize with the bounded pre-warm load, closing the `starting`-state race
 found during this validation. Durable owner-scoped user memory is also wired
 into the chat path independently of inference: a whole-message `save to
 memory:` command is confirmed directly, deterministic self-disclosures are
-captured under fixed limits, saved data is recalled into later turns without
-system-instruction priority, and users can inspect/add/delete entries through
-the Memory sidebar and `/api/v1/memories`. The optional transcription adapter
+captured under fixed limits, saved data is recalled once into a persisted chat
+snapshot and reused on later turns without system-instruction priority, and
+users can inspect/add/delete entries through the Memory sidebar and
+`/api/v1/memories`. The optional transcription adapter
 boundary is implemented; a whisper.cpp installation remains an optional
-integration.
+integration. As of 2026-08-06 the model selector also carries a persisted
+per-model Effort/Thinking settings panel (see Document Status above for the
+full description), chat replies render Markdown links and bare URLs as real
+anchors, and the global system-error indicator is a contained, auto-fading
+floating bubble with a copy action instead of a full-width top banner.
 
 Deliverables:
 
 - Login UI.
 - New Chat and history.
 - Projects.
-- Model selector.
-- Streaming responses.
+- Model selector, with a per-model Effort/Thinking settings panel
+  (persisted client-side; applied server-side as a reasoning directive for
+  reasoning-capable architectures or a sampling preset otherwise).
+- Streaming responses, with Markdown links and bare URLs rendered as real
+  anchors.
 - Attachments.
 - Context display.
 - Inspectable, owner-scoped remembered user details.
 - Basic voice recording and transcription adapter interface.
+- Contained, auto-fading system-error notification with a copy action.
 
 Exit criteria:
 
@@ -5213,10 +5281,13 @@ stores a measured verdict — both metric sets, the primary-metric delta
 (macro F1 for classification, MSE for regression), and the winner — see
 the Phase 57 entry above for the full surface and its honest boundary.
 Phases 58-60 add bounded knowledge-file ingestion, persisted authored
-hashing-vector indexes, and approved RAG retrieval/context execution. Learned
-neural embedding inference, LLM fine-tuning and RAG answer generation,
-Inference Endpoints, and every other executor not named above remain
-`Planned`: a metadata record or lifecycle transition is not execution proof.
+hashing-vector indexes, and approved RAG retrieval/context execution. Phase 61
+adds a real process-isolated llama.cpp learned-embedding adapter with durable
+model/dimension provenance and changes durable user-memory recall from every
+turn to one persisted snapshot per conversation. LLM fine-tuning, RAG answer
+generation, Inference Endpoints, and every other executor not named above
+remain `Planned`: a metadata record or lifecycle transition is not execution
+proof.
 
 This section extends the plan with an administrator-only Machine Learning
 administration and model-development module, covering the full lifecycle

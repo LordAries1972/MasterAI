@@ -1694,6 +1694,12 @@ struct GenerationResult {
     bool cancelled{false};
 };
 
+struct EmbeddingResult {
+    std::vector<double> values;
+    std::string model_id;
+    std::uint64_t elapsed_microseconds{0};
+};
+
 struct RunnerMetrics {
     RunnerState state{RunnerState::unloaded};
     std::string model_id;
@@ -1752,6 +1758,10 @@ public:
         const std::function<void(const std::string&)>& on_chunk,
         const std::atomic_bool& cancellation,
         std::uint32_t stall_timeout_seconds = 120U);
+    // Phase 61: asks the currently loaded, process-isolated llama.cpp model
+    // for one pooled learned embedding. The vector is validated and
+    // normalized before it enters MasterAI's durable knowledge index.
+    EmbeddingResult embed(const std::string& text);
     RunnerMetrics metrics() const;
     // Phase 26: applies WarmModelTracker::apply_idle_timeout() against this
     // supervisor's own tracker -- see that method's contract. Intended to be
@@ -1849,6 +1859,11 @@ struct ChatRecord {
     // or exceed the truncation this store applies when deriving it.
     std::string title{"New chat"};
     std::uint64_t created_at_epoch_seconds{0};
+    // Phase 61: one durable snapshot of the owner's memory records, loaded
+    // when this conversation starts and reused on every later turn. Legacy
+    // chats initialize lazily on their first post-upgrade message.
+    bool memory_context_initialized{false};
+    std::string memory_context;
     std::vector<ChatMessage> messages;
 };
 
@@ -1858,7 +1873,14 @@ public:
     explicit ChatStore(RecordStore& records);
     ChatRecord create(const std::string& owner_id,
                       const std::string& project_id,
-                      const std::string& model_id);
+                      const std::string& model_id,
+                      const std::string& memory_context = {});
+    // Initializes a legacy chat's memory snapshot exactly once. Returns
+    // false when the chat is absent, belongs to another owner, or was
+    // already initialized; an initialized empty snapshot is still durable.
+    bool initialize_memory_context(const std::string& chat_id,
+                                   const std::string& owner_id,
+                                   const std::string& memory_context);
     // token_count is the runner-reported token figure for this message (see
     // ChatMessage::token_count); callers that don't have one yet (the user
     // message is appended before generation runs) pass the default 0 and can
@@ -1913,8 +1935,8 @@ private:
 // chat message, or the memory API) or automatically from phrasing like
 // "my name is ..." -- see extract_memory_directive() /
 // extract_automatic_memories(). Recalled details are injected into every
-// chat turn as bounded user-provided context, so they work with any model
-// without granting persisted text system-instruction priority.
+// new conversation once as bounded user-provided context, then retained in
+// that ChatRecord so later turns do not repeatedly query durable memory.
 struct UserMemoryRecord {
     std::string id;
     std::string owner_id;
@@ -3464,15 +3486,13 @@ std::string synthetic_records_json(const std::vector<SyntheticRecord>& records);
 // list (embedding-model version, vector dimensions, document count, chunk
 // count, storage size, index type, security classification, access
 // permissions, last rebuild date, associated subject packages/agents/
-// deployed models) to identity, a free-text embedding_model field (section
-// 21's "Register embedding models" operation could reference a
-// ModelRegistryStore entry, but nothing yet produces a real embedding model
-// registration to link against, so this stays free text like
-// InstructionExample's subject_classification), a free-text distance_metric
+// deployed models) to identity, an embedding_model field (Phase 61 resolves
+// the authored method or a verified inference-model id from the dedicated
+// embeddings category), a free-text distance_metric
 // field (section 21 lists "Select distance metric" as an operation without
 // naming a closed set), and an approval-status lifecycle -- not the full
-// document-import/chunking/indexing pipeline the section describes, since
-// that requires a real embedding executor. A vector store is a standalone
+// document-import/chunking/indexing fields themselves, which are measured by
+// KnowledgeIndexStore and its profile rather than hand-entered. A vector store is a standalone
 // registered resource like Dataset above, not a target-scoped content
 // record like InstructionExample/SyntheticRecord, so it carries no
 // required parent id and reuses Dataset's three-state pending/approved/
@@ -4169,12 +4189,12 @@ std::string tabular_model_comparison_json(
     const TrainedTabularModel& candidate,
     const TabularEvaluationMetrics& candidate_metrics);
 
-// Phases 58-60: real local knowledge ingestion, vector indexing, and RAG
-// retrieval. Documents are uploaded as bounded text through a browser file
-// picker, hashed, split into overlapping chunks, and embedded by an authored
-// deterministic hashing-vectorizer. The vectors are persisted with the exact
-// source chunks; retrieval therefore produces repeatable evidence without a
-// network service or third-party ML foundation. This is deliberately a local
+// Phases 58-61: real local knowledge ingestion, authored or learned vector
+// indexing, and RAG retrieval. Documents are uploaded as bounded text through
+// a browser file picker, hashed, split into overlapping chunks, and embedded
+// by either MasterAI's deterministic hashing vectorizer or a verified GGUF
+// behind the isolated llama.cpp runner. Vectors persist with their exact
+// source and embedding-model provenance. This is deliberately a local
 // retrieval/context executor, not an LLM fine-tuning or answer-generation
 // executor.
 struct KnowledgeDocument {
@@ -4198,8 +4218,12 @@ struct KnowledgeChunk {
     std::string file_name;
     std::size_t chunk_index{0};
     std::string text;
+    std::string embedding_method{"authored_hashing_vectorizer_v1"};
     std::vector<double> embedding;
 };
+
+using KnowledgeEmbeddingFunction =
+    std::function<std::vector<double>(const std::string&)>;
 
 struct RagRetrievedChunk {
     KnowledgeChunk chunk;
@@ -4223,7 +4247,10 @@ public:
                              const std::string& vector_store_id,
                              const std::string& file_name,
                              const std::string& media_type,
-                             const std::string& content);
+                             const std::string& content,
+                             const std::string& embedding_method =
+                                 "authored_hashing_vectorizer_v1",
+                             const KnowledgeEmbeddingFunction& vectorize = {});
     std::optional<KnowledgeDocument> find_document(
         const std::string& id) const;
     std::vector<KnowledgeDocument> list_documents() const;
@@ -4242,7 +4269,11 @@ private:
 RagRetrievalResult retrieve_knowledge(
     const KnowledgeIndexStore& index, const std::string& vector_store_id,
     const std::string& search_strategy, const std::string& query,
-    std::size_t top_k = 5U);
+    std::size_t top_k = 5U,
+    const std::string& embedding_method =
+        "authored_hashing_vectorizer_v1",
+    const KnowledgeEmbeddingFunction& vectorize = {});
+std::vector<double> authored_hash_embedding(const std::string& text);
 std::string knowledge_document_json(const KnowledgeDocument& document);
 std::string knowledge_documents_json(
     const std::vector<KnowledgeDocument>& documents);
