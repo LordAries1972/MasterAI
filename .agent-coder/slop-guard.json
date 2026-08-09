@@ -6,6 +6,18 @@
   "maximumDuplicateBlockLines": 6,
   "suppressedRuleIds": [],
   "pathOverrides": [],
+  "ignoredPaths": [
+    "runtime/**",
+    "docs/**",
+    "models/**",
+    "tools/**",
+    ".claude/**",
+    ".vscode/**",
+    "rules/**",
+    "integrations/**",
+    "build/**",
+    "**/edge-profile/**"
+  ],
   "routingFeedbackEnabled": true,
   "authorshipCalibrationEnabled": true,
   "refinementLoopEnabled": true

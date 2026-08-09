@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -4554,7 +4555,17 @@ private:
         std::thread([this, model_id]() {
             try {
                 ensure_model_loaded(model_id);
+            } catch (const std::exception& warm_exception) {
+                // Best-effort warmup: send_chat_message()'s own synchronous
+                // ensure_model_loaded() call is what actually surfaces a real
+                // load failure to the user, so this is only logged, not
+                // rethrown.
+                std::cerr << "warm_model_async: failed to warm model '"
+                          << model_id << "': " << warm_exception.what()
+                          << std::endl;
             } catch (...) {
+                std::cerr << "warm_model_async: failed to warm model '"
+                          << model_id << "': unknown exception" << std::endl;
             }
             model_warm_in_progress.store(false, std::memory_order_release);
         }).detach();
@@ -5526,7 +5537,14 @@ private:
                 try {
                     queries.finish(query_id, QueryStatus::failed,
                                    failure_reason);
-                } catch (const std::exception&) {
+                } catch (const std::exception& finish_exception) {
+                    // Already handling a generation failure; logging instead
+                    // of rethrowing keeps the original failure_reason as the
+                    // one surfaced to the client.
+                    std::cerr << "chat.generate: failed to mark query '"
+                              << query_id
+                              << "' failed: " << finish_exception.what()
+                              << std::endl;
                 }
             }
             // The generate() call throwing loses its own copy of whatever it
@@ -5537,7 +5555,11 @@ private:
             if (!streamed_text.empty()) {
                 try {
                     chats->append(chat_id, ChatRole::assistant, streamed_text);
-                } catch (const std::exception&) {
+                } catch (const std::exception& append_exception) {
+                    std::cerr << "chat.generate: failed to persist partial "
+                                 "streamed reply for chat '"
+                              << chat_id << "': " << append_exception.what()
+                              << std::endl;
                 }
             }
             audit.append("chat.generate", user.id,

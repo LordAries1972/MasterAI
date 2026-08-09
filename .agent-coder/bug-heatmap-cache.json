@@ -1,706 +1,16 @@
 {
   "version": 2,
-  "capturedAtMs": 1785623648809,
+  "capturedAtMs": 1785992348885,
   "findings": [
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "$schema",
-      "startLine": 2,
-      "endLine": 2,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "$id",
-      "startLine": 3,
-      "endLine": 3,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "title",
-      "startLine": 4,
-      "endLine": 4,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "additionalProperties",
-      "startLine": 6,
-      "endLine": 6,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "required",
-      "startLine": 7,
-      "endLine": 7,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "properties",
-      "startLine": 8,
-      "endLine": 8,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "schemaVersion",
-      "startLine": 9,
-      "endLine": 9,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "server",
-      "startLine": 10,
-      "endLine": 10,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "tls",
-      "startLine": 29,
-      "endLine": 29,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "$comment",
-      "startLine": 37,
-      "endLine": 37,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "auth",
-      "startLine": 39,
-      "endLine": 39,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "enabled",
-      "startLine": 43,
-      "endLine": 43,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "workspace",
-      "startLine": 50,
-      "endLine": 50,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "storage",
-      "startLine": 58,
-      "endLine": 58,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "models",
-      "startLine": 66,
-      "endLine": 66,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "inference",
-      "startLine": 73,
-      "endLine": 73,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "downloads",
-      "startLine": 86,
-      "endLine": 86,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "indexing",
-      "startLine": 93,
-      "endLine": 93,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "retrieval",
-      "startLine": 100,
-      "endLine": 100,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "cache",
-      "startLine": 112,
-      "endLine": 112,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "session",
-      "startLine": 120,
-      "endLine": 120,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "performance",
-      "startLine": 129,
-      "endLine": 129,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "memory",
-      "startLine": 136,
-      "endLine": 136,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "docs/architecture/config.schema.json",
-      "functionName": "hardware",
-      "startLine": 146,
-      "endLine": 146,
-      "score": 12,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 1,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.integration.languageModelToolsEnabled",
-      "startLine": 2,
-      "endLine": 2,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.integration.languageModelChatProviderEnabled",
-      "startLine": 3,
-      "endLine": 3,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.integration.mcpClientEnabled",
-      "startLine": 4,
-      "endLine": 4,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.integration.approvalPromptsEnabled",
-      "startLine": 5,
-      "endLine": 5,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.integration.adaptiveRoutingEnabled",
-      "startLine": 6,
-      "endLine": 6,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.integration.defaultStrategy",
-      "startLine": 7,
-      "endLine": 7,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.integration.headlessReadOnlyEnabled",
-      "startLine": 8,
-      "endLine": 8,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.integration.auditRetentionDays",
-      "startLine": 9,
-      "endLine": 9,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.liveContext.enabled",
-      "startLine": 10,
-      "endLine": 10,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.liveValidation.continuous",
-      "startLine": 11,
-      "endLine": 11,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.liveValidation.debounceMs",
-      "startLine": 12,
-      "endLine": 12,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.liveValidation.publishDiagnostics",
-      "startLine": 13,
-      "endLine": 13,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.liveValidation.persistHistory",
-      "startLine": 14,
-      "endLine": 14,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.liveAI.enabled",
-      "startLine": 15,
-      "endLine": 15,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.liveAI.cooldownMs",
-      "startLine": 16,
-      "endLine": 16,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.liveAI.maximumInputTokens",
-      "startLine": 17,
-      "endLine": 17,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.slopGuard.liveMonitoring",
-      "startLine": 18,
-      "endLine": 18,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.slopGuard.statusBar",
-      "startLine": 19,
-      "endLine": 19,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "cmake.sourceDirectory",
-      "startLine": 20,
-      "endLine": 20,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.documenter.defaultFormat",
-      "startLine": 21,
-      "endLine": 21,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.documenter.includeGeneratedFiles",
-      "startLine": 22,
-      "endLine": 22,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": ".vscode/settings.json",
-      "functionName": "agentCoder.documenter.useAIOverview",
-      "startLine": 23,
-      "endLine": 23,
-      "score": 8,
-      "signals": {
-        "complexity": 0,
-        "churn": 4,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
     {
       "filePath": ".agent-coder.json",
       "functionName": "projectName",
       "startLine": 2,
       "endLine": 2,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -712,10 +22,10 @@
       "functionName": "languages",
       "startLine": 3,
       "endLine": 3,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -727,10 +37,10 @@
       "functionName": "protectedPaths",
       "startLine": 4,
       "endLine": 4,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -742,10 +52,10 @@
       "functionName": "excludedPaths",
       "startLine": 5,
       "endLine": 5,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -757,10 +67,10 @@
       "functionName": "allowedCommands",
       "startLine": 6,
       "endLine": 6,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -772,10 +82,10 @@
       "functionName": "requiresApprovalForEdits",
       "startLine": 11,
       "endLine": 11,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -787,10 +97,10 @@
       "functionName": "maximumFilesPerTask",
       "startLine": 12,
       "endLine": 12,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -802,10 +112,10 @@
       "functionName": "maximumRepairAttempts",
       "startLine": 13,
       "endLine": 13,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -817,10 +127,10 @@
       "functionName": "preservePublicInterfaces",
       "startLine": 14,
       "endLine": 14,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -832,10 +142,10 @@
       "functionName": "allowNewDependencies",
       "startLine": 15,
       "endLine": 15,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -847,10 +157,10 @@
       "functionName": "tokenBudget",
       "startLine": 16,
       "endLine": 16,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -862,10 +172,10 @@
       "functionName": "maximumInputTokens",
       "startLine": 17,
       "endLine": 17,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -877,10 +187,10 @@
       "functionName": "maximumOutputTokens",
       "startLine": 18,
       "endLine": 18,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -892,10 +202,10 @@
       "functionName": "reservedForRepair",
       "startLine": 19,
       "endLine": 19,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -907,10 +217,10 @@
       "functionName": "reservedForValidation",
       "startLine": 20,
       "endLine": 20,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -922,10 +232,10 @@
       "functionName": "validationPolicy",
       "startLine": 22,
       "endLine": 22,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -937,10 +247,10 @@
       "functionName": "enabled",
       "startLine": 23,
       "endLine": 23,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -952,10 +262,10 @@
       "functionName": "minimumLevel",
       "startLine": 24,
       "endLine": 24,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -967,10 +277,10 @@
       "functionName": "requireBuildTool",
       "startLine": 25,
       "endLine": 25,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -982,10 +292,10 @@
       "functionName": "requireTestTool",
       "startLine": 26,
       "endLine": 26,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -997,10 +307,10 @@
       "functionName": "failCommandOnValidationFailure",
       "startLine": 27,
       "endLine": 27,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1012,10 +322,10 @@
       "functionName": "reportCommandCompletionToChat",
       "startLine": 28,
       "endLine": 28,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1027,10 +337,10 @@
       "functionName": "liveActionFeedEnabled",
       "startLine": 30,
       "endLine": 30,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1042,10 +352,10 @@
       "functionName": "tokenCeilings",
       "startLine": 31,
       "endLine": 31,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1057,10 +367,10 @@
       "functionName": "classification",
       "startLine": 32,
       "endLine": 32,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1072,10 +382,10 @@
       "functionName": "errorExplanation",
       "startLine": 36,
       "endLine": 36,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1087,10 +397,10 @@
       "functionName": "symbolExplanation",
       "startLine": 40,
       "endLine": 40,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1102,10 +412,10 @@
       "functionName": "singleSymbolEdit",
       "startLine": 44,
       "endLine": 44,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1117,10 +427,10 @@
       "functionName": "multiFilePlanning",
       "startLine": 48,
       "endLine": 48,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1132,10 +442,10 @@
       "functionName": "architectureAnalysisBounded",
       "startLine": 52,
       "endLine": 52,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1147,10 +457,10 @@
       "functionName": "finalImplementationPatch",
       "startLine": 55,
       "endLine": 55,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1162,10 +472,10 @@
       "functionName": "finalImplementationPatchMultiFile",
       "startLine": 58,
       "endLine": 58,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1177,10 +487,10 @@
       "functionName": "adversarialReview",
       "startLine": 61,
       "endLine": 61,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1192,10 +502,10 @@
       "functionName": "designDocument",
       "startLine": 65,
       "endLine": 65,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1207,10 +517,10 @@
       "functionName": "hourlyRate",
       "startLine": 69,
       "endLine": 69,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1222,10 +532,10 @@
       "functionName": "currency",
       "startLine": 70,
       "endLine": 70,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1237,10 +547,10 @@
       "functionName": "featureAreas",
       "startLine": 71,
       "endLine": 71,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1252,10 +562,10 @@
       "functionName": "decisionIntelligence",
       "startLine": 72,
       "endLine": 72,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1267,10 +577,10 @@
       "functionName": "governance",
       "startLine": 73,
       "endLine": 73,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1282,10 +592,10 @@
       "functionName": "changeImpactAnalysis",
       "startLine": 74,
       "endLine": 74,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1297,10 +607,10 @@
       "functionName": "testIntelligence",
       "startLine": 75,
       "endLine": 75,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1312,10 +622,10 @@
       "functionName": "securityScanning",
       "startLine": 76,
       "endLine": 76,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1327,10 +637,10 @@
       "functionName": "toolchainAwareness",
       "startLine": 77,
       "endLine": 77,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1342,10 +652,10 @@
       "functionName": "gitSafety",
       "startLine": 78,
       "endLine": 78,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1357,10 +667,10 @@
       "functionName": "costOptimization",
       "startLine": 80,
       "endLine": 80,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1372,10 +682,10 @@
       "functionName": "projectMemory",
       "startLine": 81,
       "endLine": 81,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1387,10 +697,10 @@
       "functionName": "debuggingIntelligence",
       "startLine": 82,
       "endLine": 82,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1402,10 +712,10 @@
       "functionName": "domainValidation",
       "startLine": 83,
       "endLine": 83,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1417,10 +727,10 @@
       "functionName": "provenanceTracking",
       "startLine": 84,
       "endLine": 84,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1432,10 +742,10 @@
       "functionName": "controlledAutonomy",
       "startLine": 85,
       "endLine": 85,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1447,10 +757,10 @@
       "functionName": "operationalDiagnostics",
       "startLine": 86,
       "endLine": 86,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1462,10 +772,10 @@
       "functionName": "dashboardsAndVisualizations",
       "startLine": 87,
       "endLine": 87,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1477,10 +787,10 @@
       "functionName": "learningAndTeachingMode",
       "startLine": 88,
       "endLine": 88,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1492,10 +802,10 @@
       "functionName": "designAndSimulation",
       "startLine": 89,
       "endLine": 89,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1507,10 +817,10 @@
       "functionName": "pairProgrammerAndGoals",
       "startLine": 90,
       "endLine": 90,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1522,10 +832,10 @@
       "functionName": "consensusAndDebateMode",
       "startLine": 91,
       "endLine": 91,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1537,10 +847,10 @@
       "functionName": "answerVerification",
       "startLine": 92,
       "endLine": 92,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1552,10 +862,10 @@
       "functionName": "contextInspectorAndMissingInfoGate",
       "startLine": 93,
       "endLine": 93,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1567,10 +877,10 @@
       "functionName": "promptReplayAndMemoryBrowser",
       "startLine": 94,
       "endLine": 94,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1582,10 +892,10 @@
       "functionName": "promptChainWorkflowAndLifecycle",
       "startLine": 95,
       "endLine": 95,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1597,10 +907,10 @@
       "functionName": "aiHealthDashboardAndAdaptiveRouting",
       "startLine": 96,
       "endLine": 96,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1612,10 +922,10 @@
       "functionName": "engineeringSessionRecorder",
       "startLine": 97,
       "endLine": 97,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1627,10 +937,10 @@
       "functionName": "answerOrchestrator",
       "startLine": 98,
       "endLine": 98,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1642,10 +952,10 @@
       "functionName": "projectDigitalTwin",
       "startLine": 99,
       "endLine": 99,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1657,10 +967,10 @@
       "functionName": "projectTimeMachine",
       "startLine": 100,
       "endLine": 100,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1672,10 +982,10 @@
       "functionName": "bugProbabilityHeatmap",
       "startLine": 101,
       "endLine": 101,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1687,10 +997,10 @@
       "functionName": "engineeringCostEstimator",
       "startLine": 102,
       "endLine": 102,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1702,10 +1012,10 @@
       "functionName": "knowledgePreservationEngine",
       "startLine": 103,
       "endLine": 103,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1717,10 +1027,10 @@
       "functionName": "projectHealthForecast",
       "startLine": 104,
       "endLine": 104,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1732,10 +1042,10 @@
       "functionName": "architectureEvolutionSimulator",
       "startLine": 105,
       "endLine": 105,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1747,10 +1057,10 @@
       "functionName": "namingConventionAdvisor",
       "startLine": 106,
       "endLine": 106,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1762,10 +1072,10 @@
       "functionName": "apiEvolutionTracker",
       "startLine": 107,
       "endLine": 107,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1777,10 +1087,10 @@
       "functionName": "releaseReadiness",
       "startLine": 108,
       "endLine": 108,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1792,10 +1102,10 @@
       "functionName": "documentationDriftDetector",
       "startLine": 109,
       "endLine": 109,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1807,10 +1117,10 @@
       "functionName": "architectureMentor",
       "startLine": 110,
       "endLine": 110,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1822,10 +1132,10 @@
       "functionName": "legacyCodeRescueMode",
       "startLine": 111,
       "endLine": 111,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1837,10 +1147,10 @@
       "functionName": "codeArchaeologist",
       "startLine": 112,
       "endLine": 112,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1852,10 +1162,10 @@
       "functionName": "liveCodingCoach",
       "startLine": 113,
       "endLine": 113,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1867,10 +1177,10 @@
       "functionName": "engineeringKpiDashboard",
       "startLine": 114,
       "endLine": 114,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1882,10 +1192,10 @@
       "functionName": "refactorConfidenceSimulator",
       "startLine": 115,
       "endLine": 115,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1897,10 +1207,10 @@
       "functionName": "featureCompletionPredictor",
       "startLine": 116,
       "endLine": 116,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1912,10 +1222,10 @@
       "functionName": "pluginMarketplace",
       "startLine": 117,
       "endLine": 117,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1927,10 +1237,10 @@
       "functionName": "industryCompliancePacks",
       "startLine": 118,
       "endLine": 118,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1942,10 +1252,10 @@
       "functionName": "engineeringIntelligenceNetwork",
       "startLine": 119,
       "endLine": 119,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1957,10 +1267,10 @@
       "functionName": "engineeringRoadmap",
       "startLine": 120,
       "endLine": 120,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1972,10 +1282,10 @@
       "functionName": "personalEngineeringProfile",
       "startLine": 121,
       "endLine": 121,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -1987,10 +1297,10 @@
       "functionName": "innovationAssistant",
       "startLine": 122,
       "endLine": 122,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2002,10 +1312,10 @@
       "functionName": "professionalCommandFramework",
       "startLine": 123,
       "endLine": 123,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2017,10 +1327,10 @@
       "functionName": "localTestLaboratory",
       "startLine": 124,
       "endLine": 124,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2032,10 +1342,10 @@
       "functionName": "problemSolvingContainer",
       "startLine": 125,
       "endLine": 125,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2047,10 +1357,10 @@
       "functionName": "liveEngineeringContext",
       "startLine": 126,
       "endLine": 126,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2062,10 +1372,10 @@
       "functionName": "slopGuard",
       "startLine": 127,
       "endLine": 127,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2077,10 +1387,10 @@
       "functionName": "autonomousTaskBudget",
       "startLine": 129,
       "endLine": 129,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2092,10 +1402,10 @@
       "functionName": "maximumDurationMs",
       "startLine": 130,
       "endLine": 130,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2107,10 +1417,10 @@
       "functionName": "maximumAIRequests",
       "startLine": 131,
       "endLine": 131,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2122,10 +1432,10 @@
       "functionName": "maximumFilesRead",
       "startLine": 134,
       "endLine": 134,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2137,10 +1447,10 @@
       "functionName": "maximumFilesModified",
       "startLine": 135,
       "endLine": 135,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2152,10 +1462,10 @@
       "functionName": "maximumCommands",
       "startLine": 136,
       "endLine": 136,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2167,10 +1477,10 @@
       "functionName": "tokenPolicy",
       "startLine": 139,
       "endLine": 139,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2182,10 +1492,10 @@
       "functionName": "mode",
       "startLine": 140,
       "endLine": 140,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2197,10 +1507,10 @@
       "functionName": "maximumTokensPerRequest",
       "startLine": 141,
       "endLine": 141,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2212,10 +1522,10 @@
       "functionName": "maximumTokensPerTask",
       "startLine": 142,
       "endLine": 142,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2227,10 +1537,10 @@
       "functionName": "maximumRequestsPerTask",
       "startLine": 143,
       "endLine": 143,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2242,10 +1552,10 @@
       "functionName": "maximumExpensiveModelCallsPerTask",
       "startLine": 144,
       "endLine": 144,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2257,10 +1567,10 @@
       "functionName": "warnAtBudgetPercentage",
       "startLine": 145,
       "endLine": 145,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2272,10 +1582,10 @@
       "functionName": "requireApprovalAtBudgetPercentage",
       "startLine": 146,
       "endLine": 146,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2287,10 +1597,10 @@
       "functionName": "hardStopAtBudgetPercentage",
       "startLine": 147,
       "endLine": 147,
-      "score": 6,
+      "score": 8,
       "signals": {
         "complexity": 0,
-        "churn": 3,
+        "churn": 4,
         "bugfixCommits": 0,
         "threadOrResourceHeuristic": false,
         "unhandledPromiseHeuristic": false,
@@ -2328,8 +1638,8 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "$schema",
+      "filePath": ".metadata-cache.json",
+      "functionName": "projectName",
       "startLine": 2,
       "endLine": 2,
       "score": 2,
@@ -2343,8 +1653,8 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "$id",
+      "filePath": ".metadata-cache.json",
+      "functionName": "projectType",
       "startLine": 3,
       "endLine": 3,
       "score": 2,
@@ -2358,8 +1668,8 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "title",
+      "filePath": ".metadata-cache.json",
+      "functionName": "rootPath",
       "startLine": 4,
       "endLine": 4,
       "score": 2,
@@ -2373,8 +1683,23 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "additionalProperties",
+      "filePath": ".metadata-cache.json",
+      "functionName": "analyzeAtMs",
+      "startLine": 5,
+      "endLine": 5,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "tags",
       "startLine": 6,
       "endLine": 6,
       "score": 2,
@@ -2388,38 +1713,8 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "required",
-      "startLine": 7,
-      "endLine": 7,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "properties",
-      "startLine": 9,
-      "endLine": 9,
-      "score": 2,
-      "signals": {
-        "complexity": 0,
-        "churn": 1,
-        "bugfixCommits": 0,
-        "threadOrResourceHeuristic": false,
-        "unhandledPromiseHeuristic": false,
-        "hasTestCoverage": false
-      }
-    },
-    {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "schemaVersion",
+      "filePath": ".metadata-cache.json",
+      "functionName": "customMetadata",
       "startLine": 10,
       "endLine": 10,
       "score": 2,
@@ -2433,8 +1728,68 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "model",
+      "filePath": ".metadata-cache.json",
+      "functionName": "dependencies",
+      "startLine": 11,
+      "endLine": 11,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "directDependencies",
+      "startLine": 12,
+      "endLine": 12,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "transitiveDependencies",
+      "startLine": 13,
+      "endLine": 13,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "statistics",
+      "startLine": 14,
+      "endLine": 14,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "totalDependencies",
       "startLine": 15,
       "endLine": 15,
       "score": 2,
@@ -2448,8 +1803,53 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "format",
+      "filePath": ".metadata-cache.json",
+      "functionName": "directCount",
+      "startLine": 16,
+      "endLine": 16,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "devCount",
+      "startLine": 17,
+      "endLine": 17,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "outdatedCount",
+      "startLine": 18,
+      "endLine": 18,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "unusedCount",
       "startLine": 19,
       "endLine": 19,
       "score": 2,
@@ -2463,8 +1863,38 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "requirements",
+      "filePath": ".metadata-cache.json",
+      "functionName": "circularDependencies",
+      "startLine": 21,
+      "endLine": 21,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "dependencyTree",
+      "startLine": 22,
+      "endLine": 22,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "configurations",
       "startLine": 24,
       "endLine": 24,
       "score": 2,
@@ -2478,8 +1908,98 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "files",
+      "filePath": ".metadata-cache.json",
+      "functionName": "relativePath",
+      "startLine": 26,
+      "endLine": 26,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "configType",
+      "startLine": 27,
+      "endLine": 27,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "configuration",
+      "startLine": 28,
+      "endLine": 28,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "languages",
+      "startLine": 30,
+      "endLine": 30,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "protectedPaths",
+      "startLine": 31,
+      "endLine": 31,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "excludedPaths",
+      "startLine": 32,
+      "endLine": 32,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "allowedCommands",
       "startLine": 33,
       "endLine": 33,
       "score": 2,
@@ -2493,10 +2013,10 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "items",
-      "startLine": 35,
-      "endLine": 35,
+      "filePath": ".metadata-cache.json",
+      "functionName": "requiresApprovalForEdits",
+      "startLine": 38,
+      "endLine": 38,
       "score": 2,
       "signals": {
         "complexity": 0,
@@ -2508,8 +2028,128 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "provenance",
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumFilesPerTask",
+      "startLine": 39,
+      "endLine": 39,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumRepairAttempts",
+      "startLine": 40,
+      "endLine": 40,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "preservePublicInterfaces",
+      "startLine": 41,
+      "endLine": 41,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "allowNewDependencies",
+      "startLine": 42,
+      "endLine": 42,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "tokenBudget",
+      "startLine": 43,
+      "endLine": 43,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumInputTokens",
+      "startLine": 44,
+      "endLine": 44,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumOutputTokens",
+      "startLine": 45,
+      "endLine": 45,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "reservedForRepair",
+      "startLine": 46,
+      "endLine": 46,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "reservedForValidation",
       "startLine": 47,
       "endLine": 47,
       "score": 2,
@@ -2523,8 +2163,98 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "license",
+      "filePath": ".metadata-cache.json",
+      "functionName": "validationPolicy",
+      "startLine": 49,
+      "endLine": 49,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "enabled",
+      "startLine": 50,
+      "endLine": 50,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "minimumLevel",
+      "startLine": 51,
+      "endLine": 51,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "requireBuildTool",
+      "startLine": 52,
+      "endLine": 52,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "requireTestTool",
+      "startLine": 53,
+      "endLine": 53,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "failCommandOnValidationFailure",
+      "startLine": 54,
+      "endLine": 54,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "reportCommandCompletionToChat",
       "startLine": 55,
       "endLine": 55,
       "score": 2,
@@ -2538,10 +2268,10 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "accepted",
-      "startLine": 61,
-      "endLine": 61,
+      "filePath": ".metadata-cache.json",
+      "functionName": "liveActionFeedEnabled",
+      "startLine": 57,
+      "endLine": 57,
       "score": 2,
       "signals": {
         "complexity": 0,
@@ -2553,10 +2283,1585 @@
       }
     },
     {
-      "filePath": "models/manifest.schema.json",
-      "functionName": "hardware",
-      "startLine": 64,
-      "endLine": 64,
+      "filePath": ".metadata-cache.json",
+      "functionName": "tokenCeilings",
+      "startLine": 58,
+      "endLine": 58,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "classification",
+      "startLine": 59,
+      "endLine": 59,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "errorExplanation",
+      "startLine": 63,
+      "endLine": 63,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "symbolExplanation",
+      "startLine": 67,
+      "endLine": 67,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "singleSymbolEdit",
+      "startLine": 71,
+      "endLine": 71,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "multiFilePlanning",
+      "startLine": 75,
+      "endLine": 75,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "architectureAnalysisBounded",
+      "startLine": 79,
+      "endLine": 79,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "finalImplementationPatch",
+      "startLine": 82,
+      "endLine": 82,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "finalImplementationPatchMultiFile",
+      "startLine": 85,
+      "endLine": 85,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "adversarialReview",
+      "startLine": 88,
+      "endLine": 88,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "designDocument",
+      "startLine": 92,
+      "endLine": 92,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "hourlyRate",
+      "startLine": 96,
+      "endLine": 96,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "currency",
+      "startLine": 97,
+      "endLine": 97,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "featureAreas",
+      "startLine": 98,
+      "endLine": 98,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "decisionIntelligence",
+      "startLine": 99,
+      "endLine": 99,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "governance",
+      "startLine": 100,
+      "endLine": 100,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "changeImpactAnalysis",
+      "startLine": 101,
+      "endLine": 101,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "testIntelligence",
+      "startLine": 102,
+      "endLine": 102,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "securityScanning",
+      "startLine": 103,
+      "endLine": 103,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "toolchainAwareness",
+      "startLine": 104,
+      "endLine": 104,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "gitSafety",
+      "startLine": 105,
+      "endLine": 105,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "costOptimization",
+      "startLine": 107,
+      "endLine": 107,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "projectMemory",
+      "startLine": 108,
+      "endLine": 108,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "debuggingIntelligence",
+      "startLine": 109,
+      "endLine": 109,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "domainValidation",
+      "startLine": 110,
+      "endLine": 110,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "provenanceTracking",
+      "startLine": 111,
+      "endLine": 111,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "controlledAutonomy",
+      "startLine": 112,
+      "endLine": 112,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "operationalDiagnostics",
+      "startLine": 113,
+      "endLine": 113,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "dashboardsAndVisualizations",
+      "startLine": 114,
+      "endLine": 114,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "learningAndTeachingMode",
+      "startLine": 115,
+      "endLine": 115,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "designAndSimulation",
+      "startLine": 116,
+      "endLine": 116,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "pairProgrammerAndGoals",
+      "startLine": 117,
+      "endLine": 117,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "consensusAndDebateMode",
+      "startLine": 118,
+      "endLine": 118,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "answerVerification",
+      "startLine": 119,
+      "endLine": 119,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "contextInspectorAndMissingInfoGate",
+      "startLine": 120,
+      "endLine": 120,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "promptReplayAndMemoryBrowser",
+      "startLine": 121,
+      "endLine": 121,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "promptChainWorkflowAndLifecycle",
+      "startLine": 122,
+      "endLine": 122,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "aiHealthDashboardAndAdaptiveRouting",
+      "startLine": 123,
+      "endLine": 123,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "engineeringSessionRecorder",
+      "startLine": 124,
+      "endLine": 124,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "answerOrchestrator",
+      "startLine": 125,
+      "endLine": 125,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "projectDigitalTwin",
+      "startLine": 126,
+      "endLine": 126,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "projectTimeMachine",
+      "startLine": 127,
+      "endLine": 127,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "bugProbabilityHeatmap",
+      "startLine": 128,
+      "endLine": 128,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "engineeringCostEstimator",
+      "startLine": 129,
+      "endLine": 129,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "knowledgePreservationEngine",
+      "startLine": 130,
+      "endLine": 130,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "projectHealthForecast",
+      "startLine": 131,
+      "endLine": 131,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "architectureEvolutionSimulator",
+      "startLine": 132,
+      "endLine": 132,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "namingConventionAdvisor",
+      "startLine": 133,
+      "endLine": 133,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "apiEvolutionTracker",
+      "startLine": 134,
+      "endLine": 134,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "releaseReadiness",
+      "startLine": 135,
+      "endLine": 135,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "documentationDriftDetector",
+      "startLine": 136,
+      "endLine": 136,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "architectureMentor",
+      "startLine": 137,
+      "endLine": 137,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "legacyCodeRescueMode",
+      "startLine": 138,
+      "endLine": 138,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "codeArchaeologist",
+      "startLine": 139,
+      "endLine": 139,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "liveCodingCoach",
+      "startLine": 140,
+      "endLine": 140,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "engineeringKpiDashboard",
+      "startLine": 141,
+      "endLine": 141,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "refactorConfidenceSimulator",
+      "startLine": 142,
+      "endLine": 142,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "featureCompletionPredictor",
+      "startLine": 143,
+      "endLine": 143,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "pluginMarketplace",
+      "startLine": 144,
+      "endLine": 144,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "industryCompliancePacks",
+      "startLine": 145,
+      "endLine": 145,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "engineeringIntelligenceNetwork",
+      "startLine": 146,
+      "endLine": 146,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "engineeringRoadmap",
+      "startLine": 147,
+      "endLine": 147,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "personalEngineeringProfile",
+      "startLine": 148,
+      "endLine": 148,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "innovationAssistant",
+      "startLine": 149,
+      "endLine": 149,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "professionalCommandFramework",
+      "startLine": 150,
+      "endLine": 150,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "localTestLaboratory",
+      "startLine": 151,
+      "endLine": 151,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "problemSolvingContainer",
+      "startLine": 152,
+      "endLine": 152,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "liveEngineeringContext",
+      "startLine": 153,
+      "endLine": 153,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "slopGuard",
+      "startLine": 154,
+      "endLine": 154,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "autonomousTaskBudget",
+      "startLine": 156,
+      "endLine": 156,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumDurationMs",
+      "startLine": 157,
+      "endLine": 157,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumAIRequests",
+      "startLine": 158,
+      "endLine": 158,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumFilesRead",
+      "startLine": 161,
+      "endLine": 161,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumFilesModified",
+      "startLine": 162,
+      "endLine": 162,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumCommands",
+      "startLine": 163,
+      "endLine": 163,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "tokenPolicy",
+      "startLine": 166,
+      "endLine": 166,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "mode",
+      "startLine": 167,
+      "endLine": 167,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumTokensPerRequest",
+      "startLine": 168,
+      "endLine": 168,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumTokensPerTask",
+      "startLine": 169,
+      "endLine": 169,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumRequestsPerTask",
+      "startLine": 170,
+      "endLine": 170,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "maximumExpensiveModelCallsPerTask",
+      "startLine": 171,
+      "endLine": 171,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "warnAtBudgetPercentage",
+      "startLine": 172,
+      "endLine": 172,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "requireApprovalAtBudgetPercentage",
+      "startLine": 173,
+      "endLine": 173,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "hardStopAtBudgetPercentage",
+      "startLine": 174,
+      "endLine": 174,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "status",
+      "startLine": 177,
+      "endLine": 177,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "lastModifiedMs",
+      "startLine": 178,
+      "endLine": 178,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "compilerInfo",
+      "startLine": 199,
+      "endLine": 199,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "metrics",
+      "startLine": 200,
+      "endLine": 200,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "totalLinesOfCode",
+      "startLine": 201,
+      "endLine": 201,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "sourceFileCount",
+      "startLine": 202,
+      "endLine": 202,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "testFileCount",
+      "startLine": 203,
+      "endLine": 203,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "averageFileSizeBytes",
+      "startLine": 204,
+      "endLine": 204,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "codeToTestRatio",
+      "startLine": 205,
+      "endLine": 205,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "complexityScore",
+      "startLine": 206,
+      "endLine": 206,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "technicalDebtMarkers",
+      "startLine": 207,
+      "endLine": 207,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "collectedAtMs",
+      "startLine": 208,
+      "endLine": 208,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "security",
+      "startLine": 210,
+      "endLine": 210,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "vulnerabilities",
+      "startLine": 211,
+      "endLine": 211,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "securityTools",
+      "startLine": 212,
+      "endLine": 212,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "configFiles",
+      "startLine": 213,
+      "endLine": 213,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "architecture",
+      "startLine": 215,
+      "endLine": 215,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "pattern",
+      "startLine": 216,
+      "endLine": 216,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "publicApis",
+      "startLine": 217,
+      "endLine": 217,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "modules",
+      "startLine": 220,
+      "endLine": 220,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "name",
+      "startLine": 222,
+      "endLine": 222,
+      "score": 2,
+      "signals": {
+        "complexity": 0,
+        "churn": 1,
+        "bugfixCommits": 0,
+        "threadOrResourceHeuristic": false,
+        "unhandledPromiseHeuristic": false,
+        "hasTestCoverage": false
+      }
+    },
+    {
+      "filePath": ".metadata-cache.json",
+      "functionName": "description",
+      "startLine": 223,
+      "endLine": 223,
       "score": 2,
       "signals": {
         "complexity": 0,

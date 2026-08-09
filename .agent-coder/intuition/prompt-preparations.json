@@ -700,5 +700,101 @@
     ],
     "estimatedTokens": 109,
     "preparedAt": "2026-08-03T14:46:09.734Z"
+  },
+  {
+    "requestId": "27317701-676f-4c5e-b202-5a7621158018",
+    "taskType": "propose-multi-file-edit",
+    "strategyId": "verified-default",
+    "strategyVersion": 1,
+    "questionType": "generate_tests",
+    "appliedRuleIds": [],
+    "conflictCount": 0,
+    "componentSources": [
+      {
+        "id": "acceptance_criteria",
+        "source": "question builder",
+        "estimatedTokens": 40
+      },
+      {
+        "id": "constraints",
+        "source": "confirmed request and project governance",
+        "estimatedTokens": 1
+      },
+      {
+        "id": "stop_conditions",
+        "source": "question builder and safety policy",
+        "estimatedTokens": 19
+      },
+      {
+        "id": "validation_rules",
+        "source": "question builder",
+        "estimatedTokens": 18
+      },
+      {
+        "id": "current_state",
+        "source": "agent lifecycle",
+        "estimatedTokens": 13
+      },
+      {
+        "id": "response_format",
+        "source": "question builder",
+        "estimatedTokens": 16
+      },
+      {
+        "id": "token_limit",
+        "source": "token ceiling",
+        "estimatedTokens": 2
+      }
+    ],
+    "estimatedTokens": 109,
+    "preparedAt": "2026-08-06T05:09:31.112Z"
+  },
+  {
+    "requestId": "0774d4ca-3c63-4523-9267-a768637fd890",
+    "taskType": "check-semantic-patch",
+    "strategyId": "verified-default",
+    "strategyVersion": 1,
+    "questionType": "review_patch",
+    "appliedRuleIds": [],
+    "conflictCount": 0,
+    "componentSources": [
+      {
+        "id": "acceptance_criteria",
+        "source": "question builder",
+        "estimatedTokens": 40
+      },
+      {
+        "id": "constraints",
+        "source": "confirmed request and project governance",
+        "estimatedTokens": 1
+      },
+      {
+        "id": "stop_conditions",
+        "source": "question builder and safety policy",
+        "estimatedTokens": 19
+      },
+      {
+        "id": "validation_rules",
+        "source": "question builder",
+        "estimatedTokens": 18
+      },
+      {
+        "id": "current_state",
+        "source": "agent lifecycle",
+        "estimatedTokens": 13
+      },
+      {
+        "id": "response_format",
+        "source": "question builder",
+        "estimatedTokens": 16
+      },
+      {
+        "id": "token_limit",
+        "source": "token ceiling",
+        "estimatedTokens": 2
+      }
+    ],
+    "estimatedTokens": 109,
+    "preparedAt": "2026-08-06T05:10:38.237Z"
   }
 ]

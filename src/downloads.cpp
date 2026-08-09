@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <fstream>
+#include <iostream>
 #include <stdexcept>
 #include <thread>
 
@@ -389,7 +390,12 @@ DownloadJob DownloadManager::run(const std::string& id,
                     destination.parent_path().parent_path().parent_path(),
                     destination.parent_path().filename().string(), actual,
                     std::filesystem::file_size(destination));
-            } catch (const std::exception&) {
+            } catch (const std::exception& record_exception) {
+                std::cerr << "download: failed to record verified model '"
+                          << destination.string()
+                          << "' (model still downloaded successfully; will "
+                             "show unverified until next verify run): "
+                          << record_exception.what() << std::endl;
             }
         } else {
             const auto quarantine =

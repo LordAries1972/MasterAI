@@ -178,5 +178,29 @@
     "failed": false,
     "id": "ec0a2fb0-e003-4bf2-9e73-f5fd1412ac69",
     "recordedAt": "2026-08-03T14:46:40.367Z"
+  },
+  {
+    "requestId": "27317701-676f-4c5e-b202-5a7621158018",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "taskShape": "finalImplementationPatchMultiFile",
+    "latencyMs": 66611,
+    "inputTokens": 127824,
+    "outputTokens": 5995,
+    "failed": false,
+    "id": "9e89ad9b-d950-46f8-ad3e-558a1d1066e2",
+    "recordedAt": "2026-08-06T05:10:38.068Z"
+  },
+  {
+    "requestId": "0774d4ca-3c63-4523-9267-a768637fd890",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "taskShape": "adversarialReview",
+    "latencyMs": 3393,
+    "inputTokens": 1352,
+    "outputTokens": 103,
+    "failed": false,
+    "id": "7fca68a1-f93a-4ea2-9e11-bbef511e62d6",
+    "recordedAt": "2026-08-06T05:10:41.763Z"
   }
 ]

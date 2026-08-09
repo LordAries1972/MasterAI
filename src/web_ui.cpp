@@ -103,21 +103,22 @@ std::string application_script() {
         "return all[modelId]||fallback;}catch(x){return fallback;}}"
         "function saveModelSettings(modelId,settings){if(!modelId)return;"
         "let all={};try{all=JSON.parse(localStorage.getItem('modelSettings')||"
-        "'{}');}catch(x){}"
+        "'{}');}catch(x){console.warn('saveModelSettings: corrupt "
+        "modelSettings, resetting',x);}"
         "all[modelId]=settings;localStorage.setItem('modelSettings',"
         "JSON.stringify(all));}"
         "function saveCurrentModelSettings(){const select=q('#chatModel');"
         "if(!select||!select.value)return;"
         "saveModelSettings(select.value,"
         "{effort:q('#modelEffort').value,thinking:q('#modelThinking').value});}"
-        // Opens (or refreshes) the settings panel for whatever model is
-        // currently selected -- called on every model picker change (a fresh
-        // chat's first choice, a later switch, or an existing chat being
-        // reopened) so the panel's two controls always reflect the model
-        // that's actually about to run, restored from this browser's saved
-        // preference for it rather than whatever the previous model left
-        // behind.
-        "function openModelSettingsPanel(){"
+        // Refreshes the settings panel's two controls (and its note) for
+        // whatever model is currently selected, without changing whether
+        // the panel is shown -- called whenever the picker's value changes
+        // programmatically (a fresh chat's default model, an existing chat
+        // being reopened) so the panel is ready with the right values
+        // without popping open on its own. openModelSettingsPanel() below
+        // is the user-facing entry point that also shows it.
+        "function refreshModelSettingsPanel(){"
         "const select=q('#chatModel'),panel=q('#modelSettingsPanel');"
         "if(!select||!panel||!select.value)return;"
         "const saved=loadModelSettings(select.value);"
@@ -127,8 +128,13 @@ std::string application_script() {
         "'This model supports explicit reasoning -- these settings are sent "
         "to it as reasoning instructions.':"
         "'This model has no reasoning mode of its own -- these settings "
-        "instead adjust its sampling (temperature and reply length).';"
-        "panel.hidden=false;}"
+        "instead adjust its sampling (temperature and reply length).';}"
+        // Opens the settings panel for the currently selected model --
+        // called only from explicit user action (the gear button, or the
+        // user changing the model picker themselves).
+        "function openModelSettingsPanel(){"
+        "refreshModelSettingsPanel();"
+        "const panel=q('#modelSettingsPanel');if(panel)panel.hidden=false;}"
         // Files attached to the message currently being composed, and the
         // project id they were (or will be) uploaded against -- an existing
         // chat's project is fixed and known once openChat() loads it, but a
@@ -229,7 +235,8 @@ std::string application_script() {
         // administrator still needs to be created.
         "async function initLogin(){try{const r=await fetch('/health/ready');"
         "const d=await r.json();if(d.setupRequired){q('#setupSection').hidden=false;"
-        "q('#loginSection').hidden=true;}}catch(x){}}"
+        "q('#loginSection').hidden=true;}}catch(x){console.warn('initLogin: "
+        "/health/ready check failed, defaulting to login form',x);}}"
         "async function setupLocalAdmin(e){e.preventDefault();const s=q('#status');"
         "try{await api('/api/v1/setup/local','POST',{setupToken:q('#setupToken').value,"
         "username:q('#setupUsername').value,password:q('#setupPassword').value,"
@@ -513,7 +520,7 @@ std::string application_script() {
         "placeholder.value=chat.modelId;"
         "placeholder.textContent=chat.modelId+' (not currently loaded)';"
         "modelSelect.append(placeholder);}"
-        "modelSelect.value=chat.modelId;openModelSettingsPanel();}"
+        "modelSelect.value=chat.modelId;refreshModelSettingsPanel();}"
         "if(q('#chatProject'))q('#chatProject').disabled=true;"
         "const box=q('#chatMessages');box.replaceChildren();"
         "for(const message of chat.messages)"
@@ -2495,7 +2502,8 @@ std::string application_script() {
         // not the eventual refresh.
         "if(TERMINAL_DOWNLOAD_STATES.has(job.state)){clearInterval(handle);"
         "delete activePolls[id];}"
-        "}catch(x){}};"
+        "}catch(x){console.warn('download poll tick failed, retrying next "
+        "interval',x);}};"
         "await tick();handle=setInterval(tick,1000);return handle;}"
         // The server runs the transfer synchronously and only responds once
         // the job finishes, so this request can legitimately stay pending
@@ -2763,11 +2771,13 @@ std::string application_script() {
         "let defaultId=null;"
         "try{const st=await api('/api/v1/runner/status');"
         "if(st.warmState==='Ready'&&st.modelId&&"
-        "ready.some(x=>x.id===st.modelId))defaultId=st.modelId;}catch(x){}"
+        "ready.some(x=>x.id===st.modelId))defaultId=st.modelId;}catch(x){"
+        "console.warn('selectDefaultChatModel: runner status check failed, "
+        "falling back to last chat model',x);}"
         "if(!defaultId){"
         "const lastChat=chats.find(x=>x.modelId&&ready.some(r=>r.id===x.modelId));"
         "if(lastChat)defaultId=lastChat.modelId;}"
-        "if(defaultId){picker.value=defaultId;openModelSettingsPanel();}}"
+        "if(defaultId){picker.value=defaultId;refreshModelSettingsPanel();}}"
         // Polls GET /api/v1/runner/status (see server.cpp) so the chat page
         // can announce once, inline, the moment the backend actually
         // finishes loading -- not just the initial 'Using model X' choice.
@@ -2791,7 +2801,8 @@ std::string application_script() {
         "const select=q('#chatModel');"
         "const opt=select?[...select.options].find(o=>o.value===st.modelId):null;"
         "appendModelCard(box,'Model warmed: '+(opt?opt.textContent:st.modelId)+"
-        "' is ready.');}}catch(x){}}"
+        "' is ready.');}}catch(x){console.warn('pollRunnerStatus: status "
+        "poll failed, retrying next interval',x);}}"
         // Fires when the composer's model picker changes while a chat is
         // already open -- persists the new model against the chat so it's
         // still selected (and used) on the next message and after a reload.
@@ -4715,6 +4726,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "border:1px solid var(--panel-border);border-radius:.75rem;"
         "padding:.75rem .9rem;box-shadow:0 8px 24px rgba(0,0,0,.4);"
         "display:flex;flex-direction:column;gap:.4rem;z-index:20}"
+        // display:flex above beats the browser's default display:none for
+        // [hidden] (author styles win over the UA stylesheet), so without
+        // this the panel showed regardless of its hidden attribute --
+        // including on page load and after the close button set it.
+        ".modelSettingsPanel[hidden]{display:none}"
         ".modelSettingsPanel label{margin-top:.3rem}"
         ".modelSettingsPanelHeader{display:flex;align-items:center;"
         "justify-content:space-between;font-size:.75rem;color:var(--muted);"

@@ -1,0 +1,22 @@
+{
+  ".agent-coder.json": {
+    "includedCount": 1,
+    "usedCount": 0
+  },
+  ".metadata-cache.json": {
+    "includedCount": 1,
+    "usedCount": 0
+  },
+  "config/settings.json": {
+    "includedCount": 1,
+    "usedCount": 0
+  },
+  "README.md": {
+    "includedCount": 1,
+    "usedCount": 1
+  },
+  "src/masterai.hpp": {
+    "includedCount": 1,
+    "usedCount": 0
+  }
+}

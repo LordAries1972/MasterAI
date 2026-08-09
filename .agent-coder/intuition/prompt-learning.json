@@ -219,6 +219,50 @@
       "appliedIntuitionRuleIds": [],
       "verified": false,
       "recordedAt": "2026-08-03T14:46:40.376Z"
+    },
+    {
+      "promptStrategyId": "verified-default",
+      "promptStrategyVersion": 1,
+      "requestId": "27317701-676f-4c5e-b202-5a7621158018",
+      "taskType": "propose-multi-file-edit",
+      "providerId": "claude",
+      "modelId": "claude-sonnet-5",
+      "promptTokens": 127824,
+      "completionTokens": 5995,
+      "attempts": 1,
+      "responseSchemaValid": true,
+      "assumptionsRejected": 0,
+      "evidenceCoverage": 0,
+      "patchAccepted": false,
+      "userCorrectionRequired": false,
+      "rolledBack": false,
+      "finalOutcome": "partially_successful",
+      "verificationEvidence": [],
+      "appliedIntuitionRuleIds": [],
+      "verified": false,
+      "recordedAt": "2026-08-06T05:10:38.081Z"
+    },
+    {
+      "promptStrategyId": "verified-default",
+      "promptStrategyVersion": 1,
+      "requestId": "0774d4ca-3c63-4523-9267-a768637fd890",
+      "taskType": "check-semantic-patch",
+      "providerId": "claude",
+      "modelId": "claude-sonnet-5",
+      "promptTokens": 1352,
+      "completionTokens": 103,
+      "attempts": 1,
+      "responseSchemaValid": true,
+      "assumptionsRejected": 0,
+      "evidenceCoverage": 0,
+      "patchAccepted": false,
+      "userCorrectionRequired": false,
+      "rolledBack": false,
+      "finalOutcome": "partially_successful",
+      "verificationEvidence": [],
+      "appliedIntuitionRuleIds": [],
+      "verified": false,
+      "recordedAt": "2026-08-06T05:10:41.775Z"
     }
   ],
   "lessons": [],
@@ -305,6 +349,20 @@
       "timestamp": "2026-08-03T14:46:40.377Z",
       "action": "record-outcome",
       "targetId": "5e4805a2-0935-4731-af8b-e64db3ffbfa5",
+      "detail": "Outcome remains temporary and cannot influence ranking."
+    },
+    {
+      "id": "cd3e0184-9ca5-4844-a2b4-4fbd3dc61018",
+      "timestamp": "2026-08-06T05:10:38.081Z",
+      "action": "record-outcome",
+      "targetId": "27317701-676f-4c5e-b202-5a7621158018",
+      "detail": "Outcome remains temporary and cannot influence ranking."
+    },
+    {
+      "id": "d7b6a45a-d486-4b2c-a0e4-7754f721ed87",
+      "timestamp": "2026-08-06T05:10:41.775Z",
+      "action": "record-outcome",
+      "targetId": "0774d4ca-3c63-4523-9267-a768637fd890",
       "detail": "Outcome remains temporary and cannot influence ranking."
     }
   ]
