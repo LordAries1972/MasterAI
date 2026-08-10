@@ -35,6 +35,9 @@ void log(LogLevel level, const std::string& event, const std::string& detail);
 bool constant_time_equal(const std::string& left, const std::string& right) noexcept;
 std::vector<std::uint8_t> secure_random(std::size_t size);
 std::string sha256_hex(const std::string& value);
+// Decodes standard base64 (RFC 4648, '+'/'/', '=' padding required). Throws
+// std::invalid_argument on malformed input.
+std::string base64_decode(const std::string& text);
 // progress, when set, is called after every chunk read with
 // (bytes_hashed_so_far, total_file_bytes) so a caller hashing a large file
 // can report live progress instead of blocking silently until it finishes.
@@ -90,6 +93,16 @@ struct AppConfig {
     std::string accelerator_policy{"auto"};
     std::filesystem::path llama_server_executable;
     std::filesystem::path curl_executable;
+    // Phase: process-isolated DuckDB CLI backend (rule 15's second named
+    // exception) used solely to convert Parquet knowledge-document uploads
+    // to text before chunking (parquet_bridge.cpp). Empty disables Parquet
+    // ingestion; other supported knowledge media types are unaffected.
+    std::filesystem::path parquet_helper_executable;
+    // Replaces the formerly hardcoded 2 MiB constant in ml_knowledge.cpp so
+    // operators can raise the knowledge-document size ceiling without a
+    // rebuild. Applies to every supported knowledge media type, not just
+    // Parquet.
+    std::uint64_t knowledge_maximum_document_bytes{25ULL * 1024ULL * 1024ULL};
     // "PageFile" setting: an administrator-chosen substitute location for
     // MasterAI's own disk-backed cache/scratch area (see
     // resolve_page_file_root()). Empty means "use the existing default"
@@ -4242,6 +4255,12 @@ class KnowledgeIndexStore final {
 public:
     KnowledgeIndexStore() = default;
     explicit KnowledgeIndexStore(RecordStore& records);
+    // parquet_helper_executable: configured DuckDB CLI path (rule 15's
+    // second process-isolated exception); empty disables Parquet ingestion.
+    // maximum_document_bytes: replaces the previously hardcoded 2 MiB cap.
+    KnowledgeIndexStore(RecordStore& records,
+                        std::filesystem::path parquet_helper_executable,
+                        std::uint64_t maximum_document_bytes);
     KnowledgeDocument ingest(const std::string& owner_id,
                              const std::string& subject_id,
                              const std::string& vector_store_id,
@@ -4261,10 +4280,26 @@ public:
 private:
     void restore();
     RecordStore* records_{nullptr};
+    std::filesystem::path parquet_helper_executable_;
+    std::uint64_t maximum_document_bytes_{2ULL * 1024ULL * 1024ULL};
     std::map<std::string, KnowledgeDocument> documents_;
     std::map<std::string, KnowledgeChunk> chunks_;
     mutable std::mutex mutex_;
 };
+
+// Converts Parquet bytes to newline-delimited JSON text via the configured,
+// process-isolated DuckDB CLI helper (rule 15's second named exception).
+// Throws std::runtime_error if the helper is not configured, cannot be
+// spawned, times out, or exits non-zero.
+std::string parquet_bytes_to_json(
+    const std::filesystem::path& helper_executable,
+    const std::string& parquet_bytes);
+
+// Shared by KnowledgeIndexStore::ingest() and the knowledge-documents REST
+// handler, which must base64-decode Parquet content before it reaches
+// ingest() (binary cannot travel as raw JSON text like other media types).
+bool is_parquet_knowledge_upload(const std::string& media_type,
+                                 const std::string& file_name);
 
 RagRetrievalResult retrieve_knowledge(
     const KnowledgeIndexStore& index, const std::string& vector_store_id,

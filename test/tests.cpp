@@ -37,6 +37,7 @@ namespace {
 
 using masterai_test::McpHttpFixture;
 using masterai_test::fake_curl_executable;
+using masterai_test::fake_duckdb_executable;
 using masterai_test::fake_llama_executable;
 using masterai_test::require;
 using masterai_test::TemporaryDirectory;
@@ -92,6 +93,27 @@ void test_configuration_and_intranet_policy() {
             "configuration precedence did not apply CLI after environment");
     require(loaded.runner_startup_timeout_seconds == 245U,
             "runner startup timeout did not round-trip through save/load");
+
+    // knowledge.parquetHelperExecutable / knowledge.maximumDocumentBytes:
+    // rule 15's second process-isolated exception (alongside llama.cpp),
+    // configured the same way -- filesystem path, validated as a real
+    // non-symlink regular file when non-empty.
+    configuration.parquet_helper_executable = masterai_test::fake_duckdb_executable();
+    configuration.knowledge_maximum_document_bytes = 5ULL * 1024ULL * 1024ULL;
+    masterai::ConfigurationManager::save_atomic(configuration, settings);
+    const auto knowledge_loaded = masterai::ConfigurationManager::load(settings);
+    require(knowledge_loaded.parquet_helper_executable ==
+                configuration.parquet_helper_executable &&
+                knowledge_loaded.knowledge_maximum_document_bytes ==
+                    5ULL * 1024ULL * 1024ULL,
+            "knowledge section (parquetHelperExecutable/maximumDocumentBytes) "
+            "did not round-trip through save/load");
+
+    const auto defaulted = masterai::ConfigurationManager::safe_defaults();
+    require(defaulted.parquet_helper_executable.empty() &&
+                defaulted.knowledge_maximum_document_bytes ==
+                    25ULL * 1024ULL * 1024ULL,
+            "knowledge section defaults changed unexpectedly");
 
     write_text(settings, "{\"unexpected\":true}");
     bool unknown_rejected = false;
@@ -7066,6 +7088,121 @@ void test_machine_learning_knowledge_ingestion_and_rag_retrieval() {
             "RAG retrieval must reject an unknown search strategy");
 }
 
+// Rule 15's second process-isolated exception: the DuckDB CLI converts
+// Parquet knowledge-document uploads to text. masterai_fake_duckdb.cpp
+// stands in for the real binary so this test never depends on one being
+// installed, and reports back the staged temp-file path/size so the test
+// can prove parquet_bytes_to_json() staged the exact bytes it was given.
+void test_parquet_bridge_and_knowledge_ingestion() {
+    const auto set_env = [](const char* name, const char* value) {
+#if defined(_WIN32)
+        if (value == nullptr) _putenv_s(name, "");
+        else _putenv_s(name, value);
+#else
+        if (value == nullptr) unsetenv(name);
+        else setenv(name, value, 1);
+#endif
+    };
+    const auto duckdb = masterai_test::fake_duckdb_executable();
+
+    bool rejected_empty_helper = false;
+    try {
+        static_cast<void>(masterai::parquet_bytes_to_json({}, "parquet-bytes"));
+    } catch (const std::exception&) {
+        rejected_empty_helper = true;
+    }
+    require(rejected_empty_helper,
+            "parquet_bytes_to_json must reject an unconfigured helper");
+
+    set_env("MASTERAI_FAKE_DUCKDB_OUTPUT", nullptr);
+    set_env("MASTERAI_FAKE_DUCKDB_EXIT_CODE", nullptr);
+    const std::string staged_bytes = "fixture parquet payload bytes";
+    const auto success_output = masterai::parquet_bytes_to_json(duckdb, staged_bytes);
+    require(success_output.find("\"stagedFileExists\":true") != std::string::npos &&
+                success_output.find(
+                    "\"stagedFileBytes\":" + std::to_string(staged_bytes.size())) !=
+                    std::string::npos,
+            "parquet_bytes_to_json did not stage the exact Parquet bytes it was given");
+
+    set_env("MASTERAI_FAKE_DUCKDB_EXIT_CODE", "3");
+    bool rejected_nonzero_exit = false;
+    try {
+        static_cast<void>(masterai::parquet_bytes_to_json(duckdb, staged_bytes));
+    } catch (const std::exception&) {
+        rejected_nonzero_exit = true;
+    }
+    set_env("MASTERAI_FAKE_DUCKDB_EXIT_CODE", nullptr);
+    require(rejected_nonzero_exit,
+            "parquet_bytes_to_json must surface a non-zero DuckDB exit code as a failure");
+
+    require(masterai::is_parquet_knowledge_upload(
+                "application/vnd.apache.parquet", "anything.bin") &&
+                masterai::is_parquet_knowledge_upload("", "dataset.parquet") &&
+                masterai::is_parquet_knowledge_upload(
+                    "application/octet-stream", "dataset.parquet") &&
+                !masterai::is_parquet_knowledge_upload("text/plain", "notes.txt") &&
+                !masterai::is_parquet_knowledge_upload("", "dataset.csv"),
+            "Parquet upload detection must key off the registered media type "
+            "or a .parquet extension for octet-stream/empty uploads");
+
+    // KnowledgeIndexStore end to end: no helper configured must reject
+    // Parquet uploads without touching the default text-only ingestion path.
+    TemporaryDirectory temporary;
+    masterai::RecordStore no_helper_records(temporary.path() / "database-no-helper");
+    no_helper_records.open();
+    masterai::KnowledgeIndexStore no_helper_index(no_helper_records);
+    bool rejected_unconfigured_parquet = false;
+    try {
+        static_cast<void>(no_helper_index.ingest(
+            "administrator-1", "subject", "store", "dataset.parquet",
+            "application/vnd.apache.parquet", staged_bytes));
+    } catch (const std::exception&) {
+        rejected_unconfigured_parquet = true;
+    }
+    require(rejected_unconfigured_parquet,
+            "Parquet ingestion must be rejected when no DuckDB helper is configured");
+
+    // With a helper configured, ingestion must run the bytes through the
+    // bridge and chunk/index the resulting text exactly like any other
+    // supported media type.
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::KnowledgeIndexStore index(records, duckdb, 25ULL * 1024ULL * 1024ULL);
+    const auto document = index.ingest(
+        "administrator-1", "subject", "parquet-store", "dataset.parquet",
+        "application/vnd.apache.parquet", staged_bytes);
+    require(!document.id.empty() && document.chunk_count > 0U &&
+                document.media_type == "application/vnd.apache.parquet",
+            "Parquet ingestion via the configured DuckDB helper did not produce "
+            "indexable chunks");
+    const auto chunks = index.chunks_for_store("parquet-store");
+    require(!chunks.empty() &&
+                chunks.front().text.find("stagedFileExists") != std::string::npos,
+            "Parquet ingestion did not index text derived from the DuckDB bridge output");
+
+    // The extension fallback (empty/octet-stream media type + .parquet name)
+    // must also route through the bridge rather than the raw NUL-byte check.
+    const std::string binary_like_bytes("parquet\0bytes", 13U);
+    const auto extension_document = index.ingest(
+        "administrator-1", "subject", "parquet-store", "other.parquet", "",
+        binary_like_bytes);
+    require(extension_document.chunk_count > 0U,
+            "the .parquet extension fallback did not route binary content "
+            "through the DuckDB bridge");
+
+    require(masterai::base64_decode("aGVsbG8gd29ybGQ=") == "hello world" &&
+                masterai::base64_decode("Zm9v") == "foo" &&
+                masterai::base64_decode("Zm9vYg==") == "foob",
+            "base64_decode did not decode known reference vectors correctly");
+    bool rejected_bad_base64 = false;
+    try {
+        static_cast<void>(masterai::base64_decode("not valid base64!!"));
+    } catch (const std::exception&) {
+        rejected_bad_base64 = true;
+    }
+    require(rejected_bad_base64, "base64_decode must reject malformed input");
+}
+
 }  // namespace
 
 int main() {
@@ -7232,6 +7369,8 @@ int main() {
             test_machine_learning_model_comparison_lifecycle_and_execution);
         run("Machine Learning knowledge ingestion and RAG retrieval",
             test_machine_learning_knowledge_ingestion_and_rag_retrieval);
+        run("Parquet bridge and knowledge ingestion",
+            test_parquet_bridge_and_knowledge_ingestion);
         std::cout << "MasterAI core tests passed.\n";
         return 0;
     } catch (const std::exception& exception) {

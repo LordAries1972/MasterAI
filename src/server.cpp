@@ -360,7 +360,9 @@ public:
         ml_comparison_results = std::make_unique<ComparisonResultStore>(records);
         // Phases 58-61: uploaded knowledge sources, their persisted chunks
         // and authored or learned vectors, and the index consumed by RAG.
-        ml_knowledge_index = std::make_unique<KnowledgeIndexStore>(records);
+        ml_knowledge_index = std::make_unique<KnowledgeIndexStore>(
+            records, value.parquet_helper_executable,
+            value.knowledge_maximum_document_bytes);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -2799,12 +2801,18 @@ public:
                 }
                 const auto vectorize = knowledge_vectorizer(
                     vector_store->embedding_model);
+                const auto file_name = root.required("fileName").as_string();
+                const auto media_type = root.required("mediaType").as_string();
+                auto content = root.required("content").as_string();
+                // Parquet is binary and cannot travel as raw JSON text like
+                // the other supported media types, so the browser sends it
+                // base64-encoded; every other media type is used as-is.
+                if (is_parquet_knowledge_upload(media_type, file_name)) {
+                    content = base64_decode(content);
+                }
                 const auto document = ml_knowledge_index->ingest(
-                    user->id, subject_id, vector_store_id,
-                    root.required("fileName").as_string(),
-                    root.required("mediaType").as_string(),
-                    root.required("content").as_string(),
-                    vector_store->embedding_model, vectorize);
+                    user->id, subject_id, vector_store_id, file_name, media_type,
+                    content, vector_store->embedding_model, vectorize);
                 audit.append("ml.knowledge.ingest", user->id, "success",
                              document.id);
                 return response(201, "Created",

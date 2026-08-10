@@ -102,6 +102,9 @@ void apply_values(AppConfig& config,
         } else if (item.first == "curlExecutable" ||
                    item.first == "MASTERAI_CURL") {
             config.curl_executable = item.second;
+        } else if (item.first == "parquetHelperExecutable" ||
+                   item.first == "MASTERAI_PARQUET_HELPER") {
+            config.parquet_helper_executable = item.second;
         } else if (item.first == "acceleratorPolicy" ||
                    item.first == "MASTERAI_ACCELERATOR_POLICY") {
             config.accelerator_policy = item.second;
@@ -161,8 +164,9 @@ AppConfig ConfigurationManager::load(
         const auto root = parse_json(read_file(settings));
         require_only(root, {"schemaVersion", "server", "tls", "auth",
                             "workspace", "models", "inference", "downloads",
-                            "memory", "hardware", "indexing", "retrieval",
-                            "cache", "session", "performance", "storage"}, "");
+                            "knowledge", "memory", "hardware", "indexing",
+                            "retrieval", "cache", "session", "performance",
+                            "storage"}, "");
         config.schema_version =
             static_cast<int>(root.required("schemaVersion").as_integer());
 
@@ -353,6 +357,20 @@ AppConfig ConfigurationManager::load(
                 positive(*retrieval, "maximumTotalChunks", 1024U));
         }
 
+        if (const auto* knowledge = root.optional("knowledge")) {
+            require_only(*knowledge,
+                         {"parquetHelperExecutable", "maximumDocumentBytes"},
+                         "knowledge.");
+            if (knowledge->optional("parquetHelperExecutable") != nullptr) {
+                config.parquet_helper_executable =
+                    knowledge->required("parquetHelperExecutable").as_string();
+            }
+            if (knowledge->optional("maximumDocumentBytes") != nullptr) {
+                config.knowledge_maximum_document_bytes =
+                    positive(*knowledge, "maximumDocumentBytes", 256ULL * 1024ULL * 1024ULL);
+            }
+        }
+
         if (const auto* cache = root.optional("cache")) {
             require_only(*cache, {"enabled", "maximumBytesPerCategory"},
                          "cache.");
@@ -415,7 +433,8 @@ void ConfigurationManager::validate(const AppConfig& config) {
         throw std::runtime_error("accelerator policy is outside policy");
     }
     for (const auto& executable :
-         {config.llama_server_executable, config.curl_executable}) {
+         {config.llama_server_executable, config.curl_executable,
+          config.parquet_helper_executable}) {
         if (!executable.empty() &&
             (!std::filesystem::is_regular_file(executable) ||
              std::filesystem::is_symlink(executable))) {
@@ -490,6 +509,10 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         "},\n"
         "  \"downloads\":{\"curlExecutable\":" +
         quote(c.curl_executable.string()) + "},\n"
+        "  \"knowledge\":{\"parquetHelperExecutable\":" +
+        quote(c.parquet_helper_executable.string()) +
+        ",\"maximumDocumentBytes\":" +
+        std::to_string(c.knowledge_maximum_document_bytes) + "},\n"
         "  \"indexing\":{\"watchProjectFiles\":" +
         (c.watch_project_files ? "true" : "false") + "},\n"
         "  \"retrieval\":{\"enabled\":" +

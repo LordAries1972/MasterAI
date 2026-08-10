@@ -479,8 +479,10 @@ candidate model are both evaluated against one shared benchmark dataset,
 and the stored verdict reports both metric sets, the primary-metric delta,
 and the measured winner.
 Phases 58–61 add a second evidence-producing path: administrators select a
-local text, Markdown, CSV, JSON, or JSONL file in the Subject Knowledge
-Manager; MasterAI bounds and hashes the accepted UTF-8 text content, creates overlapping
+local text, Markdown, CSV, JSON, JSONL, or Parquet file in the Subject
+Knowledge Manager (Parquet is converted to text via a configured,
+process-isolated DuckDB CLI helper); MasterAI bounds and hashes the accepted
+content, creates overlapping
 chunks, persists authored 128-dimensional hashing vectors, and exposes a
 measured vector-store profile. An approved RAG configuration can then run
 hybrid, vector, or keyword retrieval and return ranked source chunks plus a
@@ -834,6 +836,7 @@ MASTERAI_RUNTIME_ROOT
 MASTERAI_MODELS_ROOT
 MASTERAI_LLAMA_SERVER
 MASTERAI_CURL
+MASTERAI_PARQUET_HELPER
 ```
 
 These approved overrides are resolved consistently by the service and every
@@ -1392,9 +1395,13 @@ Before proposing a change:
 
 Third-party coding foundations, frameworks, source libraries, and
 dependency-provided application foundations are prohibited. The current
-explicit exception is an optional, isolated, replaceable `llama.cpp` inference
-backend. Established audited cryptographic providers are required; MasterAI
-does not implement cryptographic primitives.
+explicit exceptions are an optional, isolated, replaceable `llama.cpp`
+inference backend, and an optional, isolated, replaceable DuckDB CLI
+(`duckdb.exe`) backend used for Parquet-document ingestion. Both are
+distributed separately, never vendored or linked, and configured by
+filesystem path in `settings.json`. Established audited cryptographic
+providers are required; MasterAI does not implement cryptographic
+primitives.
 
 ## Documentation
 

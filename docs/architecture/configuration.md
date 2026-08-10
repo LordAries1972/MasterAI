@@ -108,6 +108,18 @@ CUDA/Vulkan/HIP driver installed and a model manifest whose
 |---|---|---|---|
 | `curlExecutable` | string path, optional | `""` | Approved `curl` executable. Blank disables `masterai download-model` and the download API/UI; models can still be placed under `modelsRoot` manually. |
 
+## `knowledge` (optional)
+
+Knowledge-document ingestion (RAG upload endpoint, `ml_knowledge.cpp`).
+Parquet uploads are converted to text via a process-isolated DuckDB CLI
+helper (rule 15's second named exception alongside `llama.cpp`) — never
+vendored or linked, distributed separately, configured by filesystem path.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `parquetHelperExecutable` | string path, optional | `""` | Approved DuckDB CLI (`duckdb.exe`/`duckdb`) executable. Blank disables Parquet knowledge-document ingestion; other supported media types (text/Markdown/CSV/JSON/JSONL) are unaffected. |
+| `maximumDocumentBytes` | integer | `26214400` (25 MiB); `268435456` (256 MiB) | Per-file size ceiling applied to every knowledge-document upload, replacing the previously hardcoded 2 MiB constant. |
+
 ## `indexing` (optional)
 
 | Field | Type | Default | Meaning |

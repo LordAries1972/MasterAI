@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <fstream>
 #include <limits>
@@ -395,6 +396,59 @@ std::vector<std::uint8_t> pbkdf2_hmac_sha256_32(
 }
 
 }  // namespace
+
+// Used solely by the knowledge-document ingestion endpoint to decode binary
+// (Parquet) uploads that arrive as a base64 JSON string field, since raw
+// binary cannot travel as JSON text like the other supported media types.
+std::string base64_decode(const std::string& text) {
+    static constexpr char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::array<int, 256> lookup{};
+    lookup.fill(-1);
+    for (int index = 0; index < 64; ++index) {
+        lookup[static_cast<unsigned char>(alphabet[index])] = index;
+    }
+
+    std::string cleaned;
+    cleaned.reserve(text.size());
+    for (const char ch : text) {
+        if (std::isspace(static_cast<unsigned char>(ch)) == 0) cleaned += ch;
+    }
+    if (cleaned.empty() || cleaned.size() % 4U != 0U) {
+        throw std::invalid_argument("base64 value has an invalid length");
+    }
+
+    std::size_t padding = 0U;
+    if (cleaned.size() >= 2U && cleaned[cleaned.size() - 1U] == '=') ++padding;
+    if (cleaned.size() >= 2U && cleaned[cleaned.size() - 2U] == '=') ++padding;
+
+    std::string result;
+    result.reserve((cleaned.size() / 4U) * 3U);
+    for (std::size_t index = 0; index < cleaned.size(); index += 4U) {
+        int values[4];
+        for (int offset = 0; offset < 4; ++offset) {
+            const char ch = cleaned[index + static_cast<std::size_t>(offset)];
+            if (ch == '=') {
+                values[offset] = 0;
+                continue;
+            }
+            values[offset] = lookup[static_cast<unsigned char>(ch)];
+            if (values[offset] < 0) {
+                throw std::invalid_argument("base64 value has an invalid character");
+            }
+        }
+        const std::uint32_t triple =
+            (static_cast<std::uint32_t>(values[0]) << 18U) |
+            (static_cast<std::uint32_t>(values[1]) << 12U) |
+            (static_cast<std::uint32_t>(values[2]) << 6U) |
+            static_cast<std::uint32_t>(values[3]);
+        result += static_cast<char>((triple >> 16U) & 0xffU);
+        result += static_cast<char>((triple >> 8U) & 0xffU);
+        result += static_cast<char>(triple & 0xffU);
+    }
+    result.resize(result.size() - padding);
+    return result;
+}
 
 std::string hash_password(std::string password) {
     const auto salt = secure_random(kPasswordSaltBytes);

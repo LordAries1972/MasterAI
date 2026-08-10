@@ -90,6 +90,14 @@
         "curlExecutable": {"type": "string"}
       }
     },
+    "knowledge": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "parquetHelperExecutable": {"type": "string"},
+        "maximumDocumentBytes": {"type": "integer", "minimum": 1, "maximum": 268435456}
+      },
+      "$comment": "Both fields are optional and default to '' (Parquet ingestion disabled) and 26214400 (25 MiB) respectively when the section or field is omitted -- see docs/architecture/configuration.md."
+    },
     "indexing": {
       "type": "object", "additionalProperties": false,
       "required": ["watchProjectFiles"],

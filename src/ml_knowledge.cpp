@@ -10,12 +10,12 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 
 namespace masterai {
 namespace {
 
 constexpr std::size_t embedding_dimensions = 128U;
-constexpr std::size_t maximum_document_bytes = 2U * 1024U * 1024U;
 constexpr std::size_t maximum_chunks_per_document = 4096U;
 constexpr std::size_t chunk_target_bytes = 1200U;
 constexpr std::size_t chunk_overlap_bytes = 200U;
@@ -248,12 +248,36 @@ bool supported_media_type(const std::string& media_type) {
 
 }  // namespace
 
+// Browsers commonly report unrecognized extensions as "application/
+// octet-stream" or omit a media type entirely, so the .parquet extension is
+// treated as authoritative alongside the registered media type. Shared by
+// KnowledgeIndexStore::ingest() and the knowledge-documents REST handler
+// (server.cpp), which must decode base64 before content reaches ingest().
+bool is_parquet_knowledge_upload(const std::string& media_type,
+                                 const std::string& file_name) {
+    static constexpr std::string_view extension = ".parquet";
+    return media_type == "application/vnd.apache.parquet" ||
+           ((media_type.empty() || media_type == "application/octet-stream") &&
+            file_name.size() >= extension.size() &&
+            file_name.compare(file_name.size() - extension.size(),
+                              extension.size(), extension) == 0);
+}
+
 std::vector<double> authored_hash_embedding(const std::string& text) {
     return authored_hash_embedding_impl(text);
 }
 
 KnowledgeIndexStore::KnowledgeIndexStore(RecordStore& records)
     : records_(&records) {
+    restore();
+}
+
+KnowledgeIndexStore::KnowledgeIndexStore(
+    RecordStore& records, std::filesystem::path parquet_helper_executable,
+    std::uint64_t maximum_document_bytes)
+    : records_(&records),
+      parquet_helper_executable_(std::move(parquet_helper_executable)),
+      maximum_document_bytes_(maximum_document_bytes) {
     restore();
 }
 
@@ -324,23 +348,41 @@ KnowledgeDocument KnowledgeIndexStore::ingest(
     if (file_name.empty() || file_name.size() > 260U) {
         throw std::invalid_argument("knowledge file name is invalid");
     }
-    if (!supported_media_type(media_type)) {
+    const bool is_parquet = is_parquet_knowledge_upload(media_type, file_name);
+    if (!is_parquet && !supported_media_type(media_type)) {
         throw std::invalid_argument("knowledge file type is not supported");
     }
     if (content.empty()) throw std::invalid_argument("knowledge file is empty");
-    if (content.size() > maximum_document_bytes) {
-        throw std::invalid_argument("knowledge file exceeds the 2 MiB limit");
+    if (content.size() > maximum_document_bytes_) {
+        throw std::invalid_argument("knowledge file exceeds the configured size limit");
     }
-    if (content.find('\0') != std::string::npos) {
-        throw std::invalid_argument("knowledge file must contain text, not binary data");
+
+    std::string text_content;
+    if (is_parquet) {
+        if (parquet_helper_executable_.empty()) {
+            throw std::invalid_argument(
+                "Parquet ingestion requires a configured DuckDB helper executable. "
+                "Configure knowledge.parquetHelperExecutable, or upload as text, "
+                "Markdown, CSV, JSON, or JSONL instead.");
+        }
+        text_content = parquet_bytes_to_json(parquet_helper_executable_, content);
+        if (text_content.empty()) {
+            throw std::invalid_argument("Parquet file contains no rows to index");
+        }
+    } else {
+        if (content.find('\0') != std::string::npos) {
+            throw std::invalid_argument("knowledge file must contain text, not binary data");
+        }
+        text_content = content;
     }
+
     if (embedding_method.empty() || embedding_method.size() > 160U) {
         throw std::invalid_argument("embedding method is invalid");
     }
     if (embedding_method != "authored_hashing_vectorizer_v1" && !vectorize) {
         throw std::invalid_argument("learned embedding backend is unavailable");
     }
-    const auto pieces = make_chunks(content);
+    const auto pieces = make_chunks(text_content);
     if (pieces.empty()) throw std::invalid_argument("knowledge file contains no indexable text");
 
     KnowledgeDocument document;
@@ -348,7 +390,8 @@ KnowledgeDocument KnowledgeIndexStore::ingest(
     document.subject_id = subject_id;
     document.vector_store_id = vector_store_id;
     document.file_name = file_name;
-    document.media_type = media_type.empty() ? "text/plain" : media_type;
+    document.media_type = is_parquet ? "application/vnd.apache.parquet"
+                                     : (media_type.empty() ? "text/plain" : media_type);
     document.sha256 = sha256_hex(content);
     document.owner_id = owner_id;
     document.byte_count = content.size();

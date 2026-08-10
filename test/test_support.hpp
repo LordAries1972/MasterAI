@@ -84,4 +84,16 @@ inline std::filesystem::path fake_curl_executable() {
 #endif
 }
 
+// Resolves the minimal DuckDB CLI stand-in used to exercise
+// parquet_bytes_to_json() and KnowledgeIndexStore's Parquet ingestion path
+// without a real DuckDB binary or a real Parquet file; see
+// test/fake_duckdb.cpp.
+inline std::filesystem::path fake_duckdb_executable() {
+#if defined(_WIN32)
+    return std::filesystem::current_path() / "masterai_fake_duckdb.exe";
+#else
+    return std::filesystem::current_path() / "masterai_fake_duckdb";
+#endif
+}
+
 }  // namespace masterai_test

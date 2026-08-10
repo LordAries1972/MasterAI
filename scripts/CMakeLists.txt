@@ -51,6 +51,7 @@ add_library(masterai_core STATIC
     ../src/ml.cpp
     ../src/ml_engine.cpp
     ../src/ml_knowledge.cpp
+    ../src/parquet_bridge.cpp
     ../src/http_support.cpp
     ../src/integration_http.cpp
     ../src/web_ui.cpp
@@ -93,6 +94,7 @@ if(MASTERAI_BUILD_TESTS)
     endif()
     add_executable(masterai_fake_mcp ../test/fake_mcp_server.cpp)
     add_executable(masterai_fake_curl ../test/fake_curl.cpp)
+    add_executable(masterai_fake_duckdb ../test/fake_duckdb.cpp)
     add_executable(masterai_tests ../test/tests.cpp)
     target_link_libraries(masterai_tests PRIVATE masterai_core)
     add_test(NAME masterai_core_tests COMMAND masterai_tests)
