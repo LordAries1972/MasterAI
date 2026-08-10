@@ -103,6 +103,11 @@ struct AppConfig {
     // rebuild. Applies to every supported knowledge media type, not just
     // Parquet.
     std::uint64_t knowledge_maximum_document_bytes{25ULL * 1024ULL * 1024ULL};
+    // Machine Learning Settings (docs/PLAN.md "Machine Learning Abilities"
+    // section 49): replaces the previously hardcoded 8 MiB constant in
+    // ml_engine.cpp's parse_tabular_csv(), the same way
+    // knowledge_maximum_document_bytes above replaced its own hardcoded cap.
+    std::uint64_t tabular_dataset_maximum_csv_bytes{8ULL * 1024ULL * 1024ULL};
     // "PageFile" setting: an administrator-chosen substitute location for
     // MasterAI's own disk-backed cache/scratch area (see
     // resolve_page_file_root()). Empty means "use the existing default"
@@ -1098,19 +1103,41 @@ private:
     RecordStore& records_;
 };
 
+// Phase 66: docs/PLAN.md "Machine Learning Abilities" section 43 (Audit
+// Logs) reads through this same one struct, not a second write path --
+// every ml.* mutation already calls AuditLog::append() (see server.cpp).
+struct AuditLogEntry {
+    std::uint64_t timestamp_epoch_seconds{0};
+    std::string event;
+    std::string actor;
+    std::string outcome;
+    std::string detail;
+};
+
 class AuditLog final {
 public:
     explicit AuditLog(std::filesystem::path path);
     void append(const std::string& event, const std::string& actor,
                 const std::string& outcome, const std::string& detail);
+    // Reads the chained log file and returns up to `limit` entries, most
+    // recent first, optionally restricted to events beginning with
+    // `event_prefix` (e.g. "ml." for the ML admin audit viewer). A
+    // malformed line is skipped rather than aborting the whole read, since
+    // an operator inspecting the log after some corruption is exactly the
+    // case this must stay usable for.
+    std::vector<AuditLogEntry> recent(std::size_t limit,
+                                      const std::string& event_prefix = {}) const;
 
 private:
     std::filesystem::path path_;
     // append() reads the whole file to find the previous hash-chain link and
     // then writes the next line; both steps must happen as one atomic unit
     // under concurrent callers or the chain breaks / lines interleave.
-    std::mutex mutex_;
+    // mutable so the const recent() reader can hold the same lock.
+    mutable std::mutex mutex_;
 };
+
+std::string audit_log_entries_json(const std::vector<AuditLogEntry>& entries);
 
 class ApiTokenStore final {
 public:
@@ -3965,8 +3992,9 @@ struct TabularDataset {
 // last column. Throws std::runtime_error with a human-readable reason on
 // any structural problem (missing column, non-numeric feature, too few
 // rows, ...).
-TabularDataset parse_tabular_csv(const std::string& csv,
-                                 const std::string& target_column);
+TabularDataset parse_tabular_csv(
+    const std::string& csv, const std::string& target_column,
+    std::uint64_t maximum_csv_bytes = 8ULL * 1024ULL * 1024ULL);
 
 // Raw uploaded content for one DatasetStore entry, keyed by dataset id.
 // Kept as the original CSV plus the chosen target column so training and
@@ -4316,6 +4344,282 @@ std::string knowledge_index_profile_json(
     const std::string& vector_store_id,
     const std::vector<KnowledgeChunk>& chunks);
 std::string rag_retrieval_result_json(const RagRetrievalResult& result);
+
+// Phases 62-65: the remaining four docs/PLAN.md "Machine Learning
+// Abilities" section-2 interfaces (Inference Endpoints, Hardware and
+// Compute, Automation Pipelines, Safety and Governance). Each follows the
+// same scoped-down pattern as every interface above -- an identity/intent/
+// lifecycle registry recording administrator intent, not a live network
+// listener, hardware poller, job orchestrator, or content scanner. See
+// each store's own comment for the fields this phase intentionally defers.
+
+enum class InferenceEndpointStatus { draft, active, disabled };
+
+std::string inference_endpoint_status_name(InferenceEndpointStatus status);
+InferenceEndpointStatus parse_inference_endpoint_status(
+    const std::string& status);
+
+// Phase 62: docs/PLAN.md "Machine Learning Abilities" section 35. Records
+// an administrator's intent to expose a model behind a controlled
+// endpoint. Deliberately does not open a real network listener, enforce
+// the rate limit, or apply the safety/tool policy -- those require the
+// live inference-serving path this phase does not build.
+struct InferenceEndpoint {
+    std::string id;
+    std::string name;
+    std::string model_id;
+    std::string runtime;
+    std::string host;
+    std::uint16_t port{0};
+    std::string protocol;
+    std::string authentication_method;
+    std::uint32_t rate_limit_per_minute{0};
+    std::string owner_id;
+    InferenceEndpointStatus status{InferenceEndpointStatus::draft};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class InferenceEndpointStore final {
+public:
+    InferenceEndpointStore() = default;
+    explicit InferenceEndpointStore(RecordStore& records);
+    InferenceEndpoint create(const std::string& owner_id,
+                             const std::string& name,
+                             const std::string& model_id,
+                             const std::string& runtime,
+                             const std::string& host, std::uint16_t port,
+                             const std::string& protocol,
+                             const std::string& authentication_method,
+                             std::uint32_t rate_limit_per_minute);
+    std::optional<InferenceEndpoint> find(const std::string& id) const;
+    std::vector<InferenceEndpoint> list() const;
+    bool set_status(const std::string& id, InferenceEndpointStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const InferenceEndpoint& endpoint);
+    RecordStore* records_{nullptr};
+    std::map<std::string, InferenceEndpoint> endpoints_;
+    mutable std::mutex mutex_;
+};
+
+std::string inference_endpoint_json(const InferenceEndpoint& endpoint);
+std::string inference_endpoints_json(
+    const std::vector<InferenceEndpoint>& endpoints);
+
+enum class ComputeNodeStatus { available, reserved, draining, disabled };
+
+std::string compute_node_status_name(ComputeNodeStatus status);
+ComputeNodeStatus parse_compute_node_status(const std::string& status);
+
+// Phase 63: docs/PLAN.md "Machine Learning Abilities" section 30. Records
+// a compute node's static description and administrative status.
+// Deliberately does not poll live telemetry (temperature, power draw,
+// queue length, current workload) -- that requires an agent process on
+// the node this phase does not build.
+struct ComputeNode {
+    std::string id;
+    std::string name;
+    std::string address;
+    std::string operating_system;
+    std::string cpu_description;
+    std::string gpu_description;
+    std::uint64_t memory_mib{0};
+    std::string owner_id;
+    ComputeNodeStatus status{ComputeNodeStatus::available};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class ComputeNodeStore final {
+public:
+    ComputeNodeStore() = default;
+    explicit ComputeNodeStore(RecordStore& records);
+    ComputeNode create(const std::string& owner_id, const std::string& name,
+                       const std::string& address,
+                       const std::string& operating_system,
+                       const std::string& cpu_description,
+                       const std::string& gpu_description,
+                       std::uint64_t memory_mib);
+    std::optional<ComputeNode> find(const std::string& id) const;
+    std::vector<ComputeNode> list() const;
+    bool set_status(const std::string& id, ComputeNodeStatus status);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const ComputeNode& node);
+    RecordStore* records_{nullptr};
+    std::map<std::string, ComputeNode> nodes_;
+    mutable std::mutex mutex_;
+};
+
+std::string compute_node_json(const ComputeNode& node);
+std::string compute_nodes_json(const std::vector<ComputeNode>& nodes);
+
+enum class AutomationPipelineStatus { draft, active, disabled };
+enum class AutomationPipelineRunStatus {
+    queued, running, completed, failed, canceled
+};
+
+std::string automation_pipeline_status_name(AutomationPipelineStatus status);
+AutomationPipelineStatus parse_automation_pipeline_status(
+    const std::string& status);
+std::string automation_pipeline_run_status_name(
+    AutomationPipelineRunStatus status);
+AutomationPipelineRunStatus parse_automation_pipeline_run_status(
+    const std::string& status);
+
+// Phase 64: docs/PLAN.md "Machine Learning Abilities" section 37. A
+// pipeline definition names an ordered subset of the sixteen lifecycle
+// stages that section lists (import/validate/clean/label/split/train/
+// validate model/evaluate/safety test/optimize/approve/deploy staging/
+// stage test/deploy production/monitor/rollback), stored as a
+// comma-joined string of stage names. Running a pipeline records a run
+// outcome; it does not itself orchestrate the other stores' real jobs.
+struct AutomationPipeline {
+    std::string id;
+    std::string name;
+    std::string project_id;
+    std::string description;
+    std::string stages;
+    std::string owner_id;
+    AutomationPipelineStatus status{AutomationPipelineStatus::draft};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+struct AutomationPipelineRun {
+    std::string id;
+    std::string pipeline_id;
+    std::string owner_id;
+    AutomationPipelineRunStatus status{AutomationPipelineRunStatus::queued};
+    std::string outcome_note;
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class AutomationPipelineStore final {
+public:
+    AutomationPipelineStore() = default;
+    explicit AutomationPipelineStore(RecordStore& records);
+    AutomationPipeline create(const std::string& owner_id,
+                              const std::string& name,
+                              const std::string& project_id,
+                              const std::string& description,
+                              const std::string& stages);
+    std::optional<AutomationPipeline> find(const std::string& id) const;
+    std::vector<AutomationPipeline> list() const;
+    bool set_status(const std::string& id, AutomationPipelineStatus status);
+    bool remove(const std::string& id);
+    AutomationPipelineRun record_run(const std::string& owner_id,
+                                     const std::string& pipeline_id,
+                                     AutomationPipelineRunStatus status,
+                                     const std::string& outcome_note);
+    std::vector<AutomationPipelineRun> runs_for(
+        const std::string& pipeline_id) const;
+
+private:
+    void restore();
+    void persist(const AutomationPipeline& pipeline);
+    void persist_run(const AutomationPipelineRun& run);
+    RecordStore* records_{nullptr};
+    std::map<std::string, AutomationPipeline> pipelines_;
+    std::map<std::string, AutomationPipelineRun> runs_;
+    mutable std::mutex mutex_;
+};
+
+std::string automation_pipeline_json(const AutomationPipeline& pipeline);
+std::string automation_pipelines_json(
+    const std::vector<AutomationPipeline>& pipelines);
+std::string automation_pipeline_run_json(const AutomationPipelineRun& run);
+std::string automation_pipeline_runs_json(
+    const std::vector<AutomationPipelineRun>& runs);
+
+enum class SafetyPolicyStatus { pending, approved, rejected };
+
+std::string safety_policy_status_name(SafetyPolicyStatus status);
+SafetyPolicyStatus parse_safety_policy_status(const std::string& status);
+
+// Phase 65: docs/PLAN.md "Machine Learning Abilities" section 40. A
+// governance policy records restricted data categories and an approval
+// requirement for a project/scope; a model card records the section-40
+// disclosure fields for one approved model. Deliberately does not run
+// harmful-content/bias/hallucination/prompt-injection testing or
+// credential/secret detection -- those require content-scanning executors
+// this phase does not build; the policy only records administrator intent
+// and an approval decision, matching Dataset/Deployment approval above.
+struct SafetyPolicy {
+    std::string id;
+    std::string name;
+    std::string scope;
+    std::string restricted_data_categories;
+    std::string owner_id;
+    SafetyPolicyStatus status{SafetyPolicyStatus::pending};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+struct ModelCard {
+    std::string id;
+    std::string model_id;
+    std::string purpose;
+    std::string intended_use;
+    std::string prohibited_use;
+    std::string training_data_reference;
+    std::string evaluation_results;
+    std::string known_limitations;
+    std::string license;
+    std::string owner_id;
+    SafetyPolicyStatus status{SafetyPolicyStatus::pending};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class SafetyGovernanceStore final {
+public:
+    SafetyGovernanceStore() = default;
+    explicit SafetyGovernanceStore(RecordStore& records);
+    SafetyPolicy create_policy(const std::string& owner_id,
+                               const std::string& name,
+                               const std::string& scope,
+                               const std::string& restricted_data_categories);
+    std::optional<SafetyPolicy> find_policy(const std::string& id) const;
+    std::vector<SafetyPolicy> list_policies() const;
+    bool set_policy_status(const std::string& id, SafetyPolicyStatus status);
+    bool remove_policy(const std::string& id);
+
+    ModelCard create_model_card(const std::string& owner_id,
+                                const std::string& model_id,
+                                const std::string& purpose,
+                                const std::string& intended_use,
+                                const std::string& prohibited_use,
+                                const std::string& training_data_reference,
+                                const std::string& evaluation_results,
+                                const std::string& known_limitations,
+                                const std::string& license);
+    std::optional<ModelCard> find_model_card(const std::string& id) const;
+    std::vector<ModelCard> list_model_cards() const;
+    bool set_model_card_status(const std::string& id,
+                               SafetyPolicyStatus status);
+    bool remove_model_card(const std::string& id);
+
+private:
+    void restore();
+    void persist_policy(const SafetyPolicy& policy);
+    void persist_model_card(const ModelCard& card);
+    RecordStore* records_{nullptr};
+    std::map<std::string, SafetyPolicy> policies_;
+    std::map<std::string, ModelCard> model_cards_;
+    mutable std::mutex mutex_;
+};
+
+std::string safety_policy_json(const SafetyPolicy& policy);
+std::string safety_policies_json(const std::vector<SafetyPolicy>& policies);
+std::string model_card_json(const ModelCard& card);
+std::string model_cards_json(const std::vector<ModelCard>& cards);
 
 struct PerformanceSample {
     std::string name;

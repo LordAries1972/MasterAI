@@ -371,6 +371,18 @@ AppConfig ConfigurationManager::load(
             }
         }
 
+        // Machine Learning Settings (docs/PLAN.md "Machine Learning
+        // Abilities" section 49): mirrors the "knowledge" section above.
+        if (const auto* machine_learning = root.optional("machineLearning")) {
+            require_only(*machine_learning, {"tabularDatasetMaximumCsvBytes"},
+                         "machineLearning.");
+            if (machine_learning->optional("tabularDatasetMaximumCsvBytes") != nullptr) {
+                config.tabular_dataset_maximum_csv_bytes =
+                    positive(*machine_learning, "tabularDatasetMaximumCsvBytes",
+                            64ULL * 1024ULL * 1024ULL);
+            }
+        }
+
         if (const auto* cache = root.optional("cache")) {
             require_only(*cache, {"enabled", "maximumBytesPerCategory"},
                          "cache.");
@@ -513,6 +525,8 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         quote(c.parquet_helper_executable.string()) +
         ",\"maximumDocumentBytes\":" +
         std::to_string(c.knowledge_maximum_document_bytes) + "},\n"
+        "  \"machineLearning\":{\"tabularDatasetMaximumCsvBytes\":" +
+        std::to_string(c.tabular_dataset_maximum_csv_bytes) + "},\n"
         "  \"indexing\":{\"watchProjectFiles\":" +
         (c.watch_project_files ? "true" : "false") + "},\n"
         "  \"retrieval\":{\"enabled\":" +

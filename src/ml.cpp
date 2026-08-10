@@ -120,13 +120,23 @@ MachineLearningRegistry::MachineLearningRegistry() {
         {"synthetic-data", "Synthetic Data", "planned"},
         {"model-comparison", "Model Comparison", "available"},
         {"deployment-manager", "Deployment Manager", "planned"},
+        // Phases 62-65: identity/lifecycle registries only (no live network
+        // listener, hardware poller, pipeline orchestrator, or content
+        // scanner behind them yet), so these stay "planned" like
+        // Fine-Tuning/Experiment Tracking/Deployment Manager above --
+        // "available" here means a real executor exists, not merely a
+        // list/create/status/delete UI.
         {"inference-endpoints", "Inference Endpoints", "planned"},
         {"hardware-compute", "Hardware and Compute", "planned"},
         {"automation-pipelines", "Automation Pipelines", "planned"},
         {"safety-governance", "Safety and Governance", "planned"},
         {"monitoring-diagnostics", "Monitoring and Diagnostics", "planned"},
-        {"audit-logs", "Audit Logs", "planned"},
-        {"ml-settings", "Machine Learning Settings", "planned"},
+        // Phase 66: a genuine read over the real AuditLog every ml.*
+        // mutation already writes to -- no simulated data behind it.
+        {"audit-logs", "Audit Logs", "available"},
+        // Genuinely reads/writes real AppConfig fields with real
+        // enforcement (the CSV upload cap) -- no simulated data behind it.
+        {"ml-settings", "Machine Learning Settings", "available"},
     };
 }
 
@@ -3441,6 +3451,843 @@ std::string model_comparisons_json(
         if (!first) body += ",";
         first = false;
         body += model_comparison_json(comparison);
+    }
+    return body + "]";
+}
+
+// Phase 62: docs/PLAN.md "Machine Learning Abilities" section 35 (Inference
+// Endpoints) -- see InferenceEndpoint's class comment in masterai.hpp for
+// the fields this scoped-down registry defers.
+std::string inference_endpoint_status_name(const InferenceEndpointStatus status) {
+    switch (status) {
+        case InferenceEndpointStatus::draft: return "draft";
+        case InferenceEndpointStatus::active: return "active";
+        case InferenceEndpointStatus::disabled: return "disabled";
+    }
+    throw std::runtime_error("invalid inference endpoint status");
+}
+
+InferenceEndpointStatus parse_inference_endpoint_status(const std::string& status) {
+    if (status == "draft") return InferenceEndpointStatus::draft;
+    if (status == "active") return InferenceEndpointStatus::active;
+    if (status == "disabled") return InferenceEndpointStatus::disabled;
+    throw std::runtime_error("stored inference endpoint status is invalid");
+}
+
+InferenceEndpointStore::InferenceEndpointStore(RecordStore& records)
+    : records_(&records) {
+    restore();
+}
+
+void InferenceEndpointStore::restore() {
+    for (const auto& item : records_->list("ml_inference_endpoints")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 8U) {
+            throw std::runtime_error(
+                "persisted inference endpoint record field count is wrong");
+        }
+        InferenceEndpoint endpoint;
+        endpoint.id = item.first;
+        endpoint.name = fields[0];
+        endpoint.model_id = fields[1];
+        endpoint.runtime = fields[2];
+        endpoint.host = fields[3];
+        endpoint.port = static_cast<std::uint16_t>(std::stoul(fields[4]));
+        endpoint.protocol = fields[5];
+        endpoint.authentication_method = fields[6];
+        const auto rate_and_owner = unpack(fields[7]);
+        if (rate_and_owner.size() != 3U) {
+            throw std::runtime_error(
+                "persisted inference endpoint tail field count is wrong");
+        }
+        endpoint.rate_limit_per_minute =
+            static_cast<std::uint32_t>(std::stoul(rate_and_owner[0]));
+        endpoint.owner_id = rate_and_owner[1];
+        endpoint.status = parse_inference_endpoint_status(rate_and_owner[2]);
+        endpoints_[endpoint.id] = endpoint;
+    }
+}
+
+void InferenceEndpointStore::persist(const InferenceEndpoint& endpoint) {
+    records_->put(
+        "ml_inference_endpoints", endpoint.id,
+        pack({endpoint.name, endpoint.model_id, endpoint.runtime,
+             endpoint.host, std::to_string(endpoint.port), endpoint.protocol,
+             endpoint.authentication_method,
+             pack({std::to_string(endpoint.rate_limit_per_minute),
+                  endpoint.owner_id,
+                  inference_endpoint_status_name(endpoint.status)})}));
+}
+
+InferenceEndpoint InferenceEndpointStore::create(
+    const std::string& owner_id, const std::string& name,
+    const std::string& model_id, const std::string& runtime,
+    const std::string& host, const std::uint16_t port,
+    const std::string& protocol, const std::string& authentication_method,
+    const std::uint32_t rate_limit_per_minute) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("inference endpoint name is invalid");
+    }
+    if (model_id.empty()) {
+        throw std::invalid_argument("inference endpoint model id is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    InferenceEndpoint endpoint;
+    endpoint.id = random_id();
+    endpoint.name = name;
+    endpoint.model_id = model_id;
+    endpoint.runtime = runtime;
+    endpoint.host = host;
+    endpoint.port = port;
+    endpoint.protocol = protocol;
+    endpoint.authentication_method = authentication_method;
+    endpoint.rate_limit_per_minute = rate_limit_per_minute;
+    endpoint.owner_id = owner_id;
+    endpoint.status = InferenceEndpointStatus::draft;
+    endpoint.created_at_epoch_seconds = epoch_seconds();
+    endpoint.updated_at_epoch_seconds = endpoint.created_at_epoch_seconds;
+    endpoints_[endpoint.id] = endpoint;
+    if (records_) persist(endpoint);
+    return endpoint;
+}
+
+std::optional<InferenceEndpoint> InferenceEndpointStore::find(
+    const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = endpoints_.find(id);
+    return found != endpoints_.end()
+               ? std::optional<InferenceEndpoint>(found->second)
+               : std::nullopt;
+}
+
+std::vector<InferenceEndpoint> InferenceEndpointStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<InferenceEndpoint> result;
+    result.reserve(endpoints_.size());
+    for (const auto& item : endpoints_) result.push_back(item.second);
+    return result;
+}
+
+bool InferenceEndpointStore::set_status(const std::string& id,
+                                        const InferenceEndpointStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = endpoints_.find(id);
+    if (found == endpoints_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool InferenceEndpointStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = endpoints_.find(id);
+    if (found == endpoints_.end()) return false;
+    endpoints_.erase(found);
+    if (records_) records_->erase("ml_inference_endpoints", id);
+    return true;
+}
+
+std::string inference_endpoint_json(const InferenceEndpoint& endpoint) {
+    return "{\"id\":\"" + json_escape(endpoint.id) + "\",\"name\":\"" +
+           json_escape(endpoint.name) + "\",\"modelId\":\"" +
+           json_escape(endpoint.model_id) + "\",\"runtime\":\"" +
+           json_escape(endpoint.runtime) + "\",\"host\":\"" +
+           json_escape(endpoint.host) + "\",\"port\":" +
+           std::to_string(endpoint.port) + ",\"protocol\":\"" +
+           json_escape(endpoint.protocol) +
+           "\",\"authenticationMethod\":\"" +
+           json_escape(endpoint.authentication_method) +
+           "\",\"rateLimitPerMinute\":" +
+           std::to_string(endpoint.rate_limit_per_minute) +
+           ",\"ownerId\":\"" + json_escape(endpoint.owner_id) +
+           "\",\"status\":\"" +
+           inference_endpoint_status_name(endpoint.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(endpoint.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(endpoint.updated_at_epoch_seconds) + "}";
+}
+
+std::string inference_endpoints_json(
+    const std::vector<InferenceEndpoint>& endpoints) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& endpoint : endpoints) {
+        if (!first) body += ",";
+        first = false;
+        body += inference_endpoint_json(endpoint);
+    }
+    return body + "]";
+}
+
+// Phase 63: docs/PLAN.md "Machine Learning Abilities" section 30 (Hardware
+// and Compute) -- see ComputeNode's class comment in masterai.hpp for the
+// live-telemetry fields this scoped-down registry defers.
+std::string compute_node_status_name(const ComputeNodeStatus status) {
+    switch (status) {
+        case ComputeNodeStatus::available: return "available";
+        case ComputeNodeStatus::reserved: return "reserved";
+        case ComputeNodeStatus::draining: return "draining";
+        case ComputeNodeStatus::disabled: return "disabled";
+    }
+    throw std::runtime_error("invalid compute node status");
+}
+
+ComputeNodeStatus parse_compute_node_status(const std::string& status) {
+    if (status == "available") return ComputeNodeStatus::available;
+    if (status == "reserved") return ComputeNodeStatus::reserved;
+    if (status == "draining") return ComputeNodeStatus::draining;
+    if (status == "disabled") return ComputeNodeStatus::disabled;
+    throw std::runtime_error("stored compute node status is invalid");
+}
+
+ComputeNodeStore::ComputeNodeStore(RecordStore& records) : records_(&records) {
+    restore();
+}
+
+void ComputeNodeStore::restore() {
+    for (const auto& item : records_->list("ml_compute_nodes")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 8U) {
+            throw std::runtime_error(
+                "persisted compute node record field count is wrong");
+        }
+        ComputeNode node;
+        node.id = item.first;
+        node.name = fields[0];
+        node.address = fields[1];
+        node.operating_system = fields[2];
+        node.cpu_description = fields[3];
+        node.gpu_description = fields[4];
+        node.memory_mib = std::stoull(fields[5]);
+        node.owner_id = fields[6];
+        node.status = parse_compute_node_status(fields[7]);
+        nodes_[node.id] = node;
+    }
+}
+
+void ComputeNodeStore::persist(const ComputeNode& node) {
+    records_->put("ml_compute_nodes", node.id,
+                  pack({node.name, node.address, node.operating_system,
+                       node.cpu_description, node.gpu_description,
+                       std::to_string(node.memory_mib), node.owner_id,
+                       compute_node_status_name(node.status)}));
+}
+
+ComputeNode ComputeNodeStore::create(
+    const std::string& owner_id, const std::string& name,
+    const std::string& address, const std::string& operating_system,
+    const std::string& cpu_description, const std::string& gpu_description,
+    const std::uint64_t memory_mib) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("compute node name is invalid");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    ComputeNode node;
+    node.id = random_id();
+    node.name = name;
+    node.address = address;
+    node.operating_system = operating_system;
+    node.cpu_description = cpu_description;
+    node.gpu_description = gpu_description;
+    node.memory_mib = memory_mib;
+    node.owner_id = owner_id;
+    node.status = ComputeNodeStatus::available;
+    node.created_at_epoch_seconds = epoch_seconds();
+    node.updated_at_epoch_seconds = node.created_at_epoch_seconds;
+    nodes_[node.id] = node;
+    if (records_) persist(node);
+    return node;
+}
+
+std::optional<ComputeNode> ComputeNodeStore::find(const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = nodes_.find(id);
+    return found != nodes_.end() ? std::optional<ComputeNode>(found->second)
+                                 : std::nullopt;
+}
+
+std::vector<ComputeNode> ComputeNodeStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ComputeNode> result;
+    result.reserve(nodes_.size());
+    for (const auto& item : nodes_) result.push_back(item.second);
+    return result;
+}
+
+bool ComputeNodeStore::set_status(const std::string& id,
+                                  const ComputeNodeStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = nodes_.find(id);
+    if (found == nodes_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool ComputeNodeStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = nodes_.find(id);
+    if (found == nodes_.end()) return false;
+    nodes_.erase(found);
+    if (records_) records_->erase("ml_compute_nodes", id);
+    return true;
+}
+
+std::string compute_node_json(const ComputeNode& node) {
+    return "{\"id\":\"" + json_escape(node.id) + "\",\"name\":\"" +
+           json_escape(node.name) + "\",\"address\":\"" +
+           json_escape(node.address) + "\",\"operatingSystem\":\"" +
+           json_escape(node.operating_system) + "\",\"cpuDescription\":\"" +
+           json_escape(node.cpu_description) + "\",\"gpuDescription\":\"" +
+           json_escape(node.gpu_description) + "\",\"memoryMib\":" +
+           std::to_string(node.memory_mib) + ",\"ownerId\":\"" +
+           json_escape(node.owner_id) + "\",\"status\":\"" +
+           compute_node_status_name(node.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(node.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(node.updated_at_epoch_seconds) + "}";
+}
+
+std::string compute_nodes_json(const std::vector<ComputeNode>& nodes) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& node : nodes) {
+        if (!first) body += ",";
+        first = false;
+        body += compute_node_json(node);
+    }
+    return body + "]";
+}
+
+// Phase 64: docs/PLAN.md "Machine Learning Abilities" section 37
+// (Automated Machine Learning Pipelines) -- see AutomationPipeline's class
+// comment in masterai.hpp for why running a pipeline records an outcome
+// rather than orchestrating the other stores' real jobs.
+std::string automation_pipeline_status_name(const AutomationPipelineStatus status) {
+    switch (status) {
+        case AutomationPipelineStatus::draft: return "draft";
+        case AutomationPipelineStatus::active: return "active";
+        case AutomationPipelineStatus::disabled: return "disabled";
+    }
+    throw std::runtime_error("invalid automation pipeline status");
+}
+
+AutomationPipelineStatus parse_automation_pipeline_status(
+    const std::string& status) {
+    if (status == "draft") return AutomationPipelineStatus::draft;
+    if (status == "active") return AutomationPipelineStatus::active;
+    if (status == "disabled") return AutomationPipelineStatus::disabled;
+    throw std::runtime_error("stored automation pipeline status is invalid");
+}
+
+std::string automation_pipeline_run_status_name(
+    const AutomationPipelineRunStatus status) {
+    switch (status) {
+        case AutomationPipelineRunStatus::queued: return "queued";
+        case AutomationPipelineRunStatus::running: return "running";
+        case AutomationPipelineRunStatus::completed: return "completed";
+        case AutomationPipelineRunStatus::failed: return "failed";
+        case AutomationPipelineRunStatus::canceled: return "canceled";
+    }
+    throw std::runtime_error("invalid automation pipeline run status");
+}
+
+AutomationPipelineRunStatus parse_automation_pipeline_run_status(
+    const std::string& status) {
+    if (status == "queued") return AutomationPipelineRunStatus::queued;
+    if (status == "running") return AutomationPipelineRunStatus::running;
+    if (status == "completed") return AutomationPipelineRunStatus::completed;
+    if (status == "failed") return AutomationPipelineRunStatus::failed;
+    if (status == "canceled") return AutomationPipelineRunStatus::canceled;
+    throw std::runtime_error("stored automation pipeline run status is invalid");
+}
+
+AutomationPipelineStore::AutomationPipelineStore(RecordStore& records)
+    : records_(&records) {
+    restore();
+}
+
+void AutomationPipelineStore::restore() {
+    for (const auto& item : records_->list("ml_automation_pipelines")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 6U) {
+            throw std::runtime_error(
+                "persisted automation pipeline record field count is wrong");
+        }
+        AutomationPipeline pipeline;
+        pipeline.id = item.first;
+        pipeline.name = fields[0];
+        pipeline.project_id = fields[1];
+        pipeline.description = fields[2];
+        pipeline.stages = fields[3];
+        pipeline.owner_id = fields[4];
+        pipeline.status = parse_automation_pipeline_status(fields[5]);
+        pipelines_[pipeline.id] = pipeline;
+    }
+    for (const auto& item : records_->list("ml_automation_pipeline_runs")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 5U) {
+            throw std::runtime_error(
+                "persisted automation pipeline run record field count is wrong");
+        }
+        AutomationPipelineRun run;
+        run.id = item.first;
+        run.pipeline_id = fields[0];
+        run.owner_id = fields[1];
+        run.status = parse_automation_pipeline_run_status(fields[2]);
+        run.outcome_note = fields[3];
+        run.created_at_epoch_seconds = std::stoull(fields[4]);
+        run.updated_at_epoch_seconds = run.created_at_epoch_seconds;
+        runs_[run.id] = run;
+    }
+}
+
+void AutomationPipelineStore::persist(const AutomationPipeline& pipeline) {
+    records_->put(
+        "ml_automation_pipelines", pipeline.id,
+        pack({pipeline.name, pipeline.project_id, pipeline.description,
+             pipeline.stages, pipeline.owner_id,
+             automation_pipeline_status_name(pipeline.status)}));
+}
+
+void AutomationPipelineStore::persist_run(const AutomationPipelineRun& run) {
+    records_->put(
+        "ml_automation_pipeline_runs", run.id,
+        pack({run.pipeline_id, run.owner_id,
+             automation_pipeline_run_status_name(run.status),
+             run.outcome_note,
+             std::to_string(run.created_at_epoch_seconds)}));
+}
+
+AutomationPipeline AutomationPipelineStore::create(
+    const std::string& owner_id, const std::string& name,
+    const std::string& project_id, const std::string& description,
+    const std::string& stages) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("automation pipeline name is invalid");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    AutomationPipeline pipeline;
+    pipeline.id = random_id();
+    pipeline.name = name;
+    pipeline.project_id = project_id;
+    pipeline.description = description;
+    pipeline.stages = stages;
+    pipeline.owner_id = owner_id;
+    pipeline.status = AutomationPipelineStatus::draft;
+    pipeline.created_at_epoch_seconds = epoch_seconds();
+    pipeline.updated_at_epoch_seconds = pipeline.created_at_epoch_seconds;
+    pipelines_[pipeline.id] = pipeline;
+    if (records_) persist(pipeline);
+    return pipeline;
+}
+
+std::optional<AutomationPipeline> AutomationPipelineStore::find(
+    const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = pipelines_.find(id);
+    return found != pipelines_.end()
+               ? std::optional<AutomationPipeline>(found->second)
+               : std::nullopt;
+}
+
+std::vector<AutomationPipeline> AutomationPipelineStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<AutomationPipeline> result;
+    result.reserve(pipelines_.size());
+    for (const auto& item : pipelines_) result.push_back(item.second);
+    return result;
+}
+
+bool AutomationPipelineStore::set_status(
+    const std::string& id, const AutomationPipelineStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = pipelines_.find(id);
+    if (found == pipelines_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool AutomationPipelineStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = pipelines_.find(id);
+    if (found == pipelines_.end()) return false;
+    pipelines_.erase(found);
+    if (records_) records_->erase("ml_automation_pipelines", id);
+    return true;
+}
+
+AutomationPipelineRun AutomationPipelineStore::record_run(
+    const std::string& owner_id, const std::string& pipeline_id,
+    const AutomationPipelineRunStatus status,
+    const std::string& outcome_note) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (pipelines_.find(pipeline_id) == pipelines_.end()) {
+        throw std::invalid_argument("automation pipeline not found");
+    }
+    AutomationPipelineRun run;
+    run.id = random_id();
+    run.pipeline_id = pipeline_id;
+    run.owner_id = owner_id;
+    run.status = status;
+    run.outcome_note = outcome_note;
+    run.created_at_epoch_seconds = epoch_seconds();
+    run.updated_at_epoch_seconds = run.created_at_epoch_seconds;
+    runs_[run.id] = run;
+    if (records_) persist_run(run);
+    return run;
+}
+
+std::vector<AutomationPipelineRun> AutomationPipelineStore::runs_for(
+    const std::string& pipeline_id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<AutomationPipelineRun> result;
+    for (const auto& item : runs_) {
+        if (item.second.pipeline_id == pipeline_id) result.push_back(item.second);
+    }
+    return result;
+}
+
+std::string automation_pipeline_json(const AutomationPipeline& pipeline) {
+    return "{\"id\":\"" + json_escape(pipeline.id) + "\",\"name\":\"" +
+           json_escape(pipeline.name) + "\",\"projectId\":\"" +
+           json_escape(pipeline.project_id) + "\",\"description\":\"" +
+           json_escape(pipeline.description) + "\",\"stages\":\"" +
+           json_escape(pipeline.stages) + "\",\"ownerId\":\"" +
+           json_escape(pipeline.owner_id) + "\",\"status\":\"" +
+           automation_pipeline_status_name(pipeline.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(pipeline.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(pipeline.updated_at_epoch_seconds) + "}";
+}
+
+std::string automation_pipelines_json(
+    const std::vector<AutomationPipeline>& pipelines) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& pipeline : pipelines) {
+        if (!first) body += ",";
+        first = false;
+        body += automation_pipeline_json(pipeline);
+    }
+    return body + "]";
+}
+
+std::string automation_pipeline_run_json(const AutomationPipelineRun& run) {
+    return "{\"id\":\"" + json_escape(run.id) + "\",\"pipelineId\":\"" +
+           json_escape(run.pipeline_id) + "\",\"ownerId\":\"" +
+           json_escape(run.owner_id) + "\",\"status\":\"" +
+           automation_pipeline_run_status_name(run.status) +
+           "\",\"outcomeNote\":\"" + json_escape(run.outcome_note) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(run.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(run.updated_at_epoch_seconds) + "}";
+}
+
+std::string automation_pipeline_runs_json(
+    const std::vector<AutomationPipelineRun>& runs) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& run : runs) {
+        if (!first) body += ",";
+        first = false;
+        body += automation_pipeline_run_json(run);
+    }
+    return body + "]";
+}
+
+// Phase 65: docs/PLAN.md "Machine Learning Abilities" section 40 (Safety
+// and Governance) -- see SafetyPolicy/ModelCard's class comment in
+// masterai.hpp for the content-scanning fields this scoped-down registry
+// defers. Reuses the pending/approved/rejected workflow for both the
+// policy and the model card since each is an independent approval
+// decision.
+std::string safety_policy_status_name(const SafetyPolicyStatus status) {
+    switch (status) {
+        case SafetyPolicyStatus::pending: return "pending";
+        case SafetyPolicyStatus::approved: return "approved";
+        case SafetyPolicyStatus::rejected: return "rejected";
+    }
+    throw std::runtime_error("invalid safety policy status");
+}
+
+SafetyPolicyStatus parse_safety_policy_status(const std::string& status) {
+    if (status == "pending") return SafetyPolicyStatus::pending;
+    if (status == "approved") return SafetyPolicyStatus::approved;
+    if (status == "rejected") return SafetyPolicyStatus::rejected;
+    throw std::runtime_error("stored safety policy status is invalid");
+}
+
+SafetyGovernanceStore::SafetyGovernanceStore(RecordStore& records)
+    : records_(&records) {
+    restore();
+}
+
+void SafetyGovernanceStore::restore() {
+    for (const auto& item : records_->list("ml_safety_policies")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 5U) {
+            throw std::runtime_error(
+                "persisted safety policy record field count is wrong");
+        }
+        SafetyPolicy policy;
+        policy.id = item.first;
+        policy.name = fields[0];
+        policy.scope = fields[1];
+        policy.restricted_data_categories = fields[2];
+        policy.owner_id = fields[3];
+        policy.status = parse_safety_policy_status(fields[4]);
+        policies_[policy.id] = policy;
+    }
+    for (const auto& item : records_->list("ml_model_cards")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 9U) {
+            throw std::runtime_error(
+                "persisted model card record field count is wrong");
+        }
+        ModelCard card;
+        card.id = item.first;
+        card.model_id = fields[0];
+        card.purpose = fields[1];
+        card.intended_use = fields[2];
+        card.prohibited_use = fields[3];
+        card.training_data_reference = fields[4];
+        card.evaluation_results = fields[5];
+        card.known_limitations = fields[6];
+        card.license = fields[7];
+        const auto tail = unpack(fields[8]);
+        if (tail.size() != 2U) {
+            throw std::runtime_error(
+                "persisted model card tail field count is wrong");
+        }
+        card.owner_id = tail[0];
+        card.status = parse_safety_policy_status(tail[1]);
+        model_cards_[card.id] = card;
+    }
+}
+
+void SafetyGovernanceStore::persist_policy(const SafetyPolicy& policy) {
+    records_->put("ml_safety_policies", policy.id,
+                  pack({policy.name, policy.scope,
+                       policy.restricted_data_categories, policy.owner_id,
+                       safety_policy_status_name(policy.status)}));
+}
+
+void SafetyGovernanceStore::persist_model_card(const ModelCard& card) {
+    records_->put(
+        "ml_model_cards", card.id,
+        pack({card.model_id, card.purpose, card.intended_use,
+             card.prohibited_use, card.training_data_reference,
+             card.evaluation_results, card.known_limitations, card.license,
+             pack({card.owner_id, safety_policy_status_name(card.status)})}));
+}
+
+SafetyPolicy SafetyGovernanceStore::create_policy(
+    const std::string& owner_id, const std::string& name,
+    const std::string& scope,
+    const std::string& restricted_data_categories) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("safety policy name is invalid");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    SafetyPolicy policy;
+    policy.id = random_id();
+    policy.name = name;
+    policy.scope = scope;
+    policy.restricted_data_categories = restricted_data_categories;
+    policy.owner_id = owner_id;
+    policy.status = SafetyPolicyStatus::pending;
+    policy.created_at_epoch_seconds = epoch_seconds();
+    policy.updated_at_epoch_seconds = policy.created_at_epoch_seconds;
+    policies_[policy.id] = policy;
+    if (records_) persist_policy(policy);
+    return policy;
+}
+
+std::optional<SafetyPolicy> SafetyGovernanceStore::find_policy(
+    const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = policies_.find(id);
+    return found != policies_.end() ? std::optional<SafetyPolicy>(found->second)
+                                    : std::nullopt;
+}
+
+std::vector<SafetyPolicy> SafetyGovernanceStore::list_policies() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<SafetyPolicy> result;
+    result.reserve(policies_.size());
+    for (const auto& item : policies_) result.push_back(item.second);
+    return result;
+}
+
+bool SafetyGovernanceStore::set_policy_status(
+    const std::string& id, const SafetyPolicyStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = policies_.find(id);
+    if (found == policies_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist_policy(found->second);
+    return true;
+}
+
+bool SafetyGovernanceStore::remove_policy(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = policies_.find(id);
+    if (found == policies_.end()) return false;
+    policies_.erase(found);
+    if (records_) records_->erase("ml_safety_policies", id);
+    return true;
+}
+
+ModelCard SafetyGovernanceStore::create_model_card(
+    const std::string& owner_id, const std::string& model_id,
+    const std::string& purpose, const std::string& intended_use,
+    const std::string& prohibited_use,
+    const std::string& training_data_reference,
+    const std::string& evaluation_results,
+    const std::string& known_limitations, const std::string& license) {
+    if (model_id.empty()) {
+        throw std::invalid_argument("model card model id is required");
+    }
+    if (purpose.empty()) {
+        throw std::invalid_argument("model card purpose is required");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    ModelCard card;
+    card.id = random_id();
+    card.model_id = model_id;
+    card.purpose = purpose;
+    card.intended_use = intended_use;
+    card.prohibited_use = prohibited_use;
+    card.training_data_reference = training_data_reference;
+    card.evaluation_results = evaluation_results;
+    card.known_limitations = known_limitations;
+    card.license = license;
+    card.owner_id = owner_id;
+    card.status = SafetyPolicyStatus::pending;
+    card.created_at_epoch_seconds = epoch_seconds();
+    card.updated_at_epoch_seconds = card.created_at_epoch_seconds;
+    model_cards_[card.id] = card;
+    if (records_) persist_model_card(card);
+    return card;
+}
+
+std::optional<ModelCard> SafetyGovernanceStore::find_model_card(
+    const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = model_cards_.find(id);
+    return found != model_cards_.end() ? std::optional<ModelCard>(found->second)
+                                       : std::nullopt;
+}
+
+std::vector<ModelCard> SafetyGovernanceStore::list_model_cards() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ModelCard> result;
+    result.reserve(model_cards_.size());
+    for (const auto& item : model_cards_) result.push_back(item.second);
+    return result;
+}
+
+bool SafetyGovernanceStore::set_model_card_status(
+    const std::string& id, const SafetyPolicyStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = model_cards_.find(id);
+    if (found == model_cards_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist_model_card(found->second);
+    return true;
+}
+
+bool SafetyGovernanceStore::remove_model_card(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = model_cards_.find(id);
+    if (found == model_cards_.end()) return false;
+    model_cards_.erase(found);
+    if (records_) records_->erase("ml_model_cards", id);
+    return true;
+}
+
+std::string safety_policy_json(const SafetyPolicy& policy) {
+    return "{\"id\":\"" + json_escape(policy.id) + "\",\"name\":\"" +
+           json_escape(policy.name) + "\",\"scope\":\"" +
+           json_escape(policy.scope) + "\",\"restrictedDataCategories\":\"" +
+           json_escape(policy.restricted_data_categories) +
+           "\",\"ownerId\":\"" + json_escape(policy.owner_id) +
+           "\",\"status\":\"" + safety_policy_status_name(policy.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(policy.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(policy.updated_at_epoch_seconds) + "}";
+}
+
+std::string safety_policies_json(const std::vector<SafetyPolicy>& policies) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& policy : policies) {
+        if (!first) body += ",";
+        first = false;
+        body += safety_policy_json(policy);
+    }
+    return body + "]";
+}
+
+std::string model_card_json(const ModelCard& card) {
+    return "{\"id\":\"" + json_escape(card.id) + "\",\"modelId\":\"" +
+           json_escape(card.model_id) + "\",\"purpose\":\"" +
+           json_escape(card.purpose) + "\",\"intendedUse\":\"" +
+           json_escape(card.intended_use) + "\",\"prohibitedUse\":\"" +
+           json_escape(card.prohibited_use) +
+           "\",\"trainingDataReference\":\"" +
+           json_escape(card.training_data_reference) +
+           "\",\"evaluationResults\":\"" +
+           json_escape(card.evaluation_results) +
+           "\",\"knownLimitations\":\"" +
+           json_escape(card.known_limitations) + "\",\"license\":\"" +
+           json_escape(card.license) + "\",\"ownerId\":\"" +
+           json_escape(card.owner_id) + "\",\"status\":\"" +
+           safety_policy_status_name(card.status) +
+           "\",\"createdAtEpochSeconds\":" +
+           std::to_string(card.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(card.updated_at_epoch_seconds) + "}";
+}
+
+std::string model_cards_json(const std::vector<ModelCard>& cards) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& card : cards) {
+        if (!first) body += ",";
+        first = false;
+        body += model_card_json(card);
+    }
+    return body + "]";
+}
+
+// Phase 66: docs/PLAN.md "Machine Learning Abilities" section 43 (Audit
+// Logs) -- see AuditLog::recent()'s class comment in masterai.hpp; this
+// only formats entries that store already read.
+std::string audit_log_entries_json(const std::vector<AuditLogEntry>& entries) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& entry : entries) {
+        if (!first) body += ",";
+        first = false;
+        body += "{\"timestampEpochSeconds\":" +
+               std::to_string(entry.timestamp_epoch_seconds) +
+               ",\"event\":\"" + json_escape(entry.event) + "\",\"actor\":\"" +
+               json_escape(entry.actor) + "\",\"outcome\":\"" +
+               json_escape(entry.outcome) + "\",\"detail\":\"" +
+               json_escape(entry.detail) + "\"}";
     }
     return body + "]";
 }

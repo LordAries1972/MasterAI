@@ -7,7 +7,7 @@
     "agentCoder.integration.defaultStrategy": "single",
     "agentCoder.integration.headlessReadOnlyEnabled": true,
     "agentCoder.integration.auditRetentionDays": 90,
-    "agentCoder.liveContext.enabled": true,
+    "agentCoder.liveContext.enabled": false,
     "agentCoder.liveValidation.continuous": true,
     "agentCoder.liveValidation.debounceMs": 650,
     "agentCoder.liveValidation.publishDiagnostics": true,

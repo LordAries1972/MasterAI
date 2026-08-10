@@ -310,16 +310,16 @@ std::string number_array_json(const std::vector<double>& values) {
     return result + "]";
 }
 
-// The upload endpoint accepts at most this much CSV; RecordStore keeps
-// collections in memory, so an unbounded upload would be a self-DoS.
-constexpr std::size_t maximum_csv_bytes = 8U * 1024U * 1024U;
-
 }  // namespace
 
 TabularDataset parse_tabular_csv(const std::string& csv,
-                                 const std::string& target_column) {
+                                 const std::string& target_column,
+                                 const std::uint64_t maximum_csv_bytes) {
     if (csv.size() > maximum_csv_bytes) {
-        throw std::runtime_error("dataset content exceeds the 8 MiB limit");
+        throw std::runtime_error(
+            "dataset content exceeds the configured " +
+            std::to_string(maximum_csv_bytes / (1024ULL * 1024ULL)) +
+            " MiB limit");
     }
     // Split into non-empty lines; \r is trimmed per cell so both LF and
     // CRLF files parse identically.

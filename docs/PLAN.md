@@ -1133,6 +1133,67 @@ Current phase status:
   rejection, and memory-snapshot stability. No learned embedding GGUF is
   installed in this checkout, so semantic-quality/latency evidence remains a
   per-model deployment gate rather than a fabricated Phase 61 result.
+- Phase 62: Implemented (2026-08-11) — Inference Endpoints (section 2 item
+  19, section 35). A scoped-down registry: name, model reference, runtime,
+  host, port, protocol, authentication method, and rate limit, moved through
+  a draft/active/disabled lifecycle via `GET/POST /api/v1/ml/inference-
+  endpoints`, `.../status`, `.../delete`. Deliberately does not open a real
+  network listener, enforce the recorded rate limit, or apply a safety/tool
+  policy — this records administrator intent, matching the Model Registry/
+  Projects pattern, not a live inference-serving path.
+- Phase 63: Implemented (2026-08-11) — Hardware and Compute (section 2 item
+  20, section 30). A static compute-node registry: name, address, operating
+  system, CPU/GPU description, and system memory, with an available/
+  reserved/draining/disabled administrative status via `GET/POST
+  /api/v1/ml/compute-nodes`, `.../status`, `.../delete`. Deliberately does
+  not poll live telemetry (temperature, power draw, queue length, current
+  workload) — that requires an agent process on the node this phase does
+  not build.
+- Phase 64: Implemented (2026-08-11) — Automated Machine Learning Pipelines
+  (section 2 item 21, section 37). A pipeline definition names an ordered,
+  free-text list of stages drawn from section 37's sixteen-stage lifecycle
+  taxonomy; `POST .../run` records a run outcome (queued/running/completed/
+  failed/canceled) rather than orchestrating the other stores' real
+  training/evaluation/deployment jobs. `GET/POST /api/v1/ml/automation-
+  pipelines`, `.../status`, `.../run`, `.../runs`, `.../delete`.
+- Phase 65: Implemented (2026-08-11) — Safety and Governance (section 2 item
+  22, section 40). A governance policy (name, scope, restricted data
+  categories) and a per-model card (purpose, intended/prohibited use,
+  training data reference, evaluation results, known limitations, license)
+  each move through their own independent pending/approved/rejected
+  approval workflow, matching Dataset/Deployment approval. `GET/POST
+  /api/v1/ml/safety-policies` and `/api/v1/ml/model-cards`, each with
+  `.../status`, `.../delete`. Deliberately does not run harmful-content/
+  bias/hallucination/prompt-injection testing or credential/secret
+  detection — those require content-scanning executors this phase does not
+  build; the policy only records administrator intent and an approval
+  decision.
+- Phase 66: Implemented (2026-08-11) — Audit Logs (section 2 item 24,
+  section 43). Every `ml.*` administrator action already appended to the
+  hash-chained `AuditLog` (every phase back through Phase 37); this phase
+  adds the read path — `AuditLog::recent()` parses the chained log file and
+  `GET /api/v1/ml/audit-logs` returns the most recent 200 `ml.*`-prefixed
+  entries, newest first, in a dedicated read-only administrator page. No new
+  write path. Also: Machine Learning Settings (section 2 item 25, section
+  49) — an ML-scoped view of the existing System Configuration form
+  (`GET/POST /api/v1/admin/config`) surfacing only genuinely-enforced ML
+  fields: the Dataset Manager's tabular CSV upload cap (newly configurable;
+  previously a hardcoded 8 MiB constant in `ml_engine.cpp`) and the existing
+  Subject Knowledge Manager document-upload cap and Parquet helper path.
+  Layout/consistency cleanup landed alongside these phases: `#content`/
+  `.panel` items gained `min-width:0` so a wide ML table can no longer force
+  the page wider than the viewport (the actual cause of the reported
+  screen-boundary overflow), every `table()` result is now wrapped in an
+  `overflow-x:auto` container, the sidebar gained two narrow-viewport
+  breakpoints, and every ML row-action button (`iconifyMlButtons()`,
+  renamed `styleMlActionButtons()`) now keeps its visible text at a compact
+  size instead of collapsing to an icon-only affordance. Separately,
+  knowledge ingestion (`ml_knowledge.cpp`) now recognizes the Scraper
+  Project's (`f:\projects\delphi12\Scraper`) three fixed JSON/JSONL export
+  record shapes (instruction/input/output, conversation messages, raw
+  document text) and rewrites them to clean text before chunking instead of
+  slicing raw JSON syntax into 1200-byte windows; unrecognized JSON falls
+  back to the previous raw-byte chunking unchanged.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that

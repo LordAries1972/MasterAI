@@ -418,6 +418,11 @@ Status below reflects the evidence recorded in
 | 59 | Local embedding and vector indexing | Implemented; authored 128-dimensional hashing vectors and index profiles |
 | 60 | RAG retrieval and grounded context assembly | Implemented; approved-config query execution with ranked chunks and citations |
 | 61 | Learned embeddings and once-per-chat memory recall | Implemented; isolated llama.cpp embedding adapter, durable vector provenance, and retained chat memory snapshots |
+| 62 | Inference Endpoints | Implemented at a scoped-down record level; no live network listener |
+| 63 | Hardware and Compute | Implemented at a scoped-down record level; no live telemetry |
+| 64 | Automation Pipelines | Implemented at a scoped-down record level; "Run" records an outcome, no stage orchestration |
+| 65 | Safety and Governance | Implemented at a scoped-down policy/model-card approval level; no content scanning |
+| 66 | Audit Logs and Machine Learning Settings | Implemented; real read over the existing audit trail, and a real ML-scoped subset of System Configuration |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -966,8 +971,13 @@ records for projects, registered models, datasets, subject knowledge,
 labeling, data preparation, training and fine-tuning jobs, evaluation,
 experiments, model building, instruction examples, synthetic data, vector
 stores, RAG configurations, subject exams, hyperparameter searches,
-model-optimization runs, training checkpoints, deployments, and model
-comparisons.
+model-optimization runs, training checkpoints, deployments, model
+comparisons, inference endpoints, compute nodes, automation pipelines, and
+safety-governance policies/model cards. All 25 interfaces the plan names are
+now present in the sidebar; two of the newest -- Audit Logs and Machine
+Learning Settings -- are genuinely functional rather than lifecycle
+metadata (a real read over the existing audit trail, and a real ML-scoped
+subset of System Configuration), covered in more detail below.
 
 Since Phase 56, the module executes real machine learning for tabular data:
 uploading CSV content to a dataset makes it trainable, "Train now" on a
@@ -992,7 +1002,18 @@ vector-only, or keyword-only retrieval and displays the ranked scores, source
 citations, exact source text, and assembled context. Dataset upload and all
 cross-record ML forms now
 use file dialogs and named selectors instead of requiring pasted file content
-or copied opaque IDs.
+or copied opaque IDs. Knowledge ingestion also recognizes the fixed JSON/
+JSONL export shapes produced by the separate Scraper Project dataset
+builder and rewrites them to clean text before chunking, instead of
+chunking raw JSON syntax.
+
+Since Phase 66, every `ml.*` administrator action across every interface is
+visible in a dedicated read-only Audit Logs page (the most recent 200
+entries, newest first), and a Machine Learning Settings page exposes the
+genuinely-enforced subset of server configuration (the Dataset Manager's
+CSV upload cap, the Subject Knowledge Manager's document cap and Parquet
+helper path) without requiring a trip to the general System Configuration
+page.
 
 The honest boundary that remains: creating or advancing the other job types
 records administrative intent and state, not execution. Creating an empty

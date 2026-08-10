@@ -8,7 +8,7 @@
 
 **Project basis:** This guide is derived from the architecture, security rules, model lifecycle, Machine Learning Abilities, and phased implementation status in [PLAN.md](PLAN.md). Where the plan describes a future capability, this guide labels it as planned rather than presenting it as currently executable.
 
-**Last aligned with the plan:** 6 August 2026, through Phase 61 learned embedding adapters and once-per-conversation memory recall.
+**Last aligned with the plan:** 11 August 2026, through Phase 66 (Inference Endpoints, Hardware and Compute, Automation Pipelines, Safety and Governance, Audit Logs, and Machine Learning Settings).
 
 ---
 
@@ -38,6 +38,141 @@ The major lessons are:
 11. Security, troubleshooting, and final review.
 
 Do not skip directly to training commands. A training tool can execute a bad plan much faster than a person can repair the resulting data leakage, licensing problem, or misleading evaluation.
+
+---
+
+## Table of contents
+
+- [1. Learning outcomes](#1-learning-outcomes)
+- [2. The essential idea: learning a function from examples](#2-the-essential-idea-learning-a-function-from-examples)
+  - [2.1 What machine learning is not](#21-what-machine-learning-is-not)
+  - [2.2 The complete machine-learning system](#22-the-complete-machine-learning-system)
+- [3. The main families of machine learning](#3-the-main-families-of-machine-learning)
+  - [3.1 Supervised learning](#31-supervised-learning)
+  - [3.2 Unsupervised learning](#32-unsupervised-learning)
+  - [3.3 Self-supervised learning](#33-self-supervised-learning)
+  - [3.4 Semi-supervised and active learning](#34-semi-supervised-and-active-learning)
+  - [3.5 Reinforcement and preference learning](#35-reinforcement-and-preference-learning)
+  - [3.6 Transfer learning and fine-tuning](#36-transfer-learning-and-fine-tuning)
+  - [3.7 Classical models and neural networks](#37-classical-models-and-neural-networks)
+- [4. What a model actually contains](#4-what-a-model-actually-contains)
+  - [4.1 Architecture](#41-architecture)
+  - [4.2 Parameters and weights](#42-parameters-and-weights)
+  - [4.3 Hyperparameters](#43-hyperparameters)
+  - [4.4 Tokenizer and vocabulary](#44-tokenizer-and-vocabulary)
+  - [4.5 Embeddings](#45-embeddings)
+  - [4.6 Checkpoints, adapters, and final artifacts](#46-checkpoints-adapters-and-final-artifacts)
+  - [4.7 A complete model identity](#47-a-complete-model-identity)
+  - [4.8 From one artificial neuron to a network](#48-from-one-artificial-neuron-to-a-network)
+  - [4.9 Features and representations](#49-features-and-representations)
+  - [4.10 Architecture, weights, runtime, and application are separate](#410-architecture-weights-runtime-and-application-are-separate)
+- [5. How a transformer language model works](#5-how-a-transformer-language-model-works)
+  - [5.1 From prompt to output](#51-from-prompt-to-output)
+  - [5.2 Attention](#52-attention)
+  - [5.3 Transformer layers](#53-transformer-layers)
+  - [5.4 Logits, probabilities, and sampling](#54-logits-probabilities-and-sampling)
+  - [5.5 Context windows](#55-context-windows)
+  - [5.6 KV-cache reuse](#56-kv-cache-reuse)
+  - [5.7 Why hallucinations occur](#57-why-hallucinations-occur)
+- [6. How training changes a model](#6-how-training-changes-a-model)
+  - [6.1 The training loop](#61-the-training-loop)
+  - [6.2 Epochs, steps, and batches](#62-epochs-steps-and-batches)
+  - [6.3 Learning rate](#63-learning-rate)
+  - [6.4 Backpropagation and gradients](#64-backpropagation-and-gradients)
+  - [6.5 Overfitting and underfitting](#65-overfitting-and-underfitting)
+  - [6.6 Catastrophic forgetting](#66-catastrophic-forgetting)
+  - [6.7 Fine-tuning methods](#67-fine-tuning-methods)
+  - [6.8 Training from scratch](#68-training-from-scratch)
+  - [6.9 A small numerical training example](#69-a-small-numerical-training-example)
+  - [6.10 What training metrics are telling you](#610-what-training-metrics-are-telling-you)
+- [7. Four ways to "teach" a model](#7-four-ways-to-teach-a-model)
+  - [7.1 Prompting: temporary instructions](#71-prompting-temporary-instructions)
+  - [7.2 Project context: current working evidence](#72-project-context-current-working-evidence)
+  - [7.3 Retrieval-augmented generation: managed external knowledge](#73-retrieval-augmented-generation-managed-external-knowledge)
+  - [7.4 Fine-tuning: persistent behavior adaptation](#74-fine-tuning-persistent-behavior-adaptation)
+  - [7.5 The decision tree](#75-the-decision-tree)
+  - [7.6 Comparison table](#76-comparison-table)
+- [8. Data is the curriculum](#8-data-is-the-curriculum)
+  - [8.1 Define the target before collecting data](#81-define-the-target-before-collecting-data)
+  - [8.2 Source approval and provenance](#82-source-approval-and-provenance)
+  - [8.3 Cleaning and normalization](#83-cleaning-and-normalization)
+  - [8.4 Training, validation, and test separation](#84-training-validation-and-test-separation)
+  - [8.5 Labels and instruction examples](#85-labels-and-instruction-examples)
+  - [8.6 Synthetic data](#86-synthetic-data)
+  - [8.7 Dataset quality checklist](#87-dataset-quality-checklist)
+- [9. Evaluation: proving that learning occurred](#9-evaluation-proving-that-learning-occurred)
+  - [9.1 Build the evaluation before training](#91-build-the-evaluation-before-training)
+  - [9.2 Select task-appropriate metrics](#92-select-task-appropriate-metrics)
+  - [9.3 Compare against a baseline](#93-compare-against-a-baseline)
+  - [9.4 Human evaluation](#94-human-evaluation)
+  - [9.5 Approval gates](#95-approval-gates)
+- [10. MasterAI's current capability boundary](#10-masterais-current-capability-boundary)
+  - [10.1 What is usable now](#101-what-is-usable-now)
+  - [10.2 What must not be assumed yet](#102-what-must-not-be-assumed-yet)
+  - [10.3 Two model catalogs with different purposes](#103-two-model-catalogs-with-different-purposes)
+  - [10.4 When to use MasterAI today](#104-when-to-use-masterai-today)
+  - [10.5 Current Machine Learning classroom map](#105-current-machine-learning-classroom-map)
+  - [10.6 Status is state, not evidence](#106-status-is-state-not-evidence)
+  - [10.7 Hands-on lesson: train, evaluate, and use a real tabular model](#107-hands-on-lesson-train-evaluate-and-use-a-real-tabular-model)
+  - [10.8 Hands-on lesson: ingest knowledge and test grounded retrieval](#108-hands-on-lesson-ingest-knowledge-and-test-grounded-retrieval)
+  - [10.9 Hands-on lesson: importing a Scraper Project dataset](#109-hands-on-lesson-importing-a-scraper-project-dataset)
+- [11. Sequential lesson: set up an existing model for MasterAI](#11-sequential-lesson-set-up-an-existing-model-for-masterai)
+  - [Step 1 — Define the intended use](#step-1--define-the-intended-use)
+  - [Step 2 — Confirm the host and storage](#step-2--confirm-the-host-and-storage)
+    - [Understand the memory budget](#understand-the-memory-budget)
+    - [Understand the compute budget](#understand-the-compute-budget)
+  - [Step 3 — Obtain an approved inference runner](#step-3--obtain-an-approved-inference-runner)
+  - [Step 4 — Choose a compatible model artifact](#step-4--choose-a-compatible-model-artifact)
+  - [Step 5 — Create the strict manifest](#step-5--create-the-strict-manifest)
+  - [Step 6 — Build MasterAI if necessary](#step-6--build-masterai-if-necessary)
+  - [Step 7 — Configure MasterAI](#step-7--configure-masterai)
+  - [Step 8 — Verify the model](#step-8--verify-the-model)
+  - [Step 9 — Start the service and create the first administrator](#step-9--start-the-service-and-create-the-first-administrator)
+  - [Step 10 — Confirm service and model state](#step-10--confirm-service-and-model-state)
+  - [Step 11 — Run a reproducible benchmark](#step-11--run-a-reproducible-benchmark)
+  - [Step 12 — Test in chat with controlled context](#step-12--test-in-chat-with-controlled-context)
+  - [Step 13 — Record approval and operating limits](#step-13--record-approval-and-operating-limits)
+- [12. Sequential lesson: build and teach a specialized model](#12-sequential-lesson-build-and-teach-a-specialized-model)
+  - [Step 1 — Create the capability contract](#step-1--create-the-capability-contract)
+  - [Step 2 — Establish a baseline](#step-2--establish-a-baseline)
+  - [Step 3 — Create a Machine Learning project](#step-3--create-a-machine-learning-project)
+  - [Step 4 — Choose the teaching method](#step-4--choose-the-teaching-method)
+  - [Step 5 — Register the base model and its provenance](#step-5--register-the-base-model-and-its-provenance)
+  - [Step 6 — Create the subject knowledge package](#step-6--create-the-subject-knowledge-package)
+  - [Step 7 — Acquire and register approved data](#step-7--acquire-and-register-approved-data)
+  - [Step 8 — Prepare and label the data](#step-8--prepare-and-label-the-data)
+  - [Step 9 — Design the experiment](#step-9--design-the-experiment)
+  - [Step 10 — Run a small pilot before a full job](#step-10--run-a-small-pilot-before-a-full-job)
+  - [Step 11 — Create and execute the real training or fine-tuning job](#step-11--create-and-execute-the-real-training-or-fine-tuning-job)
+  - [Step 12 — Evaluate the candidate](#step-12--evaluate-the-candidate)
+  - [Step 13 — Review errors and iterate](#step-13--review-errors-and-iterate)
+  - [Step 14 — Convert and optimize for MasterAI inference](#step-14--convert-and-optimize-for-masterai-inference)
+  - [Step 15 — Package the model in MasterAI](#step-15--package-the-model-in-masterai)
+  - [Step 16 — Benchmark on the target host](#step-16--benchmark-on-the-target-host)
+  - [Step 17 — Deploy to staging](#step-17--deploy-to-staging)
+  - [Step 18 — Approve production deployment](#step-18--approve-production-deployment)
+  - [Step 19 — Monitor production](#step-19--monitor-production)
+  - [Step 20 — Version, roll back, or retire](#step-20--version-roll-back-or-retire)
+- [13. Worked classroom example: a C++17 subject assistant](#13-worked-classroom-example-a-c17-subject-assistant)
+  - [13.1 Objective](#131-objective)
+  - [13.2 First attempt: no training](#132-first-attempt-no-training)
+  - [13.3 Add retrieval when current rules matter](#133-add-retrieval-when-current-rules-matter)
+  - [13.4 Fine-tune only for persistent review behavior](#134-fine-tune-only-for-persistent-review-behavior)
+  - [13.5 Evaluation rubric](#135-evaluation-rubric)
+  - [13.6 Deployment decision](#136-deployment-decision)
+- [14. Security, privacy, and governance rules](#14-security-privacy-and-governance-rules)
+  - [14.1 Treat models and datasets as sensitive assets](#141-treat-models-and-datasets-as-sensitive-assets)
+  - [14.2 Least privilege](#142-least-privilege)
+  - [14.3 Untrusted model code](#143-untrusted-model-code)
+  - [14.4 Poisoning and prompt injection](#144-poisoning-and-prompt-injection)
+  - [14.5 Reproducibility and audit](#145-reproducibility-and-audit)
+  - [14.6 Production model card](#146-production-model-card)
+- [15. Troubleshooting guide](#15-troubleshooting-guide)
+- [16. Glossary of essential terms](#16-glossary-of-essential-terms)
+- [17. Classroom review questions](#17-classroom-review-questions)
+- [18. Final sequential checklist](#18-final-sequential-checklist)
+- [19. Closing lesson](#19-closing-lesson)
+- [Related project documentation](#related-project-documentation)
 
 ---
 
@@ -836,9 +971,15 @@ The Machine Learning administration foundation currently records and manages sco
 - model-optimization runs;
 - training checkpoints;
 - deployments;
-- model comparisons (whose **Compare now** action is a real executor — see below).
+- model comparisons (whose **Compare now** action is a real executor — see below);
+- inference endpoints;
+- compute nodes;
+- automation pipelines (whose **Run** action records a genuine outcome, not orchestration — see below);
+- safety-governance policies and per-model cards.
 
 These are valuable control-plane records. They establish identity, ownership, intent, relationships, status, review, and approval boundaries.
+
+Two further pages are genuinely functional rather than lifecycle metadata, but for a different reason than the tabular/retrieval engines below: **Audit Logs** (`/app/ml/audit-logs`) is a real read over the same hash-chained audit trail every administrator action already writes to, and **Machine Learning Settings** (`/app/ml/settings`) genuinely reads and writes real server configuration (the Dataset Manager's CSV upload cap, the Subject Knowledge Manager's document cap and Parquet helper path).
 
 Since Phase 56, the module also contains a **real execution engine** for tabular machine learning, extended by Phase 57. This is genuine computation, not record-keeping:
 
@@ -858,7 +999,7 @@ Section 10.7 walks through this end to end. The engine's own honest boundary: it
 
 ### 10.2 What must not be assumed yet
 
-At the plan's current Phase 61 boundary, the tabular engine and local retrieval engine described in 10.1 are real, but the following must still not be represented as an operating end-to-end platform:
+At the plan's current Phase 66 boundary, the tabular engine and local retrieval engine described in 10.1 are real, but the following must still not be represented as an operating end-to-end platform:
 
 - training or fine-tuning of **language models** (the real executor covers tabular classification and regression only);
 - external training-framework integration (PyTorch, llama.cpp finetune, ...);
@@ -873,9 +1014,13 @@ At the plan's current Phase 61 boundary, the tabular engine and local retrieval 
 - learned-embedding quality or speed without testing the exact installed GGUF on the target hardware (Phase 61 implements the adapter, not a universal quality claim);
 - LLM answer generation from the Phase 60/61 context package, automated groundedness judging, or a complete generative RAG answer pipeline;
 - deployment automation, canary rollout, health monitoring, or automatic rollback;
-- continual learning from user conversations.
+- continual learning from user conversations;
+- a real network listener behind an Inference Endpoint record, or enforcement of its recorded rate limit;
+- live hardware telemetry (temperature, power draw, queue length, current workload) behind a Compute Node record;
+- automation-pipeline stage orchestration (a pipeline **Run** records an outcome; it does not execute the other pages' real jobs in sequence);
+- automated content scanning behind Safety and Governance (harmful-content, bias, hallucination, prompt-injection, or credential/secret detection).
 
-Creating a Fine-Tuning Job record still records administrative intent and lifecycle state; it does not adapt a language model. Creating an empty Vector Store record alone does not index anything: a source file must be deliberately ingested through Subject Knowledge Manager. Likewise, a Subject Exam record does not administer questions, a Hyperparameter Search record does not run trials, a Model Optimization record does not quantize anything, and an approved Deployment record does not route a single request — each is a governed statement of intent and approval that a future executor will attach real evidence to. The deliberate executor exceptions through Phase 61 are tabular training, evaluation, prediction and comparison, bounded knowledge ingestion, authored or learned vector indexing, and evidence-bearing retrieval/context assembly.
+Creating a Fine-Tuning Job record still records administrative intent and lifecycle state; it does not adapt a language model. Creating an empty Vector Store record alone does not index anything: a source file must be deliberately ingested through Subject Knowledge Manager. Likewise, a Subject Exam record does not administer questions, a Hyperparameter Search record does not run trials, a Model Optimization record does not quantize anything, and an approved Deployment record does not route a single request — each is a governed statement of intent and approval that a future executor will attach real evidence to. The deliberate executor exceptions through Phase 66 are tabular training, evaluation, prediction and comparison, bounded knowledge ingestion, authored or learned vector indexing, evidence-bearing retrieval/context assembly, and the genuinely functional Audit Logs read and Machine Learning Settings read/write.
 
 ### 10.3 Two model catalogs with different purposes
 
@@ -922,14 +1067,20 @@ The current administrator pages are easiest to understand as a chain of controll
 | Model Builder | `/app/ml/model-builder-configs` | Tracks a proposed source type, design lifecycle, and the full section 9 build-settings sheet (architecture through distributed training) edited in basic or advanced mode | Records the intended design in full detail — it does not construct or train the architecture |
 | Instruction Training | `/app/ml/instruction-examples` | Tracks a target dataset, subject, and review lifecycle | Is currently scoped metadata, not the complete example body |
 | Synthetic Data | `/app/ml/synthetic-records` | Tracks generation technique, dataset, and review status | Does not generate content |
-| Embeddings and Vector Stores | `/app/ml/vector-stores` | Registers store identity, embedding model name, metric, and approval | Does not create embeddings or populate the index |
-| Retrieval-Augmented Generation | `/app/ml/rag-configs` | Registers a search strategy, optional vector-store relationship, and approval | Does not execute retrieval, assemble grounded prompts, or test citations |
+| Embeddings and Vector Stores | `/app/ml/vector-stores` | Registers store identity, embedding model name, metric, and approval; Phase 59/61 populate a real local index (authored hashing vectorizer or a verified learned GGUF) as documents are ingested | Index population happens through knowledge ingestion (Subject Knowledge Manager), not this page directly |
+| Retrieval-Augmented Generation | `/app/ml/rag-configs` | Registers a search strategy, optional vector-store relationship, and approval; an approved config over a populated store can execute real `hybrid`/`vector`/`keyword` retrieval and return citation-ready evidence (Section 10.8) | Does not generate an LLM answer or claim a later answer is grounded — retrieval and context assembly only |
 | Subject Examination | `/app/ml/subject-exams` | Tracks an exam for a registered subject package, its question format, and review lifecycle | Does not administer questions or compute scores |
 | Hyperparameter Optimization | `/app/ml/hyperparameter-searches` | Tracks a search over a training job's settings, its strategy, and job lifecycle | Does not run trials or select a best result |
 | Model Optimization | `/app/ml/model-optimizations` | Tracks an intended operation (quantization, pruning, ...) against a registered model | Does not transform any model artifact |
 | Checkpoint Management | `/app/ml/checkpoints` | Tracks checkpoint records; Phase 56 training runs create them automatically with genuinely measured losses | Records measured losses, not restorable weight snapshots; no resume or promotion |
 | Deployment Manager | `/app/ml/deployments` | Tracks an intended promotion of a registered model to an environment, with strategy and approval | Does not serve, monitor, or roll back anything |
 | Model Comparison | `/app/ml/model-comparisons` | Names a baseline model, candidate model, and shared benchmark; **Compare now** really evaluates both and stores the measured winner | Compares trained tabular models only — no latency, safety, or blind response comparison for language models |
+| Inference Endpoints | `/app/ml/inference-endpoints` | Records intent to expose a model behind a controlled endpoint (host, port, protocol, auth method, rate limit) | Does not open a real network listener or enforce the recorded rate limit |
+| Hardware and Compute | `/app/ml/compute-nodes` | Registers a compute node's static description and administrative status | Does not poll live telemetry (temperature, power draw, queue length, workload) |
+| Automation Pipelines | `/app/ml/automation-pipelines` | Names an ordered subset of the training lifecycle's stages; **Run** records a run outcome | Does not orchestrate the other pages' real jobs — recording only |
+| Safety and Governance | `/app/ml/safety-governance` | A policy (restricted data categories) and per-model cards (purpose, intended/prohibited use, limitations, license), each with its own approval workflow | Does not run harmful-content/bias/prompt-injection testing or credential/secret detection |
+| Audit Logs | `/app/ml/audit-logs` | Read-only view of the most recent 200 recorded `ml.*` administrator actions, newest first | Read-only by design — every action shown was already recorded elsewhere; there is nothing to configure here |
+| Machine Learning Settings | `/app/ml/settings` | The ML-relevant subset of System Configuration: the Dataset Manager's CSV upload cap and the Subject Knowledge Manager's document upload cap/Parquet helper path | Everything else (host/port, memory, retrieval, ...) lives on the general System Configuration page |
 
 The order in Section 12 intentionally moves between these pages according to the actual development lifecycle, rather than simply following the sidebar order.
 
@@ -1023,13 +1174,29 @@ This workflow creates retrieval evidence. It does not train a language model and
 
 The built-in hashing vectorizer is local, deterministic, restart-stable, and useful for lexical/term-overlap similarity. It is not equivalent to a learned transformer embedding model and should not be described as one. Phase 61's learned adapter can provide semantic embeddings from a suitable verified GGUF while retaining the same approval and citation boundaries. Treat its model id and dimensions as part of the index identity: changing the model requires a new/rebuilt store, and semantic quality must be measured with the exact model and workload you intend to deploy.
 
+### 10.9 Hands-on lesson: importing a Scraper Project dataset
+
+The separate **Scraper Project** (a Delphi 12 application, `f:\projects\delphi12\Scraper`, distinct from MasterAI itself) scrapes permitted public web content and exports it as instruction/conversation/document records, purpose-built to feed MasterAI. Knowing which MasterAI page a Scraper export belongs to — and why — is the point of this lesson.
+
+**First, decide which pipeline the export is for.** The Scraper writes three record shapes (`instruction`/`input`/`output`; `conversation` `messages`; raw `document` `text`), each carrying a `metadata` object (`source_url`, `source_title`, `quality_score`, ...). Every one of these is **prose/instructional data for the knowledge-ingestion (RAG) pipeline in Section 10.8** — none of it is numeric feature columns, so it is not usable input for the tabular CSV training pipeline in Section 10.7. If you export a Scraper dataset as CSV, MasterAI's tabular trainer will reject it (or silently ignore it as a poor classifier target) because `instruction`/`output`/`text` are text columns, not numeric features. Use the JSON or JSONL export format for MasterAI, not CSV.
+
+1. In the Scraper Project, run your crawl and export the resulting dataset as **JSONL** (File → Export Dataset → JSON Lines) — the format the Scraper's own documentation recommends for MasterAI. JSON (single array) also works; Parquet works if a DuckDB helper is configured (Section 10.8, step 3).
+2. In MasterAI, open **Machine Learning → Subject Knowledge Manager** and open (or create) the subject package this content belongs under.
+3. Under **Ingest a knowledge file**, choose the subject and an approved vector store, then select the exported `.jsonl` (or `.json`) file and ingest it.
+4. MasterAI recognizes the Scraper's fixed record shapes and rewrites each record to clean text (e.g. `Instruction: ...` / `Output: ...` for instruction records, `role: content` lines for conversation records, the raw passage for document records, prefixed with the source title/URL when present) before splitting it into chunks — rather than chunking the raw JSON syntax verbatim. JSON that does not match any of the three shapes still ingests, chunked as plain text exactly as before.
+5. Continue from Section 10.8, step 4 onward: verify the chunk count, inspect the populated index, and test retrieval. Confirm a returned chunk reads as clean sentence-like text (not `{"instruction":"...` fragments) — that confirms the shape recognition worked.
+
 ## 11. Sequential lesson: set up an existing model for MasterAI
 
-This is the current, operational path. Perform the steps in order.
+This is the current, operational path: taking a model that someone else already trained (an "existing model") and making it usable inside MasterAI. You are not teaching the model anything new here — you are installing, verifying, and safely connecting it. Perform the steps in order; each step exists because skipping it lets an unverified, unsuitable, or unsafe model reach a real user.
 
 ### Step 1 — Define the intended use
 
-Write down:
+**What this step is:** Before touching any software, write down, in plain language, what you actually need the model to do.
+
+**Why this step is required:** If you do not know what "good" looks like before you start, you cannot tell afterward whether the model you installed is actually suitable — you will just be guessing based on a few lucky-looking replies. Skipping this step is the single most common reason projects end up with the wrong model, or a model that leaks the wrong kind of data to the wrong audience.
+
+**What to write down:**
 
 - task and users;
 - data classification;
@@ -1042,6 +1209,10 @@ Write down:
 If the need is only current repository knowledge, begin with project context rather than training.
 
 ### Step 2 — Confirm the host and storage
+
+**What this step is:** Checking that the physical (or virtual) computer that will run the model actually has enough memory, disk space, and processing capability.
+
+**Why this step is required:** A model file that looks small on disk can still refuse to run, or run so slowly it is unusable, once MasterAI also has to hold conversation history, in-progress calculations, and multiple requests at once. Confirming capacity here — instead of after installation fails — avoids wasted downloads and confusing runtime errors later.
 
 Confirm CPU features, available RAM, optional GPU support and VRAM, free model storage, runtime storage, and expected context length. Leave an operating-system safety reserve. Do not size only for the model file; allow for mapped weights, runtime buffers, the KV cache, prompt processing, and concurrent requests.
 
@@ -1091,6 +1262,10 @@ Training usually needs far more memory than inference because it stores gradient
 
 ### Step 3 — Obtain an approved inference runner
 
+**What this step is:** MasterAI itself does not contain the code that actually runs a language model's math. That job is done by a separate, external program called an "inference runner" — MasterAI currently supports one specific one, `llama-server.exe` (from the `llama.cpp` project). This step is about obtaining a trusted, known copy of that program.
+
+**Why this step is required:** The inference runner executes on your machine with real permissions, and it is the piece of software actually interpreting the model file. An unverified or tampered copy could behave unpredictably or maliciously regardless of how carefully you vet the model itself. Pinning an exact, checked version means "the same input always produces the same behavior" — essential for trust and reproducibility later in this guide.
+
 MasterAI does not vendor or build the inference backend. Obtain the approved, version-pinned `llama-server.exe` and record its exact absolute path. The current plan pins `llama.cpp` as the sole optional exception to the independently authored C++17 foundation.
 
 Treat the executable as code:
@@ -1102,6 +1277,10 @@ Treat the executable as code:
 - do not replace it silently after calibration or evaluation.
 
 ### Step 4 — Choose a compatible model artifact
+
+**What this step is:** Picking the actual model file you want to use, in the one file format MasterAI currently understands: GGUF.
+
+**Why this step is required:** Not every model file will work with the runner from Step 3. A model built for a different architecture, or one whose license forbids your intended use, will either fail to load or expose you to legal risk. Checking compatibility and licensing before you download and configure anything avoids discovering the problem only after significant setup work.
 
 The current inference adapter requires GGUF and `llama-cpp`. Select a model whose architecture is supported by the pinned runner and whose license, task, context capacity, and hardware requirements fit the use case.
 
@@ -1123,6 +1302,10 @@ models/<category>/<model-id>/
 ```
 
 ### Step 5 — Create the strict manifest
+
+**What this step is:** Writing a small JSON "identity card" (called a manifest) that sits next to the model file and describes exactly what it is: its name, category, exact size, cryptographic fingerprint (hash), license, and hardware needs.
+
+**Why this step is required:** MasterAI refuses to trust a model file just because it exists in the right folder. Without a manifest, MasterAI (and you) would have no reliable way to know whether a file has been corrupted, swapped, or tampered with since you approved it. The manifest is what later steps (verification, in Step 8) check the real file against.
 
 Use [manifest.schema.json](../models/manifest.schema.json) as the authority. A simplified example is:
 
@@ -1169,6 +1352,10 @@ Never copy placeholder values into a real manifest. Measure the exact file size,
 
 ### Step 6 — Build MasterAI if necessary
 
+**What this step is:** Compiling MasterAI's own source code into a runnable program (`masterai.exe`), if you have not already done so for the version you intend to run.
+
+**Why this step is required:** MasterAI is C++17 source code; it must be turned into a binary before it can be started. Building it yourself (rather than trusting an unknown prebuilt copy) keeps the same "verify what you run" discipline used for the inference runner and model files.
+
 From the repository root on Windows x64:
 
 ```powershell
@@ -1179,6 +1366,10 @@ From the repository root on Windows x64:
 This guide does not instruct you to run Linux or WSL validation as part of a normal Windows model setup. Follow the project rules and perform Linux work only when it is explicitly required and authorized.
 
 ### Step 7 — Configure MasterAI
+
+**What this step is:** Running the interactive configuration wizard so MasterAI knows where things live: which network port to listen on, where to store its data, where the model folder is, and where to find the inference runner from Step 3.
+
+**Why this step is required:** MasterAI has no built-in defaults it silently guesses at for these paths — it needs to be told explicitly, once, so every later step (verification, starting the service, chatting) points at the same real files instead of failing or picking up the wrong ones.
 
 ```powershell
 .\scripts\configure.ps1 -BuildType Release
@@ -1197,6 +1388,10 @@ Leaving the inference executable blank disables inference.
 
 ### Step 8 — Verify the model
 
+**What this step is:** Asking MasterAI to actually check the model file and its manifest (from Step 5) against each other — confirming the file size, the cryptographic hash, the license, and hardware suitability all genuinely match what the manifest claims.
+
+**Why this step is required:** Just placing a file in the right folder does not make it trustworthy — a file could be incomplete, corrupted during copying, or swapped for something else entirely. Verification is the one moment MasterAI proves, with evidence, that the file it will run is the exact file you approved. A model that fails verification is refused, on purpose — this is a safety gate, not a formality to skip.
+
 MasterAI does not trust discovery alone. Refresh the verification cache after adding, replacing, or removing any model artifact:
 
 ```powershell
@@ -1213,6 +1408,10 @@ Verification checks path containment, manifest fields, file type, exact size, SH
 
 ### Step 9 — Start the service and create the first administrator
 
+**What this step is:** Actually launching the MasterAI program so it starts listening for requests, then using a one-time secret code it prints on its very first run to create the first admin account.
+
+**Why this step is required:** Nothing in the previous steps ran MasterAI itself — they only prepared files and configuration on disk. This step brings the service to life. The one-time token exists so that only the person who physically has access to the machine's console output (not a random network visitor) can claim the first, most-privileged account.
+
 ```powershell
 .\scripts\start.ps1 -BuildType Release -Foreground
 ```
@@ -1227,6 +1426,10 @@ Use the setup form to create the first administrator. The Machine Learning inter
 
 ### Step 10 — Confirm service and model state
 
+**What this step is:** Calling two simple health-check web addresses to confirm the MasterAI service itself is alive and ready to accept logins, then separately checking that your model shows as "Ready" in the model list.
+
+**Why this step is required:** "The service is running" and "the model is safe to use for chat" are two different facts, and it is easy to mistake one for the other. A running service with an unverified or still-loading model will accept your login but fail or behave unexpectedly the moment you try to chat — checking both separately avoids that confusing surprise.
+
 Check:
 
 ```text
@@ -1238,6 +1441,10 @@ Remember that `/health/ready` means the service and authentication path are read
 
 ### Step 11 — Run a reproducible benchmark
 
+**What this step is:** Running a fixed, repeatable test suite against the model that measures how fast it responds and how much memory it actually uses on your hardware.
+
+**Why this step is required:** A model's advertised specifications rarely match its real-world behavior on your specific machine. Without a measured baseline now, you have nothing to compare against later if performance degrades after a driver update, a hardware change, or swapping to a different model — "reproducible" means you can rerun the exact same test later and trust the comparison.
+
 ```powershell
 .\build\Windows-x64\Release\masterai.exe benchmark-model `
   .\config\settings.json `
@@ -1248,6 +1455,10 @@ Remember that `/health/ready` means the service and authentication path are read
 Then use `standard` and `extended` when warranted. Compare only results produced with compatible hardware identity, suite hash, and profile. Record quality, latency, token rate, peak runner memory, and failures.
 
 ### Step 12 — Test in chat with controlled context
+
+**What this step is:** Actually talking to the model through MasterAI's chat interface, deliberately trying a range of question types rather than just one friendly test message.
+
+**Why this step is required:** A benchmark (Step 11) measures speed and memory, not whether the model's *answers* are actually good, safe, and reliable for your intended use. One impressive-looking reply proves almost nothing — models can be confidently wrong (see Section 5.7 on hallucinations). Testing a deliberately varied set of cases, including edge cases and unsafe requests, is what actually reveals whether the model is fit for purpose.
 
 Create an ordinary MasterAI project if repository context is required. Create a chat, select the verified model, and test:
 
@@ -1263,15 +1474,25 @@ Do not promote a model because one demonstration looks convincing.
 
 ### Step 13 — Record approval and operating limits
 
+**What this step is:** Writing down, in one place, everything that proves this specific model was checked, tested, and formally approved — its identity, its hash, its measured performance, and its known weaknesses.
+
+**Why this step is required:** Memory fades and people change roles; a written record is what lets someone six months from now understand *why* this exact model was trusted, what its limits were, and what to roll back to if something goes wrong. Without this record, "we tested it and it seemed fine" is not something anyone can verify or audit later.
+
 Record the approved model identity, hash, source, license, benchmark evidence, intended use, known limitations, context limit, reply limit, hardware profile, and rollback model. Only then permit controlled production use.
 
 ---
 
 ## 12. Sequential lesson: build and teach a specialized model
 
-This is the recommended complete lifecycle. At the present implementation boundary, MasterAI can organize much of the control-plane metadata and can run the final compatible GGUF, while the actual training, conversion, and some evaluation work must occur in a separately approved workflow until the planned executors exist.
+This is the recommended complete lifecycle: taking an existing base model and deliberately specializing it for a narrow task, all the way through to safe production use. Unlike Section 11 (installing something already finished), this section is about *creating* something new. At the present implementation boundary, MasterAI can organize much of the control-plane metadata and can run the final compatible GGUF, while the actual training, conversion, and some evaluation work must occur in a separately approved workflow until the planned executors exist.
+
+Each step below carries an **exit condition** — a plain test for "am I actually done with this step, or am I fooling myself?" Do not move to the next step until the exit condition is genuinely true, not just technically true on paper.
 
 ### Step 1 — Create the capability contract
+
+**What this step is:** Writing a precise, testable description of what the specialized model must be able to do, and — just as importantly — what it must refuse to do.
+
+**Why this step is required:** "Make the model better" cannot be measured. If you do not define success in advance, you will not be able to tell later whether the finished model actually achieved anything, or whether you are just impressed by a demo. This contract becomes the yardstick every later evaluation (Sections 9 and 12, Step 12) is measured against.
 
 Define exactly what the model must do, must not do, and how success will be measured. Name the target input, output, subject, users, security class, latency, memory, and quality limits.
 
@@ -1279,11 +1500,19 @@ Define exactly what the model must do, must not do, and how success will be meas
 
 ### Step 2 — Establish a baseline
 
+**What this step is:** Before changing anything, measure how well an existing, untouched model already performs on your target task.
+
+**Why this step is required:** Without a "before" measurement, you cannot prove the specialization effort was worth it. Teams regularly discover — only after weeks of work — that a well-crafted prompt on an off-the-shelf model already met the requirement (see Section 7.5's decision tree), making all the subsequent training unnecessary. Measuring first can save you the entire rest of this lesson.
+
 Choose one or more approved base models and run the evaluation set before teaching. Preserve prompts, runtime settings, model hashes, hardware identity, and results.
 
 **Exit condition:** You know the current quality and cost.
 
 ### Step 3 — Create a Machine Learning project
+
+**What this step is:** Creating one named record inside MasterAI's Machine Learning administration area that acts as the home for everything related to this specific specialization effort.
+
+**Why this step is required:** A real specialization effort touches many separate records over time — datasets, training jobs, evaluations, deployments. Without one project tying them together from the start, it becomes very difficult later to answer "which dataset, which training run, and which evaluation actually belong to this model?" The project is the anchor everything else attaches to.
 
 Sign in as an administrator and open:
 
@@ -1296,6 +1525,10 @@ Create a project with a clear name, objective, subject, task, owner, and initial
 **Exit condition:** The development objective has one authoritative project identity.
 
 ### Step 4 — Choose the teaching method
+
+**What this step is:** Deciding *how* you will actually change the model's behavior — by instructing it at request time (prompting), by handing it current documents (project context or RAG), or by permanently altering its learned weights (fine-tuning).
+
+**Why this step is required:** These methods have very different costs, risks, and results, and picking the wrong one wastes enormous effort. Fine-tuning is expensive, slow, and can silently damage abilities the model already had (see Section 6.6, catastrophic forgetting); it should never be the default choice when a simpler method would work just as well.
 
 Apply the decision tree in Section 7:
 
@@ -1317,6 +1550,10 @@ Record the implemented search strategy (`hybrid`, `vector`, or `keyword`) and it
 
 ### Step 5 — Register the base model and its provenance
 
+**What this step is:** Formally recording, inside MasterAI, exactly which starting model you are building from — its exact version, where it came from, and its license — before you begin changing it.
+
+**Why this step is required:** Everything you build in the rest of this lesson is only meaningful if it is traceable back to a known, reproducible starting point. If you cannot later prove exactly which base model and version you started from, you cannot legally or technically reproduce, audit, or defend the result.
+
 Use the Machine Learning Model Registry at:
 
 ```text
@@ -1328,6 +1565,10 @@ Record the model name, source, task, and lifecycle state supported by the curren
 **Exit condition:** The exact base model can be reproduced and legally used.
 
 ### Step 6 — Create the subject knowledge package
+
+**What this step is:** Writing down exactly what subject the model is meant to know about — its scope, its terminology, and, crucially, what is explicitly *outside* that scope.
+
+**Why this step is required:** "Teach it about C++" is not a boundary anyone can check against; "teach it about C++17 resource-ownership defects, excluding build-system and IDE questions" is. A written scope is what lets a reviewer later tell whether a wrong answer is a genuine defect or simply a question that was never in scope to begin with.
 
 Open:
 
@@ -1341,6 +1582,10 @@ Define the subject, scope, owner, and review lifecycle. In the accompanying cont
 
 ### Step 7 — Acquire and register approved data
 
+**What this step is:** Collecting the source material (documents, code, examples) the model will eventually learn from, and formally recording where each piece came from and whether you are actually allowed to use it.
+
+**Why this step is required:** Section 8 explains that a model is only as trustworthy as its data — "the data is the curriculum." Using data without a clear license, consent, or classification check can create real legal exposure, and a model that has already learned from bad data cannot simply have that knowledge deleted afterward (see Section 14.1). Checking permission *before* using data, not after, is the only point where a bad source can still be avoided at zero cost.
+
 Open:
 
 ```text
@@ -1352,6 +1597,10 @@ Register the intended dataset and its source. Do not approve it yet. Build a pro
 **Exit condition:** Every source has an owner, permitted use, classification, revision, and checksum.
 
 ### Step 8 — Prepare and label the data
+
+**What this step is:** Cleaning the raw source material (removing junk, secrets, and duplicates) and attaching the "correct answers" (labels) that the model will be trained to reproduce.
+
+**Why this step is required:** A model trained on messy, duplicated, or unlabeled data does not magically produce clean, correct behavior — it faithfully reproduces whatever patterns (including mistakes, private information, or near-duplicate leakage across your test set) exist in the data you actually gave it. This is unglamorous, mechanical work, but skipping it is the most common cause of a model that looks fine in a demo and fails in reality.
 
 Use the current administrative records at:
 
@@ -1380,6 +1629,10 @@ Required order:
 **Exit condition:** The immutable dataset version passes the checklist in Section 8.7.
 
 ### Step 9 — Design the experiment
+
+**What this step is:** Writing down, before training starts, every setting that will control the training run — which layers change, what hyperparameters (Section 4.3) are used, what hardware runs it, and what would make the result acceptable or unacceptable.
+
+**Why this step is required:** Training involves many knobs that interact in non-obvious ways. Deciding these values in advance — instead of adjusting them mid-run based on how results are looking — is what keeps an experiment scientifically honest and lets another trained person repeat exactly what you did and get the same result.
 
 Open:
 
@@ -1427,6 +1680,10 @@ Change one meaningful variable at a time for early experiments when practical.
 
 ### Step 10 — Run a small pilot before a full job
 
+**What this step is:** Running the entire training pipeline once on a small slice of data — not to produce a usable model, but to prove the *machinery* itself works: that data loads correctly, losses behave sensibly, checkpoints save and restore, and nothing crashes partway through.
+
+**Why this step is required:** A full training job can take hours or days and consume significant compute. Discovering a broken data loader, a misconfigured checkpoint path, or a stalled cancellation switch only after committing the full budget wastes time, money, and possibly electricity for nothing. A cheap, fast pilot run catches these mechanical failures while they are still cheap to fix.
+
 Use a small, representative training subset to confirm:
 
 - the data loader works;
@@ -1442,6 +1699,10 @@ Do not spend the full compute budget until the pipeline passes this pilot.
 **Exit condition:** The pipeline is operational and bounded.
 
 ### Step 11 — Create and execute the real training or fine-tuning job
+
+**What this step is:** Actually running the full training process against the complete prepared dataset — the step where the model's parameters are genuinely changed, using the training loop mechanics described in Section 6.
+
+**Why this step is required:** This is the moment real learning happens; everything before it was preparation, and everything after it is verification. Watching the live metrics (loss, gradient norm, resource use) while it runs — rather than walking away and checking back at the end — is what lets you catch a diverging or unsafe run early instead of discovering the wasted compute after the fact.
 
 Record the administrative job at one of:
 
@@ -1466,6 +1727,10 @@ Each record names the training job that produced it and why it was captured (for
 
 ### Step 12 — Evaluate the candidate
 
+**What this step is:** Formally scoring the newly trained model — called the "candidate" because it has not yet earned production trust — against the frozen test set that was never used during training, and comparing it against the baseline from Step 2.
+
+**Why this step is required:** Training loss decreasing tells you the model fit its training examples better; it does not tell you the model actually improved at the real task, or that it did not quietly get worse at something else (Section 6.5, Section 6.6). Evaluation against untouched test data, using the capability contract from Step 1 as the target, is the only honest way to know whether the training effort actually worked.
+
 Create an evaluation record at:
 
 ```text
@@ -1486,6 +1751,10 @@ Run the frozen test set only after model and hyperparameter choices are settled.
 
 ### Step 13 — Review errors and iterate
 
+**What this step is:** When evaluation reveals failures, digging into *why* each one happened — bad data, an ambiguous instruction, a labeling mistake, overfitting, and so on — rather than just re-running training with vague hope it improves.
+
+**Why this step is required:** Re-training blindly on the same flawed data or plan usually reproduces the same failures, wasting another full training cycle. Diagnosing the actual root cause turns each failed attempt into useful information that makes the next attempt more likely to succeed, instead of repeating the same mistake with more compute.
+
 Classify failures by topic and cause:
 
 - missing or bad data;
@@ -1505,6 +1774,10 @@ Create a new dataset or experiment version. Never rewrite the evidence of the fa
 
 ### Step 14 — Convert and optimize for MasterAI inference
 
+**What this step is:** Taking the approved trained checkpoint (which exists in a training-oriented format) and converting it into the GGUF format MasterAI's inference runner actually understands, optionally shrinking it through quantization (Section 4.6) to save memory.
+
+**Why this step is required:** The format used during training is not the format used for serving chat responses — they serve different purposes, and MasterAI's current inference path only understands GGUF via `llama.cpp`. Quantization in particular is not free: reducing numeric precision can quietly reduce answer quality, so the converted file must be treated as a brand-new artifact to be re-checked, not an automatic step.
+
 After approval of a source checkpoint, convert or merge it through an approved isolated process into a `llama.cpp`-compatible GGUF. Select quantization using measured quality and hardware results, not file size alone.
 
 Register the intended operation against the registered model at:
@@ -1521,6 +1794,10 @@ Treat each conversion or quantization as a new candidate artifact with a new has
 
 ### Step 15 — Package the model in MasterAI
 
+**What this step is:** Placing the converted GGUF file into MasterAI's model folder under a brand-new, unique model ID, writing its manifest (exactly as in Section 11, Step 5), and running verification again.
+
+**Why this step is required:** This new, specialized GGUF is functionally a different artifact from anything MasterAI has seen before, even if it started from a familiar base model — it needs its own identity, its own hash, and its own verification pass. Overwriting the previous production model's directory instead of using a new ID would destroy your ability to roll back if the new model turns out to be worse.
+
 Create:
 
 ```text
@@ -1535,17 +1812,29 @@ Never overwrite the previous production directory. Use a new model ID and versio
 
 ### Step 16 — Benchmark on the target host
 
+**What this step is:** Running MasterAI's own benchmark (as in Section 11, Step 11) on the newly packaged specialized model, and directly comparing the numbers against the base model and whatever model is currently running in production.
+
+**Why this step is required:** Specialization and quantization can change a model's speed and memory footprint, not just its answer quality. A model that scores well on the subject test but is unacceptably slow, or that no longer fits in the memory budget from Section 11, Step 2, is not actually deployable — this step catches that before real users are affected.
+
 Run the same MasterAI benchmark profile against the base, previous production, and candidate models on the same host. Also run the subject-specific evaluation externally until MasterAI's complete evaluation harness exists.
 
 **Exit condition:** Quality, latency, memory, and stability meet the deployment contract.
 
 ### Step 17 — Deploy to staging
 
+**What this step is:** Running the new model in a controlled, non-production copy of the real system — one that behaves like production but that ordinary users cannot reach — and exercising the full request path exactly as a real user would.
+
+**Why this step is required:** Everything up to this point has tested the model in isolation. Staging is the first place the model is tested *inside the whole running system* — with real prompt assembly, real authorization checks, and real concurrent load — where integration bugs actually show up. Finding a problem in staging costs nothing to users; finding the same problem in production does not.
+
 Load the candidate only in a controlled staging environment. Test real prompt assembly, project authorization, context limits, cancellation, concurrent requests, log redaction, and expected integrations.
 
 **Exit condition:** Staging evidence matches offline evaluation and no policy boundary is bypassed.
 
 ### Step 18 — Approve production deployment
+
+**What this step is:** Getting explicit, named sign-off from the people responsible for quality, safety, and operations before the model is allowed to serve real users, and writing down exactly who approved what.
+
+**Why this step is required:** A model that passed every automated check can still be unsuitable for reasons a human reviewer catches — a subtle policy conflict, an unacceptable risk for this particular audience, a business concern no metric captures. Requiring a named, accountable approval (and dual approval for high-risk cases) ensures a real person is answerable for the decision, not just an automated pipeline.
 
 Require the designated model evaluator, safety reviewer, and deployment authority. For high-risk use, require dual approval. Record the model card, dataset card, evaluations, known limits, monitoring thresholds, and rollback model.
 
@@ -1560,6 +1849,10 @@ Name the registered model, the target environment (for example `staging` or `pro
 **Exit condition:** Approval is explicit, attributable, and auditable.
 
 ### Step 19 — Monitor production
+
+**What this step is:** Continuing to watch the model's real-world behavior after it goes live — accuracy, safety, speed, and resource use — rather than treating deployment as the finish line.
+
+**Why this step is required:** Approval in Step 18 was a snapshot judgment based on the evidence available at that moment; the real world keeps changing after that. Input patterns drift, edge cases appear that no test set anticipated, and a model that was safe on day one can start producing unsafe or low-quality output as conditions change. Monitoring is what lets you notice that before it becomes a serious incident.
 
 Monitor:
 
@@ -1577,6 +1870,10 @@ Feedback must enter a review queue. Do not train automatically from conversation
 **Exit condition:** The model stays within its approved quality, safety, and resource envelope.
 
 ### Step 20 — Version, roll back, or retire
+
+**What this step is:** When monitoring (Step 19) reveals a real problem, switching production back to the last known-good model immediately, then treating the fix as a brand-new version that has to go through evaluation and approval again from scratch — not a quick patch to the live model.
+
+**Why this step is required:** Because Step 13 (Package the model, Step 15) always assigns each candidate a unique, hashed identity with the previous approved model preserved untouched, a safe rollback target always exists — this is only true because earlier steps in this lesson were followed honestly. Preserving the failed artifact and its evidence, instead of deleting it, is what lets a future investigation understand exactly what went wrong.
 
 Rollback when a safety, integrity, quality, or resource threshold is breached. Preserve the failed artifact and evidence according to policy; do not silently delete history. Create a new version for corrected behavior and repeat the gates.
 

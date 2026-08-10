@@ -1,16 +1,5 @@
 [
   {
-    "relativePath": "test/tests.cpp",
-    "languageId": "cpp",
-    "contentHash": "072fd6b8b30b91d03a00bf524ef07732a703803af0498cee9c9a9bcb16281e68",
-    "documentVersion": 7,
-    "timestampMs": 1785615041508,
-    "outcome": "tool-unavailable",
-    "toolIdentity": "g++/clang++/cl",
-    "durationMs": 0,
-    "diagnosticFingerprints": []
-  },
-  {
     "relativePath": "docs/PLAN.md",
     "languageId": "markdown",
     "contentHash": "e7a2eccd76956492c687527579e30df316f7e0e848574d4b331951c9ffe0f6e9",
@@ -5498,6 +5487,17 @@
     "outcome": "tool-unavailable",
     "toolIdentity": "g++/clang++/cl",
     "durationMs": 0,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": ".agent-coder/startup-profiling.json",
+    "languageId": "json",
+    "contentHash": "bb186cf4dd1600915a3c06b530669adb5f0be8cf91f9be00799193571c5f356e",
+    "documentVersion": 30,
+    "timestampMs": 1786381219988,
+    "outcome": "valid",
+    "toolIdentity": "JSON.parse",
+    "durationMs": 3,
     "diagnosticFingerprints": []
   }
 ]

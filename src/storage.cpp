@@ -5,6 +5,7 @@
 // or legacy records with fail-closed authorization semantics.
 #include "masterai.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <iomanip>
@@ -477,7 +478,32 @@ bool role_allows(const UserRole role, const std::string& permission) {
           "ml.comparisons.view", "ml.comparisons.manage",
           // Phases 58-60: source ingestion/index inspection and deletion.
           // RAG execution itself remains under ml.ragconfigs.manage.
-          "ml.knowledge.view", "ml.knowledge.manage"}},
+          "ml.knowledge.view", "ml.knowledge.manage",
+          // Phase 62 (docs/PLAN.md "Machine Learning Abilities" section 35,
+          // Inference Endpoints): administrator-only, matching every other
+          // ml.* permission above.
+          "ml.endpoints.view", "ml.endpoints.manage",
+          // Phase 63 (docs/PLAN.md "Machine Learning Abilities" section 30,
+          // Hardware and Compute): administrator-only, matching every other
+          // ml.* permission above.
+          "ml.hardware.view", "ml.hardware.manage",
+          // Phase 64 (docs/PLAN.md "Machine Learning Abilities" section 37,
+          // Automation Pipelines): administrator-only, matching every other
+          // ml.* permission above.
+          "ml.pipelines.view", "ml.pipelines.manage",
+          // Phase 65 (docs/PLAN.md "Machine Learning Abilities" section 40,
+          // Safety and Governance): administrator-only, matching every
+          // other ml.* permission above.
+          "ml.safety.view", "ml.safety.manage",
+          // Phase 66 (docs/PLAN.md "Machine Learning Abilities" section 43,
+          // Audit Logs): read-only surface over the AuditLog every ml.*
+          // mutation above already writes to.
+          "ml.auditlogs.view",
+          // Machine Learning Settings (docs/PLAN.md "Machine Learning
+          // Abilities" section 49): reuses the general admin.config
+          // permission model -- see the ML Settings panel's own comment in
+          // web_ui.cpp.
+          "ml.settings.view", "ml.settings.manage"}},
         {UserRole::developer,
          {"identity.read", "models.read", "models.load", "tokens.create",
           "ide.connect", "mcp.connect", "mcp.invoke", "mcp.tools.invoke",
@@ -565,6 +591,44 @@ void AuditLog::append(const std::string& event, const std::string& actor,
     output << body << "|" << sha256_hex(body) << "\n";
     output.flush();
     if (!output) throw std::runtime_error("audit append failed");
+}
+
+std::vector<AuditLogEntry> AuditLog::recent(const std::size_t limit,
+                                            const std::string& event_prefix) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<AuditLogEntry> matches;
+    if (!std::filesystem::exists(path_)) return matches;
+    std::ifstream input(path_, std::ios::binary);
+    std::string line;
+    // previous|timestamp|event|actor|outcome|detail|hash -- see append().
+    while (std::getline(input, line)) {
+        std::vector<std::string> fields;
+        std::size_t start = 0U;
+        for (std::size_t index = 0U; index <= line.size(); ++index) {
+            if (index == line.size() || line[index] == '|') {
+                fields.push_back(line.substr(start, index - start));
+                start = index + 1U;
+            }
+        }
+        if (fields.size() != 7U) continue;  // Skip a malformed line, not the whole file.
+        if (!event_prefix.empty() && fields[2].rfind(event_prefix, 0U) != 0U) continue;
+        AuditLogEntry entry;
+        try {
+            entry.timestamp_epoch_seconds = std::stoull(fields[1]);
+        } catch (const std::exception&) {
+            continue;
+        }
+        entry.event = fields[2];
+        entry.actor = fields[3];
+        entry.outcome = fields[4];
+        entry.detail = fields[5];
+        matches.push_back(std::move(entry));
+    }
+    if (matches.size() > limit) {
+        matches.erase(matches.begin(), matches.end() - static_cast<std::ptrdiff_t>(limit));
+    }
+    std::reverse(matches.begin(), matches.end());
+    return matches;
 }
 
 // Restores hashed API-token records. Legacy four-field records remain readable,

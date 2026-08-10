@@ -363,6 +363,13 @@ public:
         ml_knowledge_index = std::make_unique<KnowledgeIndexStore>(
             records, value.parquet_helper_executable,
             value.knowledge_maximum_document_bytes);
+        // Phases 62-65: the remaining docs/PLAN.md "Machine Learning
+        // Abilities" section-2 interfaces (see each store's class comment
+        // in masterai.hpp).
+        ml_inference_endpoints = std::make_unique<InferenceEndpointStore>(records);
+        ml_compute_nodes = std::make_unique<ComputeNodeStore>(records);
+        ml_automation_pipelines = std::make_unique<AutomationPipelineStore>(records);
+        ml_safety_governance = std::make_unique<SafetyGovernanceStore>(records);
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -1474,7 +1481,9 @@ public:
                     target ? target->as_string() : std::string{};
                 // Parse before storing so bad content is rejected now, not
                 // at training time.
-                const auto parsed = parse_tabular_csv(csv, target_column);
+                const auto parsed = parse_tabular_csv(
+                    csv, target_column,
+                    configuration.tabular_dataset_maximum_csv_bytes);
                 ml_dataset_content->put(id, csv, target_column);
                 audit.append("ml.dataset.content", user->id, "success", id);
                 return response(200, "OK",
@@ -3331,6 +3340,479 @@ public:
             audit.append("ml.deployment.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
         }
+        // Phase 62: Inference Endpoints (docs/PLAN.md "Machine Learning
+        // Abilities" section 35) -- see InferenceEndpoint's class comment
+        // in masterai.hpp for the fields this scoped-down registry defers.
+        {
+            static constexpr std::string_view endpoints_prefix =
+                "/api/v1/ml/inference-endpoints/";
+            if (request.method == "GET" &&
+                request.target == "/api/v1/ml/inference-endpoints") {
+                if (auto denied = forbidden_unless(user->role, "ml.endpoints.view")) return *denied;
+                return response(200, "OK",
+                                "{\"inferenceEndpoints\":" +
+                                    inference_endpoints_json(ml_inference_endpoints->list()) +
+                                    "}");
+            }
+            if (request.method == "POST" &&
+                request.target == "/api/v1/ml/inference-endpoints") {
+                if (auto denied = forbidden_unless(user->role, "ml.endpoints.manage")) return *denied;
+                try {
+                    auto root = parse_json(request.body);
+                    const auto name = root.required("name").as_string();
+                    const auto model_id = root.required("modelId").as_string();
+                    const auto text_field = [&root](const char* field) {
+                        const auto* value = root.optional(field);
+                        return value ? value->as_string() : std::string{};
+                    };
+                    const auto* port_value = root.optional("port");
+                    const auto* rate_limit_value =
+                        root.optional("rateLimitPerMinute");
+                    const auto endpoint = ml_inference_endpoints->create(
+                        user->id, name, model_id, text_field("runtime"),
+                        text_field("host"),
+                        static_cast<std::uint16_t>(
+                            port_value ? port_value->as_integer() : 0),
+                        text_field("protocol"),
+                        text_field("authenticationMethod"),
+                        static_cast<std::uint32_t>(
+                            rate_limit_value ? rate_limit_value->as_integer() : 0));
+                    audit.append("ml.endpoint.create", user->id, "success",
+                                 endpoint.id);
+                    return response(201, "Created", inference_endpoint_json(endpoint));
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_endpoint\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
+            if (request.method == "POST" &&
+                request.target.rfind(endpoints_prefix, 0U) == 0U &&
+                request.target.size() > 7U &&
+                request.target.compare(request.target.size() - 7U, 7U,
+                                       "/status") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.endpoints.manage")) return *denied;
+                const auto id = request.target.substr(
+                    endpoints_prefix.size(),
+                    request.target.size() - endpoints_prefix.size() - 7U);
+                try {
+                    auto root = parse_json(request.body);
+                    const auto status = parse_inference_endpoint_status(
+                        root.required("status").as_string());
+                    if (!ml_inference_endpoints->set_status(id, status)) {
+                        return response(404, "Not Found",
+                                        "{\"error\":\"ml_endpoint_not_found\"}");
+                    }
+                    audit.append("ml.endpoint.status", user->id, "success", id);
+                    return response(200, "OK", "{\"updated\":true}");
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_endpoint_status\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
+            if (request.method == "POST" &&
+                request.target.rfind(endpoints_prefix, 0U) == 0U &&
+                request.target.size() > 7U &&
+                request.target.compare(request.target.size() - 7U, 7U,
+                                       "/delete") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.endpoints.manage")) return *denied;
+                const auto id = request.target.substr(
+                    endpoints_prefix.size(),
+                    request.target.size() - endpoints_prefix.size() - 7U);
+                if (!ml_inference_endpoints->remove(id)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_endpoint_not_found\"}");
+                }
+                audit.append("ml.endpoint.delete", user->id, "success", id);
+                return response(200, "OK", "{\"deleted\":true}");
+            }
+        }
+        // Phase 63: Hardware and Compute (docs/PLAN.md "Machine Learning
+        // Abilities" section 30) -- see ComputeNode's class comment in
+        // masterai.hpp for the live-telemetry fields this scoped-down
+        // registry defers.
+        {
+            static constexpr std::string_view nodes_prefix =
+                "/api/v1/ml/compute-nodes/";
+            if (request.method == "GET" &&
+                request.target == "/api/v1/ml/compute-nodes") {
+                if (auto denied = forbidden_unless(user->role, "ml.hardware.view")) return *denied;
+                return response(200, "OK",
+                                "{\"computeNodes\":" +
+                                    compute_nodes_json(ml_compute_nodes->list()) + "}");
+            }
+            if (request.method == "POST" &&
+                request.target == "/api/v1/ml/compute-nodes") {
+                if (auto denied = forbidden_unless(user->role, "ml.hardware.manage")) return *denied;
+                try {
+                    auto root = parse_json(request.body);
+                    const auto name = root.required("name").as_string();
+                    const auto text_field = [&root](const char* field) {
+                        const auto* value = root.optional(field);
+                        return value ? value->as_string() : std::string{};
+                    };
+                    const auto* memory_value = root.optional("memoryMib");
+                    const auto node = ml_compute_nodes->create(
+                        user->id, name, text_field("address"),
+                        text_field("operatingSystem"),
+                        text_field("cpuDescription"),
+                        text_field("gpuDescription"),
+                        memory_value ? static_cast<std::uint64_t>(
+                                           memory_value->as_integer())
+                                    : 0ULL);
+                    audit.append("ml.compute_node.create", user->id, "success",
+                                 node.id);
+                    return response(201, "Created", compute_node_json(node));
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_compute_node\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
+            if (request.method == "POST" &&
+                request.target.rfind(nodes_prefix, 0U) == 0U &&
+                request.target.size() > 7U &&
+                request.target.compare(request.target.size() - 7U, 7U,
+                                       "/status") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.hardware.manage")) return *denied;
+                const auto id = request.target.substr(
+                    nodes_prefix.size(),
+                    request.target.size() - nodes_prefix.size() - 7U);
+                try {
+                    auto root = parse_json(request.body);
+                    const auto status = parse_compute_node_status(
+                        root.required("status").as_string());
+                    if (!ml_compute_nodes->set_status(id, status)) {
+                        return response(404, "Not Found",
+                                        "{\"error\":\"ml_compute_node_not_found\"}");
+                    }
+                    audit.append("ml.compute_node.status", user->id, "success", id);
+                    return response(200, "OK", "{\"updated\":true}");
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_compute_node_status\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
+            if (request.method == "POST" &&
+                request.target.rfind(nodes_prefix, 0U) == 0U &&
+                request.target.size() > 7U &&
+                request.target.compare(request.target.size() - 7U, 7U,
+                                       "/delete") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.hardware.manage")) return *denied;
+                const auto id = request.target.substr(
+                    nodes_prefix.size(),
+                    request.target.size() - nodes_prefix.size() - 7U);
+                if (!ml_compute_nodes->remove(id)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_compute_node_not_found\"}");
+                }
+                audit.append("ml.compute_node.delete", user->id, "success", id);
+                return response(200, "OK", "{\"deleted\":true}");
+            }
+        }
+        // Phase 64: Automation Pipelines (docs/PLAN.md "Machine Learning
+        // Abilities" section 37) -- see AutomationPipeline's class comment
+        // in masterai.hpp for why POST .../run records an outcome rather
+        // than orchestrating the other stores' real jobs.
+        {
+            static constexpr std::string_view pipelines_prefix =
+                "/api/v1/ml/automation-pipelines/";
+            if (request.method == "GET" &&
+                request.target == "/api/v1/ml/automation-pipelines") {
+                if (auto denied = forbidden_unless(user->role, "ml.pipelines.view")) return *denied;
+                return response(200, "OK",
+                                "{\"automationPipelines\":" +
+                                    automation_pipelines_json(ml_automation_pipelines->list()) +
+                                    "}");
+            }
+            if (request.method == "POST" &&
+                request.target == "/api/v1/ml/automation-pipelines") {
+                if (auto denied = forbidden_unless(user->role, "ml.pipelines.manage")) return *denied;
+                try {
+                    auto root = parse_json(request.body);
+                    const auto name = root.required("name").as_string();
+                    const auto text_field = [&root](const char* field) {
+                        const auto* value = root.optional(field);
+                        return value ? value->as_string() : std::string{};
+                    };
+                    const auto pipeline = ml_automation_pipelines->create(
+                        user->id, name, text_field("projectId"),
+                        text_field("description"), text_field("stages"));
+                    audit.append("ml.pipeline.create", user->id, "success",
+                                 pipeline.id);
+                    return response(201, "Created", automation_pipeline_json(pipeline));
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_pipeline\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
+            if (request.method == "POST" &&
+                request.target.rfind(pipelines_prefix, 0U) == 0U &&
+                request.target.size() > 7U &&
+                request.target.compare(request.target.size() - 7U, 7U,
+                                       "/status") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.pipelines.manage")) return *denied;
+                const auto id = request.target.substr(
+                    pipelines_prefix.size(),
+                    request.target.size() - pipelines_prefix.size() - 7U);
+                try {
+                    auto root = parse_json(request.body);
+                    const auto status = parse_automation_pipeline_status(
+                        root.required("status").as_string());
+                    if (!ml_automation_pipelines->set_status(id, status)) {
+                        return response(404, "Not Found",
+                                        "{\"error\":\"ml_pipeline_not_found\"}");
+                    }
+                    audit.append("ml.pipeline.status", user->id, "success", id);
+                    return response(200, "OK", "{\"updated\":true}");
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_pipeline_status\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
+            if (request.method == "POST" &&
+                request.target.rfind(pipelines_prefix, 0U) == 0U &&
+                request.target.size() > 4U &&
+                request.target.compare(request.target.size() - 4U, 4U,
+                                       "/run") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.pipelines.manage")) return *denied;
+                const auto id = request.target.substr(
+                    pipelines_prefix.size(),
+                    request.target.size() - pipelines_prefix.size() - 4U);
+                try {
+                    // Records a run outcome; does not orchestrate the other
+                    // stores' real training/evaluation/deployment jobs --
+                    // see AutomationPipeline's class comment.
+                    const auto run = ml_automation_pipelines->record_run(
+                        user->id, id, AutomationPipelineRunStatus::completed,
+                        "Pipeline run acknowledged; stage orchestration is "
+                        "not yet implemented.");
+                    audit.append("ml.pipeline.run", user->id, "success", id);
+                    return response(200, "OK", automation_pipeline_run_json(run));
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_pipeline_run\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
+            if (request.method == "GET" &&
+                request.target.rfind(pipelines_prefix, 0U) == 0U &&
+                request.target.size() > 5U &&
+                request.target.compare(request.target.size() - 5U, 5U,
+                                       "/runs") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.pipelines.view")) return *denied;
+                const auto id = request.target.substr(
+                    pipelines_prefix.size(),
+                    request.target.size() - pipelines_prefix.size() - 5U);
+                return response(200, "OK",
+                                "{\"pipelineRuns\":" +
+                                    automation_pipeline_runs_json(
+                                        ml_automation_pipelines->runs_for(id)) +
+                                    "}");
+            }
+            if (request.method == "POST" &&
+                request.target.rfind(pipelines_prefix, 0U) == 0U &&
+                request.target.size() > 7U &&
+                request.target.compare(request.target.size() - 7U, 7U,
+                                       "/delete") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.pipelines.manage")) return *denied;
+                const auto id = request.target.substr(
+                    pipelines_prefix.size(),
+                    request.target.size() - pipelines_prefix.size() - 7U);
+                if (!ml_automation_pipelines->remove(id)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_pipeline_not_found\"}");
+                }
+                audit.append("ml.pipeline.delete", user->id, "success", id);
+                return response(200, "OK", "{\"deleted\":true}");
+            }
+        }
+        // Phase 65: Safety and Governance (docs/PLAN.md "Machine Learning
+        // Abilities" section 40) -- see SafetyPolicy/ModelCard's class
+        // comment in masterai.hpp for the content-scanning fields this
+        // scoped-down registry defers.
+        {
+            static constexpr std::string_view policies_prefix =
+                "/api/v1/ml/safety-policies/";
+            static constexpr std::string_view cards_prefix =
+                "/api/v1/ml/model-cards/";
+            if (request.method == "GET" &&
+                request.target == "/api/v1/ml/safety-policies") {
+                if (auto denied = forbidden_unless(user->role, "ml.safety.view")) return *denied;
+                return response(200, "OK",
+                                "{\"safetyPolicies\":" +
+                                    safety_policies_json(ml_safety_governance->list_policies()) +
+                                    "}");
+            }
+            if (request.method == "POST" &&
+                request.target == "/api/v1/ml/safety-policies") {
+                if (auto denied = forbidden_unless(user->role, "ml.safety.manage")) return *denied;
+                try {
+                    auto root = parse_json(request.body);
+                    const auto name = root.required("name").as_string();
+                    const auto text_field = [&root](const char* field) {
+                        const auto* value = root.optional(field);
+                        return value ? value->as_string() : std::string{};
+                    };
+                    const auto policy = ml_safety_governance->create_policy(
+                        user->id, name, text_field("scope"),
+                        text_field("restrictedDataCategories"));
+                    audit.append("ml.safety_policy.create", user->id,
+                                 "success", policy.id);
+                    return response(201, "Created", safety_policy_json(policy));
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_safety_policy\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
+            if (request.method == "POST" &&
+                request.target.rfind(policies_prefix, 0U) == 0U &&
+                request.target.size() > 7U &&
+                request.target.compare(request.target.size() - 7U, 7U,
+                                       "/status") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.safety.manage")) return *denied;
+                const auto id = request.target.substr(
+                    policies_prefix.size(),
+                    request.target.size() - policies_prefix.size() - 7U);
+                try {
+                    auto root = parse_json(request.body);
+                    const auto status = parse_safety_policy_status(
+                        root.required("status").as_string());
+                    if (!ml_safety_governance->set_policy_status(id, status)) {
+                        return response(404, "Not Found",
+                                        "{\"error\":\"ml_safety_policy_not_found\"}");
+                    }
+                    audit.append("ml.safety_policy.status", user->id,
+                                 "success", id);
+                    return response(200, "OK", "{\"updated\":true}");
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_safety_policy_status\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
+            if (request.method == "POST" &&
+                request.target.rfind(policies_prefix, 0U) == 0U &&
+                request.target.size() > 7U &&
+                request.target.compare(request.target.size() - 7U, 7U,
+                                       "/delete") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.safety.manage")) return *denied;
+                const auto id = request.target.substr(
+                    policies_prefix.size(),
+                    request.target.size() - policies_prefix.size() - 7U);
+                if (!ml_safety_governance->remove_policy(id)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_safety_policy_not_found\"}");
+                }
+                audit.append("ml.safety_policy.delete", user->id, "success", id);
+                return response(200, "OK", "{\"deleted\":true}");
+            }
+            if (request.method == "GET" &&
+                request.target == "/api/v1/ml/model-cards") {
+                if (auto denied = forbidden_unless(user->role, "ml.safety.view")) return *denied;
+                return response(200, "OK",
+                                "{\"modelCards\":" +
+                                    model_cards_json(ml_safety_governance->list_model_cards()) +
+                                    "}");
+            }
+            if (request.method == "POST" &&
+                request.target == "/api/v1/ml/model-cards") {
+                if (auto denied = forbidden_unless(user->role, "ml.safety.manage")) return *denied;
+                try {
+                    auto root = parse_json(request.body);
+                    const auto model_id = root.required("modelId").as_string();
+                    const auto purpose = root.required("purpose").as_string();
+                    const auto text_field = [&root](const char* field) {
+                        const auto* value = root.optional(field);
+                        return value ? value->as_string() : std::string{};
+                    };
+                    const auto card = ml_safety_governance->create_model_card(
+                        user->id, model_id, purpose,
+                        text_field("intendedUse"), text_field("prohibitedUse"),
+                        text_field("trainingDataReference"),
+                        text_field("evaluationResults"),
+                        text_field("knownLimitations"), text_field("license"));
+                    audit.append("ml.model_card.create", user->id, "success",
+                                 card.id);
+                    return response(201, "Created", model_card_json(card));
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_model_card\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
+            if (request.method == "POST" &&
+                request.target.rfind(cards_prefix, 0U) == 0U &&
+                request.target.size() > 7U &&
+                request.target.compare(request.target.size() - 7U, 7U,
+                                       "/status") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.safety.manage")) return *denied;
+                const auto id = request.target.substr(
+                    cards_prefix.size(),
+                    request.target.size() - cards_prefix.size() - 7U);
+                try {
+                    auto root = parse_json(request.body);
+                    const auto status = parse_safety_policy_status(
+                        root.required("status").as_string());
+                    if (!ml_safety_governance->set_model_card_status(id, status)) {
+                        return response(404, "Not Found",
+                                        "{\"error\":\"ml_model_card_not_found\"}");
+                    }
+                    audit.append("ml.model_card.status", user->id, "success", id);
+                    return response(200, "OK", "{\"updated\":true}");
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_model_card_status\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
+            if (request.method == "POST" &&
+                request.target.rfind(cards_prefix, 0U) == 0U &&
+                request.target.size() > 7U &&
+                request.target.compare(request.target.size() - 7U, 7U,
+                                       "/delete") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.safety.manage")) return *denied;
+                const auto id = request.target.substr(
+                    cards_prefix.size(),
+                    request.target.size() - cards_prefix.size() - 7U);
+                if (!ml_safety_governance->remove_model_card(id)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_model_card_not_found\"}");
+                }
+                audit.append("ml.model_card.delete", user->id, "success", id);
+                return response(200, "OK", "{\"deleted\":true}");
+            }
+        }
+        // Phase 66: Audit Logs (docs/PLAN.md "Machine Learning Abilities"
+        // section 43) -- a read-only surface over the AuditLog every ml.*
+        // mutation above already writes to (see AuditLog::recent()'s class
+        // comment in masterai.hpp). Scoped to "ml." events; the general
+        // audit trail (login, chat, project actions, ...) is not an ML
+        // administration concern.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/audit-logs") {
+            if (auto denied = forbidden_unless(user->role, "ml.auditlogs.view")) return *denied;
+            return response(200, "OK",
+                            "{\"auditLogs\":" +
+                                audit_log_entries_json(audit.recent(200U, "ml.")) +
+                                "}");
+        }
         // Phase 57: Model Comparison (docs/PLAN.md "Machine Learning
         // Abilities" section 27) -- a real executor like Phase 56's
         // training/evaluation endpoints. POST .../run evaluates both trained
@@ -3652,6 +4134,36 @@ public:
             if (target == "/app/ml/model-comparisons") {
                 return is_administrator
                            ? application_page(*user, "ml-model-comparisons")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/inference-endpoints") {
+                return is_administrator
+                           ? application_page(*user, "ml-inference-endpoints")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/compute-nodes") {
+                return is_administrator
+                           ? application_page(*user, "ml-compute-nodes")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/automation-pipelines") {
+                return is_administrator
+                           ? application_page(*user, "ml-automation-pipelines")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/safety-governance") {
+                return is_administrator
+                           ? application_page(*user, "ml-safety-governance")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/audit-logs") {
+                return is_administrator
+                           ? application_page(*user, "ml-audit-logs")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/settings") {
+                return is_administrator
+                           ? application_page(*user, "ml-settings")
                            : response(302, "Found", "", {"Location: /app"});
             }
             if (target == "/app/report/system") {
@@ -5634,6 +6146,12 @@ private:
     std::unique_ptr<ModelComparisonStore> ml_model_comparisons;
     std::unique_ptr<ComparisonResultStore> ml_comparison_results;
     std::unique_ptr<KnowledgeIndexStore> ml_knowledge_index;
+    // Phases 62-65: the remaining docs/PLAN.md "Machine Learning
+    // Abilities" section-2 interfaces.
+    std::unique_ptr<InferenceEndpointStore> ml_inference_endpoints;
+    std::unique_ptr<ComputeNodeStore> ml_compute_nodes;
+    std::unique_ptr<AutomationPipelineStore> ml_automation_pipelines;
+    std::unique_ptr<SafetyGovernanceStore> ml_safety_governance;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
     std::unique_ptr<DownloadManager> downloads;

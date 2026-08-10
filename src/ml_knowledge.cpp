@@ -1,6 +1,7 @@
 // Phases 58-61: bounded knowledge ingestion, durable authored or learned
 // embeddings, and evidence-bearing retrieval for administrator RAG testing.
 #include "masterai.hpp"
+#include "json.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -246,6 +247,140 @@ bool supported_media_type(const std::string& media_type) {
            media_type == "application/x-ndjson" || media_type.empty();
 }
 
+// Reads a string-typed field out of a JSON object, leaving `out` untouched
+// (and returning false) if the key is absent or not a string -- callers use
+// the false case to recognize a record that doesn't match one of the
+// Scraper Project's fixed shapes below, rather than throwing.
+bool json_string_field(const JsonValue::Object& object, const std::string& key,
+                       std::string& out) {
+    const auto it = object.find(key);
+    if (it == object.end() || it->second.type() != JsonValue::Type::string) {
+        return false;
+    }
+    out = it->second.as_string();
+    return true;
+}
+
+// Renders one record of the Scraper Project's "MasterAI Web Dataset
+// Builder" export (instruction/input/output, conversation messages, or
+// raw document text, each with an optional metadata.source_title/
+// source_url) as plain text worth chunking. Returns an empty string for
+// any object that matches none of the three shapes, so the caller can
+// abandon the whole-file rewrite and fall back to raw byte chunking rather
+// than silently drop content it doesn't recognize.
+std::string flatten_scraper_record(const JsonValue& record) {
+    if (!record.is_object()) return {};
+    const auto& object = record.as_object();
+    // Branch on which content field actually holds text, not merely on key
+    // presence: a Parquet/CSV-derived row (parquet_bytes_to_json) carries
+    // every column from the superset schema on every row, blank for
+    // whichever record type that row isn't, so "instruction" can be
+    // present-but-empty on a document-type row whose real content is in
+    // "text".
+    std::string instruction, output, body;
+    json_string_field(object, "instruction", instruction);
+    json_string_field(object, "output", output);
+    json_string_field(object, "text", body);
+    const auto messages = object.find("messages");
+    const bool has_messages = messages != object.end() &&
+        messages->second.type() == JsonValue::Type::array &&
+        !messages->second.as_array().empty();
+    std::string text;
+    if (has_messages) {
+        for (const auto& message : messages->second.as_array()) {
+            if (!message.is_object()) return {};
+            const auto& fields = message.as_object();
+            std::string role, content;
+            if (!json_string_field(fields, "role", role) ||
+                !json_string_field(fields, "content", content)) {
+                return {};
+            }
+            text += role + ": " + content + "\n";
+        }
+    } else if (!instruction.empty()) {
+        std::string input;
+        json_string_field(object, "input", input);
+        text = "Instruction: " + instruction + "\n";
+        if (!input.empty()) text += "Input: " + input + "\n";
+        text += "Output: " + output + "\n";
+    } else if (!body.empty()) {
+        text = body + "\n";
+    } else {
+        return {};
+    }
+    if (const auto metadata = object.find("metadata");
+        metadata != object.end() && metadata->second.is_object()) {
+        const auto& fields = metadata->second.as_object();
+        std::string title, url, source;
+        if (json_string_field(fields, "source_title", title)) source = title;
+        if (json_string_field(fields, "source_url", url)) {
+            source += source.empty() ? url : " (" + url + ")";
+        }
+        if (!source.empty()) text = "Source: " + source + "\n" + text;
+    }
+    return text;
+}
+
+// Detects a Scraper Project JSON or JSONL export and rewrites it into
+// clean, human-readable text before it reaches make_chunks() -- otherwise
+// the 1200-byte sliding window below slices straight through
+// `{"instruction":...}` syntax, producing garbled chunks and meaningless
+// embeddings for what is otherwise clean instruction/conversation/document
+// data (see docs/HowToUse-MachineLearning.md's Scraper import lesson).
+// Returns an empty string when the content doesn't match any recognized
+// shape, telling the caller to chunk the original bytes unchanged.
+std::string flatten_scraper_records(const std::string& content) {
+    std::vector<JsonValue> records;
+    // Try JSONL first: one JSON object per non-blank line.
+    std::size_t position = 0U;
+    bool jsonl_failed = false;
+    while (position <= content.size()) {
+        const auto newline = content.find('\n', position);
+        const auto line_end = newline == std::string::npos ? content.size() : newline;
+        std::string line = content.substr(position, line_end - position);
+        std::size_t begin = 0U;
+        while (begin < line.size() &&
+               std::isspace(static_cast<unsigned char>(line[begin])) != 0) {
+            ++begin;
+        }
+        std::size_t end = line.size();
+        while (end > begin &&
+               std::isspace(static_cast<unsigned char>(line[end - 1U])) != 0) {
+            --end;
+        }
+        const std::string trimmed = line.substr(begin, end - begin);
+        if (!trimmed.empty()) {
+            try {
+                records.push_back(parse_json(trimmed));
+            } catch (const std::exception&) {
+                jsonl_failed = true;
+                break;
+            }
+        }
+        if (newline == std::string::npos) break;
+        position = newline + 1U;
+    }
+    if (jsonl_failed || records.empty()) {
+        records.clear();
+        try {
+            auto parsed = parse_json(content);
+            if (parsed.type() != JsonValue::Type::array) return {};
+            for (auto& item : parsed.as_array()) records.push_back(item);
+        } catch (const std::exception&) {
+            return {};
+        }
+    }
+    if (records.empty()) return {};
+    std::string flattened;
+    for (const auto& record : records) {
+        const auto piece = flatten_scraper_record(record);
+        if (piece.empty()) return {};
+        if (!flattened.empty()) flattened += "\n\n---\n\n";
+        flattened += piece;
+    }
+    return flattened;
+}
+
 }  // namespace
 
 // Browsers commonly report unrecognized extensions as "application/
@@ -374,6 +509,25 @@ KnowledgeDocument KnowledgeIndexStore::ingest(
             throw std::invalid_argument("knowledge file must contain text, not binary data");
         }
         text_content = content;
+    }
+
+    // A JSON/JSONL/Parquet upload whose records match the Scraper Project's
+    // instruction/conversation/document shapes gets rewritten to clean text
+    // before chunking; anything else (including JSON that doesn't match any
+    // recognized shape) chunks the original bytes exactly as before.
+    static constexpr std::string_view json_extension = ".json";
+    static constexpr std::string_view jsonl_extension = ".jsonl";
+    const bool looks_like_json = is_parquet || media_type == "application/json" ||
+        media_type == "application/x-ndjson" ||
+        (file_name.size() >= json_extension.size() &&
+         file_name.compare(file_name.size() - json_extension.size(),
+                           json_extension.size(), json_extension) == 0) ||
+        (file_name.size() >= jsonl_extension.size() &&
+         file_name.compare(file_name.size() - jsonl_extension.size(),
+                           jsonl_extension.size(), jsonl_extension) == 0);
+    if (looks_like_json) {
+        const auto flattened = flatten_scraper_records(text_content);
+        if (!flattened.empty()) text_content = flattened;
     }
 
     if (embedding_method.empty() || embedding_method.size() > 160U) {
