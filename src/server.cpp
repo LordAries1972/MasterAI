@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -260,6 +261,37 @@ std::optional<CacheCategory> parse_cache_clear_category(
         throw std::runtime_error("unknown cache category");
     }
     return parsed;
+}
+
+// Phase 69: docs/PLAN.md "Machine Learning Abilities" section 37
+// (Automated Machine Learning Pipelines). Splits a pipeline's comma-joined
+// stage list, trimming whitespace around each entry and dropping empty
+// entries so "train, ,evaluate" behaves the same as "train,evaluate".
+std::vector<std::string> split_pipeline_stages(const std::string& stages) {
+    std::vector<std::string> result;
+    std::size_t start = 0U;
+    while (start <= stages.size()) {
+        const auto comma = stages.find(',', start);
+        const auto end = comma == std::string::npos ? stages.size() : comma;
+        const auto piece = stages.substr(start, end - start);
+        const auto first = piece.find_first_not_of(" \t\r\n");
+        const auto last = piece.find_last_not_of(" \t\r\n");
+        if (first != std::string::npos) {
+            result.push_back(piece.substr(first, last - first + 1U));
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1U;
+    }
+    return result;
+}
+
+std::string ascii_lower(const std::string& value) {
+    std::string result = value;
+    for (char& character : result) {
+        character = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(character)));
+    }
+    return result;
 }
 
 }  // namespace
@@ -1899,65 +1931,20 @@ public:
                     "{\"error\":\"invalid_ml_training_options\",\"detail\":\"" +
                         json_escape(error.what()) + "\"}");
             }
-            // Real lifecycle transitions, recorded as they happen.
-            ml_training_jobs->set_status(id, TrainingJobStatus::queued);
-            ml_training_jobs->set_status(id, TrainingJobStatus::preparing);
-            TrainedTabularModel model;
-            TabularTrainingReport report;
             try {
-                const auto data =
-                    parse_tabular_csv(content->csv, content->target_column);
-                ml_training_jobs->set_status(id, TrainingJobStatus::running);
-                report = train_tabular_model(data, options, model);
+                const auto result =
+                    execute_training_job(*job, *content, options, user->id);
+                audit.append("ml.training_job.run", user->id, "success", id);
+                return response(200, "OK",
+                                tabular_training_report_json(result.report,
+                                                             result.model));
             } catch (const std::exception& error) {
-                ml_training_jobs->set_status(id, TrainingJobStatus::failed);
                 audit.append("ml.training_job.run", user->id, "failure", id);
                 return response(
                     409, "Conflict",
                     "{\"error\":\"ml_training_failed\",\"detail\":\"" +
                         json_escape(error.what()) + "\"}");
             }
-            // Attach the result to the job's registry entry, or register
-            // the newly trained model if the job never named one.
-            std::string model_id = job->model_id;
-            if (model_id.empty() || !ml_models->find(model_id)) {
-                const auto entry = ml_models->create(
-                    user->id, job->name + "-model", job->name + " (trained)",
-                    "1", "masterai-tabular",
-                    model.classification ? "classification" : "regression",
-                    "masterai-tabular-v1", "training-job:" + job->id, "");
-                model_id = entry.id;
-            }
-            model.model_id = model_id;
-            model.training_job_id = job->id;
-            ml_trained_models->put(model);
-            // Trained models wait for Evaluation Lab review before approval,
-            // matching the dashboard's models-awaiting-evaluation count.
-            ml_models->set_state(model_id, ModelRegistryState::evaluation);
-            // Checkpoint records carry genuinely measured losses from the
-            // finished run, capped at ten so a 10000-epoch run doesn't
-            // flood the checkpoint list.
-            if (options.checkpoint_interval > 0U && !report.loss_history.empty()) {
-                std::size_t stride = options.checkpoint_interval;
-                const std::size_t epochs = report.loss_history.size();
-                if (epochs / stride > 10U) stride = epochs / 10U;
-                for (std::size_t epoch = stride; epoch <= epochs; epoch += stride) {
-                    char loss_text[32];
-                    std::snprintf(loss_text, sizeof(loss_text), "%.6g",
-                                  report.loss_history[epoch - 1U]);
-                    ml_training_checkpoints->create(
-                        user->id, job->id,
-                        job->name + " epoch " + std::to_string(epoch),
-                        "captured by the Phase 56 training executor",
-                        "epoch " + std::to_string(epoch) + ", training loss " +
-                            loss_text);
-                }
-            }
-            ml_training_jobs->set_status(id,
-                                         TrainingJobStatus::awaiting_evaluation);
-            audit.append("ml.training_job.run", user->id, "success", id);
-            return response(200, "OK",
-                            tabular_training_report_json(report, model));
         }
         // Phase 43: Evaluation Lab (docs/PLAN.md "Machine Learning
         // Abilities" section 23), scoped to identity/target-model/target-
@@ -2073,20 +2060,14 @@ public:
                     "{\"error\":\"ml_dataset_has_no_content\",\"detail\":"
                     "\"upload CSV content to the run's dataset first\"}");
             }
-            ml_evaluation_runs->set_status(id, EvaluationRunStatus::running);
             try {
-                const auto data =
-                    parse_tabular_csv(content->csv, content->target_column);
-                const auto metrics = evaluate_tabular_model(*model, data);
-                const auto metrics_json = tabular_evaluation_metrics_json(metrics);
-                ml_evaluation_results->put(id, metrics_json);
-                ml_evaluation_runs->set_status(id, EvaluationRunStatus::completed);
+                const auto metrics_json =
+                    execute_evaluation_run(*run, *model, *content);
                 audit.append("ml.evaluation_run.run", user->id, "success", id);
                 return response(200, "OK",
                                 "{\"runId\":\"" + json_escape(id) +
                                     "\",\"metrics\":" + metrics_json + "}");
             } catch (const std::exception& error) {
-                ml_evaluation_runs->set_status(id, EvaluationRunStatus::failed);
                 audit.append("ml.evaluation_run.run", user->id, "failure", id);
                 return response(
                     409, "Conflict",
@@ -2268,6 +2249,85 @@ public:
             }
             audit.append("ml.fine_tuning_job.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 70: the real fine-tuning executor. POST .../run adapts the
+        // job's already-trained base model to the job's dataset by warm-
+        // started gradient descent (see train_tabular_model's warm_start
+        // parameter and execute_fine_tuning_job above): the job moves
+        // through queued -> preparing -> running for real, the resulting
+        // weights genuinely continue from the base model rather than
+        // starting from zero, and the adapted model is registered as a new
+        // Model Registry entry awaiting Evaluation Lab review, leaving the
+        // base model untouched.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/fine-tuning-jobs/", 0U) == 0U &&
+            request.target.size() > 4U &&
+            request.target.compare(request.target.size() - 4U, 4U,
+                                   "/run") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.finetuning.manage")) return *denied;
+            const auto id = request.target.substr(
+                28U, request.target.size() - 28U - 4U);
+            const auto job = ml_fine_tuning_jobs->find(id);
+            if (!job) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_fine_tuning_job_not_found\"}");
+            }
+            const auto base_model = ml_trained_models->find(job->model_id);
+            if (!base_model) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_fine_tuning_base_model_not_trained\",\"detail\":"
+                    "\"the job's base model has no trained weights yet; "
+                    "train it first\"}");
+            }
+            const auto content = ml_dataset_content->find(job->dataset_id);
+            if (!content) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_dataset_has_no_content\",\"detail\":"
+                    "\"upload CSV content to the job's dataset first\"}");
+            }
+            TabularTrainingOptions options;
+            try {
+                if (!request.body.empty()) {
+                    auto root = parse_json(request.body);
+                    const auto integer_field = [&root](const char* field,
+                                                       const std::uint32_t fallback) {
+                        const auto* value = root.optional(field);
+                        return value ? static_cast<std::uint32_t>(value->as_integer())
+                                     : fallback;
+                    };
+                    options.epochs = integer_field("epochs", options.epochs);
+                    options.seed = integer_field("seed", options.seed);
+                    options.checkpoint_interval = integer_field(
+                        "checkpointInterval", options.checkpoint_interval);
+                    if (const auto* rate = root.optional("learningRate")) {
+                        options.learning_rate = rate->as_double();
+                    }
+                    if (const auto* fraction = root.optional("testFraction")) {
+                        options.test_fraction = fraction->as_double();
+                    }
+                }
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_fine_tuning_options\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+            try {
+                const auto result = execute_fine_tuning_job(
+                    *job, *base_model, *content, options, user->id);
+                audit.append("ml.fine_tuning_job.run", user->id, "success", id);
+                return response(200, "OK",
+                                tabular_training_report_json(result.report,
+                                                             result.model));
+            } catch (const std::exception& error) {
+                audit.append("ml.fine_tuning_job.run", user->id, "failure", id);
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_fine_tuning_failed\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
         }
         // Phase 46: Model Builder Interface (docs/PLAN.md "Machine Learning
         // Abilities" section 9) at full surface: identity/target-project/
@@ -2787,7 +2847,16 @@ public:
             request.target == "/api/v1/ml/knowledge-documents") {
             if (auto denied = forbidden_unless(user->role, "ml.knowledge.manage")) return *denied;
             try {
-                auto root = parse_json(request.body);
+                // A whole knowledge document travels as a JSON string field
+                // (base64 for Parquet), so it can legitimately exceed the
+                // 1 MiB default every other JSON body is capped at.
+                // configuration.max_request_bytes already bounds the raw
+                // HTTP body at parse_request() time (server.cpp), so
+                // reusing it here removes the redundant, smaller, hardcoded
+                // ceiling without introducing a second setting to keep in
+                // sync with it.
+                auto root =
+                    parse_json(request.body, configuration.max_request_bytes);
                 const auto subject_id = root.required("subjectId").as_string();
                 const auto vector_store_id =
                     root.required("vectorStoreId").as_string();
@@ -3455,6 +3524,7 @@ public:
                         return value ? value->as_string() : std::string{};
                     };
                     const auto* memory_value = root.optional("memoryMib");
+                    const auto* is_local_value = root.optional("isLocal");
                     const auto node = ml_compute_nodes->create(
                         user->id, name, text_field("address"),
                         text_field("operatingSystem"),
@@ -3462,7 +3532,8 @@ public:
                         text_field("gpuDescription"),
                         memory_value ? static_cast<std::uint64_t>(
                                            memory_value->as_integer())
-                                    : 0ULL);
+                                    : 0ULL,
+                        is_local_value ? is_local_value->as_boolean() : false);
                     audit.append("ml.compute_node.create", user->id, "success",
                                  node.id);
                     return response(201, "Created", compute_node_json(node));
@@ -3515,11 +3586,50 @@ public:
                 audit.append("ml.compute_node.delete", user->id, "success", id);
                 return response(200, "OK", "{\"deleted\":true}");
             }
+            // Phase 67: live telemetry for a node flagged `is_local` -- see
+            // ComputeNode's class comment in masterai.hpp. Only the host
+            // this MasterAI process is already running on can be probed
+            // in-process; a remote node still has no agent to poll, so it
+            // 400s instead of fabricating numbers.
+            if (request.method == "GET" &&
+                request.target.rfind(nodes_prefix, 0U) == 0U &&
+                request.target.size() > 10U &&
+                request.target.compare(request.target.size() - 10U, 10U,
+                                       "/telemetry") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.hardware.view")) return *denied;
+                const auto id = request.target.substr(
+                    nodes_prefix.size(),
+                    request.target.size() - nodes_prefix.size() - 10U);
+                const auto node = ml_compute_nodes->find(id);
+                if (!node) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_compute_node_not_found\"}");
+                }
+                if (!node->is_local) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"ml_compute_node_not_local\",\"detail\":"
+                        "\"live telemetry requires a node flagged as the "
+                        "local host; remote nodes have no agent process to "
+                        "poll\"}");
+                }
+                const auto hardware = probe_hardware(configuration.models_root);
+                return response(
+                    200, "OK",
+                    "{\"telemetry\":" + hardware_info_json(hardware) +
+                        ",\"probedAtEpochSeconds\":" +
+                        std::to_string(static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::system_clock::now()
+                                    .time_since_epoch())
+                                .count())) +
+                        "}");
+            }
         }
-        // Phase 64: Automation Pipelines (docs/PLAN.md "Machine Learning
+        // Phase 64/69: Automation Pipelines (docs/PLAN.md "Machine Learning
         // Abilities" section 37) -- see AutomationPipeline's class comment
-        // in masterai.hpp for why POST .../run records an outcome rather
-        // than orchestrating the other stores' real jobs.
+        // in masterai.hpp for which stages POST .../run genuinely executes
+        // and why the rest are honestly recorded as skipped.
         {
             static constexpr std::string_view pipelines_prefix =
                 "/api/v1/ml/automation-pipelines/";
@@ -3543,7 +3653,8 @@ public:
                     };
                     const auto pipeline = ml_automation_pipelines->create(
                         user->id, name, text_field("projectId"),
-                        text_field("description"), text_field("stages"));
+                        text_field("description"), text_field("stages"),
+                        text_field("datasetId"), text_field("modelId"));
                     audit.append("ml.pipeline.create", user->id, "success",
                                  pipeline.id);
                     return response(201, "Created", automation_pipeline_json(pipeline));
@@ -3589,22 +3700,54 @@ public:
                 const auto id = request.target.substr(
                     pipelines_prefix.size(),
                     request.target.size() - pipelines_prefix.size() - 4U);
+                const auto pipeline = ml_automation_pipelines->find(id);
+                if (!pipeline) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_pipeline_not_found\"}");
+                }
+                const auto stage_names = split_pipeline_stages(pipeline->stages);
+                AutomationPipelineRun run;
                 try {
-                    // Records a run outcome; does not orchestrate the other
-                    // stores' real training/evaluation/deployment jobs --
-                    // see AutomationPipeline's class comment.
-                    const auto run = ml_automation_pipelines->record_run(
-                        user->id, id, AutomationPipelineRunStatus::completed,
-                        "Pipeline run acknowledged; stage orchestration is "
-                        "not yet implemented.");
-                    audit.append("ml.pipeline.run", user->id, "success", id);
-                    return response(200, "OK", automation_pipeline_run_json(run));
+                    run = ml_automation_pipelines->begin_run(
+                        user->id, id,
+                        static_cast<std::uint32_t>(stage_names.size()));
                 } catch (const std::exception& error) {
                     return response(
                         400, "Bad Request",
                         "{\"error\":\"invalid_ml_pipeline_run\",\"detail\":\"" +
                             json_escape(error.what()) + "\"}");
                 }
+                // Phase 71: execution moves to a detached background thread
+                // so this request returns immediately with the run's id and
+                // a `running` status; run_automation_pipeline() below
+                // updates the same run record as each stage finishes, so
+                // GET .../runs (already polled by the web UI) reports real,
+                // live progress instead of blocking until every stage ends.
+                // pipeline/stage_names are copied by value into the thread
+                // since `request`/`user` are request-thread-local and must
+                // not be touched once this handler returns.
+                const AutomationPipeline pipeline_copy = *pipeline;
+                const std::string run_id = run.id;
+                const std::string acting_user_id = user->id;
+                std::thread(
+                    [this, pipeline_copy, run_id, acting_user_id, stage_names]() {
+                        try {
+                            run_automation_pipeline(pipeline_copy, run_id,
+                                                    acting_user_id, stage_names);
+                        } catch (const std::exception& error) {
+                            ml_automation_pipelines->finish_run(
+                                run_id, AutomationPipelineRunStatus::failed,
+                                std::string("pipeline run crashed: ") +
+                                    error.what());
+                        } catch (...) {
+                            ml_automation_pipelines->finish_run(
+                                run_id, AutomationPipelineRunStatus::failed,
+                                "pipeline run crashed with an unknown exception");
+                        }
+                    })
+                    .detach();
+                audit.append("ml.pipeline.run", user->id, "started", id);
+                return response(202, "Accepted", automation_pipeline_run_json(run));
             }
             if (request.method == "GET" &&
                 request.target.rfind(pipelines_prefix, 0U) == 0U &&
@@ -3812,6 +3955,28 @@ public:
                             "{\"auditLogs\":" +
                                 audit_log_entries_json(audit.recent(200U, "ml.")) +
                                 "}");
+        }
+        // Phase 68: Monitoring and Diagnostics (docs/PLAN.md "Machine
+        // Learning Abilities" section 44). A read-only aggregation over
+        // data other real phases already measured -- no new store, no
+        // fabricated numbers. Deliberately does NOT report per-step
+        // gradient norm/learning-rate curves (the tabular trainer has no
+        // iterative training loop to sample), live per-request latency
+        // percentiles/queue depth/cache-hit rate/safety-filter rate/tool-
+        // call success/retrieval latency (no request-path instrumentation
+        // exists), or temperature/network activity (no sensor access this
+        // codebase has built) -- those all remain planned. What is real:
+        // live local-host CPU/RAM/GPU/disk via the same probe_hardware()
+        // Phase 67 uses, real training-job status counts, each completed
+        // evaluation run's genuinely measured metrics (Phase 56/57's
+        // EvaluationResultStore), and real prompt/generation throughput
+        // from actual BenchmarkStore runs -- the closest measured inference
+        // performance evidence this codebase has, explicitly not live
+        // production request telemetry.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/monitoring") {
+            if (auto denied = forbidden_unless(user->role, "ml.monitoring.view")) return *denied;
+            return response(200, "OK", build_ml_monitoring_json());
         }
         // Phase 57: Model Comparison (docs/PLAN.md "Machine Learning
         // Abilities" section 27) -- a real executor like Phase 56's
@@ -4166,6 +4331,11 @@ public:
                            ? application_page(*user, "ml-settings")
                            : response(302, "Found", "", {"Location: /app"});
             }
+            if (target == "/app/ml/monitoring") {
+                return is_administrator
+                           ? application_page(*user, "ml-monitoring")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
             if (target == "/app/report/system") {
                 return is_administrator
                            ? application_page(*user, "report-system")
@@ -4419,6 +4589,472 @@ private:
                                                         const char* permission) {
         if (role_allows(role, permission)) return std::nullopt;
         return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+    }
+
+    // Phase 56/69: the real training executor's core, factored out so both
+    // the single-job POST .../training-jobs/{id}/run handler and the
+    // automation-pipelines "Train model" stage (Phase 69) run the exact
+    // same real training path. Moves the job through queued/preparing/
+    // running for real, trains genuine weights, registers/attaches the
+    // resulting model, records checkpoints, and leaves the job awaiting
+    // evaluation. Throws std::runtime_error (after moving the job to
+    // failed) if the CSV or the optimizer itself fails; callers already own
+    // the not-found/no-content checks that precede this.
+    struct TrainingExecution {
+        TabularTrainingReport report;
+        TrainedTabularModel model;
+        std::string model_id;
+    };
+    TrainingExecution execute_training_job(
+        const TrainingJob& job, const DatasetContentStore::Content& content,
+        const TabularTrainingOptions& options, const std::string& user_id) {
+        ml_training_jobs->set_status(job.id, TrainingJobStatus::queued);
+        ml_training_jobs->set_status(job.id, TrainingJobStatus::preparing);
+        TrainedTabularModel model;
+        TabularTrainingReport report;
+        try {
+            const auto data =
+                parse_tabular_csv(content.csv, content.target_column);
+            ml_training_jobs->set_status(job.id, TrainingJobStatus::running);
+            report = train_tabular_model(data, options, model);
+        } catch (const std::exception&) {
+            ml_training_jobs->set_status(job.id, TrainingJobStatus::failed);
+            throw;
+        }
+        std::string model_id = job.model_id;
+        if (model_id.empty() || !ml_models->find(model_id)) {
+            const auto entry = ml_models->create(
+                user_id, job.name + "-model", job.name + " (trained)",
+                "1", "masterai-tabular",
+                model.classification ? "classification" : "regression",
+                "masterai-tabular-v1", "training-job:" + job.id, "");
+            model_id = entry.id;
+        }
+        model.model_id = model_id;
+        model.training_job_id = job.id;
+        ml_trained_models->put(model);
+        // Trained models wait for Evaluation Lab review before approval,
+        // matching the dashboard's models-awaiting-evaluation count.
+        ml_models->set_state(model_id, ModelRegistryState::evaluation);
+        // Checkpoint records carry genuinely measured losses from the
+        // finished run, capped at ten so a 10000-epoch run doesn't flood
+        // the checkpoint list.
+        if (options.checkpoint_interval > 0U && !report.loss_history.empty()) {
+            std::size_t stride = options.checkpoint_interval;
+            const std::size_t epochs = report.loss_history.size();
+            if (epochs / stride > 10U) stride = epochs / 10U;
+            for (std::size_t epoch = stride; epoch <= epochs; epoch += stride) {
+                char loss_text[32];
+                std::snprintf(loss_text, sizeof(loss_text), "%.6g",
+                              report.loss_history[epoch - 1U]);
+                ml_training_checkpoints->create(
+                    user_id, job.id,
+                    job.name + " epoch " + std::to_string(epoch),
+                    "captured by the Phase 56 training executor",
+                    "epoch " + std::to_string(epoch) + ", training loss " +
+                        loss_text);
+            }
+        }
+        ml_training_jobs->set_status(job.id,
+                                     TrainingJobStatus::awaiting_evaluation);
+        return {std::move(report), std::move(model), model_id};
+    }
+
+    // Phase 70: the real fine-tuning executor. Unlike execute_training_job
+    // above (which may start a model from zero-initialized weights),
+    // fine-tuning always requires an already-trained base model -- callers
+    // check ml_trained_models->find(job.model_id) first -- and
+    // train_tabular_model's warm_start parameter continues gradient
+    // descent from that base model's weights on the job's dataset, so the
+    // resulting model is genuinely adapted rather than freshly trained.
+    // The adapted model is registered as a new Model Registry entry (the
+    // base model is left untouched, matching Model Comparison's
+    // baseline/candidate pattern) and, like a training job, lands in the
+    // evaluation state awaiting Evaluation Lab review. Throws
+    // std::runtime_error (after moving the job to failed) if the CSV, the
+    // base/dataset schema match, or the optimizer itself fails.
+    TrainingExecution execute_fine_tuning_job(
+        const FineTuningJob& job, const TrainedTabularModel& base_model,
+        const DatasetContentStore::Content& content,
+        const TabularTrainingOptions& options, const std::string& user_id) {
+        ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::queued);
+        ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::preparing);
+        TrainedTabularModel model;
+        TabularTrainingReport report;
+        try {
+            const auto data =
+                parse_tabular_csv(content.csv, content.target_column);
+            ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::running);
+            report = train_tabular_model(data, options, model, &base_model);
+        } catch (const std::exception&) {
+            ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::failed);
+            throw;
+        }
+        const auto entry = ml_models->create(
+            user_id, job.name + "-model", job.name + " (fine-tuned)", "1",
+            "masterai-tabular",
+            model.classification ? "classification" : "regression",
+            "masterai-tabular-v1",
+            "fine-tuning-job:" + job.id + " base-model:" + job.model_id, "");
+        const std::string model_id = entry.id;
+        model.model_id = model_id;
+        model.training_job_id = job.id;
+        ml_trained_models->put(model);
+        ml_models->set_state(model_id, ModelRegistryState::evaluation);
+        if (options.checkpoint_interval > 0U && !report.loss_history.empty()) {
+            std::size_t stride = options.checkpoint_interval;
+            const std::size_t epochs = report.loss_history.size();
+            if (epochs / stride > 10U) stride = epochs / 10U;
+            for (std::size_t epoch = stride; epoch <= epochs; epoch += stride) {
+                char loss_text[32];
+                std::snprintf(loss_text, sizeof(loss_text), "%.6g",
+                              report.loss_history[epoch - 1U]);
+                ml_training_checkpoints->create(
+                    user_id, job.id,
+                    job.name + " epoch " + std::to_string(epoch),
+                    "captured by the Phase 70 fine-tuning executor",
+                    "epoch " + std::to_string(epoch) + ", training loss " +
+                        loss_text);
+            }
+        }
+        ml_fine_tuning_jobs->set_status(job.id,
+                                        FineTuningJobStatus::awaiting_evaluation);
+        return {std::move(report), std::move(model), model_id};
+    }
+
+    // Phase 56/69: the real evaluation harness's core, factored out the
+    // same way as execute_training_job above -- shared by the single-run
+    // POST .../evaluation-runs/{id}/run handler and the automation-
+    // pipelines "Evaluate model" stage. Returns the genuine metrics JSON;
+    // throws std::runtime_error (after moving the run to failed) on CSV/
+    // schema mismatch.
+    std::string execute_evaluation_run(
+        const EvaluationRun& run, const TrainedTabularModel& model,
+        const DatasetContentStore::Content& content) {
+        ml_evaluation_runs->set_status(run.id, EvaluationRunStatus::running);
+        try {
+            const auto data =
+                parse_tabular_csv(content.csv, content.target_column);
+            const auto metrics = evaluate_tabular_model(model, data);
+            const auto metrics_json = tabular_evaluation_metrics_json(metrics);
+            ml_evaluation_results->put(run.id, metrics_json);
+            ml_evaluation_runs->set_status(run.id,
+                                           EvaluationRunStatus::completed);
+            return metrics_json;
+        } catch (const std::exception&) {
+            ml_evaluation_runs->set_status(run.id, EvaluationRunStatus::failed);
+            throw;
+        }
+    }
+
+    // Phase 69/71: executes every recognized stage of one Automation
+    // Pipeline run, in the order the pipeline names them, persisting live
+    // progress via AutomationPipelineStore::append_stage_result() before
+    // and after each stage so a caller polling GET .../runs sees the run
+    // advance stage by stage rather than only its final result. Runs on the
+    // detached background thread the POST .../run route above spawns, so
+    // `pipeline`/`stage_names` arrive already copied by value and nothing
+    // here may touch `request`/`user`. "Train model" and "Evaluate model"
+    // reuse Phase 56's tabular engine via execute_training_job/
+    // execute_evaluation_run above; "Validate data" (parse_tabular_csv),
+    // "Validate model" (a trained-weights lookup), "Safety tests" (an
+    // approved ModelCard lookup), "Request approval"/"Deploy staging"/
+    // "Deploy production" (a real Deployment record created/approved for
+    // that environment -- Deployment Manager's own documented scope is an
+    // approval workflow, not live traffic serving), "Rollback" (that
+    // deployment's approval revoked), and "Monitor" (Phase 68's real
+    // monitoring snapshot) are all genuine, in-process calls to existing
+    // executors -- not fabricated results. Every other named stage (import/
+    // clean/label/split data, optimize, staging tests) is honestly recorded
+    // as skipped, since this codebase has no data-labeling, data-cleaning,
+    // model-optimization, or staging-test executor to call.
+    void run_automation_pipeline(const AutomationPipeline& pipeline,
+                                 const std::string& run_id,
+                                 const std::string& user_id,
+                                 const std::vector<std::string>& stage_names) {
+        std::string current_model_id = pipeline.model_id;
+        std::string last_deployment_id;
+        bool any_failed = false;
+        std::vector<std::string> stage_result_fragments;
+        const auto stage_results_json = [&stage_result_fragments]() {
+            std::string body = "[";
+            bool first = true;
+            for (const auto& fragment : stage_result_fragments) {
+                if (!first) body += ",";
+                first = false;
+                body += fragment;
+            }
+            return body + "]";
+        };
+        // Each stage lambda returns {status, detail} and updates
+        // current_model_id/last_deployment_id/any_failed as a side effect,
+        // so the dispatch loop below stays a flat if-chain.
+        const auto run_train_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (pipeline.dataset_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "pipeline has no dataset configured for training"};
+            }
+            const auto content = ml_dataset_content->find(pipeline.dataset_id);
+            if (!content) {
+                any_failed = true;
+                return {"failed", "dataset has no uploaded content"};
+            }
+            const auto job = ml_training_jobs->create(
+                user_id, pipeline.project_id, current_model_id,
+                pipeline.dataset_id, pipeline.name + " (pipeline run)",
+                "created by automation pipeline run", "tabular");
+            try {
+                const auto result = execute_training_job(
+                    job, *content, TabularTrainingOptions{}, user_id);
+                current_model_id = result.model_id;
+                audit.append("ml.training_job.run", user_id, "success", job.id);
+                return {"completed", "trained job " + job.id + "; model " +
+                                          current_model_id};
+            } catch (const std::exception& error) {
+                any_failed = true;
+                audit.append("ml.training_job.run", user_id, "failure", job.id);
+                return {"failed", error.what()};
+            }
+        };
+        const auto run_evaluate_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (current_model_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "no trained model available to evaluate (run a "
+                        "Train model stage first, or set the pipeline's "
+                        "model)"};
+            }
+            if (pipeline.dataset_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "pipeline has no dataset configured for evaluation"};
+            }
+            const auto model = ml_trained_models->find(current_model_id);
+            if (!model) {
+                any_failed = true;
+                return {"failed", "model has not been trained yet"};
+            }
+            const auto content = ml_dataset_content->find(pipeline.dataset_id);
+            if (!content) {
+                any_failed = true;
+                return {"failed", "dataset has no uploaded content"};
+            }
+            const auto eval_run = ml_evaluation_runs->create(
+                user_id, current_model_id, pipeline.dataset_id,
+                pipeline.name + " (pipeline run)",
+                "created by automation pipeline run", "");
+            try {
+                execute_evaluation_run(eval_run, *model, *content);
+                audit.append("ml.evaluation_run.run", user_id, "success",
+                            eval_run.id);
+                return {"completed",
+                        "evaluation run " + eval_run.id +
+                            " completed; see GET /api/v1/ml/evaluation-runs/" +
+                            eval_run.id + "/result for metrics"};
+            } catch (const std::exception& error) {
+                any_failed = true;
+                audit.append("ml.evaluation_run.run", user_id, "failure",
+                            eval_run.id);
+                return {"failed", error.what()};
+            }
+        };
+        const auto run_validate_data_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (pipeline.dataset_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "pipeline has no dataset configured to validate"};
+            }
+            const auto content = ml_dataset_content->find(pipeline.dataset_id);
+            if (!content) {
+                any_failed = true;
+                return {"failed", "dataset has no uploaded content"};
+            }
+            try {
+                const auto data =
+                    parse_tabular_csv(content->csv, content->target_column);
+                return {"completed",
+                        "dataset has " + std::to_string(data.features.size()) +
+                            " valid row(s) and " +
+                            std::to_string(data.feature_names.size()) +
+                            " feature column(s)"};
+            } catch (const std::exception& error) {
+                any_failed = true;
+                return {"failed", error.what()};
+            }
+        };
+        const auto run_validate_model_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (current_model_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "no model available to validate (run a Train model "
+                        "stage first, or set the pipeline's model)"};
+            }
+            if (!ml_trained_models->find(current_model_id)) {
+                any_failed = true;
+                return {"failed", "model " + current_model_id +
+                                       " has not been trained yet"};
+            }
+            return {"completed",
+                    "model " + current_model_id + " has trained weights"};
+        };
+        const auto run_safety_tests_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (current_model_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "no model available for safety review (run a Train "
+                        "model stage first, or set the pipeline's model)"};
+            }
+            for (const auto& card : ml_safety_governance->list_model_cards()) {
+                if (card.model_id == current_model_id &&
+                    card.status == SafetyPolicyStatus::approved) {
+                    return {"completed", "approved model card " + card.id +
+                                              " covers model " +
+                                              current_model_id};
+                }
+            }
+            any_failed = true;
+            return {"failed", "no approved model card exists for model " +
+                                   current_model_id +
+                                   " (create and approve one in Safety and "
+                                   "Governance)"};
+        };
+        const auto run_request_approval_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (current_model_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "no model available to request deployment approval "
+                        "for"};
+            }
+            try {
+                const auto deployment = ml_deployments->create(
+                    user_id, current_model_id,
+                    pipeline.name + " (pipeline deployment request)",
+                    "created by automation pipeline run", "requested",
+                    "automated-pipeline");
+                last_deployment_id = deployment.id;
+                audit.append("ml.deployment.create", user_id, "success",
+                            deployment.id);
+                return {"completed", "deployment request " + deployment.id +
+                                          " created in pending status"};
+            } catch (const std::exception& error) {
+                any_failed = true;
+                return {"failed", error.what()};
+            }
+        };
+        const auto run_deploy_stage =
+            [&](const std::string& environment)
+            -> std::pair<std::string, std::string> {
+            if (current_model_id.empty()) {
+                any_failed = true;
+                return {"failed", "no model available to deploy"};
+            }
+            try {
+                if (last_deployment_id.empty()) {
+                    const auto deployment = ml_deployments->create(
+                        user_id, current_model_id,
+                        pipeline.name + " (" + environment + ")",
+                        "created by automation pipeline run", environment,
+                        "automated-pipeline");
+                    last_deployment_id = deployment.id;
+                    audit.append("ml.deployment.create", user_id, "success",
+                                deployment.id);
+                }
+                if (!ml_deployments->set_status(last_deployment_id,
+                                                DeploymentStatus::approved)) {
+                    any_failed = true;
+                    return {"failed", "deployment " + last_deployment_id +
+                                           " no longer exists"};
+                }
+                audit.append("ml.deployment.status", user_id, "success",
+                            last_deployment_id);
+                return {"completed", "deployment " + last_deployment_id +
+                                          " approved for " + environment};
+            } catch (const std::exception& error) {
+                any_failed = true;
+                return {"failed", error.what()};
+            }
+        };
+        const auto run_rollback_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (last_deployment_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "no deployment recorded by this run to roll back "
+                        "(run a Request approval or Deploy stage first)"};
+            }
+            if (!ml_deployments->set_status(last_deployment_id,
+                                            DeploymentStatus::rejected)) {
+                any_failed = true;
+                return {"failed", "deployment " + last_deployment_id +
+                                       " no longer exists"};
+            }
+            audit.append("ml.deployment.status", user_id, "success",
+                        last_deployment_id);
+            return {"completed", "deployment " + last_deployment_id +
+                                      " approval revoked (rolled back)"};
+        };
+        const auto run_monitor_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            return {"completed", build_ml_monitoring_json()};
+        };
+        std::uint32_t completed = 0;
+        for (const auto& stage : stage_names) {
+            const auto lower = ascii_lower(stage);
+            // Mark this stage as the one currently running before executing
+            // it, so a poller sees "Running: <stage>" rather than the run
+            // appearing frozen on whichever stage finished last.
+            ml_automation_pipelines->append_stage_result(
+                run_id, stage_results_json(), completed, "Running: " + stage);
+            std::pair<std::string, std::string> outcome;
+            if (lower == "train model") {
+                outcome = run_train_stage();
+            } else if (lower == "evaluate model") {
+                outcome = run_evaluate_stage();
+            } else if (lower == "validate data") {
+                outcome = run_validate_data_stage();
+            } else if (lower == "validate model") {
+                outcome = run_validate_model_stage();
+            } else if (lower == "safety tests") {
+                outcome = run_safety_tests_stage();
+            } else if (lower == "request approval") {
+                outcome = run_request_approval_stage();
+            } else if (lower == "deploy staging") {
+                outcome = run_deploy_stage("staging");
+            } else if (lower == "deploy production") {
+                outcome = run_deploy_stage("production");
+            } else if (lower == "rollback") {
+                outcome = run_rollback_stage();
+            } else if (lower == "monitor") {
+                outcome = run_monitor_stage();
+            } else {
+                outcome = {"skipped",
+                           "no automated executor exists for this stage yet"};
+            }
+            stage_result_fragments.push_back(
+                "{\"stage\":\"" + json_escape(stage) + "\",\"status\":\"" +
+                outcome.first + "\",\"detail\":\"" + json_escape(outcome.second) +
+                "\"}");
+            ++completed;
+            ml_automation_pipelines->append_stage_result(
+                run_id, stage_results_json(), completed, "");
+        }
+        const auto overall = any_failed ? AutomationPipelineRunStatus::failed
+                                         : AutomationPipelineRunStatus::completed;
+        ml_automation_pipelines->finish_run(
+            run_id, overall,
+            any_failed
+                ? "One or more pipeline stages failed; see stageResults."
+                : "Pipeline run completed; see stageResults for the outcome "
+                  "of each stage.");
+        audit.append("ml.pipeline.run", user_id,
+                     any_failed ? "failure" : "success", pipeline.id);
     }
 
     // Parses a first-admin setup body (setupToken/username/password/
@@ -5054,6 +5690,94 @@ private:
     bool is_model_ready(const std::string& model_id) const {
         const auto model = find_model(model_id);
         return model && model->state == ModelState::ready;
+    }
+
+    // Phase 68: the Machine Learning monitoring aggregation -- a live
+    // probe_hardware() snapshot, real training-job status counts, every
+    // completed evaluation run's genuinely measured metrics, and real
+    // prompt/generation throughput from actual BenchmarkStore runs.
+    // Phase 71 factored this out of the GET /api/v1/ml/monitoring route so
+    // an Automation Pipeline "Monitor" stage can attach the identical,
+    // genuinely measured snapshot to its stage result instead of a second
+    // copy of the same query logic.
+    std::string build_ml_monitoring_json() const {
+        const auto hardware = probe_hardware(configuration.models_root);
+        std::map<std::string, std::uint64_t> job_counts;
+        for (const auto& job : ml_training_jobs->list()) {
+            ++job_counts[training_job_status_name(job.status)];
+        }
+        std::string job_counts_json = "{";
+        {
+            bool first = true;
+            for (const auto& entry : job_counts) {
+                if (!first) job_counts_json += ",";
+                first = false;
+                job_counts_json += "\"" + json_escape(entry.first) +
+                                   "\":" + std::to_string(entry.second);
+            }
+        }
+        job_counts_json += "}";
+        std::string evaluations_json = "[";
+        {
+            bool first = true;
+            for (const auto& run : ml_evaluation_runs->list()) {
+                if (run.status != EvaluationRunStatus::completed) continue;
+                const auto metrics_json = ml_evaluation_results->find(run.id);
+                if (!metrics_json) continue;
+                if (!first) evaluations_json += ",";
+                first = false;
+                evaluations_json +=
+                    "{\"runId\":\"" + json_escape(run.id) +
+                    "\",\"name\":\"" + json_escape(run.name) +
+                    "\",\"modelId\":\"" + json_escape(run.model_id) +
+                    "\",\"datasetId\":\"" + json_escape(run.dataset_id) +
+                    "\",\"metrics\":" + *metrics_json + "}";
+            }
+        }
+        evaluations_json += "]";
+        std::string benchmarks_json = "[";
+        {
+            bool first = true;
+            for (const auto& record : benchmarks->all()) {
+                if (!first) benchmarks_json += ",";
+                first = false;
+                const double elapsed_seconds =
+                    static_cast<double>(record.elapsed_microseconds) /
+                    1'000'000.0;
+                const double prompt_tokens_per_second =
+                    elapsed_seconds > 0.0
+                        ? static_cast<double>(record.prompt_tokens) /
+                              elapsed_seconds
+                        : 0.0;
+                const double generation_tokens_per_second =
+                    elapsed_seconds > 0.0
+                        ? static_cast<double>(record.generated_tokens) /
+                              elapsed_seconds
+                        : 0.0;
+                const char* profile_name = "quick";
+                switch (record.profile) {
+                    case BenchmarkProfile::quick: profile_name = "quick"; break;
+                    case BenchmarkProfile::standard: profile_name = "standard"; break;
+                    case BenchmarkProfile::extended: profile_name = "extended"; break;
+                }
+                benchmarks_json +=
+                    "{\"modelId\":\"" + json_escape(record.model_id) +
+                    "\",\"profile\":\"" + profile_name +
+                    "\",\"promptTokensPerSecond\":" +
+                    std::to_string(prompt_tokens_per_second) +
+                    ",\"generationTokensPerSecond\":" +
+                    std::to_string(generation_tokens_per_second) +
+                    ",\"passedCases\":" +
+                    std::to_string(record.passed_cases) +
+                    ",\"totalCases\":" +
+                    std::to_string(record.total_cases) + "}";
+            }
+        }
+        benchmarks_json += "]";
+        return "{\"systemResources\":" + hardware_info_json(hardware) +
+               ",\"trainingJobCounts\":" + job_counts_json +
+               ",\"evaluationMetrics\":" + evaluations_json +
+               ",\"inferenceBenchmarks\":" + benchmarks_json + "}";
     }
 
     // Best-effort pre-warm: starts the same load ensure_model_loaded() would

@@ -108,7 +108,12 @@ MachineLearningRegistry::MachineLearningRegistry() {
         {"data-labeling", "Data Labeling", "available"},
         {"data-preparation", "Data Preparation", "available"},
         {"training-jobs", "Training Jobs", "available"},
-        {"fine-tuning", "Fine-Tuning", "planned"},
+        // Phase 70: POST .../run genuinely adapts the job's already-trained
+        // base model via train_tabular_model's warm_start parameter (real
+        // continued gradient descent on the fine-tuning dataset, not a
+        // fresh model that merely reuses the training code path) -- see
+        // execute_fine_tuning_job's comment in server.cpp.
+        {"fine-tuning", "Fine-Tuning", "available"},
         {"evaluation-lab", "Evaluation Lab", "available"},
         {"experiment-tracking", "Experiment Tracking", "planned"},
         {"prompt-instruction-training", "Prompt and Instruction Training",
@@ -120,17 +125,37 @@ MachineLearningRegistry::MachineLearningRegistry() {
         {"synthetic-data", "Synthetic Data", "planned"},
         {"model-comparison", "Model Comparison", "available"},
         {"deployment-manager", "Deployment Manager", "planned"},
-        // Phases 62-65: identity/lifecycle registries only (no live network
-        // listener, hardware poller, pipeline orchestrator, or content
-        // scanner behind them yet), so these stay "planned" like
-        // Fine-Tuning/Experiment Tracking/Deployment Manager above --
-        // "available" here means a real executor exists, not merely a
-        // list/create/status/delete UI.
+        // Phases 62, 65: identity/lifecycle registries only (no live
+        // network listener or content scanner behind them yet), so these
+        // stay "planned" like Experiment Tracking/Deployment Manager above
+        // -- "available" here means a real executor exists,
+        // not merely a list/create/status/delete UI. Automation Pipelines
+        // (Phase 64) left this set in Phase 69 once its "Train model"/
+        // "Evaluate model" stages gained a real executor -- see below.
         {"inference-endpoints", "Inference Endpoints", "planned"},
-        {"hardware-compute", "Hardware and Compute", "planned"},
-        {"automation-pipelines", "Automation Pipelines", "planned"},
+        // Phase 67: a node flagged `is_local` now reports genuinely live
+        // CPU/RAM/GPU capacity via probe_hardware() on every telemetry
+        // request rather than a static description -- see ComputeNode's
+        // class comment in masterai.hpp. Remote nodes (no agent process
+        // built) still hold only the administrator-entered static record,
+        // so this remains "available" for the local host, not for an
+        // arbitrary fleet.
+        {"hardware-compute", "Hardware and Compute", "available"},
+        // Phase 69: POST .../run genuinely executes any "Train model"/
+        // "Evaluate model" stages via Phase 56's real tabular engine; every
+        // other named stage is honestly recorded as skipped since no
+        // executor for it exists in this codebase -- see AutomationPipeline
+        // and execute_training_job/execute_evaluation_run's comments.
+        {"automation-pipelines", "Automation Pipelines", "available"},
         {"safety-governance", "Safety and Governance", "planned"},
-        {"monitoring-diagnostics", "Monitoring and Diagnostics", "planned"},
+        // Phase 68: GET /api/v1/ml/monitoring is a real read-only
+        // aggregation over other phases' already-real data -- live local-
+        // host telemetry (Phase 67's probe_hardware()), real training-job
+        // status counts, genuinely measured evaluation metrics, and actual
+        // benchmark throughput. Deliberately does not report per-step
+        // training curves or live per-request inference telemetry -- see
+        // the endpoint's own comment in server.cpp for the full boundary.
+        {"monitoring-diagnostics", "Monitoring and Diagnostics", "available"},
         // Phase 66: a genuine read over the real AuditLog every ml.*
         // mutation already writes to -- no simulated data behind it.
         {"audit-logs", "Audit Logs", "available"},
@@ -3649,7 +3674,10 @@ ComputeNodeStore::ComputeNodeStore(RecordStore& records) : records_(&records) {
 void ComputeNodeStore::restore() {
     for (const auto& item : records_->list("ml_compute_nodes")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 8U) {
+        // Phase 67 added `is_local` as a 9th field; records written before
+        // that phase still have 8 and default to false (a remote/unknown
+        // node, matching their prior behavior exactly).
+        if (fields.size() != 8U && fields.size() != 9U) {
             throw std::runtime_error(
                 "persisted compute node record field count is wrong");
         }
@@ -3663,6 +3691,7 @@ void ComputeNodeStore::restore() {
         node.memory_mib = std::stoull(fields[5]);
         node.owner_id = fields[6];
         node.status = parse_compute_node_status(fields[7]);
+        node.is_local = fields.size() == 9U && fields[8] == "1";
         nodes_[node.id] = node;
     }
 }
@@ -3672,14 +3701,15 @@ void ComputeNodeStore::persist(const ComputeNode& node) {
                   pack({node.name, node.address, node.operating_system,
                        node.cpu_description, node.gpu_description,
                        std::to_string(node.memory_mib), node.owner_id,
-                       compute_node_status_name(node.status)}));
+                       compute_node_status_name(node.status),
+                       node.is_local ? "1" : "0"}));
 }
 
 ComputeNode ComputeNodeStore::create(
     const std::string& owner_id, const std::string& name,
     const std::string& address, const std::string& operating_system,
     const std::string& cpu_description, const std::string& gpu_description,
-    const std::uint64_t memory_mib) {
+    const std::uint64_t memory_mib, const bool is_local) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("compute node name is invalid");
     }
@@ -3694,6 +3724,7 @@ ComputeNode ComputeNodeStore::create(
     node.memory_mib = memory_mib;
     node.owner_id = owner_id;
     node.status = ComputeNodeStatus::available;
+    node.is_local = is_local;
     node.created_at_epoch_seconds = epoch_seconds();
     node.updated_at_epoch_seconds = node.created_at_epoch_seconds;
     nodes_[node.id] = node;
@@ -3745,8 +3776,9 @@ std::string compute_node_json(const ComputeNode& node) {
            json_escape(node.gpu_description) + "\",\"memoryMib\":" +
            std::to_string(node.memory_mib) + ",\"ownerId\":\"" +
            json_escape(node.owner_id) + "\",\"status\":\"" +
-           compute_node_status_name(node.status) +
-           "\",\"createdAtEpochSeconds\":" +
+           compute_node_status_name(node.status) + "\",\"isLocal\":" +
+           (node.is_local ? "true" : "false") +
+           ",\"createdAtEpochSeconds\":" +
            std::to_string(node.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
            std::to_string(node.updated_at_epoch_seconds) + "}";
@@ -3763,10 +3795,10 @@ std::string compute_nodes_json(const std::vector<ComputeNode>& nodes) {
     return body + "]";
 }
 
-// Phase 64: docs/PLAN.md "Machine Learning Abilities" section 37
+// Phase 64/69: docs/PLAN.md "Machine Learning Abilities" section 37
 // (Automated Machine Learning Pipelines) -- see AutomationPipeline's class
-// comment in masterai.hpp for why running a pipeline records an outcome
-// rather than orchestrating the other stores' real jobs.
+// comment in masterai.hpp for which stages Phase 69 made real and why the
+// rest are honestly recorded as skipped.
 std::string automation_pipeline_status_name(const AutomationPipelineStatus status) {
     switch (status) {
         case AutomationPipelineStatus::draft: return "draft";
@@ -3814,7 +3846,9 @@ AutomationPipelineStore::AutomationPipelineStore(RecordStore& records)
 void AutomationPipelineStore::restore() {
     for (const auto& item : records_->list("ml_automation_pipelines")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 6U) {
+        // Phase 69 added dataset_id/model_id as fields 6-7; records written
+        // before that phase have 6 fields and default both to empty.
+        if (fields.size() != 6U && fields.size() != 8U) {
             throw std::runtime_error(
                 "persisted automation pipeline record field count is wrong");
         }
@@ -3826,11 +3860,21 @@ void AutomationPipelineStore::restore() {
         pipeline.stages = fields[3];
         pipeline.owner_id = fields[4];
         pipeline.status = parse_automation_pipeline_status(fields[5]);
+        if (fields.size() == 8U) {
+            pipeline.dataset_id = fields[6];
+            pipeline.model_id = fields[7];
+        }
         pipelines_[pipeline.id] = pipeline;
     }
     for (const auto& item : records_->list("ml_automation_pipeline_runs")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 5U) {
+        // Phase 69 added stage_results_json as field 5; records written
+        // before that phase have 5 fields and default it to "[]". Phase 71
+        // added the three progress fields (6-8); records written before
+        // that phase have 5 or 6 fields and default progress to a finished
+        // run's values (every field skipped forward before the run's
+        // recorded status already reflects a terminal state).
+        if (fields.size() != 5U && fields.size() != 6U && fields.size() != 9U) {
             throw std::runtime_error(
                 "persisted automation pipeline run record field count is wrong");
         }
@@ -3842,6 +3886,14 @@ void AutomationPipelineStore::restore() {
         run.outcome_note = fields[3];
         run.created_at_epoch_seconds = std::stoull(fields[4]);
         run.updated_at_epoch_seconds = run.created_at_epoch_seconds;
+        run.stage_results_json = fields.size() >= 6U ? fields[5] : "[]";
+        if (fields.size() == 9U) {
+            run.total_stage_count =
+                static_cast<std::uint32_t>(std::stoull(fields[6]));
+            run.completed_stage_count =
+                static_cast<std::uint32_t>(std::stoull(fields[7]));
+            run.current_stage = fields[8];
+        }
         runs_[run.id] = run;
     }
 }
@@ -3851,7 +3903,8 @@ void AutomationPipelineStore::persist(const AutomationPipeline& pipeline) {
         "ml_automation_pipelines", pipeline.id,
         pack({pipeline.name, pipeline.project_id, pipeline.description,
              pipeline.stages, pipeline.owner_id,
-             automation_pipeline_status_name(pipeline.status)}));
+             automation_pipeline_status_name(pipeline.status),
+             pipeline.dataset_id, pipeline.model_id}));
 }
 
 void AutomationPipelineStore::persist_run(const AutomationPipelineRun& run) {
@@ -3860,13 +3913,18 @@ void AutomationPipelineStore::persist_run(const AutomationPipelineRun& run) {
         pack({run.pipeline_id, run.owner_id,
              automation_pipeline_run_status_name(run.status),
              run.outcome_note,
-             std::to_string(run.created_at_epoch_seconds)}));
+             std::to_string(run.created_at_epoch_seconds),
+             run.stage_results_json,
+             std::to_string(run.total_stage_count),
+             std::to_string(run.completed_stage_count),
+             run.current_stage}));
 }
 
 AutomationPipeline AutomationPipelineStore::create(
     const std::string& owner_id, const std::string& name,
     const std::string& project_id, const std::string& description,
-    const std::string& stages) {
+    const std::string& stages, const std::string& dataset_id,
+    const std::string& model_id) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("automation pipeline name is invalid");
     }
@@ -3877,6 +3935,8 @@ AutomationPipeline AutomationPipelineStore::create(
     pipeline.project_id = project_id;
     pipeline.description = description;
     pipeline.stages = stages;
+    pipeline.dataset_id = dataset_id;
+    pipeline.model_id = model_id;
     pipeline.owner_id = owner_id;
     pipeline.status = AutomationPipelineStatus::draft;
     pipeline.created_at_epoch_seconds = epoch_seconds();
@@ -3923,10 +3983,9 @@ bool AutomationPipelineStore::remove(const std::string& id) {
     return true;
 }
 
-AutomationPipelineRun AutomationPipelineStore::record_run(
+AutomationPipelineRun AutomationPipelineStore::begin_run(
     const std::string& owner_id, const std::string& pipeline_id,
-    const AutomationPipelineRunStatus status,
-    const std::string& outcome_note) {
+    const std::uint32_t total_stage_count) {
     const std::lock_guard<std::mutex> lock(mutex_);
     if (pipelines_.find(pipeline_id) == pipelines_.end()) {
         throw std::invalid_argument("automation pipeline not found");
@@ -3935,13 +3994,50 @@ AutomationPipelineRun AutomationPipelineStore::record_run(
     run.id = random_id();
     run.pipeline_id = pipeline_id;
     run.owner_id = owner_id;
-    run.status = status;
-    run.outcome_note = outcome_note;
+    run.status = AutomationPipelineRunStatus::running;
+    run.total_stage_count = total_stage_count;
     run.created_at_epoch_seconds = epoch_seconds();
     run.updated_at_epoch_seconds = run.created_at_epoch_seconds;
     runs_[run.id] = run;
     if (records_) persist_run(run);
     return run;
+}
+
+bool AutomationPipelineStore::append_stage_result(
+    const std::string& run_id, const std::string& stage_results_json,
+    const std::uint32_t completed_stage_count,
+    const std::string& current_stage) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = runs_.find(run_id);
+    if (found == runs_.end()) return false;
+    found->second.stage_results_json = stage_results_json;
+    found->second.completed_stage_count = completed_stage_count;
+    found->second.current_stage = current_stage;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist_run(found->second);
+    return true;
+}
+
+bool AutomationPipelineStore::finish_run(
+    const std::string& run_id, const AutomationPipelineRunStatus status,
+    const std::string& outcome_note) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = runs_.find(run_id);
+    if (found == runs_.end()) return false;
+    found->second.status = status;
+    found->second.outcome_note = outcome_note;
+    found->second.current_stage.clear();
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist_run(found->second);
+    return true;
+}
+
+std::optional<AutomationPipelineRun> AutomationPipelineStore::find_run(
+    const std::string& run_id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = runs_.find(run_id);
+    return found != runs_.end() ? std::optional<AutomationPipelineRun>(found->second)
+                                 : std::nullopt;
 }
 
 std::vector<AutomationPipelineRun> AutomationPipelineStore::runs_for(
@@ -3959,7 +4055,9 @@ std::string automation_pipeline_json(const AutomationPipeline& pipeline) {
            json_escape(pipeline.name) + "\",\"projectId\":\"" +
            json_escape(pipeline.project_id) + "\",\"description\":\"" +
            json_escape(pipeline.description) + "\",\"stages\":\"" +
-           json_escape(pipeline.stages) + "\",\"ownerId\":\"" +
+           json_escape(pipeline.stages) + "\",\"datasetId\":\"" +
+           json_escape(pipeline.dataset_id) + "\",\"modelId\":\"" +
+           json_escape(pipeline.model_id) + "\",\"ownerId\":\"" +
            json_escape(pipeline.owner_id) + "\",\"status\":\"" +
            automation_pipeline_status_name(pipeline.status) +
            "\",\"createdAtEpochSeconds\":" +
@@ -3986,7 +4084,16 @@ std::string automation_pipeline_run_json(const AutomationPipelineRun& run) {
            json_escape(run.owner_id) + "\",\"status\":\"" +
            automation_pipeline_run_status_name(run.status) +
            "\",\"outcomeNote\":\"" + json_escape(run.outcome_note) +
-           "\",\"createdAtEpochSeconds\":" +
+           "\",\"stageResults\":" +
+           (run.stage_results_json.empty() ? "[]" : run.stage_results_json) +
+           // Phase 71: live progress -- totalStageCount is 0 until
+           // begin_run() knows the pipeline's real stage count, and
+           // currentStage is empty once the run reaches a terminal status.
+           ",\"totalStageCount\":" + std::to_string(run.total_stage_count) +
+           ",\"completedStageCount\":" +
+           std::to_string(run.completed_stage_count) +
+           ",\"currentStage\":\"" + json_escape(run.current_stage) + "\"" +
+           ",\"createdAtEpochSeconds\":" +
            std::to_string(run.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
            std::to_string(run.updated_at_epoch_seconds) + "}";

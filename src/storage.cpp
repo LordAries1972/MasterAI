@@ -503,7 +503,12 @@ bool role_allows(const UserRole role, const std::string& permission) {
           // Abilities" section 49): reuses the general admin.config
           // permission model -- see the ML Settings panel's own comment in
           // web_ui.cpp.
-          "ml.settings.view", "ml.settings.manage"}},
+          "ml.settings.view", "ml.settings.manage",
+          // Phase 68 (docs/PLAN.md "Machine Learning Abilities" section 44,
+          // Monitoring and Diagnostics): read-only aggregation over other
+          // stores' already-real data (see the monitoring endpoint's own
+          // comment in server.cpp), so there is no ...manage counterpart.
+          "ml.monitoring.view"}},
         {UserRole::developer,
          {"identity.read", "models.read", "models.load", "tokens.create",
           "ide.connect", "mcp.connect", "mcp.invoke", "mcp.tools.invoke",

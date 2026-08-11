@@ -100,11 +100,13 @@ namespace {
 
 class Parser final {
 public:
-    explicit Parser(const std::string& input) : input_(input) {}
+    Parser(const std::string& input, const std::size_t max_bytes)
+        : input_(input), max_bytes_(max_bytes) {}
 
     JsonValue parse() {
-        if (input_.size() > 1024U * 1024U) {
-            throw std::runtime_error("JSON input exceeds one MiB");
+        if (input_.size() > max_bytes_) {
+            throw std::runtime_error("JSON input exceeds " +
+                                     std::to_string(max_bytes_) + " bytes");
         }
         skip_space();
         JsonValue value = parse_value(0U);
@@ -371,12 +373,13 @@ private:
 
     const std::string& input_;
     std::size_t position_{0U};
+    std::size_t max_bytes_;
 };
 
 }  // namespace
 
-JsonValue parse_json(const std::string& input) {
-    return Parser(input).parse();
+JsonValue parse_json(const std::string& input, const std::size_t max_bytes) {
+    return Parser(input, max_bytes).parse();
 }
 
 // Escapes control characters and returns a complete quoted JSON string.

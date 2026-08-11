@@ -329,7 +329,8 @@ std::string flatten_scraper_record(const JsonValue& record) {
 // data (see docs/HowToUse-MachineLearning.md's Scraper import lesson).
 // Returns an empty string when the content doesn't match any recognized
 // shape, telling the caller to chunk the original bytes unchanged.
-std::string flatten_scraper_records(const std::string& content) {
+std::string flatten_scraper_records(const std::string& content,
+                                    const std::size_t max_json_bytes) {
     std::vector<JsonValue> records;
     // Try JSONL first: one JSON object per non-blank line.
     std::size_t position = 0U;
@@ -351,7 +352,7 @@ std::string flatten_scraper_records(const std::string& content) {
         const std::string trimmed = line.substr(begin, end - begin);
         if (!trimmed.empty()) {
             try {
-                records.push_back(parse_json(trimmed));
+                records.push_back(parse_json(trimmed, max_json_bytes));
             } catch (const std::exception&) {
                 jsonl_failed = true;
                 break;
@@ -363,7 +364,7 @@ std::string flatten_scraper_records(const std::string& content) {
     if (jsonl_failed || records.empty()) {
         records.clear();
         try {
-            auto parsed = parse_json(content);
+            auto parsed = parse_json(content, max_json_bytes);
             if (parsed.type() != JsonValue::Type::array) return {};
             for (auto& item : parsed.as_array()) records.push_back(item);
         } catch (const std::exception&) {
@@ -526,7 +527,8 @@ KnowledgeDocument KnowledgeIndexStore::ingest(
          file_name.compare(file_name.size() - jsonl_extension.size(),
                            jsonl_extension.size(), jsonl_extension) == 0);
     if (looks_like_json) {
-        const auto flattened = flatten_scraper_records(text_content);
+        const auto flattened =
+            flatten_scraper_records(text_content, maximum_document_bytes_);
         if (!flattened.empty()) text_content = flattened;
     }
 

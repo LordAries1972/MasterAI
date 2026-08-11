@@ -462,7 +462,8 @@ std::string tabular_dataset_profile_json(const std::string& dataset_id,
 
 TabularTrainingReport train_tabular_model(const TabularDataset& data,
                                           const TabularTrainingOptions& options,
-                                          TrainedTabularModel& model) {
+                                          TrainedTabularModel& model,
+                                          const TrainedTabularModel* warm_start) {
     if (data.features.size() < 2U) {
         throw std::runtime_error("dataset has fewer than two rows");
     }
@@ -474,6 +475,20 @@ TabularTrainingReport train_tabular_model(const TabularDataset& data,
     }
     if (options.test_fraction < 0.0 || options.test_fraction > 0.9) {
         throw std::runtime_error("test fraction must be in [0, 0.9]");
+    }
+    if (warm_start != nullptr) {
+        if (warm_start->feature_names != data.feature_names) {
+            throw std::runtime_error(
+                "fine-tuning dataset feature columns do not match the base model");
+        }
+        if (warm_start->classification != data.classification) {
+            throw std::runtime_error(
+                "fine-tuning dataset task does not match the base model");
+        }
+        if (data.classification && warm_start->class_labels != data.class_labels) {
+            throw std::runtime_error(
+                "fine-tuning dataset labels do not match the base model");
+        }
     }
     const std::size_t row_count = data.features.size();
     const std::size_t feature_count = data.feature_names.size();
@@ -541,6 +556,10 @@ TabularTrainingReport train_tabular_model(const TabularDataset& data,
                    : output_count == 2U ? "logistic_regression"
                                         : "softmax_regression";
     model.weights.assign(output_count, std::vector<double>(feature_count + 1U, 0.0));
+    // Warm start: continue gradient descent from the base model's learned
+    // weights instead of zero, so this run genuinely fine-tunes it rather
+    // than training a fresh model that happens to reuse the same code path.
+    if (warm_start != nullptr) model.weights = warm_start->weights;
 
     TabularTrainingReport report;
     report.train_rows = train_count;

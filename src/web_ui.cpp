@@ -5,6 +5,39 @@
 // independently reviewable without introducing a web framework.
 #include "server_internal.hpp"
 
+// Small inline-SVG glyphs for the primary submit button on every form --
+// mirrors the dynamically-built ICONS set in application_script() (used for
+// row-toolbar buttons) but as C++ literals, since these buttons are baked
+// into the static server-rendered HTML rather than assembled client-side.
+// Every submit button gets one of these plus a title="" tooltip so no
+// button on the page is icon-less or hint-less, matching the row-toolbar
+// buttons' icon+title convention.
+#define ICON_PLUS_SVG \
+    "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" " \
+    "fill=\"currentColor\"><path d=\"M8 2a1 1 0 0 1 1 1v4h4a1 1 0 1 1 0 " \
+    "2H9v4a1 1 0 1 1-2 0V9H3a1 1 0 1 1 0-2h4V3a1 1 0 0 1 1-1z\"/></svg>"
+#define ICON_SAVE_SVG \
+    "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" " \
+    "fill=\"currentColor\"><path d=\"M13.7 3.3a1 1 0 0 1 0 1.4l-7 7a1 1 " \
+    "0 0 1-1.4 0l-3.5-3.5a1 1 0 1 1 1.4-1.4L6 9.6l6.3-6.3a1 1 0 0 1 1.4 " \
+    "0z\"/></svg>"
+#define ICON_UPLOAD_SVG \
+    "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" " \
+    "fill=\"currentColor\"><path d=\"M7.5 1.5a.5.5 0 0 1 1 0v7.79l2.15-" \
+    "2.15a.5.5 0 0 1 .7.71l-3 3a.5.5 0 0 1-.7 0l-3-3a.5.5 0 1 1 .7-.71L" \
+    "7.5 9.29V1.5zM2 12.5a.5.5 0 0 1 .5-.5h11a.5.5 0 0 1 0 1h-11a.5.5 0 " \
+    "0 1-.5-.5z\"/></svg>"
+#define ICON_DOWNLOAD_SVG \
+    "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" " \
+    "fill=\"currentColor\"><path d=\"M7.5 1.5a.5.5 0 0 1 1 0v7.29l2.15-" \
+    "2.15a.5.5 0 1 1 .7.71l-3 3a.5.5 0 0 1-.7 0l-3-3a.5.5 0 1 1 .7-.71L" \
+    "7.5 8.79V1.5zM2 12.5a.5.5 0 0 1 .5-.5h11a.5.5 0 0 1 0 1h-11a.5.5 0 " \
+    "0 1-.5-.5z\"/></svg>"
+#define ICON_PLAY_SVG \
+    "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" " \
+    "fill=\"currentColor\"><path d=\"M4 2.5a.5.5 0 0 1 .77-.42l9 5.5a." \
+    "5.5 0 0 1 0 .84l-9 5.5A.5.5 0 0 1 4 13.5v-11z\"/></svg>"
+
 // Shared dark theme for both browser documents. A macro (not a function)
 // because it expands into adjacent C++ string-literal concatenation inside
 // each page's own <style> block, alongside that page's own overrides.
@@ -33,16 +66,9 @@
     "button{margin-top:.75rem;background:var(--accent);border:none;color:#fff;" \
     "font-weight:600;cursor:pointer;transition:background .15s}" \
     "button:hover{background:var(--accent-hover)}" \
+    "button svg{vertical-align:-2px;margin-right:.4rem}" \
     "a{color:var(--accent-hover)}" \
     "a:hover{text-decoration:none}" \
-    /* Compact, clearly-labeled action buttons (Machine Learning table \
-       rows): overrides the full-width default above so a row of several \
-       actions sits inline and stays small, while keeping each button's \
-       visible text -- consistent across every ML page (see \
-       styleMlActionButtons() in application_script()). */ \
-    ".mlActionBtn{width:auto;margin:.1rem .3rem .1rem 0;" \
-    "padding:.35rem .6rem;font-size:.8rem;display:inline-flex;" \
-    "align-items:center;vertical-align:middle}" \
     "progress{width:100%;height:.6rem;margin-top:.6rem;accent-color:var(--accent)}" \
     "#actionStatus,#status{color:var(--muted);min-height:1.2em}" \
     /* Floating error bubble every action-failure catch block now raises \
@@ -245,7 +271,7 @@ std::string application_script() {
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
-        "const [me,p,c,mem,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,mlse,mlhs,mlmo,mlck,mldp,mlcmp,mlkd,mlend,mlnode,mlpipe,mlpolicy,mlcard,mlaudit,cfg,report]="
+        "const [me,p,c,mem,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,mlse,mlhs,mlmo,mlck,mldp,mlcmp,mlkd,mlend,mlnode,mlpipe,mlpolicy,mlcard,mlaudit,mlmon,cfg,report]="
         "await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
@@ -265,9 +291,9 @@ std::string application_script() {
         "deployedModels:0,failedTrainingJobs:0,interfaces:[]}),"
         "fetchFor('#mlProjectsList,#mlTrainingJobProjectId,#mlExperimentProjectId,#mlFineTuningJobProjectId,#mlModelBuilderConfigProjectId',"
         "'/api/v1/ml/projects',{projects:[]}),"
-        "fetchFor('#mlModelsList,#mlPredictModelId,#mlTrainingJobModelId,#mlEvaluationRunModelId,#mlExperimentModelId,#mlFineTuningJobModelId,#mlModelBuilderConfigBaseModelId,#mlModelOptimizationModelId,#mlDeploymentModelId,#mlModelComparisonBaselineModelId,#mlModelComparisonCandidateModelId',"
+        "fetchFor('#mlModelsList,#mlPredictModelId,#mlTrainingJobModelId,#mlEvaluationRunModelId,#mlExperimentModelId,#mlFineTuningJobModelId,#mlModelBuilderConfigBaseModelId,#mlModelOptimizationModelId,#mlDeploymentModelId,#mlModelComparisonBaselineModelId,#mlModelComparisonCandidateModelId,#mlPipelineModelId',"
         "'/api/v1/ml/models',{models:[]}),"
-        "fetchFor('#mlDatasetsList,#mlDatasetContentId,#mlLabelTaskDatasetId,#mlPrepJobDatasetId,#mlTrainingJobDatasetId,#mlEvaluationRunDatasetId,#mlExperimentDatasetId,#mlFineTuningJobDatasetId,#mlInstructionExampleDatasetId,#mlSyntheticRecordDatasetId,#mlModelComparisonDatasetId',"
+        "fetchFor('#mlDatasetsList,#mlDatasetContentId,#mlLabelTaskDatasetId,#mlPrepJobDatasetId,#mlTrainingJobDatasetId,#mlEvaluationRunDatasetId,#mlExperimentDatasetId,#mlFineTuningJobDatasetId,#mlInstructionExampleDatasetId,#mlSyntheticRecordDatasetId,#mlModelComparisonDatasetId,#mlPipelineDatasetId',"
         "'/api/v1/ml/datasets',{datasets:[]}),"
         "fetchFor('#mlSubjectsList,#mlKnowledgeSubjectId,#mlSubjectExamSubjectId',"
         "'/api/v1/ml/subjects',{subjects:[]}),"
@@ -317,6 +343,9 @@ std::string application_script() {
         "fetchFor('#mlModelCardsList,#mlModelCardModelId',"
         "'/api/v1/ml/model-cards',{modelCards:[]}),"
         "fetchFor('#mlAuditLogsList','/api/v1/ml/audit-logs',{auditLogs:[]}),"
+        "fetchFor('#mlMonitoringPanel','/api/v1/ml/monitoring',"
+        "{systemResources:null,trainingJobCounts:{},evaluationMetrics:[],"
+        "inferenceBenchmarks:[]}),"
         // 403/503 for anyone who isn't an administrator, or when no
         // settings.json path is known to the running server -- both are
         // quiet, expected no-ops here exactly like the ml.* fetches above.
@@ -366,6 +395,7 @@ std::string application_script() {
         "renderMlSafetyPolicies(mlpolicy.safetyPolicies);"
         "renderMlModelCards(mlcard.modelCards);"
         "renderMlAuditLogs(mlaudit.auditLogs);"
+        "renderMlMonitoring(mlmon);"
         "fillMlSelect('#mlKnowledgeSubjectId',mls.subjects,'Choose a subject',"
         "x=>x.name);fillMlSelect('#mlSubjectExamSubjectId',mls.subjects,"
         "'Choose a subject',x=>x.name);"
@@ -382,13 +412,13 @@ std::string application_script() {
         "'#mlModelBuilderConfigBaseModelId','#mlModelOptimizationModelId',"
         "'#mlDeploymentModelId','#mlModelComparisonBaselineModelId',"
         "'#mlModelComparisonCandidateModelId','#mlEndpointModelId',"
-        "'#mlModelCardModelId'])fillMlSelect(id,mlm.models,"
+        "'#mlModelCardModelId','#mlPipelineModelId'])fillMlSelect(id,mlm.models,"
         "'None / choose a model',x=>x.displayName||x.name);"
         "for(const id of ['#mlDatasetContentId','#mlLabelTaskDatasetId',"
         "'#mlPrepJobDatasetId','#mlTrainingJobDatasetId','#mlEvaluationRunDatasetId',"
         "'#mlExperimentDatasetId','#mlFineTuningJobDatasetId',"
         "'#mlInstructionExampleDatasetId','#mlSyntheticRecordDatasetId',"
-        "'#mlModelComparisonDatasetId'])fillMlSelect(id,mld.datasets,"
+        "'#mlModelComparisonDatasetId','#mlPipelineDatasetId'])fillMlSelect(id,mld.datasets,"
         "'None / choose a dataset',x=>x.name);"
         "fillMlSelect('#mlHyperparameterSearchTrainingJobId',mltj.trainingJobs,"
         "'Choose a training job',x=>x.name+' ('+x.status+')');"
@@ -396,9 +426,6 @@ std::string application_script() {
         "'Choose a training job',x=>x.name+' ('+x.status+')');"
         "fillMlSelect('#mlLabelTaskAssigneeId',u.users,'Unassigned',"
         "x=>x.displayName+' ('+x.role+')');"
-        // Every ML list above just re-rendered its rows; swap their text
-        // action buttons for the compact consistent icon set.
-        "styleMlActionButtons();"
         "renderSystemConfig(cfg);"
         "renderSystemReport(report);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
@@ -857,16 +884,50 @@ std::string application_script() {
         "fill=\"currentColor\"><path d=\"M4.3 4.3a1 1 0 0 1 1.4 0L8 6.6l"
         "2.3-2.3a1 1 0 1 1 1.4 1.4L9.4 8l2.3 2.3a1 1 0 0 1-1.4 1.4L8 9.4l"
         "-2.3 2.3a1 1 0 0 1-1.4-1.4L6.6 8 4.3 5.7a1 1 0 0 1 0-1.4z\"/>"
-        "</svg>'};"
+        "</svg>',"
+        "play:'<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" "
+        "fill=\"currentColor\"><path d=\"M4 2.5a.5.5 0 0 1 .77-.42l9 5.5a."
+        "5.5 0 0 1 0 .84l-9 5.5A.5.5 0 0 1 4 13.5v-11z\"/></svg>',"
+        "eye:'<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" "
+        "fill=\"currentColor\"><path d=\"M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 "
+        "8 5.5S16 8 16 8zM1.173 8a13.13 13.13 0 0 1 1.66-2.043C4.12 4.668 "
+        "5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.13 13.13 0 0 1 "
+        "14.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 "
+        "1.755C11.879 11.332 10.119 12.5 8 12.5c-2.12 0-3.879-1.168-"
+        "5.168-2.457A13.13 13.13 0 0 1 1.172 8z\"/><path d=\"M8 5.5a2.5 "
+        "2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4.5 8a3.5 3.5 0 1 1 7 0 3.5 3.5 "
+        "0 0 1-7 0z\"/></svg>',"
+        "gear:'<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" "
+        "fill=\"currentColor\"><path d=\"M9.405 1.05c-.413-1.4-2.397-1.4-"
+        "2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-"
+        "2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34."
+        "1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-"
+        ".17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 "
+        "0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 "
+        "0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-"
+        ".311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-"
+        "2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-"
+        ".705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-"
+        ".1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.858 2.929 2.929 0 0 1 0 "
+        "5.858z\"/></svg>',"
+        "pause:'<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" "
+        "fill=\"currentColor\"><path d=\"M5 3.5A1.5 1.5 0 0 1 6.5 5v6a1.5 "
+        "1.5 0 0 1-3 0V5A1.5 1.5 0 0 1 5 3.5zm6 0A1.5 1.5 0 0 1 12.5 5v6a"
+        "1.5 1.5 0 0 1-3 0V5A1.5 1.5 0 0 1 11 3.5z\"/></svg>',"
+        "stop:'<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" "
+        "fill=\"currentColor\"><path d=\"M3.5 3.5A1 1 0 0 1 4.5 2.5h7a1 1 "
+        "0 0 1 1 1v7a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7z\"/></svg>'};"
         // Renders a single icon-only action button. `label` is both the
         // tooltip and the accessible name since the button carries no
         // visible text -- callers group several of these in a
         // '.rowToolbar' div that sits above the row's descriptive text
         // instead of stretching the row with full-width text buttons.
-        "function iconBtn(icon,label,attr,id,extraClass){"
+        // `extraAttr` is an optional raw HTML attribute (e.g. 'disabled').
+        "function iconBtn(icon,label,attr,id,extraClass,extraAttr){"
         "return '<button type=\"button\" class=\"iconBtn'+"
         "(extraClass?' '+extraClass:'')+'\" data-'+attr+'=\"'+id+"
-        "'\" title=\"'+esc(label)+'\" aria-label=\"'+esc(label)+'\">'+"
+        "'\" title=\"'+esc(label)+'\" aria-label=\"'+esc(label)+'\"'+"
+        "(extraAttr?' '+extraAttr:'')+'>'+"
         "ICONS[icon]+'</button>';}"
         "function applyBtn(attr,id){return iconBtn('check','Apply',attr,id,"
         "'iconBtn-apply');}"
@@ -876,6 +937,12 @@ std::string application_script() {
         "attr,id,'iconBtn-apply');}"
         "function rejectBtn(attr,id){return iconBtn('x','Reject',attr,id,"
         "'iconBtn-delete');}"
+        "function runBtn(attr,id,label){return iconBtn('play',"
+        "label||'Run',attr,id,'');}"
+        "function viewBtn(attr,id,label){return iconBtn('eye',"
+        "label||'View',attr,id,'');}"
+        "function configureBtn(attr,id){return iconBtn('gear','Configure',"
+        "attr,id,'');}"
         "function toolbar(){return '<div class=\"rowToolbar\">'+"
         "Array.prototype.slice.call(arguments).join('')+'</div>';}"
         // Builds a simple two-column-plus-actions HTML table from rows,
@@ -1078,15 +1145,15 @@ std::string application_script() {
         "if(!el)return;"
         "if(!models.length){el.innerHTML='<p>No models registered yet.</p>';"
         "return;}"
-        "el.innerHTML=table(['Name','Version','Family','Task','State','Set state',''],"
+        "el.innerHTML=table(['Name','Version','Family','Task','State','Set state'],"
         "models.map(x=>[esc(x.displayName||x.name),esc(x.version),"
         "esc(x.family),esc(x.task),"
         "'<span class=\"stateTag stateTag-'+esc(x.state)+'\">'+esc(x.state)+"
         "'</span>',"
         "toolbar('<select data-state-for=\"'+x.id+'\">'+MODEL_STATES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.state?' selected':'')+'>'+s+"
-        "'</option>').join('')+'</select>',applyBtn('apply-state',x.id)),"
-        "deleteBtn('delete-ml-model',x.id)]));"
+        "'</option>').join('')+'</select>',applyBtn('apply-state',x.id),"
+        "deleteBtn('delete-ml-model',x.id))]));"
         "for(const btn of el.querySelectorAll('[data-apply-state]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
         "const id=btn.dataset.applyState;"
@@ -1143,7 +1210,7 @@ std::string application_script() {
         "if(!subjects.length){el.innerHTML='<p>No subject packages "
         "registered yet.</p>';return;}"
         "el.innerHTML=table(['Name','Scope','Target audience','Review "
-        "status','Set status',''],"
+        "status','Set status'],"
         "subjects.map(x=>[esc(x.name),esc(x.scope),esc(x.targetAudience),"
         "'<span class=\"stateTag stateTag-'+esc(x.reviewStatus)+'\">'+"
         "esc(x.reviewStatus)+'</span>',"
@@ -1151,8 +1218,8 @@ std::string application_script() {
         "SUBJECT_REVIEW_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.reviewStatus?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-review-status',x.id)),"
-        "deleteBtn('delete-ml-subject',x.id)]));"
+        "applyBtn('apply-review-status',x.id),"
+        "deleteBtn('delete-ml-subject',x.id))]));"
         "for(const btn of el.querySelectorAll('[data-apply-review-status]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
         "const id=btn.dataset.applyReviewStatus;"
@@ -1196,7 +1263,7 @@ std::string application_script() {
         "if(!tasks.length){el.innerHTML='<p>No labeling tasks created "
         "yet.</p>';return;}"
         "el.innerHTML=table(['Name','Dataset','Label mode','Assignee',"
-        "'Status','Set status',''],"
+        "'Status','Set status'],"
         "tasks.map(x=>[esc(x.name),escTrim(x.datasetId,16),esc(x.labelMode),"
         "escTrim(x.assigneeId,16),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1205,8 +1272,8 @@ std::string application_script() {
         "LABEL_TASK_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-label-task-status',x.id)),"
-        "deleteBtn('delete-ml-label-task',x.id)]));"
+        "applyBtn('apply-label-task-status',x.id),"
+        "deleteBtn('delete-ml-label-task',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-label-task-status]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
@@ -1233,7 +1300,7 @@ std::string application_script() {
         "if(!jobs.length){el.innerHTML='<p>No preparation jobs created "
         "yet.</p>';return;}"
         "el.innerHTML=table(['Name','Dataset','Operation','Status',"
-        "'Set status',''],"
+        "'Set status'],"
         "jobs.map(x=>[esc(x.name),escTrim(x.datasetId,16),esc(x.operation),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
         "esc(x.status)+'</span>',"
@@ -1241,8 +1308,8 @@ std::string application_script() {
         "PREP_JOB_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-prep-job-status',x.id)),"
-        "deleteBtn('delete-ml-prep-job',x.id)]));"
+        "applyBtn('apply-prep-job-status',x.id),"
+        "deleteBtn('delete-ml-prep-job',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-prep-job-status]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
@@ -1267,24 +1334,6 @@ std::string application_script() {
         "const TRAINING_JOB_STATUSES=['draft','queued','preparing','running',"
         "'paused','canceling','canceled','failed','completed',"
         "'awaiting_evaluation','archived'];"
-        // Compact, clearly-labeled row actions for the handful of Machine
-        // Learning buttons that carry a verb no icon reads unambiguously
-        // (Train now, Evaluate now, View result, Configure, ...): these
-        // keep visible text but get the compact .mlActionBtn sizing (see
-        // DARK_THEME_CSS) instead of stretching to the form-control default
-        // of width:100%. Apply/Delete/Approve/Reject are excluded here --
-        // those are built as icon-only buttons via iconBtn()/applyBtn()/
-        // deleteBtn()/approveBtn()/rejectBtn() above and sized by .iconBtn
-        // instead.
-        "const ML_BUTTON_KINDS=[/^run/,/^view/,/^configure/];"
-        "function styleMlActionButtons(){"
-        "for(const btn of document.querySelectorAll("
-        "'section[id^=\"panel-ml-\"] button')){"
-        "if(btn.dataset.iconified)continue;"
-        "const key=Object.keys(btn.dataset)[0];if(!key)continue;"
-        "if(!ML_BUTTON_KINDS.some(pattern=>pattern.test(key)))continue;"
-        "btn.classList.add('mlActionBtn');"
-        "btn.dataset.iconified='1';}}"
         // Phase 56: one shared formatter for real evaluation metrics so
         // Training Jobs, Evaluation Lab, and prediction results all report
         // numbers the same way.
@@ -1302,7 +1351,7 @@ std::string application_script() {
         "if(!jobs.length){el.innerHTML='<p>No training jobs created "
         "yet.</p>';return;}"
         "el.innerHTML=table(['Name','Project','Model','Dataset','Training "
-        "type','Status','Set status',''],"
+        "type','Status','Set status'],"
         "jobs.map(x=>[esc(x.name),escTrim(x.projectId,16),"
         "escTrim(x.modelId,16),escTrim(x.datasetId,16),esc(x.trainingType),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1311,9 +1360,8 @@ std::string application_script() {
         "TRAINING_JOB_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-training-job-status',x.id)),"
-        "toolbar('<button type=\"button\" data-run-ml-training-job=\"'+"
-        "x.id+'\">Train now</button>',"
+        "applyBtn('apply-training-job-status',x.id),"
+        "runBtn('run-ml-training-job',x.id,'Train now'),"
         "deleteBtn('delete-ml-training-job',x.id))]));"
         // Phase 56: "Train now" invokes the real training executor and
         // shows the genuine result (method, loss, held-out metrics) in the
@@ -1362,7 +1410,7 @@ std::string application_script() {
         "if(!runs.length){el.innerHTML='<p>No evaluation runs created "
         "yet.</p>';return;}"
         "el.innerHTML=table(['Name','Model','Dataset','Category','Status',"
-        "'Set status',''],"
+        "'Set status'],"
         "runs.map(x=>[esc(x.name),escTrim(x.modelId,16),"
         "escTrim(x.datasetId,16),esc(x.category),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1371,11 +1419,9 @@ std::string application_script() {
         "EVALUATION_RUN_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-evaluation-run-status',x.id)),"
-        "toolbar('<button type=\"button\" data-run-ml-evaluation=\"'+x.id+"
-        "'\">Evaluate now</button>',"
-        "'<button type=\"button\" data-view-ml-evaluation=\"'+x.id+"
-        "'\">View result</button>',"
+        "applyBtn('apply-evaluation-run-status',x.id),"
+        "runBtn('run-ml-evaluation',x.id,'Evaluate now'),"
+        "viewBtn('view-ml-evaluation',x.id,'View result'),"
         "deleteBtn('delete-ml-evaluation-run',x.id))]));"
         // Phase 56: "Evaluate now" scores the run's trained model against
         // its dataset for real; "View result" recalls the stored metrics.
@@ -1426,7 +1472,7 @@ std::string application_script() {
         "if(!experiments.length){el.innerHTML='<p>No experiments created "
         "yet.</p>';return;}"
         "el.innerHTML=table(['Name','Project','Model','Dataset','Status',"
-        "'Set status',''],"
+        "'Set status'],"
         "experiments.map(x=>[esc(x.name),escTrim(x.projectId,16),"
         "escTrim(x.modelId,16),escTrim(x.datasetId,16),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1435,8 +1481,8 @@ std::string application_script() {
         "EXPERIMENT_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-experiment-status',x.id)),"
-        "deleteBtn('delete-ml-experiment',x.id)]));"
+        "applyBtn('apply-experiment-status',x.id),"
+        "deleteBtn('delete-ml-experiment',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-experiment-status]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
@@ -1458,7 +1504,10 @@ std::string application_script() {
         // Fine-Tuning Interface (docs/PLAN.md "Machine Learning Abilities"
         // section 18): same status-dropdown-plus-Delete pattern as Training
         // Jobs above, reusing that section's eleven-state lifecycle since
-        // fine-tuning is a training-job variant.
+        // fine-tuning is a training-job variant. Phase 70 adds "Fine-tune
+        // now", the real executor: it warm-starts gradient descent from the
+        // base model's already-learned weights (see execute_fine_tuning_job
+        // in server.cpp) rather than training a fresh model from scratch.
         "const FINE_TUNING_JOB_STATUSES=['draft','queued','preparing',"
         "'running','paused','canceling','canceled','failed','completed',"
         "'awaiting_evaluation','archived'];"
@@ -1467,7 +1516,7 @@ std::string application_script() {
         "if(!jobs.length){el.innerHTML='<p>No fine-tuning jobs created "
         "yet.</p>';return;}"
         "el.innerHTML=table(['Name','Project','Base model','Dataset',"
-        "'Method','Status','Set status',''],"
+        "'Method','Status','Set status'],"
         "jobs.map(x=>[esc(x.name),escTrim(x.projectId,16),"
         "escTrim(x.modelId,16),escTrim(x.datasetId,16),esc(x.method),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1476,8 +1525,26 @@ std::string application_script() {
         "FINE_TUNING_JOB_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-fine-tuning-job-status',x.id)),"
-        "deleteBtn('delete-ml-fine-tuning-job',x.id)]));"
+        "applyBtn('apply-fine-tuning-job-status',x.id),"
+        "runBtn('run-ml-fine-tuning-job',x.id,'Fine-tune now'),"
+        "deleteBtn('delete-ml-fine-tuning-job',x.id))]));"
+        "for(const btn of el.querySelectorAll("
+        "'[data-run-ml-fine-tuning-job]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const out=q('#mlFineTuningRunResult');"
+        "if(out)out.textContent='Fine-tuning...';btn.disabled=true;"
+        "try{const r=await api('/api/v1/ml/fine-tuning-jobs/'+"
+        "encodeURIComponent(btn.dataset.runMlFineTuningJob)+'/run','POST',{});"
+        "if(out)out.textContent='Fine-tuned '+r.method+' over '+r.epochs+"
+        "' epochs on '+r.trainRows+' rows (final loss '+"
+        "Number(r.finalLoss).toPrecision(4)+'). '+"
+        "(r.evaluatedOnTest?'Held-out ('+r.testRows+' rows): '"
+        ":'No held-out rows; metrics use training data: ')+"
+        "fmtMlMetrics(r.metrics)+' Adapted model ID: '+r.modelId;"
+        "await load();}"
+        "catch(x){if(out)out.textContent='';"
+        "showSystemError('Fine-tuning failed: '+x.message);}"
+        "finally{btn.disabled=false;}});}"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-fine-tuning-job-status]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
@@ -1548,7 +1615,7 @@ std::string application_script() {
         "if(!configs.length){el.innerHTML='<p>No model builder "
         "configurations created yet.</p>';return;}"
         "el.innerHTML=table(['Name','Project','Base model','Source type',"
-        "'Architecture','Mode','Status','Set status',''],"
+        "'Architecture','Mode','Status','Set status'],"
         "configs.map(x=>[esc(x.name),escTrim(x.projectId,16),"
         "escTrim(x.baseModelId,16),esc(x.sourceType),"
         "esc((x.settings&&x.settings.architecture)||''),"
@@ -1559,10 +1626,8 @@ std::string application_script() {
         "'\">'+MODEL_BUILDER_CONFIG_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-model-builder-config-status',x.id)),"
-        "toolbar('<button type=\"button\" "
-        "data-configure-ml-model-builder-config=\"'+x.id+"
-        "'\">Configure</button>',"
+        "applyBtn('apply-model-builder-config-status',x.id),"
+        "configureBtn('configure-ml-model-builder-config',x.id),"
         "deleteBtn('delete-ml-model-builder-config',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-configure-ml-model-builder-config]')){"
@@ -1600,7 +1665,7 @@ std::string application_script() {
         "if(!examples.length){el.innerHTML='<p>No instruction examples "
         "created yet.</p>';return;}"
         "el.innerHTML=table(['Name','Dataset','Subject classification',"
-        "'Status','Set status',''],"
+        "'Status','Set status'],"
         "examples.map(x=>[esc(x.name),escTrim(x.datasetId,16),"
         "esc(x.subjectClassification),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1609,8 +1674,8 @@ std::string application_script() {
         "'\">'+INSTRUCTION_EXAMPLE_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-instruction-example-status',x.id)),"
-        "deleteBtn('delete-ml-instruction-example',x.id)]));"
+        "applyBtn('apply-instruction-example-status',x.id),"
+        "deleteBtn('delete-ml-instruction-example',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-instruction-example-status]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
@@ -1643,7 +1708,7 @@ std::string application_script() {
         "if(!records.length){el.innerHTML='<p>No synthetic records "
         "created yet.</p>';return;}"
         "el.innerHTML=table(['Name','Dataset','Generation technique',"
-        "'Status','Set status',''],"
+        "'Status','Set status'],"
         "records.map(x=>[esc(x.name),escTrim(x.datasetId,16),"
         "esc(x.generationTechnique),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1652,8 +1717,8 @@ std::string application_script() {
         "'\">'+SYNTHETIC_RECORD_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-synthetic-record-status',x.id)),"
-        "deleteBtn('delete-ml-synthetic-record',x.id)]));"
+        "applyBtn('apply-synthetic-record-status',x.id),"
+        "deleteBtn('delete-ml-synthetic-record',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-synthetic-record-status]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
@@ -1683,7 +1748,7 @@ std::string application_script() {
         "if(!stores.length){el.innerHTML='<p>No vector stores registered "
         "yet.</p>';return;}"
         "el.innerHTML=table(['Name','Embedding model','Distance metric',"
-        "'Status','Set status',''],"
+        "'Status','Set status'],"
         "stores.map(x=>[esc(x.name),esc(x.embeddingModel),"
         "esc(x.distanceMetric),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1692,9 +1757,8 @@ std::string application_script() {
         "VECTOR_STORE_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-vector-store-status',x.id)),"
-        "toolbar('<button type=\"button\" data-view-ml-vector-index=\"'+"
-        "x.id+'\">View index</button>',"
+        "applyBtn('apply-vector-store-status',x.id),"
+        "viewBtn('view-ml-vector-index',x.id,'View index'),"
         "deleteBtn('delete-ml-vector-store',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-vector-store-status]')){"
@@ -1735,7 +1799,7 @@ std::string application_script() {
         "if(!configs.length){el.innerHTML='<p>No RAG configurations "
         "registered yet.</p>';return;}"
         "el.innerHTML=table(['Name','Search strategy','Vector store',"
-        "'Status','Set status',''],"
+        "'Status','Set status'],"
         "configs.map(x=>[esc(x.name),esc(x.searchStrategy),"
         "escTrim(x.vectorStoreId,16),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1744,8 +1808,8 @@ std::string application_script() {
         "RAG_CONFIG_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-rag-config-status',x.id)),"
-        "deleteBtn('delete-ml-rag-config',x.id)]));"
+        "applyBtn('apply-rag-config-status',x.id),"
+        "deleteBtn('delete-ml-rag-config',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-rag-config-status]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
@@ -1775,7 +1839,7 @@ std::string application_script() {
         "if(!exams.length){el.innerHTML='<p>No subject exams created "
         "yet.</p>';return;}"
         "el.innerHTML=table(['Name','Subject ID','Question format',"
-        "'Status','Set status',''],"
+        "'Status','Set status'],"
         "exams.map(x=>[esc(x.name),escTrim(x.subjectId,16),"
         "esc(x.questionFormat),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1784,8 +1848,8 @@ std::string application_script() {
         "SUBJECT_EXAM_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-subject-exam-status',x.id)),"
-        "deleteBtn('delete-ml-subject-exam',x.id)]));"
+        "applyBtn('apply-subject-exam-status',x.id),"
+        "deleteBtn('delete-ml-subject-exam',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-subject-exam-status]')){"
         "btn.addEventListener('click',async()=>{"
@@ -1815,7 +1879,7 @@ std::string application_script() {
         "if(!searches.length){el.innerHTML='<p>No hyperparameter searches "
         "created yet.</p>';return;}"
         "el.innerHTML=table(['Name','Training job ID','Strategy',"
-        "'Status','Set status',''],"
+        "'Status','Set status'],"
         "searches.map(x=>[esc(x.name),escTrim(x.trainingJobId,16),"
         "esc(x.strategy),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1824,8 +1888,8 @@ std::string application_script() {
         "'\">'+HYPERPARAMETER_SEARCH_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-hyperparameter-search-status',x.id)),"
-        "deleteBtn('delete-ml-hyperparameter-search',x.id)]));"
+        "applyBtn('apply-hyperparameter-search-status',x.id),"
+        "deleteBtn('delete-ml-hyperparameter-search',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-hyperparameter-search-status]')){"
         "btn.addEventListener('click',async()=>{"
@@ -1855,7 +1919,7 @@ std::string application_script() {
         "if(!runs.length){el.innerHTML='<p>No model optimization runs "
         "created yet.</p>';return;}"
         "el.innerHTML=table(['Name','Model ID','Operation',"
-        "'Status','Set status',''],"
+        "'Status','Set status'],"
         "runs.map(x=>[esc(x.name),escTrim(x.modelId,16),esc(x.operation),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
         "esc(x.status)+'</span>',"
@@ -1863,8 +1927,8 @@ std::string application_script() {
         "'\">'+MODEL_OPTIMIZATION_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-model-optimization-status',x.id)),"
-        "deleteBtn('delete-ml-model-optimization',x.id)]));"
+        "applyBtn('apply-model-optimization-status',x.id),"
+        "deleteBtn('delete-ml-model-optimization',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-model-optimization-status]')){"
         "btn.addEventListener('click',async()=>{"
@@ -1893,7 +1957,7 @@ std::string application_script() {
         "if(!checkpoints.length){el.innerHTML='<p>No checkpoints recorded "
         "yet.</p>';return;}"
         "el.innerHTML=table(['Name','Training job ID','Capture reason',"
-        "'Status','Set status',''],"
+        "'Status','Set status'],"
         "checkpoints.map(x=>[esc(x.name),escTrim(x.trainingJobId,16),"
         "esc(x.captureReason),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1902,8 +1966,8 @@ std::string application_script() {
         "CHECKPOINT_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-checkpoint-status',x.id)),"
-        "deleteBtn('delete-ml-checkpoint',x.id)]));"
+        "applyBtn('apply-checkpoint-status',x.id),"
+        "deleteBtn('delete-ml-checkpoint',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-checkpoint-status]')){"
         "btn.addEventListener('click',async()=>{"
@@ -1932,7 +1996,7 @@ std::string application_script() {
         "if(!deployments.length){el.innerHTML='<p>No deployments recorded "
         "yet.</p>';return;}"
         "el.innerHTML=table(['Name','Model ID','Environment','Strategy',"
-        "'Status','Set status',''],"
+        "'Status','Set status'],"
         "deployments.map(x=>[esc(x.name),escTrim(x.modelId,16),"
         "esc(x.environment),esc(x.strategy),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1941,8 +2005,8 @@ std::string application_script() {
         "DEPLOYMENT_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-deployment-status',x.id)),"
-        "deleteBtn('delete-ml-deployment',x.id)]));"
+        "applyBtn('apply-deployment-status',x.id),"
+        "deleteBtn('delete-ml-deployment',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-deployment-status]')){"
         "btn.addEventListener('click',async()=>{"
@@ -1983,7 +2047,7 @@ std::string application_script() {
         "if(!comparisons.length){el.innerHTML='<p>No model comparisons "
         "created yet.</p>';return;}"
         "el.innerHTML=table(['Name','Baseline model','Candidate model',"
-        "'Benchmark dataset','Status','Set status',''],"
+        "'Benchmark dataset','Status','Set status'],"
         "comparisons.map(x=>[esc(x.name),escTrim(x.baselineModelId,16),"
         "escTrim(x.candidateModelId,16),escTrim(x.datasetId,16),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -1992,11 +2056,9 @@ std::string application_script() {
         "MODEL_COMPARISON_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-comparison-status',x.id)),"
-        "toolbar('<button type=\"button\" data-run-ml-comparison=\"'+x.id+"
-        "'\">Compare now</button>',"
-        "'<button type=\"button\" data-view-ml-comparison=\"'+x.id+"
-        "'\">View result</button>',"
+        "applyBtn('apply-comparison-status',x.id),"
+        "runBtn('run-ml-comparison',x.id,'Compare now'),"
+        "viewBtn('view-ml-comparison',x.id,'View result'),"
         "deleteBtn('delete-ml-comparison',x.id))]));"
         // Phase 57: "Compare now" scores both trained artifacts against the
         // shared benchmark for real; "View result" recalls the stored
@@ -2046,7 +2108,7 @@ std::string application_script() {
         "if(!endpoints.length){el.innerHTML='<p>No inference endpoints "
         "created yet.</p>';return;}"
         "el.innerHTML=table(['Name','Model','Host','Port','Protocol',"
-        "'Status','Set status',''],"
+        "'Status','Set status'],"
         "endpoints.map(x=>[esc(x.name),escTrim(x.modelId,16),esc(x.host),"
         "esc(x.port),esc(x.protocol),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -2055,8 +2117,8 @@ std::string application_script() {
         "INFERENCE_ENDPOINT_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-endpoint-status',x.id)),"
-        "deleteBtn('delete-ml-endpoint',x.id)]));"
+        "applyBtn('apply-endpoint-status',x.id),"
+        "deleteBtn('delete-ml-endpoint',x.id))]));"
         "for(const btn of el.querySelectorAll('[data-apply-endpoint-status]')){"
         "btn.addEventListener('click',async()=>{"
         "const id=btn.dataset.applyEndpointStatus;"
@@ -2074,25 +2136,36 @@ std::string application_script() {
         "catch(x){showSystemError('Delete endpoint failed: '+"
         "x.message);}});}}"
         // Phase 63 (docs/PLAN.md "Machine Learning Abilities" section 30):
-        // same pattern; no live telemetry, see ComputeNode's class comment.
+        // same list/status/delete pattern as the other registries. Phase 67
+        // adds a real "View live telemetry" action for whichever node is
+        // flagged local -- see ComputeNode's class comment in masterai.hpp.
         "const COMPUTE_NODE_STATUSES=['available','reserved','draining',"
         "'disabled'];"
+        "function fmtMlHardware(h){if(!h)return'';"
+        "return h.physicalCpus+' physical / '+h.logicalCpus+' logical CPUs, '+"
+        "h.availableRamMiB+' / '+h.totalRamMiB+' MiB RAM available, '+"
+        "(h.gpuBackends.length?h.gpuBackends.join('/')+' GPU backend, '+"
+        "h.gpuMemoryMiB+' MiB VRAM':'no GPU backend detected')+', '+"
+        "h.storageFreeMiB+' MiB free disk ('+h.storageClass+').';}"
         "function renderMlComputeNodes(nodes){"
         "const el=q('#mlComputeNodesList');if(!el)return;"
         "if(!nodes.length){el.innerHTML='<p>No compute nodes registered "
         "yet.</p>';return;}"
-        "el.innerHTML=table(['Name','Address','OS','CPU','GPU',"
-        "'Status','Set status',''],"
+        "el.innerHTML=table(['Name','Address','OS','CPU','GPU','Local',"
+        "'Status','Set status'],"
         "nodes.map(x=>[esc(x.name),esc(x.address),esc(x.operatingSystem),"
         "escTrim(x.cpuDescription,20),escTrim(x.gpuDescription,20),"
+        "x.isLocal?'Yes':'No',"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
         "esc(x.status)+'</span>',"
         "toolbar('<select data-node-status-for=\"'+x.id+'\">'+"
         "COMPUTE_NODE_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-node-status',x.id)),"
-        "deleteBtn('delete-ml-node',x.id)]));"
+        "applyBtn('apply-node-status',x.id),"
+        "x.isLocal?viewBtn('view-ml-node-telemetry',x.id,"
+        "'View live telemetry'):'',"
+        "deleteBtn('delete-ml-node',x.id))]));"
         "for(const btn of el.querySelectorAll('[data-apply-node-status]')){"
         "btn.addEventListener('click',async()=>{"
         "const id=btn.dataset.applyNodeStatus;"
@@ -2102,6 +2175,16 @@ std::string application_script() {
         "'/status','POST',{status});await load();}"
         "catch(x){showSystemError('Update compute node status failed: '+"
         "x.message);}});}"
+        "for(const btn of el.querySelectorAll('[data-view-ml-node-telemetry]')"
+        "){btn.addEventListener('click',async()=>{"
+        "const out=q('#mlComputeNodeTelemetry');"
+        "if(out)out.textContent='Probing...';"
+        "try{const r=await api('/api/v1/ml/compute-nodes/'+"
+        "encodeURIComponent(btn.dataset.viewMlNodeTelemetry)+'/telemetry');"
+        "if(out)out.textContent='Live telemetry: '+"
+        "fmtMlHardware(r.telemetry);}"
+        "catch(x){if(out)out.textContent='';"
+        "showSystemError('Fetch telemetry failed: '+x.message);}});}"
         "for(const btn of el.querySelectorAll('[data-delete-ml-node]')){"
         "btn.addEventListener('click',async()=>{"
         "try{await api('/api/v1/ml/compute-nodes/'+"
@@ -2109,33 +2192,76 @@ std::string application_script() {
         "await load();}"
         "catch(x){showSystemError('Delete compute node failed: '+"
         "x.message);}});}}"
-        // Phase 64 (docs/PLAN.md "Machine Learning Abilities" section 37):
-        // 'Run' records a run outcome, not real stage orchestration -- see
-        // AutomationPipeline's class comment in masterai.hpp.
+        // Phase 64/69/71 (docs/PLAN.md "Machine Learning Abilities" section
+        // 37): 'Run' genuinely executes Train model/Evaluate model/Validate
+        // data/Validate model/Safety tests/Request approval/Deploy staging/
+        // Deploy production/Rollback/Monitor stages and honestly records
+        // every other named stage as skipped -- see AutomationPipeline's
+        // class comment in masterai.hpp. The run's per-stage outcome is
+        // rendered into #mlPipelineRunDetail below. Phase 71: a run now
+        // executes on a background thread and POST .../run returns
+        // immediately in the `running` state, so renderMlPipelineRun()
+        // shows a live <progress> bar (completedStageCount/totalStageCount)
+        // and the currently-running stage's name while pollMlPipelineRun()
+        // re-fetches GET .../runs once a second until the run reaches a
+        // terminal status.
         "const AUTOMATION_PIPELINE_STATUSES=['draft','active','disabled'];"
+        "function renderMlPipelineRun(run){"
+        "const el=q('#mlPipelineRunDetail');if(!el)return;"
+        "const stillRunning=run.status==='queued'||run.status==='running';"
+        "const bar=stillRunning?'<progress value=\"'+run.completedStageCount+"
+        "'\" max=\"'+(run.totalStageCount||1)+'\"></progress><p>'+"
+        "run.completedStageCount+' / '+run.totalStageCount+' stage(s) complete'+"
+        "(run.currentStage?' -- '+esc(run.currentStage):'')+'</p>':'';"
+        "el.innerHTML='<h3>Run '+esc(run.id)+' -- '+"
+        "'<span class=\"stateTag stateTag-'+esc(run.status)+'\">'+"
+        "esc(run.status)+'</span></h3>'+bar+'<p>'+esc(run.outcomeNote)+'</p>'+"
+        "table(['Stage','Status','Detail'],"
+        "(run.stageResults||[]).map(s=>[esc(s.stage),"
+        "'<span class=\"stateTag stateTag-'+esc(s.status)+'\">'+"
+        "esc(s.status)+'</span>',esc(s.detail)]));}"
+        // Re-fetches the run list (the run's own live progress fields, not
+        // just its final result) once a second until the run this button
+        // started reaches a terminal status, re-rendering the progress bar
+        // and stage table on every tick so the operator can see how far
+        // along a still-running pipeline is instead of staring at a
+        // disabled button with no feedback.
+        "const TERMINAL_PIPELINE_RUN_STATES=new Set("
+        "['completed','failed','canceled']);"
+        "async function pollMlPipelineRun(pipelineId,runId){"
+        "for(;;){let run;"
+        "try{const d=await api('/api/v1/ml/automation-pipelines/'+"
+        "encodeURIComponent(pipelineId)+'/runs');"
+        "run=(d.pipelineRuns||[]).find(r=>r.id===runId);}"
+        "catch(x){console.warn('pipeline run poll tick failed, retrying "
+        "next interval',x);}"
+        "if(run)renderMlPipelineRun(run);"
+        "if(run&&TERMINAL_PIPELINE_RUN_STATES.has(run.status))return run;"
+        "await new Promise(r=>setTimeout(r,1000));}}"
         "function renderMlAutomationPipelines(pipelines){"
         "const el=q('#mlAutomationPipelinesList');if(!el)return;"
         "if(!pipelines.length){el.innerHTML='<p>No automation pipelines "
         "created yet.</p>';return;}"
-        "el.innerHTML=table(['Name','Project','Stages','Status',"
-        "'Set status',''],"
+        "el.innerHTML=table(['Name','Project','Stages','Dataset','Model',"
+        "'Status','Set status'],"
         "pipelines.map(x=>[esc(x.name),escTrim(x.projectId,16),"
-        "escTrim(x.stages,24),"
+        "escTrim(x.stages,24),escTrim(x.datasetId,16),escTrim(x.modelId,16),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
         "esc(x.status)+'</span>',"
         "toolbar('<select data-pipeline-status-for=\"'+x.id+'\">'+"
         "AUTOMATION_PIPELINE_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-pipeline-status',x.id)),"
-        "toolbar('<button type=\"button\" data-run-ml-pipeline=\"'+x.id+"
-        "'\">Run</button>',"
+        "applyBtn('apply-pipeline-status',x.id),"
+        "runBtn('run-ml-pipeline',x.id,'Run pipeline'),"
         "deleteBtn('delete-ml-pipeline',x.id))]));"
         "for(const btn of el.querySelectorAll('[data-run-ml-pipeline]')){"
         "btn.addEventListener('click',async()=>{btn.disabled=true;"
-        "try{await api('/api/v1/ml/automation-pipelines/'+"
-        "encodeURIComponent(btn.dataset.runMlPipeline)+'/run','POST',{});"
-        "await load();}"
+        "const pipelineId=btn.dataset.runMlPipeline;"
+        "try{const run=await api('/api/v1/ml/automation-pipelines/'+"
+        "encodeURIComponent(pipelineId)+'/run','POST',{});"
+        "renderMlPipelineRun(run);"
+        "await pollMlPipelineRun(pipelineId,run.id);await load();}"
         "catch(x){showSystemError('Run pipeline failed: '+x.message);}"
         "finally{btn.disabled=false;}});}"
         "for(const btn of el.querySelectorAll('[data-apply-pipeline-status]')){"
@@ -2163,7 +2289,7 @@ std::string application_script() {
         "if(!policies.length){el.innerHTML='<p>No safety policies created "
         "yet.</p>';return;}"
         "el.innerHTML=table(['Name','Scope','Restricted categories',"
-        "'Status','Set status',''],"
+        "'Status','Set status'],"
         "policies.map(x=>[esc(x.name),esc(x.scope),"
         "escTrim(x.restrictedDataCategories,24),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
@@ -2172,8 +2298,8 @@ std::string application_script() {
         "SAFETY_POLICY_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-policy-status',x.id)),"
-        "deleteBtn('delete-ml-policy',x.id)]));"
+        "applyBtn('apply-policy-status',x.id),"
+        "deleteBtn('delete-ml-policy',x.id))]));"
         "for(const btn of el.querySelectorAll('[data-apply-policy-status]')){"
         "btn.addEventListener('click',async()=>{"
         "const id=btn.dataset.applyPolicyStatus;"
@@ -2194,7 +2320,7 @@ std::string application_script() {
         "const el=q('#mlModelCardsList');if(!el)return;"
         "if(!cards.length){el.innerHTML='<p>No model cards created yet."
         "</p>';return;}"
-        "el.innerHTML=table(['Model','Purpose','Status','Set status',''],"
+        "el.innerHTML=table(['Model','Purpose','Status','Set status'],"
         "cards.map(x=>[escTrim(x.modelId,20),escTrim(x.purpose,28),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
         "esc(x.status)+'</span>',"
@@ -2202,8 +2328,8 @@ std::string application_script() {
         "SAFETY_POLICY_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
-        "applyBtn('apply-card-status',x.id)),"
-        "deleteBtn('delete-ml-card',x.id)]));"
+        "applyBtn('apply-card-status',x.id),"
+        "deleteBtn('delete-ml-card',x.id))]));"
         "for(const btn of el.querySelectorAll('[data-apply-card-status]')){"
         "btn.addEventListener('click',async()=>{"
         "const id=btn.dataset.applyCardStatus;"
@@ -2230,6 +2356,43 @@ std::string application_script() {
         "entries.map(x=>[esc(new Date(x.timestampEpochSeconds*1000)"
         ".toLocaleString()),esc(x.event),esc(x.actor),esc(x.outcome),"
         "esc(x.detail)]));}"
+        // Phase 68 (docs/PLAN.md "Machine Learning Abilities" section 44):
+        // a read-only aggregation over data other real phases already
+        // measured -- see the /api/v1/ml/monitoring handler's own comment
+        // in server.cpp for exactly what is real here and what remains
+        // planned (per-step training curves, live per-request telemetry,
+        // temperature/network sensors).
+        "function renderMlMonitoring(data){"
+        "const panel=q('#mlMonitoringPanel');if(!panel)return;"
+        "const sys=q('#mlMonitoringSystem');"
+        "if(sys)sys.textContent=data.systemResources?"
+        "fmtMlHardware(data.systemResources):"
+        "'No system resource snapshot available.';"
+        "const jobs=q('#mlMonitoringTrainingJobs');"
+        "if(jobs){const counts=data.trainingJobCounts||{};"
+        "const keys=Object.keys(counts);"
+        "jobs.innerHTML=keys.length?table(['Training job status','Count'],"
+        "keys.map(k=>[esc(k),String(counts[k])])):"
+        "'<p>No training jobs recorded yet.</p>';}"
+        "const evals=q('#mlMonitoringEvaluations');"
+        "if(evals){const rows=data.evaluationMetrics||[];"
+        "evals.innerHTML=rows.length?table("
+        "['Evaluation run','Model','Dataset','Measured result'],"
+        "rows.map(x=>[esc(x.name),escTrim(x.modelId,16),"
+        "escTrim(x.datasetId,16),fmtMlMetrics(x.metrics)])):"
+        "'<p>No completed evaluation runs with stored metrics yet.</p>';}"
+        "const benches=q('#mlMonitoringBenchmarks');"
+        "if(benches){const rows=data.inferenceBenchmarks||[];"
+        "benches.innerHTML=rows.length?table("
+        "['Model','Benchmark profile','Prompt tokens/sec',"
+        "'Generation tokens/sec','Passed cases'],"
+        "rows.map(x=>[escTrim(x.modelId,16),esc(x.profile),"
+        "Number(x.promptTokensPerSecond).toFixed(1),"
+        "Number(x.generationTokensPerSecond).toFixed(1),"
+        "x.passedCases+' / '+x.totalCases])):"
+        "'<p>No benchmark runs recorded yet -- run one from the "
+        "Dashboard to populate real inference throughput evidence "
+        "here.</p>';}}"
         // Each row gets its own Start/resume, Pause, Stop, and Remove buttons
         // wired directly to that job's id -- nothing to hand-type, unlike the
         // old single manual 'Download job ID' field this replaces. The State
@@ -2244,14 +2407,15 @@ std::string application_script() {
         "'<span id=\"state-'+x.id+'\">'+esc(x.state)+'</span>',"
         "'<span id=\"progress-'+x.id+'\">'+"
         "(x.completedBytes/1048576).toFixed(1)+' MiB</span>',"
-        "'<button type=\"button\" data-run-id=\"'+x.id+'\" '+"
-        "(x.state==='complete'?'disabled':'')+'>'+"
-        "(x.state==='complete'?'Complete':'Start / resume')+'</button>'+"
+        "toolbar("
+        "iconBtn(x.state==='complete'?'check':'play',"
+        "x.state==='complete'?'Complete':'Start / resume','run-id',x.id,"
+        "'',x.state==='complete'?'disabled':''),"
         "(x.state==='transferring'?"
-        "' <button type=\"button\" data-pause-id=\"'+x.id+'\">Pause</button>':'')+"
+        "iconBtn('pause','Pause','pause-id',x.id):''),"
         "(ACTIVE.has(x.state)?"
-        "' <button type=\"button\" data-stop-id=\"'+x.id+'\">Stop</button>':'')+"
-        "' <button type=\"button\" data-remove-id=\"'+x.id+'\">Remove</button>']));"
+        "iconBtn('stop','Stop','stop-id',x.id,'iconBtn-delete'):''),"
+        "iconBtn('trash','Remove','remove-id',x.id,'iconBtn-delete'))]));"
         "for(const btn of el.querySelectorAll('[data-run-id]')){"
         "btn.addEventListener('click',()=>runDownloadJob(btn.dataset.runId));}"
         "for(const btn of el.querySelectorAll('[data-pause-id]')){"
@@ -3393,14 +3557,17 @@ std::string application_script() {
         "operatingSystem:q('#mlComputeNodeOperatingSystem').value,"
         "cpuDescription:q('#mlComputeNodeCpuDescription').value,"
         "gpuDescription:q('#mlComputeNodeGpuDescription').value,"
-        "memoryMib:Number(q('#mlComputeNodeMemoryMib').value)||0})));"
+        "memoryMib:Number(q('#mlComputeNodeMemoryMib').value)||0,"
+        "isLocal:q('#mlComputeNodeIsLocal').checked})));"
         "if(q('#newMlAutomationPipeline'))"
         "q('#newMlAutomationPipeline').addEventListener("
         "'submit',e=>submit(e,'/api/v1/ml/automation-pipelines',"
         "()=>({name:q('#mlPipelineName').value,"
         "projectId:q('#mlPipelineProjectId').value,"
         "description:q('#mlPipelineDescription').value,"
-        "stages:q('#mlPipelineStages').value})));"
+        "stages:q('#mlPipelineStages').value,"
+        "datasetId:q('#mlPipelineDatasetId').value,"
+        "modelId:q('#mlPipelineModelId').value})));"
         "if(q('#newMlSafetyPolicy'))"
         "q('#newMlSafetyPolicy').addEventListener("
         "'submit',e=>submit(e,'/api/v1/ml/safety-policies',"
@@ -3446,7 +3613,7 @@ std::string login_page() {
         "<input id=\"setupDisplay\" required>"
         "<label for=\"setupPassword\">Password (minimum 8 characters)</label>"
         "<input id=\"setupPassword\" type=\"password\" minlength=\"8\" required>"
-        "<button>Create administrator</button></form></section>"
+        "<button title=\"Create administrator\">" ICON_PLUS_SVG " Create administrator</button></form></section>"
         "<section id=\"loginSection\"><p>Sign in with your MasterAI or "
         "operating-system account.</p><form id=\"login\"><label for=\"username\">"
         "User name</label><input id=\"username\" autocomplete=\"username\" required>"
@@ -3571,7 +3738,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<form id=\"newProject\"><label>Project ID<input id=\"projectId\" "
             "required pattern=\"[A-Za-z0-9_.-]+\"></label><label>Name"
             "<input id=\"projectName\" required></label>"
-            "<button>Create project</button></form>"
+            "<button title=\"Create project\">" ICON_PLUS_SVG " Create project</button></form>"
             "<div id=\"projectsList\">Loading...</div></div></section>";
     } else if (section == "models-inventory") {
         body =
@@ -3685,7 +3852,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label class=\"checkboxLabel\"><input id=\"downloadLicense\" "
             "type=\"checkbox\" required> "
             "I have reviewed and accept this model's license</label>"
-            "<button>Queue download</button></form>"
+            "<button title=\"Queue download\">" ICON_DOWNLOAD_SVG " Queue download</button></form>"
             // Active downloads lives at the bottom of this same page --
             // queueing a download and watching it run are one continuous
             // task, not two separate destinations.
@@ -3730,7 +3897,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "rows=\"2\"></textarea></label>"
             "<label>Subject domain<input id=\"mlProjectSubjectDomain\"></label>"
             "<label>Model task<input id=\"mlProjectModelTask\"></label>"
-            "<button>Create project</button></form>"
+            "<button title=\"Create project\">" ICON_PLUS_SVG " Create project</button></form>"
             "</div><div>"
             "<h2>Projects</h2><div id=\"mlProjectsList\">Loading...</div>"
             "</div></section>";
@@ -3758,7 +3925,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Source<input id=\"mlModelSource\" "
             "placeholder=\"where this model came from\"></label>"
             "<label>License<input id=\"mlModelLicense\"></label>"
-            "<button>Register model</button></form>"
+            "<button title=\"Register model\">" ICON_PLUS_SVG " Register model</button></form>"
             // Phase 56: live prediction against a trained model's persisted
             // weights. Feature values are entered as JSON keyed by column
             // name so the caller never has to know the internal ordering.
@@ -3771,7 +3938,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "{&quot;sepal_length&quot;:5.1,&quot;sepal_width&quot;:3.5})"
             "<textarea id=\"mlPredictFeatures\" rows=\"3\" required>"
             "</textarea></label>"
-            "<button>Predict</button></form>"
+            "<button title=\"Predict\">" ICON_PLAY_SVG " Predict</button></form>"
             "<p id=\"mlPredictResult\"></p>"
             "</div><div>"
             "<h2>Registered models</h2>"
@@ -3799,7 +3966,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>License<input id=\"mlDatasetLicense\"></label>"
             "<label>Data format<input id=\"mlDatasetFormat\" "
             "placeholder=\"e.g. JSONL, CSV\"></label>"
-            "<button>Register dataset</button></form>"
+            "<button title=\"Register dataset\">" ICON_PLUS_SVG " Register dataset</button></form>"
             // Phase 56: real content upload. The CSV is fully parsed and
             // validated server-side before it is stored, and the returned
             // profile (rows, columns, task) is shown below the form.
@@ -3813,7 +3980,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>CSV file (header row first; feature columns must be "
             "numeric)<input id=\"mlDatasetContentFile\" type=\"file\" "
             "accept=\".csv,text/csv\" required></label>"
-            "<button>Upload content</button></form>"
+            "<button title=\"Upload content\">" ICON_UPLOAD_SVG " Upload content</button></form>"
             "<p id=\"mlDatasetContentResult\"></p>"
             "</div><div>"
             "<h2>Registered datasets</h2>"
@@ -3837,7 +4004,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "placeholder=\"what this subject does and does not cover\">"
             "</textarea></label>"
             "<label>Target audience<input id=\"mlSubjectTargetAudience\"></label>"
-            "<button>Create subject package</button></form>"
+            "<button title=\"Create subject package\">" ICON_PLUS_SVG " Create subject package</button></form>"
             "<h2>Ingest a knowledge file</h2>"
             "<p>Select a real local text source. MasterAI hashes it, creates "
             "overlapping chunks, generates local deterministic vectors, and "
@@ -3852,7 +4019,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "required></label><p class=\"fieldHint\">Size limit is set by the "
             "administrator. Text, Markdown, CSV, JSON, JSONL, and Parquet are "
             "supported.</p>"
-            "<button>Ingest and index file</button></form>"
+            "<button title=\"Ingest and index file\">" ICON_UPLOAD_SVG " Ingest and index file</button></form>"
             "<p id=\"mlKnowledgeUploadResult\"></p>"
             "</div><div>"
             "<h2>Subject packages</h2>"
@@ -3883,7 +4050,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</label>"
             "<label>Assignee (optional)<select id=\"mlLabelTaskAssigneeId\">"
             "<option value=\"\">Unassigned</option></select></label>"
-            "<button>Create labeling task</button></form>"
+            "<button title=\"Create labeling task\">" ICON_PLUS_SVG " Create labeling task</button></form>"
             "</div><div>"
             "<h2>Labeling tasks</h2>"
             "<div id=\"mlLabelTasksList\">Loading...</div>"
@@ -3910,7 +4077,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Operation<input id=\"mlPrepJobOperation\" required "
             "placeholder=\"e.g. remove_duplicates, redact_pii, split_dataset\">"
             "</label>"
-            "<button>Create preparation job</button></form>"
+            "<button title=\"Create preparation job\">" ICON_PLUS_SVG " Create preparation job</button></form>"
             "</div><div>"
             "<h2>Preparation jobs</h2>"
             "<div id=\"mlPrepJobsList\">Loading...</div>"
@@ -3941,7 +4108,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Training type<input id=\"mlTrainingJobTrainingType\" "
             "placeholder=\"e.g. fine_tuning, transfer_learning, lora\">"
             "</label>"
-            "<button>Create training job</button></form>"
+            "<button title=\"Create training job\">" ICON_PLUS_SVG " Create training job</button></form>"
             "</div><div>"
             "<h2>Training jobs</h2>"
             "<div id=\"mlTrainingJobsList\">Loading...</div>"
@@ -3977,7 +4144,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Category<input id=\"mlEvaluationRunCategory\" "
             "placeholder=\"e.g. accuracy, f1_score, hallucination_rate\">"
             "</label>"
-            "<button>Create evaluation run</button></form>"
+            "<button title=\"Create evaluation run\">" ICON_PLUS_SVG " Create evaluation run</button></form>"
             "</div><div>"
             "<h2>Evaluation runs</h2>"
             "<div id=\"mlEvaluationRunsList\">Loading...</div>"
@@ -4010,7 +4177,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "maxlength=\"160\"></label>"
             "<label>Description<textarea id=\"mlExperimentDescription\" "
             "rows=\"2\"></textarea></label>"
-            "<button>Create experiment</button></form>"
+            "<button title=\"Create experiment\">" ICON_PLUS_SVG " Create experiment</button></form>"
             "</div><div>"
             "<h2>Experiments</h2>"
             "<div id=\"mlExperimentsList\">Loading...</div>"
@@ -4042,10 +4209,18 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Method<input id=\"mlFineTuningJobMethod\" "
             "placeholder=\"e.g. subject_specialisation, code_assistant, "
             "safety_alignment\"></label>"
-            "<button>Create fine-tuning job</button></form>"
+            "<button title=\"Create fine-tuning job\">" ICON_PLUS_SVG " Create fine-tuning job</button></form>"
             "</div><div>"
             "<h2>Fine-tuning jobs</h2>"
             "<div id=\"mlFineTuningJobsList\">Loading...</div>"
+            // Phase 70: the real fine-tuning executor reports its genuine
+            // result (method, final loss, held-out metrics, adapted model
+            // id) here after a "Fine-tune now" click.
+            "<h2>Last fine-tuning result</h2>"
+            "<p id=\"mlFineTuningRunResult\">No fine-tuning run in this "
+            "session yet. Click \"Fine-tune now\" on a job whose base model "
+            "has been trained and whose dataset has uploaded CSV "
+            "content.</p>"
             "</div></section>";
     } else if (section == "ml-model-builder-configs") {
         // Phase 46 (docs/PLAN.md "Machine Learning Abilities" section 9) at
@@ -4075,7 +4250,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Description<textarea "
             "id=\"mlModelBuilderConfigDescription\" rows=\"2\"></textarea>"
             "</label>"
-            "<button>Create configuration</button></form>"
+            "<button title=\"Create configuration\">" ICON_PLUS_SVG " Create configuration</button></form>"
             "</div><div>"
             "<h2>Configure build settings</h2>"
             "<p id=\"mlMbcTarget\">Press Configure on a configuration in "
@@ -4151,7 +4326,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "id=\"mlMbcDistributedTrainingSettings\" rows=\"2\" "
             "placeholder=\"e.g. 2-node data parallel\"></textarea></label>"
             "</div>"
-            "<button>Save build settings</button></form>"
+            "<button title=\"Save build settings\">" ICON_SAVE_SVG " Save build settings</button></form>"
             "</div><div>"
             "<h2>Model builder configurations</h2>"
             "<div id=\"mlModelBuilderConfigsList\">Loading...</div>"
@@ -4181,7 +4356,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Subject classification<input "
             "id=\"mlInstructionExampleSubjectClassification\" "
             "placeholder=\"e.g. cpp_code_review, customer_support\"></label>"
-            "<button>Create instruction example</button></form>"
+            "<button title=\"Create instruction example\">" ICON_PLUS_SVG " Create instruction example</button></form>"
             "</div><div>"
             "<h2>Instruction examples</h2>"
             "<div id=\"mlInstructionExamplesList\">Loading...</div>"
@@ -4213,7 +4388,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "id=\"mlSyntheticRecordGenerationTechnique\" "
             "placeholder=\"e.g. paraphrase, edge_case, counterexample\">"
             "</label>"
-            "<button>Create synthetic record</button></form>"
+            "<button title=\"Create synthetic record\">" ICON_PLUS_SVG " Create synthetic record</button></form>"
             "</div><div>"
             "<h2>Synthetic records</h2>"
             "<div id=\"mlSyntheticRecordsList\">Loading...</div>"
@@ -4245,7 +4420,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Distance metric<select id=\"mlVectorStoreDistanceMetric\">"
             "<option value=\"cosine\">Cosine similarity</option>"
             "</select></label>"
-            "<button>Create vector store</button></form>"
+            "<button title=\"Create vector store\">" ICON_PLUS_SVG " Create vector store</button></form>"
             "</div><div>"
             "<h2>Vector stores</h2>"
             "<div id=\"mlVectorStoresList\">Loading...</div>"
@@ -4279,7 +4454,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</select></label>"
             "<label>Vector store<select id=\"mlRagConfigVectorStoreId\" required>"
             "<option value=\"\">Choose a vector store</option></select></label>"
-            "<button>Create RAG configuration</button></form>"
+            "<button title=\"Create RAG configuration\">" ICON_PLUS_SVG " Create RAG configuration</button></form>"
             "<h2>Test retrieval</h2>"
             "<form id=\"mlRagQueryForm\">"
             "<label>Approved RAG configuration<select id=\"mlRagQueryConfigId\" required>"
@@ -4289,7 +4464,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "required maxlength=\"8192\"></textarea></label>"
             "<label>Retrieved chunks<input id=\"mlRagQueryTopK\" type=\"number\" "
             "min=\"1\" max=\"20\" value=\"5\" required></label>"
-            "<button>Retrieve grounded context</button></form>"
+            "<button title=\"Retrieve grounded context\">" ICON_PLAY_SVG " Retrieve grounded context</button></form>"
             "</div><div>"
             "<h2>RAG configurations</h2>"
             "<div id=\"mlRagConfigsList\">Loading...</div>"
@@ -4321,7 +4496,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "id=\"mlSubjectExamQuestionFormat\" "
             "placeholder=\"e.g. multiple_choice, short_answer, code_task\">"
             "</label>"
-            "<button>Create subject exam</button></form>"
+            "<button title=\"Create subject exam\">" ICON_PLUS_SVG " Create subject exam</button></form>"
             "</div><div>"
             "<h2>Subject exams</h2>"
             "<div id=\"mlSubjectExamsList\">Loading...</div>"
@@ -4352,7 +4527,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Search strategy<input "
             "id=\"mlHyperparameterSearchStrategy\" "
             "placeholder=\"e.g. grid, random, bayesian\"></label>"
-            "<button>Create hyperparameter search</button></form>"
+            "<button title=\"Create hyperparameter search\">" ICON_PLUS_SVG " Create hyperparameter search</button></form>"
             "</div><div>"
             "<h2>Hyperparameter searches</h2>"
             "<div id=\"mlHyperparameterSearchesList\">Loading...</div>"
@@ -4381,7 +4556,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Operation<input id=\"mlModelOptimizationOperation\" "
             "placeholder=\"e.g. quantization, pruning, distillation\">"
             "</label>"
-            "<button>Create model optimization</button></form>"
+            "<button title=\"Create model optimization\">" ICON_PLUS_SVG " Create model optimization</button></form>"
             "</div><div>"
             "<h2>Model optimization runs</h2>"
             "<div id=\"mlModelOptimizationsList\">Loading...</div>"
@@ -4410,7 +4585,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "id=\"mlCheckpointDescription\" rows=\"2\"></textarea></label>"
             "<label>Capture reason<input id=\"mlCheckpointCaptureReason\" "
             "placeholder=\"e.g. epoch_end, best_metric, manual\"></label>"
-            "<button>Create checkpoint record</button></form>"
+            "<button title=\"Create checkpoint record\">" ICON_PLUS_SVG " Create checkpoint record</button></form>"
             "</div><div>"
             "<h2>Checkpoints</h2>"
             "<div id=\"mlCheckpointsList\">Loading...</div>"
@@ -4440,7 +4615,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "placeholder=\"e.g. development, staging, production\"></label>"
             "<label>Strategy<input id=\"mlDeploymentStrategy\" "
             "placeholder=\"e.g. direct, blue_green, canary\"></label>"
-            "<button>Create deployment</button></form>"
+            "<button title=\"Create deployment\">" ICON_PLUS_SVG " Create deployment</button></form>"
             "</div><div>"
             "<h2>Deployments</h2>"
             "<div id=\"mlDeploymentsList\">Loading...</div>"
@@ -4468,7 +4643,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Description<textarea "
             "id=\"mlModelComparisonDescription\" rows=\"2\"></textarea>"
             "</label>"
-            "<button>Create model comparison</button></form>"
+            "<button title=\"Create model comparison\">" ICON_PLUS_SVG " Create model comparison</button></form>"
             "</div><div>"
             "<h2>Model comparisons</h2>"
             "<div id=\"mlModelComparisonsList\">Loading...</div>"
@@ -4506,15 +4681,17 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "placeholder=\"e.g. api_token\"></label>"
             "<label>Rate limit, requests per minute<input "
             "id=\"mlEndpointRateLimit\" type=\"number\" min=\"0\"></label>"
-            "<button>Create inference endpoint</button></form>"
+            "<button title=\"Create inference endpoint\">" ICON_PLUS_SVG " Create inference endpoint</button></form>"
             "</div><div>"
             "<h2>Inference endpoints</h2>"
             "<div id=\"mlInferenceEndpointsList\">Loading...</div>"
             "</div></section>";
     } else if (section == "ml-compute-nodes") {
         // Phase 63 (docs/PLAN.md "Machine Learning Abilities" section 30):
-        // a static compute-node registry -- see ComputeNode's class comment
-        // in masterai.hpp for why this does not poll live telemetry.
+        // a static compute-node registry. Phase 67 adds real live telemetry
+        // for whichever single node is flagged as this MasterAI process's
+        // own host -- see ComputeNode's class comment in masterai.hpp for
+        // why a remote node still cannot be polled.
         body =
             "<section id=\"panel-ml-compute-nodes\" class=\"panel\">"
             "<div>"
@@ -4532,17 +4709,27 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</label>"
             "<label>System memory, MiB<input id=\"mlComputeNodeMemoryMib\" "
             "type=\"number\" min=\"0\"></label>"
-            "<button>Create compute node</button></form>"
+            "<label class=\"checkboxLabel\">"
+            "<input type=\"checkbox\" id=\"mlComputeNodeIsLocal\">"
+            " This is the local node MasterAI is running on (enables live "
+            "CPU/RAM/GPU telemetry)</label>"
+            "<button title=\"Create compute node\">" ICON_PLUS_SVG " Create compute node</button></form>"
             "</div><div>"
             "<h2>Compute nodes</h2>"
             "<div id=\"mlComputeNodesList\">Loading...</div>"
+            "<div id=\"mlComputeNodeTelemetry\"></div>"
             "</div></section>";
     } else if (section == "ml-automation-pipelines") {
-        // Phase 64 (docs/PLAN.md "Machine Learning Abilities" section 37):
-        // a pipeline names an ordered subset of the section's sixteen
-        // lifecycle stages; "Run" records a run outcome rather than
-        // orchestrating the other stores' real jobs -- see
-        // AutomationPipeline's class comment in masterai.hpp.
+        // Phase 64/69/71 (docs/PLAN.md "Machine Learning Abilities" section
+        // 37): a pipeline names an ordered subset of the section's sixteen
+        // lifecycle stages. "Run" genuinely executes "Train model",
+        // "Evaluate model", "Validate data", "Validate model", "Safety
+        // tests", "Request approval", "Deploy staging", "Deploy
+        // production", "Rollback", and "Monitor" (matched case-
+        // insensitively); every other named stage is honestly recorded as
+        // skipped -- see AutomationPipeline's class comment in
+        // masterai.hpp. A run executes on a background thread and reports
+        // live per-stage progress while it works.
         body =
             "<section id=\"panel-ml-automation-pipelines\" class=\"panel\">"
             "<div>"
@@ -4556,12 +4743,22 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Description<textarea id=\"mlPipelineDescription\" "
             "rows=\"2\"></textarea></label>"
             "<label>Stages, comma-separated<input id=\"mlPipelineStages\" "
-            "placeholder=\"e.g. import,validate,clean,train,evaluate,"
-            "approve,deploy_staging,monitor\"></label>"
-            "<button>Create automation pipeline</button></form>"
+            "placeholder=\"e.g. Validate data,Train model,Evaluate model,"
+            "Validate model,Safety tests,Request approval,Deploy staging,"
+            "Deploy production,Monitor\"></label>"
+            "<label>Training/evaluation dataset (for Train model / Evaluate "
+            "model / Validate data stages)<select id=\"mlPipelineDatasetId\">"
+            "<option value=\"\">None / choose a dataset</option></select>"
+            "</label>"
+            "<label>Starting model, optional (for stages that need a model "
+            "with no prior Train model stage)<select id=\"mlPipelineModelId\">"
+            "<option value=\"\">None / choose a model</option></select>"
+            "</label>"
+            "<button title=\"Create automation pipeline\">" ICON_PLUS_SVG " Create automation pipeline</button></form>"
             "</div><div>"
             "<h2>Automation pipelines</h2>"
             "<div id=\"mlAutomationPipelinesList\">Loading...</div>"
+            "<div id=\"mlPipelineRunDetail\"></div>"
             "</div></section>";
     } else if (section == "ml-safety-governance") {
         // Phase 65 (docs/PLAN.md "Machine Learning Abilities" section 40):
@@ -4581,7 +4778,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "id=\"mlSafetyPolicyRestrictedDataCategories\" rows=\"2\" "
             "placeholder=\"e.g. personal information, credentials, "
             "copyrighted text\"></textarea></label>"
-            "<button>Create safety policy</button></form>"
+            "<button title=\"Create safety policy\">" ICON_PLUS_SVG " Create safety policy</button></form>"
             "</div><div>"
             "<h2>Safety policies</h2>"
             "<div id=\"mlSafetyPoliciesList\">Loading...</div>"
@@ -4606,10 +4803,42 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "id=\"mlModelCardKnownLimitations\" rows=\"2\"></textarea>"
             "</label>"
             "<label>License<input id=\"mlModelCardLicense\"></label>"
-            "<button>Create model card</button></form>"
+            "<button title=\"Create model card\">" ICON_PLUS_SVG " Create model card</button></form>"
             "</div><div>"
             "<h2>Model cards</h2>"
             "<div id=\"mlModelCardsList\">Loading...</div>"
+            "</div></section>";
+    } else if (section == "ml-monitoring") {
+        // Phase 68 (docs/PLAN.md "Machine Learning Abilities" section 44):
+        // a read-only aggregation over data other real phases already
+        // measured -- no new store, no fabricated numbers. See the
+        // /api/v1/ml/monitoring handler's own comment in server.cpp for the
+        // exact boundary between what is real here and what remains
+        // planned.
+        body =
+            "<section id=\"panel-ml-monitoring\" class=\"panel\">"
+            "<div id=\"mlMonitoringPanel\">"
+            "<h2>System resources</h2>"
+            "<p>Live CPU/RAM/GPU/disk for the host this MasterAI process is "
+            "running on, probed fresh on every page load.</p>"
+            "<p id=\"mlMonitoringSystem\">Loading...</p>"
+            "<h2>Training job status</h2>"
+            "<p>Real status counts from every registered training job.</p>"
+            "<div id=\"mlMonitoringTrainingJobs\">Loading...</div>"
+            "<h2>Evaluation results</h2>"
+            "<p>Genuinely measured metrics from completed Evaluation Lab "
+            "runs.</p>"
+            "<div id=\"mlMonitoringEvaluations\">Loading...</div>"
+            "<h2>Inference throughput (benchmarks)</h2>"
+            "<p>Real prompt/generation tokens-per-second from actual "
+            "Benchmark runs -- the closest measured inference-performance "
+            "evidence this build has. Not live production request "
+            "telemetry: requests-per-second, latency percentiles, queue "
+            "depth, cache-hit rate, safety-filter rate, tool-call success, "
+            "retrieval latency, and model-loading time remain planned, "
+            "since no request path in this codebase is currently "
+            "instrumented to measure them.</p>"
+            "<div id=\"mlMonitoringBenchmarks\">Loading...</div>"
             "</div></section>";
     } else if (section == "ml-audit-logs") {
         // Phase 66 (docs/PLAN.md "Machine Learning Abilities" section 43):
@@ -4656,7 +4885,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "leave empty to disable Parquet ingestion"
             "<input id=\"cfgParquetHelperExecutable\" type=\"text\" "
             "data-path=\"knowledge.parquetHelperExecutable\"></label>"
-            "<button>Save Machine Learning settings</button>"
+            "<button title=\"Save Machine Learning settings\">" ICON_SAVE_SVG " Save Machine Learning settings</button>"
             "</form>"
             "<p id=\"systemConfigStatus\" role=\"status\"></p>"
             "</div></section>";
@@ -4776,7 +5005,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Maximum request size, bytes"
             "<input id=\"cfgMaxRequestBytes\" type=\"number\" min=\"1024\" "
             "data-path=\"server.maxRequestBytes\"></label>"
-            "<button>Save configuration</button>"
+            "<button title=\"Save configuration\">" ICON_SAVE_SVG " Save configuration</button>"
             "</form>"
             "<p id=\"systemConfigStatus\" role=\"status\"></p>"
             "</div></section>";
@@ -4805,7 +5034,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Password (minimum 8 characters)"
             "<input id=\"newUserPassword\" type=\"password\" "
             "minlength=\"8\" required></label>"
-            "<button>Create local account</button></form>"
+            "<button title=\"Create local account\">" ICON_PLUS_SVG " Create local account</button></form>"
             "</div></section>";
     } else if (section == "admin-users") {
         body =
@@ -4823,7 +5052,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
                         ? "<form id=\"newMemory\"><label for=\"memoryContent\">"
                           "Detail to remember</label><textarea id=\"memoryContent\" "
                           "rows=\"2\" maxlength=\"512\" required></textarea>"
-                          "<button>Save detail</button></form>"
+                          "<button title=\"Save detail\">" ICON_SAVE_SVG " Save detail</button></form>"
                         : "") +
         "<div id=\"memoryList\">Loading...</div></details>";
 
@@ -4876,13 +5105,17 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "report", "Report",
             nav_link("/app/report/system", "System Report",
                      section == "report-system"));
+        // Ordered to match the chronological order of actually building a
+        // model -- an administrator works top to bottom, project through
+        // deployment/monitoring, with the two packaging/inspection steps
+        // that only make sense once a model exists ("Model Builder", which
+        // produces the finished GGUF, and "Model Registry", which reports
+        // on it) placed last rather than grouped near the top.
         sidebar_links += sidebar_section(
             "ml", "Machine Learning",
             nav_link("/app/ml", "Dashboard", section == "ml-dashboard") +
                 nav_link("/app/ml/projects", "Projects",
                          section == "ml-projects") +
-                nav_link("/app/ml/models", "Model Registry",
-                         section == "ml-models") +
                 nav_link("/app/ml/datasets", "Dataset Manager",
                          section == "ml-datasets") +
                 nav_link("/app/ml/subjects", "Subject Knowledge Manager",
@@ -4891,46 +5124,47 @@ std::string application_page(const UserRecord& user, const std::string& section,
                          section == "ml-label-tasks") +
                 nav_link("/app/ml/prep-jobs", "Data Preparation",
                          section == "ml-prep-jobs") +
-                nav_link("/app/ml/training-jobs", "Training Jobs",
-                         section == "ml-training-jobs") +
-                nav_link("/app/ml/evaluation-runs", "Evaluation Lab",
-                         section == "ml-evaluation-runs") +
-                nav_link("/app/ml/experiments", "Experiment Tracking",
-                         section == "ml-experiments") +
-                nav_link("/app/ml/fine-tuning-jobs", "Fine-Tuning",
-                         section == "ml-fine-tuning-jobs") +
-                nav_link("/app/ml/model-builder-configs", "Model Builder",
-                         section == "ml-model-builder-configs") +
-                nav_link("/app/ml/instruction-examples",
-                         "Prompt and Instruction Training",
-                         section == "ml-instruction-examples") +
                 nav_link("/app/ml/synthetic-records",
                          "Synthetic Data Generation",
                          section == "ml-synthetic-records") +
+                nav_link("/app/ml/instruction-examples",
+                         "Prompt and Instruction Training",
+                         section == "ml-instruction-examples") +
                 nav_link("/app/ml/vector-stores",
                          "Embeddings and Vector Stores",
                          section == "ml-vector-stores") +
                 nav_link("/app/ml/rag-configs",
                          "Retrieval-Augmented Generation",
                          section == "ml-rag-configs") +
-                nav_link("/app/ml/subject-exams",
-                         "Subject Examination",
-                         section == "ml-subject-exams") +
                 nav_link("/app/ml/hyperparameter-searches",
                          "Hyperparameter Optimization",
                          section == "ml-hyperparameter-searches") +
-                nav_link("/app/ml/model-optimizations",
-                         "Model Optimization",
-                         section == "ml-model-optimizations") +
+                nav_link("/app/ml/training-jobs", "Training Jobs",
+                         section == "ml-training-jobs") +
+                nav_link("/app/ml/fine-tuning-jobs", "Fine-Tuning",
+                         section == "ml-fine-tuning-jobs") +
                 nav_link("/app/ml/checkpoints",
                          "Checkpoint Management",
                          section == "ml-checkpoints") +
-                nav_link("/app/ml/deployments",
-                         "Deployment Manager",
-                         section == "ml-deployments") +
+                nav_link("/app/ml/evaluation-runs", "Evaluation Lab",
+                         section == "ml-evaluation-runs") +
+                nav_link("/app/ml/experiments", "Experiment Tracking",
+                         section == "ml-experiments") +
+                nav_link("/app/ml/subject-exams",
+                         "Subject Examination",
+                         section == "ml-subject-exams") +
+                nav_link("/app/ml/model-optimizations",
+                         "Model Optimization",
+                         section == "ml-model-optimizations") +
                 nav_link("/app/ml/model-comparisons",
                          "Model Comparison",
                          section == "ml-model-comparisons") +
+                nav_link("/app/ml/safety-governance",
+                         "Safety and Governance",
+                         section == "ml-safety-governance") +
+                nav_link("/app/ml/deployments",
+                         "Deployment Manager",
+                         section == "ml-deployments") +
                 nav_link("/app/ml/inference-endpoints",
                          "Inference Endpoints",
                          section == "ml-inference-endpoints") +
@@ -4940,15 +5174,22 @@ std::string application_page(const UserRecord& user, const std::string& section,
                 nav_link("/app/ml/automation-pipelines",
                          "Automation Pipelines",
                          section == "ml-automation-pipelines") +
-                nav_link("/app/ml/safety-governance",
-                         "Safety and Governance",
-                         section == "ml-safety-governance") +
-                nav_link("/app/ml/audit-logs",
-                         "Audit Logs",
+                nav_link("/app/ml/model-builder-configs", "Model Builder",
+                         section == "ml-model-builder-configs"));
+        // Logs, settings, and statistics aren't build-pipeline steps -- an
+        // administrator visits them to check on or configure the system,
+        // not as part of working through a model build in order -- so they
+        // get their own tree instead of trailing the pipeline above.
+        sidebar_links += sidebar_section(
+            "ml-admin", "Machine Learning Logs and Settings",
+            nav_link("/app/ml/monitoring", "Monitoring and Diagnostics",
+                     section == "ml-monitoring") +
+                nav_link("/app/ml/audit-logs", "Audit Logs",
                          section == "ml-audit-logs") +
-                nav_link("/app/ml/settings",
-                         "Machine Learning Settings",
-                         section == "ml-settings"));
+                nav_link("/app/ml/settings", "Machine Learning Settings",
+                         section == "ml-settings") +
+                nav_link("/app/ml/models", "Model Registry (Statistics)",
+                         section == "ml-models"));
     }
 
     return html_response(
@@ -5023,12 +5264,27 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // list (status pickers, approve/reject/delete actions) in place of
         // full-width text buttons -- keeps each row a single tidy line
         // instead of stretching table cells and wrapping under the window.
-        ".rowToolbar{display:flex;align-items:center;gap:.3rem;flex-wrap:wrap}"
+        // nowrap keeps every row's action buttons on one line -- wrap let
+        // a cramped column fold the second/third button onto its own line,
+        // which is the "toolbar buttons need to be side by side" bug;
+        // table() already wraps the whole table in an overflow-x:auto div,
+        // so a genuinely too-narrow row scrolls instead of stacking.
+        ".rowToolbar{display:flex;align-items:center;gap:.3rem;flex-wrap:nowrap}"
         ".rowToolbar select{max-width:11rem}"
-        ".iconBtn{flex:none;width:1.8rem;height:1.8rem;padding:0;"
+        // margin-top:0 overrides the generic button{margin-top:.75rem}
+        // rule (see DARK_THEME_CSS) that otherwise pushes every icon
+        // button down out of vertical center with the select/text next to
+        // it in the same .rowToolbar row.
+        ".iconBtn{flex:none;width:1.8rem;height:1.8rem;padding:0;margin-top:0;"
         "display:inline-flex;align-items:center;justify-content:center;"
         "background:transparent;border:1px solid var(--panel-border);"
         "border-radius:.4rem;color:var(--muted);line-height:1;cursor:pointer}"
+        // The global "button svg{margin-right:.4rem}" rule (see
+        // DARK_THEME_CSS) exists to space an icon from the visible label
+        // text that follows it on full-width form buttons -- iconBtn
+        // buttons carry no label text, so that same margin just shoves the
+        // icon off-center inside the square button. Zero it here.
+        ".iconBtn svg{margin-right:0}"
         ".iconBtn:hover{background:var(--panel);color:var(--text)}"
         ".iconBtn-apply:hover{color:#4caf6a;border-color:#4caf6a}"
         ".iconBtn-delete:hover{color:#e5657a;border-color:#e5657a}"
@@ -5074,6 +5330,19 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // letting the table's own overflow-x scrollbar (see table()) do
         // the job, so a single wide ML card could blow out the whole row.
         ".panel>div{min-width:0}"
+        // Every Machine Learning panel that pairs a form with a list
+        // (:has(>div:nth-child(2)) excludes the handful of ML panels that
+        // are just a single list/settings card, e.g. ml-audit-logs,
+        // ml-settings) was giving the narrow form column the same 1fr
+        // share as the list column, so a list's table -- often the widest
+        // thing on the page -- got squeezed into half the panel width.
+        // Capping the form column keeps it comfortably readable while
+        // handing the rest of the row to the list.
+        "section[id^=\"panel-ml-\"].panel:has(>div:nth-child(2)){"
+        "grid-template-columns:minmax(260px,22rem) minmax(0,1fr)}"
+        "@media (max-width:900px){"
+        "section[id^=\"panel-ml-\"].panel:has(>div:nth-child(2)){"
+        "grid-template-columns:1fr}}"
         // Chat gets its own full-height flex column (centered empty-state
         // greeting, growing history, a pill composer pinned to the bottom)
         // instead of the generic multi-card grid every settings page uses,

@@ -6626,6 +6626,104 @@ void test_machine_learning_deployment_lifecycle() {
             "deployment_json did not report the deployment's own fields");
 }
 
+// Phase 71: AutomationPipelineStore's live-progress additions
+// (begin_run/append_stage_result/finish_run/find_run) must behave like a
+// real background-job record -- created immediately in `running` with a
+// known stage count, advanced stage by stage, and left in a terminal state
+// with its final outcome note -- and must survive a store reload exactly
+// like every other persisted field. The stage-executor dispatch itself
+// (run_automation_pipeline in server.cpp) is exercised as part of the
+// Server class and is not reachable from this store-level test.
+void test_machine_learning_automation_pipeline_progress_lifecycle() {
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::AutomationPipelineStore pipelines(records);
+    const auto pipeline = pipelines.create(
+        "administrator-1", "nightly-retrain", "project-1",
+        "Retrain and validate the support model nightly.",
+        "Validate data,Train model,Evaluate model,Monitor", "dataset-1", "");
+    require(!pipeline.id.empty() && pipeline.stages ==
+                "Validate data,Train model,Evaluate model,Monitor",
+            "a newly created pipeline must record its stage list verbatim");
+
+    bool rejected_unknown_pipeline = false;
+    try {
+        pipelines.begin_run("administrator-1", "nonexistent-pipeline", 4U);
+    } catch (const std::invalid_argument&) {
+        rejected_unknown_pipeline = true;
+    }
+    require(rejected_unknown_pipeline,
+            "begin_run() must reject a run against an unknown pipeline id");
+
+    auto run = pipelines.begin_run("administrator-1", pipeline.id, 4U);
+    require(!run.id.empty() &&
+                run.status == masterai::AutomationPipelineRunStatus::running &&
+                run.total_stage_count == 4U && run.completed_stage_count == 0U,
+            "begin_run() must persist a running row with the given total "
+            "stage count and zero progress");
+    require(pipelines.runs_for(pipeline.id).size() == 1U,
+            "begin_run() did not make the run visible via runs_for()");
+    require(pipelines.find_run(run.id).has_value(),
+            "find_run() did not return the run begin_run() just created");
+    require(!pipelines.find_run("nonexistent-run").has_value(),
+            "find_run() must return nullopt for an unknown run id");
+
+    require(pipelines.append_stage_result(
+                run.id, "[{\"stage\":\"Validate data\"}]", 1U,
+                "Running: Train model"),
+            "append_stage_result() rejected a known run id");
+    const auto mid_run = pipelines.find_run(run.id);
+    require(mid_run.has_value() && mid_run->completed_stage_count == 1U &&
+                mid_run->current_stage == "Running: Train model" &&
+                mid_run->stage_results_json ==
+                    "[{\"stage\":\"Validate data\"}]",
+            "append_stage_result() did not persist progress and the "
+            "current-stage label");
+    require(!pipelines.append_stage_result("nonexistent-run", "[]", 0U, ""),
+            "append_stage_result() must no-op for an unknown run id, not "
+            "throw");
+
+    require(pipelines.finish_run(
+                run.id, masterai::AutomationPipelineRunStatus::completed,
+                "Pipeline run completed; see stageResults for the outcome "
+                "of each stage."),
+            "finish_run() rejected a known run id");
+    const auto finished_run = pipelines.find_run(run.id);
+    require(finished_run.has_value() &&
+                finished_run->status ==
+                    masterai::AutomationPipelineRunStatus::completed &&
+                finished_run->current_stage.empty() &&
+                finished_run->outcome_note ==
+                    "Pipeline run completed; see stageResults for the "
+                    "outcome of each stage.",
+            "finish_run() did not persist the terminal status/outcome and "
+            "clear current_stage");
+    require(!pipelines.finish_run(
+                "nonexistent-run", masterai::AutomationPipelineRunStatus::failed,
+                "unused"),
+            "finish_run() must no-op for an unknown run id, not throw");
+
+    masterai::AutomationPipelineStore reloaded(records);
+    const auto reloaded_run = reloaded.find_run(run.id);
+    require(reloaded_run.has_value() &&
+                reloaded_run->status ==
+                    masterai::AutomationPipelineRunStatus::completed &&
+                reloaded_run->total_stage_count == 4U &&
+                reloaded_run->completed_stage_count == 1U &&
+                reloaded_run->stage_results_json ==
+                    "[{\"stage\":\"Validate data\"}]",
+            "AutomationPipelineStore did not restore a run's progress "
+            "fields after reload");
+
+    const auto json = masterai::automation_pipeline_run_json(*reloaded_run);
+    require(json.find("\"totalStageCount\":4") != std::string::npos &&
+                json.find("\"completedStageCount\":1") != std::string::npos &&
+                json.find("\"currentStage\":\"\"") != std::string::npos,
+            "automation_pipeline_run_json did not report the run's live "
+            "progress fields");
+}
+
 // Phase 56: the ML engine must actually learn, not just record intent. A
 // linearly separable classification dataset must train to high held-out
 // accuracy, a linear regression must recover a known line, artifacts must
@@ -6754,6 +6852,86 @@ void test_machine_learning_real_training_and_prediction() {
     results.put("run-56", metrics_json);
     require(results.find("run-56").value_or("") == metrics_json,
             "EvaluationResultStore did not round-trip the metrics");
+}
+
+// Phase 70: docs/PLAN.md "Machine Learning Abilities" section 18
+// (Fine-Tuning) real executor -- train_tabular_model's warm_start
+// parameter must genuinely continue from an existing model's weights
+// rather than merely accepting one, and must reject a fine-tuning dataset
+// whose schema does not match the base model.
+void test_machine_learning_fine_tuning_execution() {
+    std::string csv = "x1,x2,label\n";
+    for (int index = 0; index < 20; ++index) {
+        csv += std::to_string(0.1 * index) + "," +
+               std::to_string(1.0 + 0.05 * index) + ",low\n";
+        csv += std::to_string(4.0 + 0.1 * index) + "," +
+               std::to_string(3.0 + 0.05 * index) + ",high\n";
+    }
+    const auto data = masterai::parse_tabular_csv(csv, "label");
+
+    masterai::TabularTrainingOptions base_options;
+    base_options.epochs = 300U;
+    base_options.learning_rate = 0.5;
+    base_options.test_fraction = 0.25;
+    masterai::TrainedTabularModel base_model;
+    masterai::train_tabular_model(data, base_options, base_model);
+    require(!base_model.weights.empty() &&
+                (base_model.weights[0][0] != 0.0 ||
+                 base_model.weights[0][1] != 0.0),
+            "the base model must have genuinely learned nonzero weights");
+
+    // A near-zero learning rate for a single epoch leaves gradient descent
+    // almost no room to move the weights, so the fine-tuned result must
+    // stay close to whichever weights it started from -- this isolates
+    // warm_start's initialization effect from the optimizer's own work.
+    masterai::TabularTrainingOptions probe_options;
+    probe_options.epochs = 1U;
+    probe_options.learning_rate = 1e-9;
+    probe_options.test_fraction = 0.25;
+
+    masterai::TrainedTabularModel warm_started;
+    masterai::train_tabular_model(data, probe_options, warm_started,
+                                  &base_model);
+    require(std::fabs(warm_started.weights[0][0] - base_model.weights[0][0]) <
+                    1e-6 &&
+                std::fabs(warm_started.weights[0][1] -
+                          base_model.weights[0][1]) < 1e-6,
+            "warm_start must initialize gradient descent from the base "
+            "model's own weights, not zero");
+
+    masterai::TrainedTabularModel cold_started;
+    masterai::train_tabular_model(data, probe_options, cold_started);
+    require(std::fabs(cold_started.weights[0][0]) < 1e-6 &&
+                std::fabs(cold_started.weights[0][1]) < 1e-6,
+            "without warm_start, gradient descent must still start from "
+            "zero-initialized weights");
+    require(std::fabs(warm_started.weights[0][0] - cold_started.weights[0][0]) >
+                1e-3,
+            "a warm-started run and a cold-started run must diverge because "
+            "they started from different weights");
+
+    // A dataset with different feature columns is not the same problem the
+    // base model was trained on -- fine-tuning it must fail loudly instead
+    // of silently producing a meaningless adapted model.
+    std::string mismatched_csv = "a,b,label\n";
+    for (int index = 0; index < 10; ++index) {
+        mismatched_csv += std::to_string(index) + "," +
+                          std::to_string(index) + ",low\n";
+        mismatched_csv += std::to_string(index + 10) + "," +
+                          std::to_string(index + 10) + ",high\n";
+    }
+    const auto mismatched_data = masterai::parse_tabular_csv(mismatched_csv, "label");
+    bool rejected = false;
+    try {
+        masterai::TrainedTabularModel dud;
+        masterai::train_tabular_model(mismatched_data, probe_options, dud,
+                                      &base_model);
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    require(rejected,
+            "fine-tuning a dataset whose feature columns differ from the "
+            "base model must be rejected, not silently trained");
 }
 
 // Phase 57: docs/PLAN.md "Machine Learning Abilities" section 27 (Model
@@ -7343,6 +7521,8 @@ int main() {
             test_machine_learning_experiment_tracking_lifecycle);
         run("Machine Learning fine-tuning lifecycle",
             test_machine_learning_fine_tuning_lifecycle);
+        run("Machine Learning fine-tuning real execution",
+            test_machine_learning_fine_tuning_execution);
         run("Machine Learning model builder lifecycle",
             test_machine_learning_model_builder_lifecycle);
         run("Machine Learning prompt and instruction training lifecycle",
@@ -7363,6 +7543,8 @@ int main() {
             test_machine_learning_checkpoint_lifecycle);
         run("Machine Learning deployment lifecycle",
             test_machine_learning_deployment_lifecycle);
+        run("Machine Learning automation pipeline progress lifecycle",
+            test_machine_learning_automation_pipeline_progress_lifecycle);
         run("Machine Learning real training and prediction",
             test_machine_learning_real_training_and_prediction);
         run("Machine Learning model comparison lifecycle and execution",

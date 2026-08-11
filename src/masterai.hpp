@@ -4084,9 +4084,20 @@ struct TabularTrainingReport {
 // method from the dataset's task (regression vs 2-class vs k-class). Fills
 // `model` (except model_id/training_job_id, which the caller owns) and
 // returns the report. Throws std::runtime_error on an untrainable dataset.
-TabularTrainingReport train_tabular_model(const TabularDataset& data,
-                                          const TabularTrainingOptions& options,
-                                          TrainedTabularModel& model);
+//
+// `warm_start`, when non-null, is Phase 70's real Fine-Tuning executor
+// hook: instead of zero-initializing `model.weights`, gradient descent
+// continues from `warm_start`'s already-learned weights, so the run
+// genuinely adapts an existing model to the fine-tuning dataset rather
+// than training a new one from scratch. `warm_start`'s feature schema,
+// task, and (for classification) class label set must match `data`
+// exactly -- fine-tuning adapts a model to more examples of the same
+// problem, not a different one -- and a mismatch throws
+// std::runtime_error before any training happens.
+TabularTrainingReport train_tabular_model(
+    const TabularDataset& data, const TabularTrainingOptions& options,
+    TrainedTabularModel& model,
+    const TrainedTabularModel* warm_start = nullptr);
 
 // Scores an existing model against a dataset with the same schema (feature
 // names must match; classification labels must be known to the model).
@@ -4416,9 +4427,15 @@ ComputeNodeStatus parse_compute_node_status(const std::string& status);
 
 // Phase 63: docs/PLAN.md "Machine Learning Abilities" section 30. Records
 // a compute node's static description and administrative status.
-// Deliberately does not poll live telemetry (temperature, power draw,
-// queue length, current workload) -- that requires an agent process on
-// the node this phase does not build.
+// Deliberately does not poll live telemetry for an arbitrary remote node
+// (temperature, power draw, queue length, current workload) -- that
+// requires an agent process on the node this phase does not build. Phase
+// 67 closes the one case that needs no remote agent at all: a node flagged
+// `is_local` is the same host this MasterAI process is already running on,
+// so its live CPU/RAM/GPU capacity can be probed in-process via
+// probe_hardware() on demand (see the compute-node telemetry endpoint in
+// server.cpp). Remote nodes still report only the static description
+// entered at creation time.
 struct ComputeNode {
     std::string id;
     std::string name;
@@ -4429,6 +4446,7 @@ struct ComputeNode {
     std::uint64_t memory_mib{0};
     std::string owner_id;
     ComputeNodeStatus status{ComputeNodeStatus::available};
+    bool is_local{false};
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -4442,7 +4460,7 @@ public:
                        const std::string& operating_system,
                        const std::string& cpu_description,
                        const std::string& gpu_description,
-                       std::uint64_t memory_mib);
+                       std::uint64_t memory_mib, bool is_local);
     std::optional<ComputeNode> find(const std::string& id) const;
     std::vector<ComputeNode> list() const;
     bool set_status(const std::string& id, ComputeNodeStatus status);
@@ -4477,14 +4495,43 @@ AutomationPipelineRunStatus parse_automation_pipeline_run_status(
 // stages that section lists (import/validate/clean/label/split/train/
 // validate model/evaluate/safety test/optimize/approve/deploy staging/
 // stage test/deploy production/monitor/rollback), stored as a
-// comma-joined string of stage names. Running a pipeline records a run
-// outcome; it does not itself orchestrate the other stores' real jobs.
+// comma-joined string of stage names.
+// Phase 69: docs/PLAN.md "Machine Learning Abilities" section 37, closing
+// Automation Pipelines out of the "records intent" set. dataset_id/
+// model_id name the real target a run trains/evaluates against. Running a
+// pipeline now genuinely executes each recognized stage that already has a
+// real executor elsewhere in this codebase -- "Train model" via Phase 56's
+// train_tabular_model (a fresh TrainingJob is created and run for real) and
+// "Evaluate model" via Phase 56's evaluate_tabular_model (a fresh
+// EvaluationRun is created and run for real against the model the pipeline
+// just trained, or model_id if no Train model stage ran first) -- and
+// records every other named stage honestly as skipped, since this codebase
+// has no data-labeling, safety-scanning, deployment-serving, or monitoring
+// executor for a pipeline to call.
+// Phase 71: seven more stages gain a real executor -- "Validate data"
+// (parse_tabular_csv against the dataset's uploaded content), "Validate
+// model" (the current model actually has trained weights), "Safety tests"
+// (an approved ModelCard exists for the current model), "Request approval"/
+// "Deploy staging"/"Deploy production" (a real Deployment record is
+// created/approved for that environment, matching Deployment Manager's own
+// documented scope of an approval workflow rather than live traffic
+// serving), and "Rollback" (the pipeline's most recent deployment is
+// rejected, i.e. its approval is revoked). "Monitor" also becomes real,
+// reusing Phase 68's build_ml_monitoring_json(). Import/clean/label/split
+// data, optimize, and staging tests remain honestly skipped -- this
+// codebase still has no data-labeling, data-cleaning, model-optimization,
+// or staging-test executor to call. A run no longer blocks the HTTP request
+// until every stage finishes: it now executes on a detached background
+// thread while GET .../runs reports live progress (current stage, and
+// completed/total stage counts) so the web UI can render a progress bar.
 struct AutomationPipeline {
     std::string id;
     std::string name;
     std::string project_id;
     std::string description;
     std::string stages;
+    std::string dataset_id;
+    std::string model_id;
     std::string owner_id;
     AutomationPipelineStatus status{AutomationPipelineStatus::draft};
     std::uint64_t created_at_epoch_seconds{0};
@@ -4497,6 +4544,15 @@ struct AutomationPipelineRun {
     std::string owner_id;
     AutomationPipelineRunStatus status{AutomationPipelineRunStatus::queued};
     std::string outcome_note;
+    // Phase 69: JSON array of {"stage","status","detail"} objects, one per
+    // recognized pipeline stage, in the order the pipeline names them.
+    std::string stage_results_json{"[]"};
+    // Phase 71: live progress, updated once per stage as a background
+    // thread executes the run, so GET .../runs can report how far along a
+    // still-`running` run is instead of only showing the final result.
+    std::uint32_t total_stage_count{0};
+    std::uint32_t completed_stage_count{0};
+    std::string current_stage;
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -4509,15 +4565,30 @@ public:
                               const std::string& name,
                               const std::string& project_id,
                               const std::string& description,
-                              const std::string& stages);
+                              const std::string& stages,
+                              const std::string& dataset_id,
+                              const std::string& model_id);
     std::optional<AutomationPipeline> find(const std::string& id) const;
     std::vector<AutomationPipeline> list() const;
     bool set_status(const std::string& id, AutomationPipelineStatus status);
     bool remove(const std::string& id);
-    AutomationPipelineRun record_run(const std::string& owner_id,
-                                     const std::string& pipeline_id,
-                                     AutomationPipelineRunStatus status,
-                                     const std::string& outcome_note);
+    // Phase 71: begin_run() persists a `running` row with a known total
+    // stage count before any stage executes, so a poller sees the run
+    // immediately; append_stage_result() is called once per stage as a
+    // background thread works through them; finish_run() sets the terminal
+    // status once every stage has run.
+    AutomationPipelineRun begin_run(const std::string& owner_id,
+                                    const std::string& pipeline_id,
+                                    std::uint32_t total_stage_count);
+    bool append_stage_result(const std::string& run_id,
+                             const std::string& stage_results_json,
+                             std::uint32_t completed_stage_count,
+                             const std::string& current_stage);
+    bool finish_run(const std::string& run_id,
+                    AutomationPipelineRunStatus status,
+                    const std::string& outcome_note);
+    std::optional<AutomationPipelineRun> find_run(
+        const std::string& run_id) const;
     std::vector<AutomationPipelineRun> runs_for(
         const std::string& pipeline_id) const;
 

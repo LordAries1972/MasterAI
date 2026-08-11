@@ -53,7 +53,14 @@ private:
     Object object_;
 };
 
-JsonValue parse_json(const std::string& input);
+// max_bytes guards against parsing an unbounded payload; it defaults to 1
+// MiB, plenty for every ordinary control/administrative request body. A
+// caller that legitimately expects a larger JSON payload (e.g. a knowledge
+// document embedded as a JSON string field) passes an explicit, already-
+// configurable ceiling instead of the codebase gaining a second hardcoded
+// constant to keep in sync with the first.
+JsonValue parse_json(const std::string& input,
+                     std::size_t max_bytes = 1024U * 1024U);
 
 // Encodes one UTF-8 value as a complete quoted JSON string.
 std::string json_string(const std::string& value);

@@ -423,6 +423,11 @@ Status below reflects the evidence recorded in
 | 64 | Automation Pipelines | Implemented at a scoped-down record level; "Run" records an outcome, no stage orchestration |
 | 65 | Safety and Governance | Implemented at a scoped-down policy/model-card approval level; no content scanning |
 | 66 | Audit Logs and Machine Learning Settings | Implemented; real read over the existing audit trail, and a real ML-scoped subset of System Configuration |
+| 67 | Hardware and Compute live telemetry | Implemented; a compute node flagged as the local host reports a genuinely fresh `probe_hardware()` snapshot on demand |
+| 68 | Monitoring and Diagnostics | Implemented; real aggregation of live local-host hardware, training-job counts, evaluation metrics, and benchmark throughput |
+| 69 | Automation Pipelines real executor | Implemented; "Train model"/"Evaluate model" stages genuinely run, every other named stage honestly reported as skipped |
+| 70 | Fine-Tuning real executor | Implemented; genuine warm-start gradient descent from a base model's trained weights, registered as a new model |
+| 71 | Automation Pipelines: more real stages and live progress | Implemented; "Validate data"/"Validate model"/"Safety tests"/"Request approval"/"Deploy staging"/"Deploy production"/"Rollback"/"Monitor" all genuinely execute (Import/clean/label/split data, optimize, and staging tests remain honestly skipped); a run now executes on a background thread and reports live per-stage progress the web UI renders as a progress bar |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -1014,6 +1019,26 @@ genuinely-enforced subset of server configuration (the Dataset Manager's
 CSV upload cap, the Subject Knowledge Manager's document cap and Parquet
 helper path) without requiring a trip to the general System Configuration
 page.
+
+Phases 67-71 turned the module's remaining "records intent" interfaces into
+real executors one by one: Hardware and Compute reports genuinely fresh
+local-host telemetry (Phase 67), Monitoring and Diagnostics aggregates real
+hardware/training/evaluation/benchmark data (Phase 68), Automation
+Pipelines and Fine-Tuning gained real "Train model"/"Evaluate model" and
+warm-start fine-tuning executors (Phases 69-70), and Phase 71 wires seven
+more Automation Pipeline stages to real, already-existing executors:
+"Validate data" (the same CSV structural check the trainer relies on),
+"Validate model" (a trained-weights lookup), "Safety tests" (an approved
+Model Card lookup), "Request approval"/"Deploy staging"/"Deploy
+production" (a real Deployment record created and approved for that
+environment — an approval decision, not a live traffic cutover), and
+"Rollback" (that deployment's approval revoked); "Monitor" also becomes
+real, reusing Phase 68's aggregation. A pipeline run now executes on a
+background thread and reports live per-stage progress that the web UI
+renders as a progress bar, instead of blocking the page until every stage
+finishes. Import/clean/label/split data, optimize, and staging tests are
+still honestly recorded as skipped, since no executor for those exists in
+this codebase yet.
 
 The honest boundary that remains: creating or advancing the other job types
 records administrative intent and state, not execution. Creating an empty

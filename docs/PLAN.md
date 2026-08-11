@@ -1194,6 +1194,159 @@ Current phase status:
   document text) and rewrites them to clean text before chunking instead of
   slicing raw JSON syntax into 1200-byte windows; unrecognized JSON falls
   back to the previous raw-byte chunking unchanged.
+- Phase 67: Implemented (2026-08-11) — Hardware and Compute live telemetry
+  (section 2 item 20, section 30), closing the first of the six interfaces
+  that Phases 62-65 deliberately left as "planned" identity/lifecycle
+  registries. A compute node may now be flagged `isLocal` at creation --
+  meaning it is the same host this MasterAI process is already running on
+  -- and `GET /api/v1/ml/compute-nodes/{id}/telemetry` returns a genuinely
+  fresh `probe_hardware()` snapshot (physical/logical CPU count, total/
+  available RAM, GPU backends and VRAM, free disk) for that node on every
+  request; a node not flagged local 400s rather than fabricating numbers,
+  since polling an arbitrary remote node still requires an agent process
+  this phase does not build. The Hardware and Compute dashboard tile moves
+  from "planned" to "available" on that basis: real for the local host,
+  not for a fleet. The web UI gained a "local node" checkbox on the create
+  form, a Local column, and a "View live telemetry" action rendered only
+  for local nodes. Separately, the Machine Learning sidebar was reordered
+  to match the chronological order of actually building a model (Projects
+  through data/knowledge preparation, training/fine-tuning, evaluation,
+  optimization/comparison, safety/deployment/serving/ops, Automation
+  Pipelines, then Model Builder last), and Audit Logs, Machine Learning
+  Settings, and Model Registry were moved out of that pipeline tree into
+  their own "Machine Learning Logs and Settings" sidebar group, since they
+  are operational/inspection destinations rather than build steps.
+- Phase 68: Implemented (2026-08-11) — Monitoring and Diagnostics (section
+  2 item 23, section 44), closing the last of the six interfaces Phases
+  62-65 deliberately left as "planned". `GET /api/v1/ml/monitoring` is a
+  read-only aggregation over data other real phases already measured: a
+  live `probe_hardware()` snapshot (Phase 67's same CPU/RAM/GPU/disk
+  probe), real training-job status counts from `TrainingJobStore`, every
+  completed evaluation run's genuinely measured metrics from Phase 56/57's
+  `EvaluationResultStore`, and real prompt/generation tokens-per-second
+  computed from actual `BenchmarkStore` runs. It deliberately does not
+  report section 44's per-step training curves (current epoch/step,
+  gradient norm, learning rate) — the tabular trainer has no iterative
+  loop to sample one from — or any live per-request inference telemetry
+  (requests/sec, latency percentiles, queue depth, cache-hit rate, safety-
+  filter rate, tool-call success, retrieval latency, model-loading time,
+  temperature, network activity) — no request-path instrumentation for any
+  of that exists in this codebase yet, so surfacing it would mean
+  fabricating numbers. The Monitoring and Diagnostics dashboard tile moves
+  from "planned" to "available" on that same real-aggregation basis. New
+  permission: `ml.monitoring.view` (administrator-only, view-only — there
+  is nothing to mutate on a read-only aggregation page).
+
+  Separately, fixed a real ingestion bug this phase's work surfaced: every
+  `parse_json()` call site shared one hardcoded 1 MiB input ceiling, which
+  rejected any knowledge document (JSON body includes the whole document
+  as a string field, base64-inflated for Parquet) larger than 1 MiB even
+  though `knowledge_maximum_document_bytes` already permitted up to 25 MiB.
+  `parse_json()` gained an explicit, defaulted `max_bytes` parameter (every
+  other call site keeps the 1 MiB default unchanged) instead of a second
+  hardcoded constant; the knowledge-document ingestion endpoint and its
+  internal Scraper-record JSON/JSONL flattening now both parse against
+  `configuration.max_request_bytes` / the document's own configured size
+  ceiling respectively, so a legitimately large, already-permitted
+  knowledge document no longer fails one layer below the check that was
+  supposed to allow it.
+
+- Phase 69: Implemented (2026-08-11) — Automation Pipelines (section 2 item
+  21, section 37), closing the last "records intent" ML interface Phase 64
+  originally scoped down. A pipeline now names a target dataset and an
+  optional starting model alongside its stage list; `POST .../run` executes
+  every recognized stage for real, in order: a "Train model" stage creates
+  a real `TrainingJob` against the pipeline's dataset and runs it through
+  Phase 56's actual `train_tabular_model` (the same code path the Training
+  Jobs page uses, factored into a shared `execute_training_job()` helper),
+  handing its resulting model id to the next stage; an "Evaluate model"
+  stage creates a real `EvaluationRun` and scores it via Phase 56's
+  `evaluate_tabular_model` (`execute_evaluation_run()`, shared with the
+  Evaluation Lab page) against the model the pipeline just trained, or the
+  pipeline's configured starting model if no Train model stage ran first.
+  Every other one of section 37's fourteen named stages (import/validate/
+  clean/label/split data, validate model, safety tests, optimize, request
+  approval, deploy staging/production, staging tests, monitor, rollback) is
+  recorded honestly as `"skipped"` with a "no automated executor exists for
+  this stage yet" detail — this codebase has no data-labeling, safety-
+  scanning, deployment-serving, or monitoring executor for a pipeline to
+  call, so fabricating success for those would be dishonest. Each run
+  stores a per-stage `{"stage","status","detail"}` array (`stageResults` on
+  `GET/POST .../run` and `.../runs`) instead of the prior single canned
+  outcome note. The web UI's pipeline form gained dataset/model selects and
+  a run-detail panel rendering that per-stage table.
+- Phase 70: Implemented (2026-08-11) — Fine-Tuning (section 2 item 10,
+  section 18) gains a real executor, closing the last "records intent"
+  training-family interface Phase 45 originally scoped down.
+  `train_tabular_model` (`src/ml_engine.cpp`) gained an optional
+  `warm_start` parameter: when a fine-tuning run supplies the job's base
+  model (`ml_trained_models->find(job.model_id)`, required — a job whose
+  base model has no trained weights yet 409s rather than silently training
+  from scratch), gradient descent initializes from that model's
+  already-learned weights instead of zero, so the run genuinely continues
+  training the existing model rather than coincidentally reusing the same
+  optimizer code path. `warm_start`'s feature schema, task, and (for
+  classification) class label set must match the fine-tuning dataset
+  exactly, or the run fails with a clear schema-mismatch error before any
+  training happens. `POST /api/v1/ml/fine-tuning-jobs/{id}/run`
+  (`execute_fine_tuning_job` in `server.cpp`, mirroring Phase 56/69's
+  `execute_training_job`) moves the job through
+  queued/preparing/running for real, registers the adapted weights as a
+  new Model Registry entry (the base model is left untouched, matching
+  Model Comparison's baseline/candidate pattern), records genuinely
+  measured checkpoints, and leaves the job `awaiting_evaluation` so
+  Evaluation Lab can score the adapted model the same way it scores a
+  freshly trained one. The web UI's Fine-Tuning page gained a "Fine-tune
+  now" action and a last-run result panel, mirroring Training Jobs' "Train
+  now". The dashboard's Fine-Tuning tile moves from "planned" to
+  "available" on that real-execution basis. Deliberately out of scope: an
+  actual LLM adapter/LoRA fine-tuning path (this executor only fine-tunes
+  Phase 56's tabular linear/logistic/softmax models, the only model family
+  this codebase actually trains) and any of section 18's still-deferred
+  hyperparameter/checkpoint-strategy/output-model-versioning fields.
+- Phase 71: Implemented (2026-08-11) — Automation Pipelines (section 2 item
+  21, section 37) gains a real executor for seven more of the twelve
+  stages Phase 69 left as "skipped": "Validate data" (`parse_tabular_csv`
+  against the dataset's uploaded content, the same structural check Phase
+  56's trainer already relies on), "Validate model" (the current model
+  actually has trained weights in `TrainedModelStore`), "Safety tests" (an
+  approved `ModelCard` exists for the current model, via
+  `SafetyGovernanceStore::list_model_cards()`), "Request approval"/"Deploy
+  staging"/"Deploy production" (a real `Deployment` record is created and
+  approved for that environment — matching Deployment Manager's own
+  documented scope of an approval workflow, not live traffic serving), and
+  "Rollback" (that run's most recent deployment has its approval revoked,
+  i.e. moved to `rejected`). "Monitor" also becomes real, reusing Phase
+  68's monitoring aggregation (factored out of the `GET
+  /api/v1/ml/monitoring` route into `build_ml_monitoring_json()` so both
+  the route and a pipeline stage call the identical, genuinely measured
+  snapshot). "Import data", "Clean data", "Label data", "Split data",
+  "Optimize", and "Staging tests" remain honestly recorded as skipped —
+  this codebase still has no data-labeling, data-cleaning, model-
+  optimization, or staging-test executor to call. Separately, a pipeline
+  run no longer blocks the HTTP request until every stage finishes: `POST
+  /api/v1/ml/automation-pipelines/{id}/run` now calls
+  `AutomationPipelineStore::begin_run()` (persists a `running` row with
+  the pipeline's real stage count), returns immediately with `202
+  Accepted`, and executes every stage on a detached background thread
+  (`run_automation_pipeline()` in `server.cpp`) that calls
+  `append_stage_result()` before and after each stage — once to mark it
+  "Running: `<stage>`", once with its finished outcome — and `finish_run()`
+  once every stage has run. `AutomationPipelineRun` gained
+  `totalStageCount`/`completedStageCount`/`currentStage` fields so `GET
+  .../runs` (already polled elsewhere in the ML admin UI) reports live
+  progress; the web UI's pipeline "Run" button renders a `<progress>` bar
+  and the currently-running stage's name, polling once a second via a new
+  `pollMlPipelineRun()` helper (mirroring the existing model-download
+  progress poll) until the run reaches a terminal status. The now-unused
+  one-shot `AutomationPipelineStore::record_run()` was removed rather than
+  left dead. `test_machine_learning_automation_pipeline_progress_lifecycle`
+  covers `begin_run`/`append_stage_result`/`finish_run`/`find_run`
+  (including their unknown-id no-op/reject behavior), progress surviving a
+  store reload, and `automation_pipeline_run_json`'s new fields; the stage-
+  executor dispatch itself lives on the `Server` class and is exercised
+  through the web UI/HTTP surface rather than a store-level unit test, the
+  same boundary Phase 69's original two stages left untested.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
