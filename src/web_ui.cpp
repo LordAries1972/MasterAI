@@ -73,33 +73,49 @@
     "#actionStatus,#status{color:var(--muted);min-height:1.2em}" \
     /* Floating error bubble every action-failure catch block now raises \
        through showSystemError() instead of the easy-to-miss #actionStatus \
-       line -- maroon body with yellow text so a failure is unmissable, but \
-       pinned to a corner and width-capped (not a full-width top banner) so \
-       it can never blow out over the rest of the page, on the Machine \
-       Learning screens or anywhere else. Auto-fades and hides itself 10 \
-       seconds after the most recent showSystemError() call (see that \
-       function); its close and copy buttons both act immediately instead \
-       of waiting on that timer. */ \
+       line -- pinned to a corner and width-capped (not a full-width top \
+       banner) so it can never blow out over the rest of the page, on the \
+       Machine Learning screens or anywhere else. Has its own title bar \
+       (a red gradient, with the close button pinned to its far right) \
+       above a body panel that carries the actual error text in light \
+       rose on a dark maroon background, so the message itself stays \
+       legible while the title bar signals severity. Auto-fades to solid \
+       black over the last .4s before hiding itself 10 seconds after the \
+       most recent showSystemError() call (see that function) -- the \
+       default timeout for any error that is not dismissed sooner; its \
+       close and copy buttons both act immediately instead of waiting on \
+       that timer. */ \
     "#systemErrorBanner{position:fixed;bottom:1rem;right:1rem;z-index:9999;" \
-    "width:min(24rem,calc(100vw - 2rem));" \
-    "background:#3a0a0a;color:#ffd54a;padding:.75rem 1rem;" \
-    "border:1px solid #ffd54a;border-radius:.75rem;" \
+    "width:min(24rem,calc(100vw - 2rem));padding:0;" \
+    "border:1px solid #7a0d0d;border-radius:.75rem;overflow:hidden;" \
     "box-shadow:0 6px 20px rgba(0,0,0,.45);" \
-    "display:flex;flex-direction:column;gap:.5rem;" \
-    "opacity:1;transition:opacity .4s ease}" \
-    "#systemErrorBanner.systemErrorFading{opacity:0}" \
-    "#systemErrorBanner .systemErrorTop{display:flex;align-items:flex-start;" \
-    "gap:.75rem}" \
+    "display:flex;flex-direction:column;" \
+    "transition:border-color .4s ease}" \
+    "#systemErrorBanner.systemErrorFading{border-color:#000}" \
+    "#systemErrorBanner .systemErrorTitleBar{display:flex;align-items:center;" \
+    "justify-content:space-between;gap:.75rem;padding:.55rem .75rem;" \
+    "background:linear-gradient(135deg,#8a1414,#c92a2a 55%,#5c0a0a);" \
+    "color:#fff2f2;transition:background-color .4s ease}" \
+    "#systemErrorBanner.systemErrorFading .systemErrorTitleBar{background:#000}" \
     "#systemErrorBanner .systemErrorTitle{font-weight:800;letter-spacing:.03em}" \
+    "#systemErrorBanner .systemErrorClose{width:auto;margin:0;padding:0 .3rem;" \
+    "background:transparent;border:none;color:#fff2f2;font-weight:700;" \
+    "font-size:1.15rem;line-height:1;cursor:pointer}" \
+    "#systemErrorBanner .systemErrorClose:hover{color:#ffd6d6}" \
     "#systemErrorBanner .systemErrorBody{flex:1;overflow-wrap:anywhere;" \
-    "max-height:12rem;overflow:auto}" \
-    "#systemErrorBanner .systemErrorClose{width:auto;margin:0;padding:0 .4rem;" \
-    "background:transparent;color:#ffd54a;font-weight:700;cursor:pointer}" \
-    "#systemErrorBanner .systemErrorActions{display:flex;justify-content:flex-end}" \
+    "max-height:12rem;overflow:auto;padding:.75rem 1rem;" \
+    "background:#5a0d0d;color:#ffd9d9;font-weight:600;" \
+    "transition:background-color .4s ease,color .4s ease}" \
+    "#systemErrorBanner.systemErrorFading .systemErrorBody{background:#000;" \
+    "color:#000}" \
+    "#systemErrorBanner .systemErrorActions{display:flex;justify-content:flex-end;" \
+    "padding:.5rem .75rem .75rem;background:#5a0d0d;" \
+    "transition:background-color .4s ease}" \
+    "#systemErrorBanner.systemErrorFading .systemErrorActions{background:#000}" \
     "#systemErrorBanner .systemErrorCopy{width:auto;margin:0;" \
-    "padding:.3rem .7rem;background:transparent;border:1px solid #ffd54a;" \
-    "color:#ffd54a;font-size:.75rem;border-radius:.4rem;cursor:pointer}" \
-    "#systemErrorBanner .systemErrorCopy:hover{background:rgba(255,213,74,.15)}" \
+    "padding:.3rem .7rem;background:transparent;border:1px solid #ffd9d9;" \
+    "color:#ffd9d9;font-size:.75rem;border-radius:.4rem;cursor:pointer}" \
+    "#systemErrorBanner .systemErrorCopy:hover{background:rgba(255,217,217,.15)}" \
     ".checkboxLabel{display:flex;align-items:center;gap:.5rem}" \
     ".checkboxLabel input{width:auto}"
 
@@ -215,25 +231,31 @@ std::string application_script() {
         // a floating bubble pinned to a bottom corner, width-capped and
         // scrollable so a long message is contained rather than blowing out
         // over the rest of the page (the Machine Learning screens' own
-        // failures included), maroon body/yellow text, titled
-        // 'SYSTEM ERROR!' so it's impossible to miss. A copy button lets the
-        // exact message be pasted elsewhere (bug reports, chat with an
-        // administrator) without retyping it, and the bubble fades out and
-        // hides itself 10 seconds after this call unless closed sooner.
-        // Reuses one bubble element (created lazily) so a second failure
-        // while the first is still showing just replaces the message and
-        // restarts the fade timer rather than stacking bubbles.
+        // failures included). Its own title bar -- a red gradient, titled
+        // 'SYSTEM ERROR!', with the close (x) button pinned to its far
+        // right -- sits above a body panel that carries the actual error
+        // text in light rose on a dark maroon background, so the message
+        // stays legible while the title bar signals severity. A copy button
+        // lets the exact message be pasted elsewhere (bug reports, chat
+        // with an administrator) without retyping it. Unless closed sooner
+        // (the x button), the whole bubble fades to solid black over its
+        // last .4 seconds and then closes 10 seconds after this call -- the
+        // default timeout for any error left on screen. Reuses one bubble
+        // element (created lazily) so a second failure while the first is
+        // still showing just replaces the message and restarts the timer
+        // rather than stacking bubbles.
         "function showSystemError(message){let el=q('#systemErrorBanner');"
         "if(!el){el=document.createElement('div');el.id='systemErrorBanner';"
-        "const top=document.createElement('div');top.className='systemErrorTop';"
+        "const titleBar=document.createElement('div');"
+        "titleBar.className='systemErrorTitleBar';"
         "const title=document.createElement('div');"
         "title.className='systemErrorTitle';title.textContent='SYSTEM ERROR!';"
-        "const body=document.createElement('div');body.className='systemErrorBody';"
         "const close=document.createElement('button');close.type='button';"
         "close.className='systemErrorClose';close.textContent='\\u00d7';"
         "close.setAttribute('aria-label','Dismiss error');"
         "close.addEventListener('click',()=>hideSystemError(el));"
-        "top.append(title,body,close);"
+        "titleBar.append(title,close);"
+        "const body=document.createElement('div');body.className='systemErrorBody';"
         "const actions=document.createElement('div');"
         "actions.className='systemErrorActions';"
         "const copyBtn=document.createElement('button');copyBtn.type='button';"
@@ -241,7 +263,8 @@ std::string application_script() {
         "copyBtn.setAttribute('aria-label','Copy error message');"
         "copyBtn.addEventListener('click',()=>"
         "copyToClipboard(el.querySelector('.systemErrorBody').textContent,copyBtn));"
-        "actions.append(copyBtn);el.append(top,actions);document.body.append(el);}"
+        "actions.append(copyBtn);el.append(titleBar,body,actions);"
+        "document.body.append(el);}"
         "el.querySelector('.systemErrorBody').textContent=message;"
         "el.hidden=false;el.classList.remove('systemErrorFading');"
         "if(el._fadeTimer)clearTimeout(el._fadeTimer);"
