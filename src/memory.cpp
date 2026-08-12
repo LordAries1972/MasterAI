@@ -242,6 +242,26 @@ MemoryPolicy MemoryBudgetManager::policy() const {
     return state_->policy;
 }
 
+// Phase 34: reuses the exact bound checks the constructor already enforces
+// -- see MemoryBudgetManager::MemoryBudgetManager() above -- so a policy
+// applied here can never relax a safety ceiling the constructor would have
+// refused to start with.
+void MemoryBudgetManager::set_policy(MemoryPolicy policy) {
+    if (policy.hard_limit_bytes < 256U * mib ||
+        policy.minimum_free_percent > 50U ||
+        policy.elevated_percent >= policy.high_percent ||
+        policy.high_percent >= policy.critical_percent ||
+        policy.critical_percent > 99U ||
+        policy.maximum_active_inference == 0U ||
+        policy.maximum_queued_inference == 0U ||
+        policy.maximum_index_workers == 0U) {
+        throw std::invalid_argument("memory policy violates bounded limits");
+    }
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->policy = std::move(policy);
+    state_->current.hard_limit_bytes = state_->policy.hard_limit_bytes;
+}
+
 MemoryPolicy MemoryBudgetManager::policy_for(
     const ResourceProfile profile, const HardwareInfo& hardware,
     const std::uint64_t hard_limit_bytes) {

@@ -5042,6 +5042,90 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "currently enabled.</p>"
             "<div id=\"systemReport\">Loading...</div>"
             "</div></section>";
+    } else if (section == "performance") {
+        body =
+            "<section id=\"panel-performance\" class=\"panel\">"
+            "<div><h2>Performance</h2>"
+            "<p>Live visibility and manual override for the local runner "
+            "pool (Phase 33), the intranet worker pool (Phase 33), and the "
+            "adaptive performance controller (Phase 34). Every figure below "
+            "comes directly from the same routes those phases expose -- "
+            "nothing here is a separately maintained display-only value.</p>"
+            "<div class=\"reportSection\"><h3>Adaptive controller</h3>"
+            "<div id=\"perfAdaptive\">Loading...</div>"
+            "<form id=\"perfModeForm\"><label>Mode<select id=\"perfMode\">"
+            "<option value=\"automatic\">Automatic</option>"
+            "<option value=\"balanced\">Balanced</option>"
+            "<option value=\"minimal_memory\">Minimal Memory</option>"
+            "<option value=\"lowest_latency\">Lowest Latency</option>"
+            "<option value=\"maximum_throughput\">Maximum Throughput</option>"
+            "<option value=\"battery_saver\">Battery Saver</option>"
+            "<option value=\"quiet_thermal_conservative\">"
+            "Quiet/Thermal Conservative</option>"
+            "<option value=\"administrator_custom\">Administrator Custom"
+            "</option></select></label>"
+            "<button type=\"submit\" title=\"Apply performance mode\">" ICON_SAVE_SVG
+            " Apply mode</button>"
+            "<button type=\"button\" id=\"perfRollback\" "
+            "title=\"Revert the most recent automatic change\">Rollback last "
+            "change</button></form>"
+            "</div>"
+            "<div class=\"reportSection\"><h3>Local runner pool</h3>"
+            "<div id=\"perfRunnerPool\">Loading...</div></div>"
+            "<div class=\"reportSection\"><h3>Intranet worker pool</h3>"
+            "<div id=\"perfWorkerPool\">Loading...</div></div>"
+            "</div></section>"
+            // Self-contained: fetched and rendered independently of the
+            // page's shared load() pipeline (see fetchFor()'s own comment
+            // on why that shared Promise.all only fetches elements present
+            // on the current page) -- this page's placeholders above are
+            // only ever present when section=='performance', so a plain,
+            // unconditional api() call here never fires on any other page.
+            "<script>(function(){"
+            "function row(label,value){return '<tr><td class=\"reportLabel\">'+"
+            "label+'</td><td class=\"reportValue\">'+value+'</td></tr>';}"
+            "function renderAdaptive(r){const el=q('#perfAdaptive');if(!el)return;"
+            "let html='<table><tbody>'+"
+            "row('Active mode',r.activeMode)+row('Selected mode',r.selectedMode)+"
+            "row('Applied this cycle',r.applied.length)+"
+            "row('Proposed (not yet applied)',r.proposedNotYetApplied.length)+"
+            "'</tbody></table>';"
+            "if(r.applied.length){html+='<h4>Applied</h4><ul>'+r.applied.map(a=>"
+            "'<li>'+a.parameter+': '+a.previousValue+' \\u2192 '+a.proposedValue+"
+            "' ('+a.reason+')</li>').join('')+'</ul>';}"
+            "if(r.proposedNotYetApplied.length){html+='<h4>Recommended</h4><ul>'+"
+            "r.proposedNotYetApplied.map(a=>'<li>'+a.parameter+': '+"
+            "a.previousValue+' \\u2192 '+a.proposedValue+' ('+a.reason+"
+            "', confidence '+Math.round(a.confidence*100)+'%)</li>').join('')+"
+            "'</ul>';}"
+            "el.innerHTML=html;q('#perfMode').value=r.activeMode;}"
+            "function renderPool(elementId,list,noun){const el=q(elementId);"
+            "if(!el)return;if(!list.length){el.textContent='No '+noun+' configured.';"
+            "return;}"
+            "el.innerHTML='<table><thead><tr><th>Id</th><th>State</th>"
+            "<th>Model</th><th>Healthy</th><th>Failures</th></tr></thead><tbody>'+"
+            "list.map(x=>'<tr><td>'+x.id+'</td><td>'+x.state+'</td><td>'+"
+            "(x.modelId||'')+'</td><td>'+(x.healthy?'yes':'no')+'</td><td>'+"
+            "x.consecutiveFailures+'</td></tr>').join('')+'</tbody></table>';}"
+            "async function refresh(){"
+            "try{renderAdaptive(await api('/api/v1/performance/adaptive'));}"
+            "catch(e){}"
+            "try{const p=await api('/api/v1/runner/pool');"
+            "renderPool('#perfRunnerPool',p.runners,'local runners');}catch(e){}"
+            "try{const w=await api('/api/v1/worker/pool');"
+            "renderPool('#perfWorkerPool',w.workers,'intranet workers');}catch(e){}"
+            "}"
+            "if(q('#panel-performance')){refresh();"
+            "const form=q('#perfModeForm');"
+            "if(form)form.addEventListener('submit',async(e)=>{e.preventDefault();"
+            "try{await api('/api/v1/performance/adaptive/mode','POST',"
+            "{mode:q('#perfMode').value});await refresh();}"
+            "catch(err){showSystemError(err.message);}});"
+            "const rollback=q('#perfRollback');"
+            "if(rollback)rollback.addEventListener('click',async()=>{"
+            "try{await api('/api/v1/performance/adaptive/rollback','POST',{});"
+            "await refresh();}catch(err){showSystemError(err.message);}});}"
+            "})();</script>";
     } else if (section == "admin-create") {
         body =
             "<section id=\"panel-admin-create\" class=\"panel\">"
@@ -5128,6 +5212,13 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "report", "Report",
             nav_link("/app/report/system", "System Report",
                      section == "report-system"));
+        // Phase 35: Performance administration -- overview, local runner
+        // pool (Phase 33), intranet worker pool (Phase 33), and the
+        // adaptive controller (Phase 34), each backed by the real routes
+        // those phases already exposed.
+        sidebar_links += sidebar_section(
+            "performance", "Performance",
+            nav_link("/app/performance", "Overview", section == "performance"));
         // Ordered to match the chronological order of actually building a
         // model -- an administrator works top to bottom, project through
         // deployment/monitoring, with the two packaging/inspection steps

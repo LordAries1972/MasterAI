@@ -471,6 +471,202 @@ TabularCleanReport clean_tabular_csv(const std::string& csv) {
     return report;
 }
 
+namespace {
+
+// Quotes a rebuilt CSV field only when it actually needs it (contains a
+// comma, quote, or newline), doubling any embedded quotes -- the inverse of
+// split_csv_line() above, so a row this function writes always re-parses
+// back to the same fields.
+std::string join_csv_field(const std::string& field) {
+    const bool needs_quoting =
+        field.find(',') != std::string::npos || field.find('"') != std::string::npos ||
+        field.find('\n') != std::string::npos;
+    if (!needs_quoting) return field;
+    std::string quoted = "\"";
+    for (const char character : field) {
+        if (character == '"') quoted += "\"\"";
+        else quoted += character;
+    }
+    quoted += "\"";
+    return quoted;
+}
+
+std::string join_csv_row(const std::vector<std::string>& fields) {
+    std::string row;
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+        if (index > 0U) row += ",";
+        row += join_csv_field(fields[index]);
+    }
+    return row;
+}
+
+}  // namespace
+
+TabularAutoLabelReport auto_label_tabular_dataset(const std::string& csv,
+                                                  const std::string& target_column) {
+    std::vector<std::string> raw_lines;
+    std::size_t position = 0U;
+    while (position <= csv.size()) {
+        const auto newline = csv.find('\n', position);
+        const auto end = newline == std::string::npos ? csv.size() : newline;
+        raw_lines.push_back(csv.substr(position, end - position));
+        if (newline == std::string::npos) break;
+        position = newline + 1U;
+    }
+    if (raw_lines.size() > 1U && trim(raw_lines.back()).empty()) raw_lines.pop_back();
+    if (raw_lines.size() < 2U) {
+        throw std::runtime_error("dataset needs a header row and at least one data row");
+    }
+    auto header = split_csv_line(trim(raw_lines.front()));
+    for (auto& name : header) name = trim(name);
+    if (header.empty()) throw std::runtime_error("dataset header is empty");
+    std::size_t target_index = header.size() - 1U;
+    if (!target_column.empty()) {
+        const auto found = std::find(header.begin(), header.end(), target_column);
+        if (found == header.end()) {
+            throw std::runtime_error("target column \"" + target_column +
+                                     "\" is not in the CSV header");
+        }
+        target_index = static_cast<std::size_t>(found - header.begin());
+    }
+    std::vector<std::vector<std::string>> rows;
+    rows.reserve(raw_lines.size() - 1U);
+    for (std::size_t index = 1; index < raw_lines.size(); ++index) {
+        if (trim(raw_lines[index]).empty()) continue;
+        rows.push_back(split_csv_line(raw_lines[index]));
+    }
+    if (rows.empty()) throw std::runtime_error("dataset has no data rows to label");
+
+    TabularAutoLabelReport report;
+    report.rows_total = rows.size();
+    std::vector<bool> missing(rows.size(), false);
+    for (std::size_t row = 0; row < rows.size(); ++row) {
+        const auto value = target_index < rows[row].size() ? trim(rows[row][target_index])
+                                                            : std::string{};
+        if (value.empty()) missing[row] = true; else ++report.rows_already_labeled;
+    }
+    if (report.rows_already_labeled == rows.size()) {
+        report.method = "existing_labels_validated";
+        std::string rebuilt = trim(raw_lines.front());
+        for (const auto& row : rows) {
+            rebuilt += "\n";
+            rebuilt += join_csv_row(row);
+        }
+        report.csv = std::move(rebuilt);
+        return report;
+    }
+
+    // Find the first column, other than the target, whose value parses as a
+    // real number on every data row -- the deterministic binning source.
+    std::size_t source_index = header.size();
+    std::vector<double> source_values;
+    for (std::size_t column = 0; column < header.size(); ++column) {
+        if (column == target_index) continue;
+        std::vector<double> candidate_values;
+        candidate_values.reserve(rows.size());
+        bool all_numeric = true;
+        for (const auto& row : rows) {
+            double value = 0.0;
+            const auto text = column < row.size() ? trim(row[column]) : std::string{};
+            if (!parse_double(text, value)) { all_numeric = false; break; }
+            candidate_values.push_back(value);
+        }
+        if (all_numeric) {
+            source_index = column;
+            source_values = std::move(candidate_values);
+            break;
+        }
+    }
+    if (source_index == header.size()) {
+        throw std::runtime_error(
+            "no fully-numeric column is available to derive labels from");
+    }
+
+    auto sorted_values = source_values;
+    std::sort(sorted_values.begin(), sorted_values.end());
+    const auto percentile = [&sorted_values](const double fraction) {
+        const auto index = static_cast<std::size_t>(
+            fraction * static_cast<double>(sorted_values.size() - 1U));
+        return sorted_values[index];
+    };
+    report.method = "quantile_binning";
+    report.source_column = header[source_index];
+    report.low_medium_threshold = percentile(1.0 / 3.0);
+    report.medium_high_threshold = percentile(2.0 / 3.0);
+
+    for (std::size_t row = 0; row < rows.size(); ++row) {
+        if (!missing[row]) continue;
+        const double value = source_values[row];
+        std::string label;
+        if (value <= report.low_medium_threshold) label = "low";
+        else if (value <= report.medium_high_threshold) label = "medium";
+        else label = "high";
+        if (target_index >= rows[row].size()) rows[row].resize(target_index + 1U);
+        rows[row][target_index] = label;
+        ++report.rows_labeled;
+    }
+
+    std::string rebuilt = trim(raw_lines.front());
+    for (const auto& row : rows) {
+        rebuilt += "\n";
+        rebuilt += join_csv_row(row);
+    }
+    report.csv = std::move(rebuilt);
+    return report;
+}
+
+void TrainingProgressTracker::begin(const std::string& job_id,
+                                    const std::uint32_t total_epochs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    TrainingProgressSnapshot snapshot;
+    snapshot.running = true;
+    snapshot.total_epochs = total_epochs;
+    snapshot.updated_at_epoch_seconds = epoch_seconds();
+    progress_[job_id] = snapshot;
+}
+
+void TrainingProgressTracker::update(const std::string& job_id,
+                                     const std::uint32_t epoch, const double loss) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = progress_.find(job_id);
+    if (found == progress_.end()) return;  // end()/never begin()-ed: nothing to update.
+    // epoch is 0-based in the training loop; reported as 1-based "epochs
+    // completed so far" so a poller reading current_epoch == total_epochs
+    // sees a run that has finished its last epoch, not one epoch short.
+    found->second.current_epoch = epoch + 1U;
+    found->second.current_loss = loss;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+}
+
+void TrainingProgressTracker::end(const std::string& job_id) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    progress_.erase(job_id);
+}
+
+TrainingProgressSnapshot TrainingProgressTracker::snapshot(
+    const std::string& job_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = progress_.find(job_id);
+    return found != progress_.end() ? found->second : TrainingProgressSnapshot{};
+}
+
+std::vector<std::string> TrainingProgressTracker::active_job_ids() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::string> ids;
+    ids.reserve(progress_.size());
+    for (const auto& entry : progress_) ids.push_back(entry.first);
+    return ids;
+}
+
+std::string training_progress_snapshot_json(const TrainingProgressSnapshot& snapshot) {
+    return "{\"running\":" + std::string(snapshot.running ? "true" : "false") +
+          ",\"currentEpoch\":" + std::to_string(snapshot.current_epoch) +
+          ",\"totalEpochs\":" + std::to_string(snapshot.total_epochs) +
+          ",\"currentLoss\":" + json_number(snapshot.current_loss) +
+          ",\"updatedAtEpochSeconds\":" +
+          std::to_string(snapshot.updated_at_epoch_seconds) + "}";
+}
+
 TabularSplitReport split_tabular_csv(const std::string& csv,
                                      const std::string& target_column,
                                      const double holdout_fraction) {
@@ -546,10 +742,10 @@ std::string tabular_dataset_profile_json(const std::string& dataset_id,
            "\",\"classes\":" + string_array_json(data.class_labels) + "}";
 }
 
-TabularTrainingReport train_tabular_model(const TabularDataset& data,
-                                          const TabularTrainingOptions& options,
-                                          TrainedTabularModel& model,
-                                          const TrainedTabularModel* warm_start) {
+TabularTrainingReport train_tabular_model(
+    const TabularDataset& data, const TabularTrainingOptions& options,
+    TrainedTabularModel& model, const TrainedTabularModel* warm_start,
+    const std::function<void(std::uint32_t, double)>& on_epoch) {
     if (data.features.size() < 2U) {
         throw std::runtime_error("dataset has fewer than two rows");
     }
@@ -701,6 +897,7 @@ TabularTrainingReport train_tabular_model(const TabularDataset& data,
                 "training diverged (non-finite loss); lower the learning rate");
         }
         report.loss_history.push_back(loss);
+        if (on_epoch) on_epoch(epoch, loss);
     }
     report.final_loss = report.loss_history.back();
     report.evaluated_on_test = test_count > 0U;

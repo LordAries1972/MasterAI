@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <thread>
@@ -374,7 +375,14 @@ void TuningProfileStore::save(const TuningProfile& profile) {
              // with this store's existing "malformed record throws"
              // policy).
              to_string(profile.recommended_load_mode),
-             to_string(profile.recommended_pre_touch)});
+             to_string(profile.recommended_pre_touch),
+             // Phase 19 real-hardware-class evidence: appended at the end,
+             // same "old readers never see it, restore() requires the new
+             // count" convention the Phase 26 fields above already used.
+             profile.gpu_telemetry_available ? "true" : "false",
+             profile.gpu_vendor,
+             std::to_string(profile.average_gpu_utilization_percent),
+             std::to_string(profile.peak_gpu_temperature_celsius)});
         record_store_->put("tuning_profiles", key, value);
     }
 }
@@ -423,8 +431,25 @@ PreTouchLevel parse_pre_touch_level(const std::string& value) {
 void TuningProfileStore::restore() {
     for (const auto& item : record_store_->list("tuning_profiles")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 26U) {
-            throw std::runtime_error("persisted tuning profile is invalid");
+        // Phase 19 (2026-08-13): TuningProfile gained four GPU-telemetry
+        // fields, appended after the Phase 26 load-mode/pre-touch pair (26
+        // fields -> 30). A hard throw here on any length other than the
+        // current schema would mean simply *building* a newer binary while
+        // real calibration evidence from an older schema is still on disk
+        // takes the whole control plane down at startup -- even though a
+        // mismatched schema almost always also carries a stale build_id, so
+        // TuningProfileStore::find() would never have matched it anyway.
+        // Recognized older schemas (currently just the pre-Phase-19 26-field
+        // one) are parsed with their new fields defaulted; anything else is
+        // logged and dropped rather than crashing the server. This profile
+        // is only ever advisory evidence a fresh calibrate() regenerates --
+        // never durable data whose loss would be silent or irreversible.
+        if (fields.size() != 30U && fields.size() != 26U) {
+            log(LogLevel::warning, "tuning_profile.restore.skipped",
+               "unrecognized persisted tuning profile schema (" +
+                   std::to_string(fields.size()) + " fields); dropping stale "
+                   "record, recalibration will regenerate it");
+            continue;
         }
         TuningProfile profile;
         profile.host_hash = fields[0];
@@ -458,6 +483,15 @@ void TuningProfileStore::restore() {
         profile.calibrated_at_epoch_seconds = std::stoull(fields[23]);
         profile.recommended_load_mode = parse_load_mode(fields[24]);
         profile.recommended_pre_touch = parse_pre_touch_level(fields[25]);
+        if (fields.size() == 30U) {
+            profile.gpu_telemetry_available = fields[26] == "true";
+            profile.gpu_vendor = fields[27];
+            profile.average_gpu_utilization_percent = std::stod(fields[28]);
+            profile.peak_gpu_temperature_celsius = std::stoi(fields[29]);
+        }
+        // else: pre-Phase-19 26-field record -- GPU fields stay at their
+        // struct defaults (gpu_telemetry_available == false), an honest
+        // "not measured by this old record" rather than a fabricated value.
         if (!valid_sha256(profile.host_hash) ||
             !valid_sha256(profile.model_sha256)) {
             throw std::runtime_error("persisted tuning profile violates policy");
@@ -570,10 +604,33 @@ TuningProfile CalibrationService::calibrate(
 
     std::atomic_bool sampling{true};
     std::atomic<std::uint64_t> peak_resident{0};
+    // Phase 19 (real-hardware-class evidence): GPU utilization/temperature
+    // sampled at the same cadence and over the same window as the existing
+    // resident-memory sampler, via the now-approved vendor SDKs
+    // (gpu_vendor.cpp / ADR-0001). A std::mutex guards the small aggregate
+    // state below rather than atomics, since averaging utilization across
+    // however many GPU devices a host has needs more than a single
+    // read-modify-write.
+    std::atomic_bool gpu_available{false};
+    std::mutex gpu_sample_mutex;
+    std::string gpu_vendor_seen;
+    double gpu_utilization_sum{0.0};
+    std::uint64_t gpu_utilization_samples{0};
+    int gpu_peak_temperature{0};
     std::thread memory_sampler([&]() {
         while (sampling.load()) {
             raise_atomic_maximum(peak_resident,
                                  inference_.metrics().resident_memory_bytes);
+            for (const auto& telemetry : probe_gpu_vendor_telemetry()) {
+                if (!telemetry.available) continue;
+                gpu_available.store(true);
+                std::lock_guard<std::mutex> lock(gpu_sample_mutex);
+                if (gpu_vendor_seen.empty()) gpu_vendor_seen = telemetry.vendor;
+                gpu_utilization_sum += static_cast<double>(telemetry.utilization_percent);
+                ++gpu_utilization_samples;
+                gpu_peak_temperature =
+                    std::max(gpu_peak_temperature, telemetry.temperature_celsius);
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     });
@@ -628,6 +685,16 @@ TuningProfile CalibrationService::calibrate(
         profile.average_cpu_percent = utilization.cpu_percent;
         profile.disk_read_bytes = utilization.disk_read_bytes;
         profile.disk_write_bytes = utilization.disk_write_bytes;
+        profile.gpu_telemetry_available = gpu_available.load();
+        {
+            std::lock_guard<std::mutex> lock(gpu_sample_mutex);
+            profile.gpu_vendor = gpu_vendor_seen;
+            profile.average_gpu_utilization_percent =
+                gpu_utilization_samples > 0U
+                    ? gpu_utilization_sum / static_cast<double>(gpu_utilization_samples)
+                    : 0.0;
+            profile.peak_gpu_temperature_celsius = gpu_peak_temperature;
+        }
         profile.calibrated_at_epoch_seconds = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::system_clock::now().time_since_epoch())
@@ -690,7 +757,18 @@ std::string tuning_profile_json(const TuningProfile& profile) {
           ",\"recommendedLoadMode\":\"" +
           to_string(profile.recommended_load_mode) + "\"" +
           ",\"recommendedPreTouch\":\"" +
-          to_string(profile.recommended_pre_touch) + "\"}";
+          to_string(profile.recommended_pre_touch) + "\"" +
+          ",\"gpuTelemetryAvailable\":" +
+          (profile.gpu_telemetry_available ? "true" : "false") +
+          // gpu_vendor is always "nvidia", "amd", or empty (see
+          // GpuVendorTelemetry's comment in masterai.hpp) -- a fixed literal
+          // set, never escaped input, matching how host_hash/profile_name
+          // above are quoted directly.
+          ",\"gpuVendor\":\"" + profile.gpu_vendor + "\"" +
+          ",\"averageGpuUtilizationPercent\":" +
+          std::to_string(profile.average_gpu_utilization_percent) +
+          ",\"peakGpuTemperatureCelsius\":" +
+          std::to_string(profile.peak_gpu_temperature_celsius) + "}";
 }
 
 }  // namespace masterai

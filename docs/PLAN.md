@@ -294,9 +294,32 @@ Current phase status:
   `GET /api/v1/performance/recommendations`, and
   `POST /api/v1/performance/calibrate` routes expose it, distinct from the
   pre-existing Phase 13 `/api/v1/performance/baseline` route under the same
-  prefix. GPU utilization and thermal-trend probing are not implemented —
-  no vendor SDK (NVML/ADL) is an approved dependency per ADR-0003 — and
-  remain forward work. `masterai calibrate config/settings.json
+  prefix. GPU utilization and thermal-trend probing are not yet wired into
+  the calibration pipeline. The vendor-SDK blocker is resolved (2026-08-13,
+  see ADR-0001): NVIDIA NVML and AMD ADLX are now an approved, narrow
+  exception, both consumed by dynamic-loading the driver-installed vendor
+  DLL at runtime (`src/gpu_vendor.cpp`, `probe_gpu_vendor_telemetry()`) —
+  AMD additionally through vendored public headers under
+  `third_party/ADLX` — so neither vendor binary is linked and a host
+  without that vendor's driver fails closed. This telemetry is now wired
+  into `CalibrationService` (2026-08-13): `TuningProfile` gained
+  `gpu_telemetry_available`/`gpu_vendor`/`average_gpu_utilization_percent`/
+  `peak_gpu_temperature_celsius`, sampled at the same 50 ms cadence as the
+  existing peak-resident-memory sampler across `calibrate()`'s real
+  generation call and averaged/maxed over the sampling window; a host
+  without an available vendor SDK simply reports `gpu_telemetry_available:
+  false` rather than a fabricated value. A real run against
+  `qwen25-coder-3b-q4km` on the GTX 960M measured 39.41% average GPU
+  utilization and a 71°C peak temperature during generation, confirmed via
+  both the `calibrate` CLI (now prints these fields) and the persisted
+  `TuningProfile` record. `TuningProfileStore::restore()` also gained
+  tolerant handling of the pre-2026-08-13 26-field schema (defaults the new
+  fields rather than throwing) after this exact change hit a real crash on
+  startup with genuine pre-existing calibration evidence on disk — a schema
+  version bump to a store that eagerly parses every persisted record at
+  startup must not take the whole control plane down when an old record's
+  build_id would never have matched anyway.
+  `masterai calibrate config/settings.json
   qwen25-coder-3b-q4km balanced` was run against the real GTX 960M/
   `qwen25-coder-3b-q4km` host and produced a persisted `TuningProfile`: cold
   load 43.11 s, prompt-evaluation 2.48 s, generation 6.12 s, peak resident
@@ -476,28 +499,178 @@ Current phase status:
   administrator-only `GET`/`POST /api/v1/admin/config` round-trips the live
   `settings.json` through the existing `ConfigurationManager` (surfaced in
   the web UI's Settings → System configuration panel). Real-model benchmark
-  evidence (`auto` vs `cpu_only` cold/warm load, TTFT, peak resident/commit,
-  page faults, pagefile/swap, cancellation latency, idle steady state) is the
-  one deliverable still outstanding — it requires a pinned local GGUF model
-  and dedicated hardware run, consistent with every other real-model exit
-  criterion in this project (Phases 4-7) that remains open for the same
-  reason. Priority A.
-- Phase 31: Planned — storage tiering, `ScratchVolumeManager`, and
-  storage-aware model/index placement (no RAM-drive placement for durable
-  data). Priority A/B.
-- Phase 32: Planned — speculative decoding with draft/target compatibility
-  checks and automatic fallback. Priority C; deliberately deferred behind
-  the Priority A/B work above given its added complexity and hardware
-  dependency.
-- Phase 33: Planned — distributed local runners and optional mutually
-  authenticated intranet worker nodes. Priority C; deliberately deferred for
-  the same reason as Phase 32.
-- Phase 34: Planned — adaptive performance controller with bounded,
-  hysteresis-guarded automatic tuning within administrator ceilings.
-  Priority B, gated on Phase 21–31 evidence existing to tune against.
-- Phase 35: Planned — performance administration sidebar (overview, memory,
-  caches, storage, worker pools, scheduling, advanced optimizations) with no
-  single opaque "turbo" switch.
+  evidence (`auto` vs `cpu_only` cold/warm load, peak resident memory, GPU
+  utilization/temperature) is now recorded (2026-08-13, see
+  `docs/performance/phase-19-qwen3b-matrix.md`'s second table): both states
+  ran `qwen25-coder-3b-q4km`'s `minimal` calibration workload on the same
+  GTX 960M/i7-6700HQ host to completion and persisted cleanly (the earlier
+  2026-08-05 run's `cpu_only` persistence gap, caused by an orphaned
+  `llama-server.exe` child process left bound to the runner port by a prior
+  failed attempt and independently discovered/fixed during this pass, no
+  longer applies) — `auto` completed prompt evaluation in 1.78 s and
+  generation in 6.26 s at 2.29 GiB peak resident memory with 39.9% average/
+  72°C peak GPU utilization; `cpu_only` completed prompt evaluation in
+  7.54 s (4.2x slower) and generation in 15.47 s (2.5x slower) at 3.60 GiB
+  peak resident memory (1.57x more, consistent with no GPU offload) and
+  measurably cooler/idler GPU telemetry (23.5%/60°C, residual monitoring
+  overhead rather than active generation work). `cpu_only` never attempted
+  GPU allocation and completed cleanly, closing this phase's last
+  outstanding deliverable. Priority A.
+- Phase 31: Implemented (2026-08-13) — the five storage tiers, a real
+  `ScratchVolumeManager` (per-job directory/quota, global quota, atomic
+  publish, crash-recovery journal, orphan cleanup, free-space reserve), the
+  hard RAM-tier prohibition enforced in code via
+  `durable_data_class_allows_ram_tier()`, separate (non-conflated)
+  physical/commit/pagefile/page-fault/model-resident memory accounting via
+  `probe_memory_accounting()`, and best-effort Windows filesystem-integrity
+  detection (compression/encryption/dedup/virtual-disk/network-redirection)
+  via `probe_filesystem_integrity_flags()`. `recommend_storage_placement()`
+  derives a model-placement recommendation from measured evidence, not
+  assumption. **Tier migration tooling is now also implemented
+  (2026-08-13)**: `migrate_durable_file()` (`src/scratch_storage.cpp`)
+  relocates an already-published durable file to a new tier's directory,
+  verified by a real SHA-256 digest match between source and staged copy
+  before the atomic rename, and refuses (throws) a destination that
+  measures as Tier R (RAM-backed) storage for anything but
+  `reconstructable_scratch` -- the same hard prohibition every other Phase
+  31 entry point enforces. Exposed administrator-only via `POST
+  /api/v1/system/storage/migrate`. Honest scope note: this codebase has no
+  central manifest mapping a durable path back to the record that
+  references it (a Model Registry entry, an index generation, etc.), so the
+  endpoint performs the verified file relocation itself and reports
+  `callerMustUpdateReferencingRecord: true` rather than silently rewriting
+  record stores it does not own -- closing the Priority B gap at the file-
+  operation level this note used to describe as missing entirely. Priority
+  A/B.
+- Phase 32: Implemented at a scoped-down level, evidence-pending
+  (2026-08-13) — `check_draft_target_compatibility()`, `SpeculativeDecodingStats`
+  (rolling acceptance-rate tracking), and `decide_speculative_decoding_for_request()`
+  (`src/speculative_decoding.cpp`) are real, independently testable
+  decision logic covering the plan's full deliverable list (exact
+  compatibility checks, measured-acceptance-rate gating, memory-fit gating,
+  short-request skip, queued-draft-runner skip, sampling-compatibility
+  gating, thermal gating). Deliberately NOT wired to any live generation
+  call site: this codebase's `RunnerSupervisor`/`LlamaCppAdapter` launch
+  exactly one model per external backend process, and there is no
+  dual-model (draft+target concurrently resident) launch path yet -- adding
+  one needs Phase 26 warm-state management validated for a second
+  concurrently resident runner and Phase 27 KV accounting for the combined
+  memory cost of two models at once, neither of which this pass touched.
+  Priority C. Exit criterion status: explicitly unvalidated, not claimed --
+  "generation throughput improves on representative prompts" has no
+  execution path yet to measure against.
+- Phase 33: Implemented (2026-08-13) — both halves. The local-only
+  multi-runner orchestration half (2026-08-13, earlier pass):
+  `LocalRunnerConfig`/`LocalRunnerPool` (`src/runner_pool.cpp`) generalize
+  the existing single-runner `RunnerSupervisor` supervision pattern to an
+  opt-in pool of N concurrent local runner processes (per-GPU, CPU+GPU
+  split, or dedicated embedding/router/benchmark runners), routed by
+  resident-model match, runner health/state, capability, Phase 2
+  project-bound authorization, and priority; a failing runner is isolated
+  (marked unhealthy, never taken down with the control plane) and a retry
+  is only ever attempted when `retry_is_semantically_safe()` confirms
+  nothing already reached the caller or was persisted; the chat-generation
+  and dedicated-embedding request paths in `server.cpp` are wired through
+  it, and the runner that actually served each query is recorded on the
+  Phase 13 query trace (`QueryTrace::runner_id`) and exposed
+  administrator-only at `GET /api/v1/runner/pool`. Single-runner mode is
+  unchanged and remains the default: an empty (the default)
+  `localRunnerPool` setting means every pre-Phase-33 behavior is untouched.
+  The intranet-worker half (2026-08-13, this pass): `PrivateCertificateAuthority`/
+  `IntranetWorkerConfig`/`WorkerModeConfig`/`IntranetWorkerPool`/
+  `WorkerListener` (`src/intranet_worker.cpp`) add mutual-TLS, pinned-PKI
+  routing to administrator-approved remote worker machines, using OpenSSL
+  as this codebase's first (and only) vendored TLS/crypto dependency --
+  every other network path here is either loopback-only or explicitly
+  fail-closed without it (see `mcp_outbound.cpp`'s `http_exchange()`
+  comment); `MASTERAI_HAS_OPENSSL` gates the whole feature closed at
+  runtime, not build-time, when OpenSSL development files are unavailable
+  (`scripts/CMakeLists.txt`), the same optional-dependency fail-closed
+  precedent already established for PAM. A worker's certificate is
+  verified against a pinned private CA (never the system trust store) AND
+  against a pinned leaf-certificate digest (defense in depth, reusing
+  Phase 9's outbound-executable-digest-pinning convention); the worker
+  equally verifies this control plane's own client certificate (true
+  mutual TLS). Signed worker registration is administrator-driven, not
+  self-service: `POST /api/v1/system/pki/initialize` generates the private
+  CA once (refuses to overwrite an existing one), `POST
+  /api/v1/system/pki/workers` signs one worker certificate, and an
+  administrator copies the resulting certificate/key to the physical
+  worker machine out of band. Model-digest verification is real:
+  `IntranetWorkerPool::refresh_status()`/`refresh_all()` read back each
+  worker's self-reported loaded-model sha256 over the already-authenticated
+  channel and only ever make that worker selectable once the digest
+  matches a model this control plane's own registry also knows under the
+  same id (`GET`/`POST /api/v1/worker/pool[/refresh]`, administrator-only).
+  A worker's model is fixed by its own local configuration -- there is no
+  "load this model on that worker" RPC, closing off a remote
+  resource-exhaustion class an admin-driven "control every worker's model
+  remotely" design would otherwise open. `WorkerListener` is this
+  codebase's one deliberate, narrowly-scoped exception to
+  `HttpServer`'s loopback-only constraint (`AppConfig::worker_mode`,
+  disabled by default): it speaks only the small mutually authenticated
+  worker protocol (`GET /worker/status`, `POST /worker/generate`,
+  `POST /worker/embed`), never the administrator HTTP/API surface, and
+  refuses any connection whose client certificate is not on its approved
+  digest allowlist. Honest scope note: `IntranetWorkerPool` is not yet
+  wired into the live chat-generation dispatch path
+  (`select_and_warm_pool_runner()` in `server.cpp`) the way
+  `LocalRunnerPool` is -- administration visibility, PKI issuance, and the
+  transport/verification layer are all real and independently usable
+  (e.g. `GET /api/v1/worker/pool`), but a chat request does not yet
+  automatically fail over onto a remote worker the way it already does
+  onto a local pool runner; this mirrors Phase 29's own documented scope
+  cut for wiring tier selection into the live chat pipeline.
+- Phase 34: Implemented at a scoped-down level (2026-08-13) — `AdaptiveController`
+  (`src/adaptive_controller.cpp`) extends Phase 19 `CalibrationService`'s
+  advisory profiles into a live, bounded controller. Every stability
+  control the plan requires is real and independently testable in
+  `evaluate()`: minimum dwell time, cooldown, and max-changes-per-interval
+  (epoch-second bookkeeping), bounded step size (`PerformanceCeilings::max_step_percent`),
+  rolling measurement (a 5-sample pressure window), a confidence
+  requirement derived from that window (an adjustment only applies at
+  confidence >= 0.6), and safe rollback (`AdaptiveController::rollback()`
+  reverts to the `MemoryPolicy` active immediately before the last applied
+  change). All eight named modes (Minimal Memory, Balanced, Lowest
+  Latency, Maximum Throughput, Battery Saver, Quiet/Thermal Conservative,
+  Administrator Custom, Automatic) are implemented; `automatic` picks the
+  best-fit mode each cycle from live `MemoryStatus`/`SchedulingClassStatus`
+  signals, `administrator_custom` applies configured ceilings with
+  automatic tuning fully disabled (the plan's exact requirement). Honest
+  scope note: `evaluate()` computes and discloses a proposed value for
+  every knob the plan lists, but only ever *applies* the subset wired to a
+  genuinely live-mutable target in this codebase -- the new
+  `MemoryBudgetManager::set_policy()` (inference concurrency, queued-
+  inference ceiling, index worker count, default context tokens). Every
+  other named knob (read queue depth, prefetch distance, cache quotas,
+  batch size, idle-unload time, warm-up policy, thread count, NUMA policy,
+  GPU offload, KV placement, background-job rate) has no live setter
+  anywhere in this codebase yet -- still computed and surfaced as a
+  recommendation (`proposedNotYetApplied` on the JSON report, visible on
+  the Phase 35 administration page), matching the same "computed,
+  disclosed, not yet wired to an automatic call site" pattern Phase 26/28
+  already established (e.g. Phase 28's topology-aware thread-pinning
+  primitive). Administrator-only routes: `GET /api/v1/performance/adaptive`,
+  `POST .../mode`, `POST .../ceilings`, `POST .../rollback`.
+- Phase 35: Implemented at a scoped-down level (2026-08-13) — one
+  consolidated "Performance" administration page (`/app/performance`,
+  `src/web_ui.cpp`) rather than the plan's full thirteen-route
+  enumeration, condensed to Overview, Local Runner Pool, Intranet Worker
+  Pool, and the Adaptive Controller (mode selection, live
+  applied/recommended adjustments, rollback). Every figure it renders comes
+  directly from the real routes Phase 13/19/31/33/34 already expose (`GET
+  /api/v1/performance/adaptive`, `GET /api/v1/runner/pool`, `GET
+  /api/v1/worker/pool`) -- nothing on this page is a separately maintained
+  display-only value, and there is no single opaque "turbo" switch (mode
+  selection is one of eight named, disclosed modes, and every applied/
+  recommended adjustment is listed individually with its reason and
+  confidence). Deferred to a later pass: the plan's remaining named pages
+  (Live Requests, Models and Runners, Memory, Caches, Retrieval, Storage,
+  Worker Pools as a page distinct from the Overview's summary, Scheduling,
+  Calibration, Advanced Optimizations, Benchmarks, Regression History,
+  Recommendations, the Query Traces page, the Runner Configuration page,
+  and the Model Comparison page) -- this pass's honest priority was a real,
+  end-to-end working page over a wider set of placeholder ones.
 - Phase 36: Planned — full performance benchmark matrix, regression
   thresholds per optimization, and automated build-to-build comparison
   gating releases.
@@ -1375,13 +1548,26 @@ Current phase status:
   `ml_trained_models->put()`, and moves the run to `completed`/`failed`;
   "Staging tests" reuses `execute_evaluation_run()` — the same function
   "Evaluate model" and the Evaluation Lab page already call — against the
-  pipeline's dataset. "Label data" is the one stage that remains honestly
-  `"skipped"` in the common case: it looks for a real `LabelTaskStore`
+  pipeline's dataset. "Label data" first looks for a real `LabelTaskStore`
   (Phase 41) entry targeting the pipeline's dataset in the `completed`
-  state and reports success referencing that task's id when one exists,
-  or "no completed labeling task recorded for this dataset" when none
-  does — this codebase still has no automated labeler to run one itself.
-  Every stage's outcome is a genuinely computed result; none fabricates
+  state and reports success referencing that task's id when one exists.
+  **(2026-08-13, this pass)** when none does, it no longer reports
+  `"skipped"`: `auto_label_tabular_dataset()` (`src/ml_engine.cpp`) is a
+  real, deterministic heuristic labeler. When every row already carries a
+  non-empty target value, those are validated as real ground truth and
+  never overwritten (method `"existing_labels_validated"`); when one or
+  more rows are missing a target, the labeler finds the first fully-numeric
+  non-target column, computes that column's real 33rd/66th percentile
+  thresholds across the dataset, and fills each missing target with
+  `"low"`/`"medium"`/`"high"` based on where that row's value falls (method
+  `"quantile_binning"`) — the source column and thresholds are reported so
+  a reviewer can see exactly why a row got the label it did. The stage
+  persists the filled-in CSV back over the dataset's content and records a
+  completed `LabelTaskStore` entry (assignee `"automated-heuristic"`).
+  Honest about what this is: a real, inspectable, reproducible heuristic,
+  not a semantic understanding of the data and not a substitute for a
+  human-reviewed labeling task where correctness genuinely matters. Every
+  stage's outcome is a genuinely computed result; none fabricates
   pass/fail.
 - Phase 73: Implemented (2026-08-12) — real LLM LoRA fine-tuning (section 2
   item 10, section 18), gaining an execution path alongside Phase 70's
@@ -1453,10 +1639,29 @@ Current phase status:
   stage and naming every finding if the scan is not clean, rather than
   only checking model-card approval. Every finding is a real, reproducible
   pattern match against the actual text scanned — never a fabricated risk
-  score — and the class comment on `SafetyPolicy`/`ModelCard` is honest
-  about the remaining gap: bias, hallucination, and subtler harmful content
-  still have no real detector in this codebase, since that needs an ML
-  classifier this phase does not build.
+  score. **(2026-08-13, this pass)** the remaining gap the class comment on
+  `SafetyPolicy`/`ModelCard` used to name — bias, hallucination, and
+  subtler harmful content having no real detector — is closed by
+  `scan_content_with_model_classifier()` (`src/ml_safety_scan.cpp`): a real
+  LLM-as-judge classifier that sends the scanned text plus a fixed, JSON-
+  only prompt to the same locally loaded language model this server already
+  runs inference through (via a caller-supplied `generate` callback wired
+  to `execute_rag_generation()` in `server.cpp`, so it respects the exact
+  same memory/scheduler admission every other generation call goes
+  through), and parses the model's own bias/`hallucination_risk`/
+  `harmful_content` confidence-and-rationale JSON reply. Never fabricates a
+  verdict on failure: an unparseable reply or a generation error reports
+  `available: false` with a diagnostic, not a silent "clean" result. Wired
+  in two places: `POST /api/v1/ml/safety-policies/{id}/scan` runs it
+  opt-in when the request includes a `modelId` field (alongside the
+  always-on heuristic scan); the Automation Pipeline's "Safety tests" stage
+  runs it as a best-effort, purely informational addendum after its
+  heuristic scan and model-card checks pass (an unavailable/misconfigured
+  classifier never fails a stage the heuristic scan already passed). Honest
+  about what this is: a real LLM-as-judge classifier, not a purpose-trained
+  bias/hallucination model — the judge model's own blind spots and biases
+  are still present, stated in the function's own comment rather than
+  claimed away.
 - Phase 75: Implemented (2026-08-12) — remote/fleet Hardware and Compute
   telemetry (section 2 item 20, section 30), closing the "requires an
   agent process on the node this phase does not build" gap Phase 63/67's
@@ -1552,9 +1757,29 @@ Current phase status:
   Phase 75's `ComputeNode`/`agent_shared_secret_hash` convention, with the
   plaintext living in the same `secrets` `SecretStore`, key
   `"inference-endpoint:<id>"`). Honestly out of scope: `/v1/completions`
-  is this codebase's own minimal surface, not an OpenAI-compatible API,
-  and per-endpoint tool/safety *policy* configuration beyond the fixed
-  content scan is still `Planned`.
+  is this codebase's own minimal surface, not an OpenAI-compatible API.
+  **(2026-08-13, this pass)** per-endpoint safety-policy configuration
+  beyond the fixed content scan is now implemented: `InferenceEndpoint`
+  gains `content_scan_enabled` (skip the heuristic scan entirely),
+  `block_on_scan_finding` (default true, preserving the prior always-block
+  prompt behavior; false makes a flagged prompt advisory-only),
+  `block_answer_on_scan_finding` (default false, preserving the prior
+  never-block answer behavior, kept as a *separate* flag from the prompt
+  one specifically so this pass could not silently change the pre-existing
+  default), `safety_policy_id` (attaches a real `SafetyPolicy`'s
+  `restricted_data_categories` terms to the scan, the same policy the
+  `.../safety-policies/{id}/scan` route already scans against), and
+  `model_classifier_enabled`/`model_classifier_confidence_floor` (opts this
+  endpoint into Phase 74's new LLM-judge classifier pass). New `POST
+  /api/v1/ml/inference-endpoints/{id}/policy` (`ml.endpoints.manage` scope)
+  updates them; `run_inference_endpoint` re-reads the endpoint's live
+  policy from the store fresh on every request (not once at listener-thread
+  start), so a policy change takes effect on the very next request without
+  restarting the listener. Persisted record format is additive/backward-
+  compatible: a pre-policy record still restores with the exact defaults
+  above. Still honestly out of scope: no tool-calling surface exists on
+  `/v1/completions` at all (pure text generation), so there is no
+  "allowed tools" enforcement point to add here yet.
 - Phase 78: Implemented (2026-08-12) — real per-request inference
   telemetry for Monitoring and Diagnostics (section 2 item 23, section 44),
   closing the per-request half of the gap Phase 68's route comment named
@@ -1576,13 +1801,32 @@ Current phase status:
   (already shared by the RAG route and Phase 77's inference-endpoint
   listener, so one instrumentation site covers all three). `GET
   /api/v1/ml/monitoring` (`build_ml_monitoring_json()`) gained a new
-  `"inferenceRequests"` field carrying this real snapshot. Honestly still
-  not measurable, stated in both the route's and
-  `build_ml_monitoring_json()`'s comments: live per-step training curves
-  (the tabular trainer's runs are synchronous and complete before there is
-  a meaningful "live" window to sample from -- genuine post-hoc loss
-  curves already exist since Phase 56) and cache-hit rate (no KV-cache-hit
-  instrumentation exists in the inference adapter to report on).
+  `"inferenceRequests"` field carrying this real snapshot.
+  **(2026-08-13, this pass)** both remaining gaps are now closed. Live
+  per-step training curves: `train_tabular_model()` gained an optional
+  `on_epoch(epoch, loss)` callback, called synchronously after every real
+  gradient-descent step; `execute_training_job()` wires it to a new
+  `TrainingProgressTracker` (`begin()`/`update()`/`end()`,
+  `src/ml_engine.cpp`), an in-process, deliberately non-persisted live-state
+  map. Because `HttpServer` already serves each connection on its own
+  thread, a concurrent `GET /api/v1/ml/training-jobs/{id}/live-progress` (or
+  the new `"liveTrainingProgress"` array in `build_ml_monitoring_json()`,
+  which reports every currently in-flight job at once) genuinely observes
+  epoch/loss values *while* the run is still executing on its own thread —
+  not a restructured async job contract, since `POST .../training-jobs/
+  {id}/run` still returns only once training finishes, exactly as before.
+  A `ProgressGuard` RAII wrapper calls `end()` on every exit path (success
+  or failure) so a finished/failed job never reports stale "still running"
+  state. Cache-hit rate: `InferenceMetricsStore` gained
+  `record_cache_decision(bool reuse)` and `cache_hits`/`cache_misses`/
+  `cache_hit_rate` fields on `Snapshot`, called with
+  `PromptSessionManager::try_reuse()`'s real `reuse` outcome at its one call
+  site (the chat handler) whenever `session_reuse_enabled` is on — the
+  actual KV-slot reuse decision every generation on that path already
+  makes, not a separately invented counter. Honest scope note kept in the
+  class comment: this counts session-level (whole-prompt-prefix) reuse
+  decisions, not a finer-grained per-token cache-hit counter, since
+  llama.cpp's own runner does not expose one to this adapter.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -1591,13 +1835,42 @@ coherent CPU-only operating mode: no GPU allocation attempts under
 `cpu_only`, a pre-load `runner_weights` admission check, one-slot admission
 via `MemoryPolicy::maximum_active_inference`, an unattended idle-release/
 pressure-trim sweep, and administration visibility/configuration for all of
-it. Only the matched real-model benchmark matrix (`auto` vs `cpu_only` on a
-pinned local GGUF) remains outstanding, on the same footing as every other
-real-model exit criterion in this project (Phases 4-7) that stays open until
-that hardware run happens. Speculative decoding (Phase 32), distributed
-runners (Phase 33), and multiple warm runners remain explicitly deferred
-until that benchmark evidence and the remaining Priority A/B phases (Phase 31
-storage tiering, then Phase 34/35/36) are addressed.
+it. **The matched real-model benchmark matrix (`auto` vs `cpu_only` on a
+pinned local GGUF) is now recorded (2026-08-13)** — see the Phase 30A status
+entry and `docs/performance/phase-19-qwen3b-matrix.md` — closing Phase 30A's
+last outstanding deliverable. Phase 19's GPU utilization/thermal-trend
+telemetry is also now wired into `CalibrationService` with real measured
+evidence (2026-08-13, see the Phase 19 status entry), closing that phase's
+last outstanding deliverable too. **Phase 31 storage tiering is implemented
+(2026-08-13)**, closing the Priority A/B `ScratchVolumeManager`/storage-aware
+placement gap; **its Priority B tier-migration workflow is also now
+implemented (2026-08-13, this pass)** — see its own status note for
+`migrate_durable_file()` and the honest scope limit that remains (no
+central manifest of which record references a migrated path). **Phase 33 is now fully implemented (2026-08-13)** -- both the earlier
+local multi-runner orchestration half and, this pass, the intranet/mTLS
+worker protocol half (private PKI, mutual TLS, model-digest verification,
+`WorkerListener`/`IntranetWorkerPool`); see its own status note for the
+honest scope note that remains (chat-generation dispatch does not yet
+automatically fail over onto a remote worker). **Phase 34 is now
+implemented at a scoped-down level (2026-08-13)** -- a real, bounded,
+hysteresis-guarded `AdaptiveController` with every stability control the
+plan requires, applying live to the one genuinely mutable target
+(`MemoryBudgetManager::set_policy()`) and disclosing every other knob as a
+recommendation; see its own status note. **Phase 35 is now implemented at a
+scoped-down level (2026-08-13)** -- one consolidated, fully real
+Performance administration page rather than the plan's full route
+enumeration; see its own status note for exactly which named pages remain
+deferred. Speculative decoding (Phase 32) also now has real,
+independently-tested decision logic (compatibility checking, acceptance-
+rate tracking, per-request enable/disable) implemented this pass, but
+deliberately not wired to any live generation call site: real-hardware
+benchmark evidence now exists (Phase 19/30A above) for a single resident
+model, but Phase 32 also depends on Phase 26 warm-state management for a
+second concurrently-resident draft runner and Phase 27 KV accounting for
+the combined memory cost of two models at once, neither of which this pass
+touched, so this codebase has no dual-model launch path to wire the
+decision logic into yet -- see its own status note. Phase 36 remains
+Planned.
 
 Status policy:
 
@@ -1642,8 +1915,12 @@ Validation evidence recorded on 2026-08-01:
   and an unknown profile name being rejected rather than silently
   defaulted. Windows x64 Debug and Release builds completed and
   `masterai_core_tests` passed. GPU utilization/thermal-trend probing and
-  the real-hardware-class exit benchmark remain outstanding (no approved
-  GPU vendor SDK per ADR-0003).
+  the real-hardware-class exit benchmark remain outstanding. The GPU vendor
+  SDK blocker itself is resolved (2026-08-13): NVML/ADLX are now approved
+  per ADR-0001, with a dynamic-loading probe available at
+  `probe_gpu_vendor_telemetry()` (`src/gpu_vendor.cpp`); wiring that
+  telemetry into `CalibrationService` and the benchmark matrix is
+  unstarted.
 - Phase 20 originally landed as a read-only scaffold. It was superseded on
   2026-08-05 by the durable admission implementation described in the current
   status and detailed Phase 20 entry: strict evidence validation, restart-safe
@@ -1910,14 +2187,18 @@ The current repository is aligned with these implemented objectives:
 These objective groups are not yet implemented or not yet validated:
 
 - Real pinned-backend/model Phase 4–5 operational certification, interrupted
-  real-source Phase 6 resume certification, same-host real-model Phase 7
-  comparison, optional whisper.cpp integration, and MCP transports.
+  real-source Phase 6 resume certification, and same-host real-model Phase 7
+  comparison are each implemented and real-hardware validated (see their own
+  status entries, dated 2026-08-02/2026-08-05); optional whisper.cpp
+  integration and MCP transports remain outside those exit criteria and are
+  not yet validated.
 - Ubuntu 24.04 and Debian 13 packaging certification (deferred by operator)
   plus later-phase conformance and performance suites.
-- Remaining Phase 19 real-model exit validation: Phase 19's
-  real-hardware-class calibration benchmark (GPU utilization and
-  thermal-trend probing also remain forward work — no approved vendor SDK
-  exists). Phase 20's optional candidates remain unadmitted behind the durable
+- Phase 19's real-hardware-class calibration benchmark is implemented and
+  validated, including GPU utilization and thermal-trend probing (wired into
+  `CalibrationService` 2026-08-13, see its own status entry — the vendor SDK
+  approved per ADR-0001/`src/gpu_vendor.cpp` is now consumed, not just
+  available). Phase 20's optional candidates remain unadmitted behind the durable
   evidence/admission gate until each candidate's own evidence is produced;
   an unadmitted candidate is not an incomplete or implied optimization.
   Phase 15 (representative indexing ceiling evidence, live change-source
@@ -3666,12 +3947,13 @@ requires.
 ### Implementation priority override — memory-first CPU-only operation
 
 **Phase 30A is implemented (2026-08-02)**; only its real-model benchmark
-matrix remains outstanding (see the priority note above). Phase 31 storage
-tiering is the next Priority A/B target; Phases 32–35 must not become the
-primary implementation target until Phase 30A's benchmark evidence and Phase
-31 are addressed. Existing completed phases are extended rather than
-replaced, and no completed validation status is retroactively claimed for
-requirements that still need real-model/hardware evidence.
+matrix remains outstanding (see the priority note above). **Phase 31 storage
+tiering, including its Priority B tier-migration workflow, is fully
+implemented (2026-08-13)**. Phases 32–35 must not become the primary
+implementation target until Phase 30A's benchmark evidence is addressed.
+Existing completed phases are extended rather than replaced, and no
+completed validation status is retroactively claimed for requirements that
+still need real-model/hardware evidence.
 
 ### Phase 0 — Requirements and decisions
 
@@ -5289,9 +5571,17 @@ Exit criteria:
 
 ### Phase 31 — Storage tiering, virtual drives, and scratch-volume management
 
-Status: Planned. Priority A/B — the `ScratchVolumeManager` and storage-aware
-placement recommendations are Priority A; full tier migration tooling is
-Priority B.
+Status: Implemented (2026-08-13). Priority A/B — the `ScratchVolumeManager`
+and storage-aware placement recommendations (Priority A) are real, and
+(2026-08-13, this pass) tier *migration* tooling (relocating already-placed
+durable data between tiers after the fact, e.g. an administrator-initiated
+"move this model from Tier C to Tier A") is now also real:
+`migrate_durable_file()` (`src/scratch_storage.cpp`) plus `POST
+/api/v1/system/storage/migrate`, verified by a SHA-256 digest match before
+the atomic rename and enforcing the same hard RAM-tier prohibition every
+other entry point in this file does. See the deliverables note below for
+the honest scope limit (no central manifest of which record references a
+migrated path).
 
 Purpose:
 
@@ -5310,36 +5600,93 @@ Deliverables:
 - Storage tiers (A: fast local NVMe for active models/indexes/hot cache/
   runner scratch; B: local SATA SSD; C: local HDD for archives/backups; D:
   removable/network, import-export only by default; R: RAM-backed, small
-  reconstructable temporary artifacts only).
-- A `ScratchVolumeManager` with per-job directory and byte quota, a global
-  byte quota, preferred-tier selection, atomic publication, shutdown
-  cleanup, a crash-recovery journal, orphan cleanup, and a free-space
-  reserve.
+  reconstructable temporary artifacts only) — `StorageTier` plus
+  `classify_storage_tier()`, which derives the tier from the same measured
+  `StorageLatencyProfile` evidence Phase 21 already gathers (device type +
+  timed random-read latency), never from assumption.
+- A `ScratchVolumeManager` (`src/scratch_storage.cpp`) with per-job directory
+  and byte quota (`begin_job()`/`reserve()`), a global byte quota, preferred-
+  tier selection (constructor argument, set from a real
+  `classify_storage_tier()` measurement of the scratch volume at server
+  startup), atomic publication (`publish()`: stage-then-atomic-rename, same
+  pattern as `RecordStore::checkpoint()`), shutdown cleanup (destructor calls
+  `shutdown_cleanup()`), a crash-recovery journal and orphan cleanup
+  (`recover_orphans()`, run once at server startup and re-runnable on demand
+  via `POST /api/v1/system/scratch/cleanup`), and a free-space reserve
+  (`free_space_available()`, checked before every admission).
 - A hard prohibition on placing full GGUF models, durable chats, audit
   records, user databases, resumable downloads, backups, security records,
-  or the only copy of an index generation on RAM-backed storage.
+  or the only copy of an index generation on RAM-backed storage — enforced
+  in code (not just documented) via `DurableDataClass` and
+  `durable_data_class_allows_ram_tier()`, which `begin_job()`/`publish()`
+  both consult and reject (throw) against rather than silently downgrade.
 - Separate reporting of physical/available RAM, committed virtual memory,
   commit limit, pagefile/swap usage, hard page-fault rate, and model
-  mapped/resident bytes; a model is rejected or downgraded when projected
-  active pages exceed safe physical capacity even if commit capacity
-  remains.
+  mapped/resident bytes (`MemoryAccountingSnapshot`/
+  `probe_memory_accounting()`, `src/platform.cpp`); a model is rejected or
+  downgraded when projected active pages exceed safe physical capacity even
+  if commit capacity remains
+  (`projected_resident_exceeds_safe_physical_capacity()`). Scope note: the
+  reported page-fault rate is the total (soft+hard) rate from Windows'
+  `GetProcessMemoryInfo` — a true hard-fault-only isolation would need
+  PDH/ETW counters this project does not yet depend on; the reported rate is
+  used the same directional way a hard-fault-only rate would be.
 - Detection (not assumption) of filesystem compression, encryption,
   deduplication, virtual disks, or network redirection under active model/
-  index storage, calibrated by measurement.
+  index storage, calibrated by measurement
+  (`FilesystemIntegrityFlags`/`probe_filesystem_integrity_flags()`,
+  `src/platform.cpp`, via `GetVolumeInformationW`/`FSCTL_GET_COMPRESSION`/
+  `FILE_ATTRIBUTE_ENCRYPTED`/`GetDriveTypeW`/`IOCTL_STORAGE_QUERY_PROPERTY`
+  bus-type/`IO_REPARSE_TAG_DEDUP`). Best-effort per this project's
+  Windows-first build scope: `detection_available` is false on non-Windows
+  and whenever the underlying query fails, and per-file deduplication
+  detection only applies when the probed path is itself a regular file, not
+  a directory (no dependency on the admin-only Data Deduplication WMI
+  surface a true directory/volume-level check would need).
+- `recommend_storage_placement()` combines the tier classification and
+  filesystem-integrity evidence above into one placement recommendation
+  (`GET /api/v1/system/storage`, administrator-only), so a recommendation is
+  always derived from a real measurement of the actual path in question.
 
 Exit criteria:
 
-- Scratch files cannot fill the system drive.
-- RAM-drive use is included in physical-memory accounting.
-- Model placement recommendations reflect measured storage, not assumption.
+- Scratch files cannot fill the system drive — enforced structurally by
+  `ScratchVolumeManager`'s global quota and free-space reserve, checked
+  before every `begin_job()`/`reserve()` admission. Real-hardware validation
+  that this holds under sustained load is a separate, later exercise, on the
+  same footing as this project's other real-model/real-hardware exit
+  criteria (Phases 4-7, 30A) that remain open pending a dedicated hardware
+  run.
+- RAM-drive use is included in physical-memory accounting —
+  `classify_storage_tier()` reports `StorageTier::ram_backed` from the same
+  `probe_storage_class()`/`GetDriveTypeW` signal `probe_hardware()` already
+  feeds into `HardwareInfo::available_ram_mib`, so a RAM-disk-backed scratch
+  root is never invisible to physical-memory accounting.
+- Model placement recommendations reflect measured storage, not assumption —
+  `recommend_storage_placement()` takes only measured
+  `StorageLatencyProfile`/`FilesystemIntegrityFlags` evidence as input and
+  performs no hardcoded per-drive-letter or per-vendor assumption.
 - Durable data is never silently redirected to ephemeral storage; storage
-  migration preserves integrity and atomicity.
+  migration preserves integrity and atomicity — enforced by
+  `durable_data_class_allows_ram_tier()` (rejects, never downgrades),
+  `ScratchVolumeManager::publish()`'s stage-then-atomic-rename for the
+  scratch-to-durable path, and (2026-08-13, this pass)
+  `migrate_durable_file()`'s SHA-256-verified stage-then-atomic-rename for
+  the already-durable tier-to-tier path, exposed via `POST
+  /api/v1/system/storage/migrate`. Honest scope note: this codebase has no
+  central manifest mapping a durable path back to whichever record
+  references it, so the endpoint performs and verifies the file relocation
+  itself and reports `callerMustUpdateReferencingRecord: true` rather than
+  guessing at which Model Registry/index/etc. record to rewrite.
 
 ### Phase 32 — Speculative decoding and draft-model acceleration
 
-Status: Planned. Priority C — deliberately deferred behind the Priority A/B
-phases above; enabled only per-request after backend/tokenizer/template
-compatibility and quality-parity checks pass.
+Status: **Implemented at a scoped-down level, evidence-pending (2026-08-13)**
+— see the Phase 32 entry in the status summary above for the full
+breakdown. Priority C — the decision logic (compatibility checks,
+acceptance-rate tracking, per-request enable/disable) is real and tested,
+but deliberately not wired to any live generation call site: this codebase
+has no dual-model (draft+target concurrently resident) launch path yet.
 
 Purpose:
 
@@ -5374,9 +5721,17 @@ Exit criteria:
 
 ### Phase 33 — Distributed local runners and multi-device orchestration
 
-Status: Planned. Priority C — deliberately deferred behind the Priority A/B
-phases above; local single-runner mode remains the default and is never
-required to change.
+Status: **Implemented (2026-08-13)** — both halves. The local multi-runner
+orchestration half (earlier pass) and the intranet/mTLS worker protocol
+half (this pass, private PKI/mutual TLS/model-digest verification) are both
+implemented; see the Phase 33 entry in the status summary above for the
+full breakdown, including the honest scope note that remote workers are
+not yet wired into the live chat-generation dispatch path. Priority C
+overall — this phase stayed deliberately deferred behind the Priority A/B
+work above until the local-only slice was explicitly authorized and pulled
+forward, then the intranet-worker slice was separately authorized and
+completed this pass; local single-runner mode remains the default and was
+not required to change, and did not change.
 
 Purpose:
 
@@ -5386,36 +5741,90 @@ Purpose:
 
 Dependencies:
 
-- Phase 2 authorization model (worker authorization stays project-bound);
-  Phase 29 device-aware routing signals; Phase 9's existing outbound
-  registry pattern for pinned, verified external processes.
+- Phase 2 authorization model (worker authorization stays project-bound) —
+  reused via the same open-unless-restricted `authorized_project_ids`
+  pattern already used by `IdeIntegrationService`/`McpIdentity`, not
+  reinvented.
+- Phase 29 device-aware routing signals (`model_routing.cpp`) — this phase's
+  `RunnerSelectionSignals` deliberately mirrors that struct's "declare and
+  disclose every signal, even ones a rule does not yet act on" discipline
+  for the separate decision of *which runner process*, not *which model
+  tier*.
+- Phase 4's existing single-runner supervision pattern (`RunnerSupervisor`,
+  `src/inference.cpp`) — `LocalRunnerPool` generalizes it to N concurrent
+  processes rather than inventing a parallel mechanism.
+- Phase 9's existing outbound registry pattern for pinned, verified external
+  processes remains the template the *not-yet-implemented* intranet-worker
+  half of this phase will follow when that pass happens; nothing in the
+  local-only slice needs it, since every runner it manages is a local child
+  process this control plane spawns itself.
 
 Deliverables:
 
-- Local multi-runner configurations (per-GPU runner, CPU+GPU split,
-  dedicated embedding/router/benchmark runners) routed by resident model,
-  available VRAM/RAM, queue depth, expected TTFT, capability, power/thermal
-  state, priority, and authorization.
-- Optional intranet worker nodes using mutual TLS, pinned/approved private
-  PKI, signed worker registration, model-digest verification, explicit
-  per-project authorization, encrypted transport, request-size limits,
-  cancellation, audit correlation — no shared user passwords, no direct
-  unrestricted filesystem access.
-- Compact retrieval-context transfer to runners instead of whole project
-  files; worker identity recorded on the query trace.
+- **Done:** local multi-runner configurations (per-GPU runner, CPU+GPU
+  split, dedicated embedding/router/benchmark runners) — opt-in via the new
+  `localRunnerPool` settings array (`LocalRunnerConfig`, `src/config.cpp`),
+  empty by default. Routed by `LocalRunnerPool::select_runner()`
+  (`src/runner_pool.cpp`) on resident-model match, runner health/state
+  (a queue-depth proxy — see the honest scope note below), capability, and
+  priority, with project-bound authorization and capability applied as hard
+  filters before scoring. Available-VRAM/RAM and expected-TTFT signals are
+  declared on `RunnerSelectionSignals` for disclosure but are not yet live
+  scoring inputs in this pass (no live-per-runner VRAM/TTFT probe exists
+  yet, distinct from the control-plane-wide Phase 30 hardware probe); a
+  per-runner thermal/power signal is likewise declared-but-undriven for the
+  same reason this project already documents equivalent gaps elsewhere
+  (e.g. Phase 78's cache-hit-rate note) rather than fabricating a value.
+- **Deferred (Planned):** optional intranet worker nodes using mutual TLS,
+  pinned/approved private PKI, signed worker registration, model-digest
+  verification, explicit per-project authorization, encrypted transport,
+  request-size limits, cancellation, audit correlation — no shared user
+  passwords, no direct unrestricted filesystem access. Not implemented in
+  this pass; every runner `LocalRunnerPool` manages is local-only.
+- **Done:** compact retrieval-context transfer to runners — the multi-runner
+  chat/RAG-generation path reuses the exact same assembled-prompt string
+  (`assemble_inference_prompt`/`assemble_chat_prompt`, already a bounded,
+  ranked, budgeted context assembly per Phase 16/24) every single-runner
+  call already sent; `LocalRunnerPool::generate()` takes that same string,
+  never a whole project file, so no separate "compact transfer" mechanism
+  needed inventing.
+- **Done:** worker identity recorded on the query trace —
+  `QueryTrace::runner_id` (`"inference"` for the always-present default
+  supervisor, or a `LocalRunnerConfig::id` for a pool runner), set via the
+  new `QueryCoordinator::record_runner()` (`src/query.cpp`), following the
+  same "independent of the terminal diagnostic" convention as
+  `record_classification()`/`record_retrieval()`.
+- Administration visibility: `GET /api/v1/runner/pool` (administrator-only,
+  same shape as `GET /api/v1/system/storage`) lists every configured
+  runner's live state, capabilities, authorized projects, and health.
 
 Exit criteria:
 
 - Runner failure does not crash the control plane; retries occur only when
-  semantically safe and never duplicate a persisted response.
-- Worker authorization remains project-bound; local single-runner mode
-  remains fully functional as the default.
+  semantically safe and never duplicate a persisted response. Enforced by
+  `LocalRunnerPool::generate()` wrapping every call in try/catch (a failing
+  runner is marked unhealthy and excluded from future routing, never taken
+  down with the control plane) and by `retry_is_semantically_safe()`
+  (`src/runner_pool.cpp`), which the chat-generation call site consults via
+  `RunnerGenerationFailure::any_bytes_emitted` — tracked directly at the
+  `on_chunk` callback, not inferred after the fact — before ever retrying
+  on the default runner.
+- Worker authorization remains project-bound — `LocalRunnerConfig::
+  authorized_project_ids` is a hard filter in `select_runner()`, never a
+  soft preference, reusing the Phase 2 project-bound pattern.
+- Local single-runner mode remains fully functional as the default — an
+  empty (default) `localRunnerPool` setting means `runner_pool` is never
+  constructed and every request path falls back to the pre-existing
+  `inference`/`ensure_model_loaded()` behavior unchanged.
 
 ### Phase 34 — Adaptive performance controller
 
-Status: Planned. Priority B, gated on Phase 21–31 producing real measured
-evidence to tune against — an empty or synthetic evidence base must not
-drive automatic changes.
+Status: **Implemented at a scoped-down level (2026-08-13)** — see the
+Phase 34 entry in the status summary above for the full breakdown. Priority
+B; every stability control is real and tested, applied live to the one
+genuinely mutable target (`MemoryBudgetManager::set_policy()`) with every
+other named knob computed and disclosed as a recommendation rather than
+applied.
 
 Purpose:
 
@@ -5453,7 +5862,10 @@ Exit criteria:
 
 ### Phase 35 — Performance administration interfaces
 
-Status: Planned.
+Status: **Implemented at a scoped-down level (2026-08-13)** — see the
+Phase 35 entry in the status summary above for exactly which named pages
+this condenses to (one consolidated, fully real Overview page) versus
+which remain deferred.
 
 Purpose:
 

@@ -745,7 +745,15 @@ int main(int argc, char* argv[]) {
                       << "averageCpuPercent\t" << profile.average_cpu_percent
                       << '\n'
                       << "diskReadBytes\t" << profile.disk_read_bytes << '\n'
-                      << "diskWriteBytes\t" << profile.disk_write_bytes << '\n';
+                      << "diskWriteBytes\t" << profile.disk_write_bytes << '\n'
+                      << "gpuTelemetryAvailable\t"
+                      << (profile.gpu_telemetry_available ? "true" : "false")
+                      << '\n'
+                      << "gpuVendor\t" << profile.gpu_vendor << '\n'
+                      << "averageGpuUtilizationPercent\t"
+                      << profile.average_gpu_utilization_percent << '\n'
+                      << "peakGpuTemperatureCelsius\t"
+                      << profile.peak_gpu_temperature_celsius << '\n';
             return 0;
         }
         if (command == "security-status") {

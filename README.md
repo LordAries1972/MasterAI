@@ -260,6 +260,100 @@ The current source includes native implementations for:
   a wired implementation, no recorded regression, and a verified fallback;
   every admitted feature remains independently disableable. The safe Phase 19
   profile is always retained. No optional candidate is currently admitted.
+- Phase 31: storage tiering and scratch-volume management. Five measured
+  storage tiers (fast local NVMe, local SATA SSD, local HDD, removable/
+  network, RAM-backed) classified from Phase 21's real device-type/latency
+  evidence, never assumed. `ScratchVolumeManager` bounds ephemeral per-job
+  scratch storage with per-job and global byte quotas, refuses admission
+  once free disk space would fall below a configured reserve, publishes
+  finished output atomically (stage-then-rename, so a durable destination is
+  never partially observable), cleans up on shutdown, and recovers orphaned
+  scratch left by a previous crashed run via a durable journal at the next
+  startup (also re-runnable on demand via `POST /api/v1/system/scratch/
+  cleanup`). A hard, code-enforced prohibition (`durable_data_class_allows_
+  ram_tier()`) refuses -- never silently downgrades -- any attempt to place a
+  GGUF model, durable chat, audit/security record, user database, resumable
+  download, backup, or sole-copy index generation on RAM-backed storage.
+  `GET /api/v1/system/storage` (administrator-only) reports measured
+  filesystem-integrity flags (compression/encryption/dedup/virtual-disk/
+  network-redirection, best-effort on Windows) and a resulting model-
+  placement recommendation, plus separate physical/committed/commit-limit/
+  pagefile/page-fault-rate/model-resident memory accounting so none of those
+  figures are conflated into one number. `GET /api/v1/system/scratch`
+  reports live quota/usage/active-job status. A dedicated multi-tier
+  migration workflow (relocating already-placed durable data between tiers)
+  is also implemented: `migrate_durable_file()` verifies a SHA-256 digest
+  match between source and staged copy before an atomic rename, enforces
+  the same RAM-tier prohibition, and is exposed administrator-only via
+  `POST /api/v1/system/storage/migrate` (this codebase has no central
+  manifest of which record references a migrated path, so the endpoint
+  performs and verifies the relocation and reports
+  `callerMustUpdateReferencingRecord: true` rather than guessing).
+- Phase 33: distributed runners, both halves. Local multi-runner
+  orchestration: `LocalRunnerPool` generalizes the existing single-runner
+  `RunnerSupervisor` supervision pattern to N concurrent local runner
+  processes (per-GPU runner, CPU+GPU split, or dedicated embedding/router/
+  benchmark runners), configured via the `localRunnerPool` settings array,
+  which stays empty (unchanged single-runner mode) unless an administrator
+  opts in. Requests are routed by resident-model match, runner health/
+  state, capability, and priority, with Phase 2 project-bound authorization
+  enforced as a hard filter; a failing runner is isolated (marked
+  unhealthy, excluded from routing) rather than taking down the control
+  plane, and a retry is only ever attempted when nothing from the failed
+  attempt has already reached the caller or been persisted. The runner
+  that actually served each query is recorded on the Phase 13 query trace
+  and visible administrator-only at `GET /api/v1/runner/pool`. Intranet
+  worker protocol: `IntranetWorkerPool`/`WorkerListener`
+  (`src/intranet_worker.cpp`) add mutual-TLS routing to administrator-
+  approved remote worker machines, using OpenSSL as this codebase's first
+  vendored TLS/crypto dependency (optional at build time via
+  `find_package(OpenSSL)`; fails closed at runtime with a clear error when
+  unavailable, never falls back to plaintext). A worker's certificate is
+  verified against a pinned private CA plus a pinned leaf digest; the
+  worker equally verifies this control plane's own client certificate.
+  Worker certificates are issued from an in-process private CA
+  (`POST /api/v1/system/pki/initialize`, `POST /api/v1/system/pki/workers`)
+  and copied to the physical worker machine out of band -- there is no
+  self-service worker registration. Each worker's self-reported loaded-
+  model digest is verified against this control plane's own model registry
+  before that worker is ever selectable (`GET`/`POST /api/v1/worker/pool[/refresh]`).
+  `WorkerListener` (`AppConfig::workerMode`, disabled by default) is this
+  codebase's one deliberate exception to the administrator HTTP server's
+  loopback-only constraint, speaking only the narrow authenticated worker
+  protocol, never the administrator surface. Not yet wired into the live
+  chat-generation dispatch path -- a chat request does not automatically
+  fail over onto a remote worker the way it already does onto a local pool
+  runner.
+- Phase 34: adaptive performance controller. `AdaptiveController`
+  (`src/adaptive_controller.cpp`) extends Phase 19 calibration into a live,
+  bounded controller with real minimum-dwell-time, cooldown, bounded-step-
+  size, rolling-measurement, confidence-requirement, and safe-rollback
+  stability controls, and all eight named modes (Minimal Memory, Balanced,
+  Lowest Latency, Maximum Throughput, Battery Saver, Quiet/Thermal
+  Conservative, Administrator Custom, Automatic). Applies live to the one
+  genuinely mutable target in this codebase
+  (`MemoryBudgetManager::set_policy()` -- inference concurrency, queued-
+  inference ceiling, index worker count, default context tokens); every
+  other named knob (prefetch distance, batch size, NUMA/GPU offload, KV
+  placement, background-job rate, and others) is computed and disclosed as
+  a recommendation rather than applied, since no live setter exists for
+  them yet. Administrator-only routes: `GET /api/v1/performance/adaptive`,
+  `POST .../mode`, `POST .../ceilings`, `POST .../rollback`.
+- Phase 35: a "Performance" administration page (`/app/performance`)
+  consolidating live visibility into the local runner pool, the intranet
+  worker pool, and the adaptive controller (mode selection, applied/
+  recommended adjustments with reasons and confidence, rollback), backed
+  entirely by the real routes above -- condensed from the plan's full
+  named-page enumeration into one working page rather than many
+  placeholders.
+- Phase 32 (evidence-pending): speculative decoding decision logic.
+  `check_draft_target_compatibility()`, `SpeculativeDecodingStats`, and
+  `decide_speculative_decoding_for_request()`
+  (`src/speculative_decoding.cpp`) implement exact draft/target
+  compatibility checking, rolling acceptance-rate tracking, and the
+  bounded per-request enable/disable rule the plan describes, but are
+  deliberately not wired to any live generation call site -- this codebase
+  has no dual-model (draft+target concurrently resident) launch path yet.
 - A native asynchronous storage and prefetch engine (`IAsyncFileReader`):
   IOCP-backed overlapped reads on Windows and a bounded worker-pool `pread`
   fallback on POSIX, adjacent-request read coalescing, an adaptive
@@ -387,7 +481,7 @@ Status below reflects the evidence recorded in
 | 29 | Model tiering, routing, and cascade inference | Decision logic implemented at a scoped-down level; live chat routing/cascade execution pending |
 | 30 | Memory deduplication and immutable shared-data architecture | Implemented at a scoped-down level |
 | 30A | CPU-only and GPU-disabled low-memory operation | Implemented; matched real-model benchmark matrix pending |
-| 31 | Storage tiering, virtual drives, and scratch-volume management | Planned |
+| 31 | Storage tiering, virtual drives, and scratch-volume management | Implemented, including Priority B tier-migration tooling |
 | 32 | Speculative decoding and draft-model acceleration | Planned |
 | 33 | Distributed local runners and multi-device orchestration | Planned |
 | 34 | Adaptive performance controller | Planned |
@@ -428,13 +522,13 @@ Status below reflects the evidence recorded in
 | 69 | Automation Pipelines real executor | Implemented; "Train model"/"Evaluate model" stages genuinely run, every other named stage honestly reported as skipped |
 | 70 | Fine-Tuning real executor | Implemented; genuine warm-start gradient descent from a base model's trained weights, registered as a new model |
 | 71 | Automation Pipelines: more real stages and live progress | Implemented; "Validate data"/"Validate model"/"Safety tests"/"Request approval"/"Deploy staging"/"Deploy production"/"Rollback"/"Monitor" all genuinely execute (Import/clean/label/split data, optimize, and staging tests remain honestly skipped); a run now executes on a background thread and reports live per-stage progress the web UI renders as a progress bar |
-| 72 | Automation Pipelines: final six real stages | Implemented; "Import data"/"Clean data"/"Split data"/"Optimize"/"Staging tests" all genuinely execute; "Label data" honestly reports skipped unless a completed labeling task is on record |
+| 72 | Automation Pipelines: final six real stages | Implemented; all six stages genuinely execute, including "Label data", which now runs a real heuristic auto-labeler (quantile-binning or existing-label validation) when no completed labeling task is on record |
 | 73 | Real LLM LoRA fine-tuning | Implemented when `llama_finetune_executable`/`llama_export_lora_executable` are configured (administrator-vendored, same manual-placement convention as `llama-server`); a `"llm:"`-prefixed fine-tuning job method runs a real LoRA train-and-merge pipeline on a background thread |
-| 74 | Safety and Governance real content scanning | Implemented; local heuristic secret/prompt-injection/restricted-term scanning (`scan_content_for_risks`), not an ML classifier |
+| 74 | Safety and Governance real content scanning | Implemented; local heuristic secret/prompt-injection/restricted-term scanning (`scan_content_for_risks`) plus a real LLM-as-judge ML classifier pass (`scan_content_with_model_classifier`) for bias/hallucination/subtler harmful content |
 | 75 | Hardware and Compute remote telemetry agent | Implemented; `masterai telemetry-agent` run on a remote node, polled for real by a `ComputeNode` with a matching `agentUrl` |
 | 76 | RAG real answer generation | Implemented; the RAG query route's optional `"generate":true` mode produces a real generated answer grounded in the same retrieved context |
-| 77 | Inference Endpoints real listener | Implemented; an `active` endpoint opens a real listener enforcing authentication, rate limiting, and Phase 74's content scan |
-| 78 | Monitoring real per-request telemetry | Implemented; real latency percentiles, queue depth, and requests/minute from every real generation call site |
+| 77 | Inference Endpoints real listener | Implemented; an `active` endpoint opens a real listener enforcing authentication, rate limiting, and a real per-endpoint safety policy (scan on/off, block-on-finding, attached `SafetyPolicy`, opt-in Phase 74 model classifier), re-read live on every request |
+| 78 | Monitoring real per-request telemetry | Implemented; real latency percentiles, queue depth, requests/minute, live per-step tabular-training progress, and KV-session cache-hit rate |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -477,7 +571,17 @@ chat-streaming write path. Phases 21–26 are implementation-complete; Phases
 27–30 retain the explicit scope limits recorded in [docs/PLAN.md](docs/PLAN.md).
 Linux uses the documented bounded `pread` fallback instead of `io_uring`, and
 continuous batching remains default-off until host/model/backend calibration
-admits it. Phase 31 and Phases 32–36 remain planned.
+admits it. Phase 31 adds storage tiering (`StorageTier`, measured from the
+same Phase 21 device-type/latency evidence), a `ScratchVolumeManager` (bounded
+per-job/global quotas, atomic publish, crash-recovery journal, orphan cleanup,
+free-space reserve), a hard code-enforced prohibition on placing durable data
+(models, chats, audit/security records, user databases, downloads, backups,
+sole-copy indexes) on RAM-backed storage, separate physical/commit/pagefile/
+page-fault/model-resident memory accounting, and best-effort Windows
+filesystem-integrity detection (compression/encryption/dedup/virtual-disk/
+network-redirection) feeding a measured, not assumed, model-placement
+recommendation. Its tier-migration workflow remains future work; Phases
+32–36 remain planned.
 
 Phases 37–55 establish the Machine Learning administration layer:
 administrators manage durable, permission-gated records through native web
@@ -1392,9 +1496,12 @@ Near-term work is:
    improvement over full-text-only retrieval.
 2. Author the Phase 17 representative-query latency benchmark comparing
    cached against uncached retrieval preparation time.
-3. Complete the Phase 19 comparative calibration evidence and the Phase 30A
-   matched `auto`-versus-`cpu_only` real-model benchmark matrix; add GPU
-   utilization/thermal-trend probing only if an approved vendor SDK is adopted.
+3. ~~Complete the Phase 19 comparative calibration evidence and the Phase 30A
+   matched `auto`-versus-`cpu_only` real-model benchmark matrix~~ — done
+   (2026-08-13): GPU utilization/thermal-trend probing is wired into
+   `CalibrationService` with real measured evidence, and both `auto`/
+   `cpu_only` states now persist a `TuningProfile` on the same pinned host/
+   model, see [docs/performance/phase-19-qwen3b-matrix.md](docs/performance/phase-19-qwen3b-matrix.md).
 4. Evaluate Phase 20 throughput options independently after prerequisite
    evidence closes; use the durable admission API and never enable an
    unavailable, regressing, or fallback-unverified candidate.
@@ -1404,8 +1511,17 @@ Near-term work is:
    `io_uring`, unadapted retrieval strategies, live backend batching,
    backend-actionable pre-touch, validated KV compression/prefix sharing,
    measured worker affinity, live cascade routing, and broader zero-copy use.
-7. Implement the still-planned performance Phases 31–36 in prerequisite
-   order, beginning with storage tiering and scratch-volume management.
+7. Implement the still-planned Phase 36 full performance benchmark matrix
+   and regression gates (Phase 31 storage tiering, Phase 33 local and
+   intranet-worker distributed runners, Phase 34 adaptive performance
+   controller, and Phase 35 performance administration are all now
+   implemented; Phase 32 speculative decoding has real, tested decision
+   logic but is not wired to a live generation path -- see docs/PLAN.md).
+   Wire `IntranetWorkerPool` into the live chat-generation dispatch path
+   the way `LocalRunnerPool` already is, and extend the Phase 35
+   administration page toward the plan's remaining named pages (Query
+   Traces, Runner Configuration, Model Comparison, Calibration, Advanced
+   Optimizations, Benchmarks, Regression History, Recommendations).
 8. Extend the Phase 61 Machine Learning executors with governed LLM
    fine-tuning, generated-answer RAG
    evaluation, and the remaining planned job executors without allowing
@@ -1417,7 +1533,6 @@ Outstanding operational certification also includes:
 - Ubuntu 24.04 and Debian 13 packaging-host certification
 - Optional pinned `whisper.cpp` integration, if enabled
 - Broader Phase 19 semantic-quality scoring beyond the fixed successful calibration workload
-- Phase 30A matched `auto`-versus-`cpu_only` real-model benchmark matrix
 
 The detailed roadmap, deliverables, dependencies, installation outcomes, and
 exit criteria are maintained in [docs/PLAN.md](docs/PLAN.md).
@@ -1467,12 +1582,18 @@ Before proposing a change:
 Third-party coding foundations, frameworks, source libraries, and
 dependency-provided application foundations are prohibited. The current
 explicit exceptions are an optional, isolated, replaceable `llama.cpp`
-inference backend, and an optional, isolated, replaceable DuckDB CLI
-(`duckdb.exe`) backend used for Parquet-document ingestion. Both are
-distributed separately, never vendored or linked, and configured by
-filesystem path in `settings.json`. Established audited cryptographic
-providers are required; MasterAI does not implement cryptographic
-primitives.
+inference backend, an optional, isolated, replaceable DuckDB CLI
+(`duckdb.exe`) backend used for Parquet-document ingestion, and NVIDIA
+NVML/AMD ADLX for GPU utilization/thermal-trend probing (Phase 19). The
+first two are distributed separately, never vendored or linked, and
+configured by filesystem path in `settings.json`. NVML/ADLX are narrower:
+no vendor binary is linked (both are loaded from the driver-installed DLL
+at runtime and fail closed when that driver is absent), but AMD's public
+interface headers and helper source are vendored under `third_party/ADLX`
+since ADLX has no CUDA-Toolkit-style pre-installed system location to load
+headers from; see `docs/architecture/ADR-0001-cpp17-native-architecture.md`.
+Established audited cryptographic providers are required; MasterAI does not
+implement cryptographic primitives.
 
 ## Documentation
 

@@ -242,6 +242,17 @@ void QueryCoordinator::record_retrieval_strategy_skips(
     trace.disabled_retrieval_strategies = std::move(reasons);
 }
 
+// Phase 33 (LOCAL-ONLY slice): records which local runner process served
+// this query. Independent of the terminal diagnostic (same convention as
+// record_classification()/record_retrieval() above) so a later successful
+// finish() cannot erase it.
+void QueryCoordinator::record_runner(const std::string& id,
+                                     std::string runner_id) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    auto& trace = state_->required(id);
+    trace.runner_id = std::move(runner_id);
+}
+
 // Closes the final active stage and publishes a terminal state and sanitized
 // bounded diagnostic. Cancellation is also attached to the active stage.
 void QueryCoordinator::finish(const std::string& id, const QueryStatus status,
@@ -331,6 +342,7 @@ std::string QueryCoordinator::to_json(const QueryTrace& trace) {
            json_string(trace.request_classification) +
            ",\"disabledRetrievalStrategies\":" +
            join_json_strings(trace.disabled_retrieval_strategies) +
+           ",\"runnerId\":" + json_string(trace.runner_id) +
            ",\"diagnostic\":" + json_string(trace.diagnostic) + "}";
 }
 

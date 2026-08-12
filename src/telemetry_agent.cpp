@@ -294,8 +294,14 @@ void run_telemetry_agent(const std::string& host, const std::uint16_t port,
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
-    address.sin_addr.s_addr =
-        host.empty() || host == "0.0.0.0" ? INADDR_ANY : inet_addr(host.c_str());
+    if (host.empty() || host == "0.0.0.0") {
+        address.sin_addr.s_addr = INADDR_ANY;
+    } else {
+        // inet_pton() is the non-deprecated replacement for inet_addr(); it
+        // also correctly rejects "255.255.255.255" instead of aliasing it
+        // to INADDR_NONE.
+        inet_pton(AF_INET, host.c_str(), &address.sin_addr);
+    }
     if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
         listen(listener, 16) != 0) {
         close_socket(listener);

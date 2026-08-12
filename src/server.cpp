@@ -297,6 +297,12 @@ std::string ascii_lower(const std::string& value) {
 }  // namespace
 
 class HttpServer::State final {
+    // Phase 33 (INTRANET-WORKER slice): HttpServer::run()/stop() start and
+    // join worker_listener_thread directly against the private fields
+    // below, the same way every other background-thread field in this
+    // class is already only ever touched from HttpServer's own methods.
+    friend class HttpServer;
+
 public:
     // Opens durable services in dependency order, then wires the MCP dispatcher
     // to the same project catalogue and model root used by the normal API.
@@ -337,6 +343,12 @@ public:
             .concurrency_allowance = memory_policy.maximum_active_inference;
         request_scheduler = std::make_unique<RequestScheduler>(
             std::move(scheduling_policies), 256U);
+        // Phase 34: always constructed (cheap, in-memory, no disk/network
+        // I/O) even when no administrator has ever selected a mode other
+        // than the default `automatic` -- the same "always on, opt-in
+        // behavior only" shape PromptSessionManager (Phase 18) already
+        // established for a cheap always-present service.
+        adaptive_controller = std::make_unique<AdaptiveController>();
         users = std::make_unique<UserStore>(records);
         sessions = std::make_unique<SessionStore>(records);
         api_tokens = std::make_unique<ApiTokenStore>(records);
@@ -409,6 +421,26 @@ public:
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
+        // Phase 31: constructed before anything that might want scratch
+        // space of its own. classify_storage_tier() reasons from a real
+        // measured StorageLatencyProfile of the actual scratch volume (which
+        // may sit on a different physical drive than runtime_root), not an
+        // assumed tier -- the "model placement recommendations reflect
+        // measured storage, not assumption" exit criterion applies to
+        // scratch placement the same way. recover_orphans() runs
+        // immediately so a directory left behind by a previous crashed
+        // process is cleaned up before this run creates any new job.
+        {
+            const auto scratch_root = resolve_scratch_root(value);
+            const auto scratch_storage_class = probe_hardware(scratch_root).storage_class;
+            const auto scratch_latency =
+                probe_storage_latency(scratch_root, scratch_storage_class);
+            scratch_volumes = std::make_unique<ScratchVolumeManager>(
+                scratch_root, value.scratch_global_quota_mib * 1024ULL * 1024ULL,
+                value.scratch_free_space_reserve_mib * 1024ULL * 1024ULL,
+                classify_storage_tier(scratch_latency));
+            scratch_volumes->recover_orphans();
+        }
         if (!value.llama_server_executable.empty()) {
             inference = std::make_unique<RunnerSupervisor>(
                 value.llama_server_executable, value.runtime_root);
@@ -417,6 +449,35 @@ public:
                 *inference, *tuning_profiles, hardware,
                 sha256_file_hex(value.llama_server_executable),
                 "masterai-0.1.0", value.accelerator_policy);
+            // Phase 33 (LOCAL-ONLY slice): additional concurrent local
+            // runners, opt-in only -- ConfigurationManager::validate()
+            // already rejected a non-empty local_runner_pool without
+            // llama_server_executable set, so reaching here with entries
+            // present means every precondition already held.
+            if (!value.local_runner_pool.empty()) {
+                runner_pool = std::make_unique<LocalRunnerPool>(
+                    value.local_runner_pool, value.llama_server_executable,
+                    value.runtime_root);
+            }
+        }
+        // Phase 33 (INTRANET-WORKER slice): opt-in remote worker routing.
+        // ConfigurationManager::validate() already rejected a non-empty
+        // intranet_worker_pool without private_ca/client certificate/key
+        // set, so reaching here with entries present means every
+        // precondition already held.
+        if (!value.intranet_worker_pool.empty()) {
+            intranet_worker_pool = std::make_unique<IntranetWorkerPool>(
+                value.intranet_worker_pool, value.private_ca,
+                value.intranet_worker_client_certificate_file,
+                value.intranet_worker_client_private_key_file);
+        }
+        // Phase 33 (INTRANET-WORKER slice): opt-in worker-mode listener --
+        // ConfigurationManager::validate() already required
+        // llama_server_executable/PKI paths to be set when enabled.
+        if (value.worker_mode.enabled) {
+            worker_listener = std::make_unique<WorkerListener>(
+                value.worker_mode, value.llama_server_executable,
+                value.runtime_root);
         }
         if (!value.curl_executable.empty()) {
             downloads = std::make_unique<DownloadManager>(
@@ -1234,6 +1295,420 @@ public:
                     "{\"error\":\"advanced_optimization_rejected\"}");
             }
         }
+        // Phase 31: storage tiering visibility. GET /api/v1/system/storage
+        // reports the measured tier/filesystem-integrity evidence and
+        // resulting placement recommendation for models_root (the "active
+        // model/index storage" the plan's exit criterion is about), plus a
+        // separate, non-conflated memory accounting snapshot -- following
+        // the same "administrator-only, evidence not assumption" shape as
+        // /api/v1/system/resources and the Phase 19/20 performance routes
+        // above.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/system/storage") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto storage_class = probe_hardware(configuration.models_root).storage_class;
+            const auto latency =
+                probe_storage_latency(configuration.models_root, storage_class);
+            const auto filesystem =
+                probe_filesystem_integrity_flags(configuration.models_root);
+            const auto placement = recommend_storage_placement(latency, filesystem);
+            const auto memory_accounting = probe_memory_accounting(
+                100U, 0U,
+                inference != nullptr ? inference->metrics().resident_memory_bytes : 0U);
+            std::string concerns = "[";
+            for (std::size_t index = 0U; index < placement.concerns.size(); ++index) {
+                if (index != 0U) concerns += ",";
+                concerns += json_string(placement.concerns[index]);
+            }
+            concerns += "]";
+            return response(
+                200, "OK",
+                "{\"modelsRoot\":{\"storageClass\":" + json_string(storage_class) +
+                    ",\"measuredReadLatencyMicroseconds\":" +
+                    std::to_string(latency.measured_read_latency_us) +
+                    ",\"tier\":" + json_string(to_string(placement.recommended_tier)) +
+                    ",\"acceptableForActiveModelStorage\":" +
+                    (placement.acceptable_for_active_model_storage ? "true" : "false") +
+                    ",\"concerns\":" + concerns +
+                    ",\"filesystem\":{\"detectionAvailable\":" +
+                    (filesystem.detection_available ? "true" : "false") +
+                    ",\"volumeFilesystem\":" + json_string(filesystem.volume_filesystem) +
+                    ",\"compressed\":" + (filesystem.compressed ? "true" : "false") +
+                    ",\"encrypted\":" + (filesystem.encrypted ? "true" : "false") +
+                    ",\"deduplicated\":" + (filesystem.deduplicated ? "true" : "false") +
+                    ",\"virtualDisk\":" + (filesystem.virtual_disk ? "true" : "false") +
+                    ",\"networkRedirected\":" +
+                    (filesystem.network_redirected ? "true" : "false") + "}},\n"
+                "\"memoryAccounting\":{\"physicalTotalBytes\":" +
+                    std::to_string(memory_accounting.physical_total_bytes) +
+                    ",\"physicalAvailableBytes\":" +
+                    std::to_string(memory_accounting.physical_available_bytes) +
+                    ",\"committedBytes\":" +
+                    std::to_string(memory_accounting.committed_bytes) +
+                    ",\"commitLimitBytes\":" +
+                    std::to_string(memory_accounting.commit_limit_bytes) +
+                    ",\"pagefileUsedBytes\":" +
+                    std::to_string(memory_accounting.pagefile_used_bytes) +
+                    ",\"hardPageFaultRatePerSecond\":" +
+                    std::to_string(memory_accounting.hard_page_fault_rate_per_second) +
+                    ",\"modelMappedBytes\":" +
+                    std::to_string(memory_accounting.model_mapped_bytes) +
+                    ",\"modelResidentBytes\":" +
+                    std::to_string(memory_accounting.model_resident_bytes) + "}}");
+        }
+        // Phase 33 (LOCAL-ONLY slice): local runner pool visibility --
+        // which runners are configured, their live RunnerMetrics-derived
+        // state, capabilities, project authorization, and health --
+        // following the same "administrator-only" shape as
+        // /api/v1/system/storage above. Returns an empty runners array
+        // (not an error) when no pool is configured, so this route is
+        // always safe for an admin UI to poll regardless of deployment
+        // mode.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/runner/pool") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto entries = runner_pool != nullptr
+                                     ? runner_pool->status()
+                                     : std::vector<RunnerPoolEntrySnapshot>{};
+            return response(200, "OK", LocalRunnerPool::status_json(entries));
+        }
+        // Phase 33 (INTRANET-WORKER slice): remote worker pool visibility,
+        // the same administrator-only shape as GET /api/v1/runner/pool
+        // above. Returns an empty workers array (not an error) when no
+        // intranet worker pool is configured.
+        if (request.method == "GET" && request.target == "/api/v1/worker/pool") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto entries =
+                intranet_worker_pool != nullptr
+                    ? intranet_worker_pool->status()
+                    : std::vector<RunnerPoolEntrySnapshot>{};
+            return response(200, "OK", IntranetWorkerPool::status_json(entries));
+        }
+        // Phase 33 (INTRANET-WORKER slice): re-runs mutual-TLS status/
+        // model-digest verification against every configured intranet
+        // worker on demand, rather than only ever on an internal timer --
+        // an administrator can immediately confirm a newly approved worker
+        // is reachable and reporting the expected model.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/worker/pool/refresh") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            if (intranet_worker_pool == nullptr) {
+                return response(200, "OK", "{\"refreshed\":false}");
+            }
+            std::map<std::string, std::string> known_model_sha256_by_id;
+            const auto hardware = probe_hardware(configuration.models_root);
+            for (const auto& model :
+                ModelRegistry(configuration.models_root, hardware,
+                              configuration.memory_reserve_mib)
+                    .scan()) {
+                known_model_sha256_by_id[model.manifest.id] =
+                    model.manifest.model_sha256;
+            }
+            intranet_worker_pool->refresh_all(known_model_sha256_by_id);
+            audit.append("worker.pool.refresh", user->id, "success", "");
+            return response(200, "OK", "{\"refreshed\":true}");
+        }
+        // Phase 33 (INTRANET-WORKER slice): initializes this control
+        // plane's own private worker CA. Administrator-only, and refuses to
+        // overwrite an already-existing CA (see
+        // initialize_private_certificate_authority()'s own guard) --
+        // replacing a CA silently would invalidate every already-issued
+        // worker certificate without warning.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/system/pki/initialize") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            if (configuration.private_ca.certificate_file.empty() ||
+                configuration.private_ca.private_key_file.empty()) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"privateCa is not configured in settings\"}");
+            }
+            try {
+                initialize_private_certificate_authority(configuration.private_ca);
+            } catch (const std::exception& failure) {
+                return response(400, "Bad Request",
+                                "{\"error\":" + json_string(failure.what()) +
+                                    "}");
+            }
+            audit.append("pki.ca.initialize", user->id, "success", "");
+            return response(200, "OK", "{\"initialized\":true}");
+        }
+        // Phase 33 (INTRANET-WORKER slice): signs one worker certificate
+        // against this control plane's private CA. Administrator-only.
+        // Returns the certificate AND private key exactly once -- this
+        // control plane does not retain the private key itself (see
+        // IssuedWorkerCertificate's class comment) -- the response body is
+        // therefore the only copy an administrator will ever see and must
+        // be copied to the physical worker machine immediately.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/system/pki/workers") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            if (configuration.private_ca.certificate_file.empty() ||
+                configuration.private_ca.private_key_file.empty()) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"privateCa is not configured in settings\"}");
+            }
+            std::string common_name;
+            try {
+                const auto payload = parse_json(request.body);
+                common_name = payload.required("commonName").as_string();
+            } catch (const std::exception&) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"commonName is required\"}");
+            }
+            try {
+                const auto issued = issue_worker_certificate(
+                    configuration.private_ca, common_name);
+                audit.append("pki.worker.issue", user->id, "success", common_name);
+                return response(
+                    200, "OK",
+                    "{\"certificatePem\":" +
+                        json_string(issued.certificate_pem) +
+                        ",\"privateKeyPem\":" +
+                        json_string(issued.private_key_pem) +
+                        ",\"sha256Fingerprint\":" +
+                        json_string(issued.sha256_fingerprint) + "}");
+            } catch (const std::exception& failure) {
+                return response(400, "Bad Request",
+                                "{\"error\":" + json_string(failure.what()) +
+                                    "}");
+            }
+        }
+        // Phase 34: runs one AdaptiveController::evaluate() cycle against
+        // live MemoryBudgetManager/RequestScheduler/CacheManager signals
+        // and returns the resulting report -- see AdaptiveController's
+        // class comment in masterai.hpp for exactly which named knobs this
+        // can apply live versus only ever recommend. Administrator-only,
+        // and safe to poll repeatedly: evaluate() itself is what enforces
+        // dwell time/cooldown/max-changes-per-interval, not the caller.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/performance/adaptive") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            AdaptiveSignalSnapshot signals;
+            signals.memory = memory->sample();
+            signals.scheduler = request_scheduler->status();
+            signals.cache = cache->status();
+            const auto now = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count());
+            const auto report = adaptive_controller->evaluate(signals, *memory, now);
+            return response(200, "OK", AdaptiveController::to_json(report));
+        }
+        // Phase 34: administrator mode selection -- one of the named
+        // PerformanceMode values from masterai.hpp, case-sensitive,
+        // matching to_string(PerformanceMode)'s own spelling exactly.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/performance/adaptive/mode") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto payload = parse_json(request.body);
+            const auto requested = payload.required("mode").as_string();
+            static const std::map<std::string, PerformanceMode> modes = {
+                {"minimal_memory", PerformanceMode::minimal_memory},
+                {"balanced", PerformanceMode::balanced},
+                {"lowest_latency", PerformanceMode::lowest_latency},
+                {"maximum_throughput", PerformanceMode::maximum_throughput},
+                {"battery_saver", PerformanceMode::battery_saver},
+                {"quiet_thermal_conservative",
+                 PerformanceMode::quiet_thermal_conservative},
+                {"administrator_custom", PerformanceMode::administrator_custom},
+                {"automatic", PerformanceMode::automatic}};
+            const auto found = modes.find(requested);
+            if (found == modes.end()) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"unknown performance mode\"}");
+            }
+            adaptive_controller->set_mode(found->second);
+            audit.append("performance.adaptive.mode", user->id, "success", requested);
+            return response(200, "OK", "{\"mode\":" + json_string(requested) + "}");
+        }
+        // Phase 34: administrator-configured ceilings -- see
+        // PerformanceCeilings in masterai.hpp for the field list. Every
+        // field is optional in the request body; an omitted field keeps
+        // its current value rather than resetting to PerformanceCeilings'
+        // struct default.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/performance/adaptive/ceilings") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto payload = parse_json(request.body);
+            auto ceilings = adaptive_controller->ceilings();
+            if (payload.optional("maxInferenceConcurrency") != nullptr) {
+                ceilings.max_inference_concurrency = static_cast<std::uint32_t>(
+                    payload.required("maxInferenceConcurrency").as_integer());
+            }
+            if (payload.optional("maxQueuedInference") != nullptr) {
+                ceilings.max_queued_inference = static_cast<std::uint32_t>(
+                    payload.required("maxQueuedInference").as_integer());
+            }
+            if (payload.optional("maxIndexWorkers") != nullptr) {
+                ceilings.max_index_workers = static_cast<std::uint32_t>(
+                    payload.required("maxIndexWorkers").as_integer());
+            }
+            if (payload.optional("maxContextTokens") != nullptr) {
+                ceilings.max_context_tokens = static_cast<std::uint32_t>(
+                    payload.required("maxContextTokens").as_integer());
+            }
+            if (payload.optional("minIdleUnloadSeconds") != nullptr) {
+                ceilings.min_idle_unload_seconds = static_cast<std::uint32_t>(
+                    payload.required("minIdleUnloadSeconds").as_integer());
+            }
+            if (payload.optional("maxIdleUnloadSeconds") != nullptr) {
+                ceilings.max_idle_unload_seconds = static_cast<std::uint32_t>(
+                    payload.required("maxIdleUnloadSeconds").as_integer());
+            }
+            if (payload.optional("maxStepPercent") != nullptr) {
+                ceilings.max_step_percent = static_cast<unsigned int>(
+                    payload.required("maxStepPercent").as_integer());
+            }
+            if (payload.optional("maxChangesPerInterval") != nullptr) {
+                ceilings.max_changes_per_interval = static_cast<std::uint32_t>(
+                    payload.required("maxChangesPerInterval").as_integer());
+            }
+            if (payload.optional("intervalSeconds") != nullptr) {
+                ceilings.interval_seconds = static_cast<std::uint32_t>(
+                    payload.required("intervalSeconds").as_integer());
+            }
+            if (payload.optional("minimumDwellSeconds") != nullptr) {
+                ceilings.minimum_dwell_seconds = static_cast<std::uint32_t>(
+                    payload.required("minimumDwellSeconds").as_integer());
+            }
+            adaptive_controller->set_ceilings(ceilings);
+            audit.append("performance.adaptive.ceilings", user->id, "success", "");
+            return response(200, "OK", "{\"updated\":true}");
+        }
+        // Phase 34: the plan's "failed recommendations revert to the last
+        // safe profile" exit criterion, exposed as an explicit
+        // administrator action rather than only ever automatic.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/performance/adaptive/rollback") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            adaptive_controller->rollback(*memory);
+            audit.append("performance.adaptive.rollback", user->id, "success", "");
+            return response(200, "OK", "{\"rolledBack\":true}");
+        }
+        // Phase 31: ScratchVolumeManager visibility/administration.
+        // POST cleanup re-runs recover_orphans() on demand (the same
+        // journal-driven sweep the constructor already ran once at
+        // startup) so an administrator can reclaim orphaned scratch without
+        // restarting the server.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/system/scratch") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            return response(200, "OK",
+                            scratch_volume_manager_status_json(*scratch_volumes));
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/system/scratch/cleanup") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            const auto removed = scratch_volumes->recover_orphans();
+            audit.append("system.scratch.cleanup", user->id, "success",
+                        std::to_string(removed));
+            return response(200, "OK",
+                            "{\"orphansRemoved\":" + std::to_string(removed) + "}");
+        }
+        // Phase 31 (Priority B): tier-migration tooling. Relocates an
+        // already-published durable file (e.g. a GGUF model sitting on Tier
+        // C) to a different tier's directory, verified byte-for-byte via
+        // migrate_durable_file()'s SHA-256 check before the original is ever
+        // removed. There is no central manifest in this codebase mapping a
+        // durable path back to whichever record references it (Model
+        // Registry entry, index generation, etc.), so this endpoint reports
+        // the new path and leaves updating that record to the caller --
+        // surfaced honestly via the "callerMustUpdateReferencingRecord" flag
+        // below rather than silently pretending to be a full migration
+        // workflow.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/system/storage/migrate") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                const auto source_path_text = root.required("sourcePath").as_string();
+                const auto destination_directory_text =
+                    root.required("destinationDirectory").as_string();
+                const auto* data_class_value = root.optional("dataClass");
+                const auto data_class_text =
+                    data_class_value ? data_class_value->as_string() : std::string{"gguf_model"};
+                DurableDataClass data_class;
+                if (data_class_text == "reconstructable_scratch") {
+                    data_class = DurableDataClass::reconstructable_scratch;
+                } else if (data_class_text == "gguf_model") {
+                    data_class = DurableDataClass::gguf_model;
+                } else if (data_class_text == "durable_chat") {
+                    data_class = DurableDataClass::durable_chat;
+                } else if (data_class_text == "audit_record") {
+                    data_class = DurableDataClass::audit_record;
+                } else if (data_class_text == "user_database") {
+                    data_class = DurableDataClass::user_database;
+                } else if (data_class_text == "resumable_download") {
+                    data_class = DurableDataClass::resumable_download;
+                } else if (data_class_text == "backup") {
+                    data_class = DurableDataClass::backup;
+                } else if (data_class_text == "security_record") {
+                    data_class = DurableDataClass::security_record;
+                } else if (data_class_text == "index_generation_sole_copy") {
+                    data_class = DurableDataClass::index_generation_sole_copy;
+                } else {
+                    return response(400, "Bad Request",
+                                    "{\"error\":\"invalid_data_class\"}");
+                }
+                const auto result = migrate_durable_file(
+                    source_path_text, destination_directory_text, data_class);
+                audit.append("system.storage.migrate", user->id, "success",
+                             source_path_text + " -> " + result.destination_path.string());
+                return response(
+                    200, "OK",
+                    "{\"destinationPath\":" +
+                        json_string(result.destination_path.string()) +
+                        ",\"bytesMigrated\":" + std::to_string(result.bytes_migrated) +
+                        ",\"sha256\":" + json_string(result.sha256_hex) +
+                        ",\"callerMustUpdateReferencingRecord\":true}");
+            } catch (const std::exception& error) {
+                audit.append("system.storage.migrate", user->id, "denied", error.what());
+                return response(400, "Bad Request",
+                                "{\"error\":\"migration_failed\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
+        }
         // Machine Learning foundation phase: Dashboard is the only real
         // interface behind this route so far -- see MachineLearningRegistry's
         // class comment in masterai.hpp.
@@ -1891,6 +2366,22 @@ public:
             }
             audit.append("ml.training_job.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 78 (this pass): live per-step training progress -- see
+        // TrainingProgressTracker's class comment in masterai.hpp. Read-only,
+        // so it uses the same view scope the job-listing GET route uses
+        // rather than the .manage scope the mutating routes above require.
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/training-jobs/", 0U) == 0U &&
+            request.target.size() > 14U &&
+            request.target.compare(request.target.size() - 14U, 14U,
+                                   "/live-progress") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.training.view")) return *denied;
+            const auto id = request.target.substr(
+                25U, request.target.size() - 25U - 14U);
+            return response(200, "OK",
+                            training_progress_snapshot_json(
+                                ml_training_progress.snapshot(id)));
         }
         // Phase 56: the real training executor. POST .../run trains the
         // job's dataset content by gradient descent right now: the job
@@ -3711,6 +4202,65 @@ public:
                             json_escape(error.what()) + "\"}");
                 }
             }
+            // Phase 77 (this pass): per-endpoint tool/safety policy
+            // configuration -- see InferenceEndpoint's policy fields'
+            // comment in masterai.hpp. Distinct from /status above: this
+            // never touches the listener thread's lifecycle, only the
+            // policy `run_inference_endpoint` reads at the top of each
+            // request loop (so a live endpoint picks up a policy change on
+            // its very next request, no restart required).
+            if (request.method == "POST" &&
+                request.target.rfind(endpoints_prefix, 0U) == 0U &&
+                request.target.size() > 7U &&
+                request.target.compare(request.target.size() - 7U, 7U,
+                                       "/policy") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.endpoints.manage")) return *denied;
+                const auto id = request.target.substr(
+                    endpoints_prefix.size(),
+                    request.target.size() - endpoints_prefix.size() - 7U);
+                try {
+                    auto root = parse_json(request.body);
+                    const auto bool_field = [&root](const char* field, bool fallback) {
+                        const auto* value = root.optional(field);
+                        return value ? value->as_boolean() : fallback;
+                    };
+                    const auto* safety_policy_id_value = root.optional("safetyPolicyId");
+                    const auto* confidence_value =
+                        root.optional("modelClassifierConfidenceFloor");
+                    const auto content_scan_enabled =
+                        bool_field("contentScanEnabled", true);
+                    const auto block_on_scan_finding =
+                        bool_field("blockOnScanFinding", true);
+                    const auto block_answer_on_scan_finding =
+                        bool_field("blockAnswerOnScanFinding", false);
+                    const auto safety_policy_id =
+                        safety_policy_id_value ? safety_policy_id_value->as_string()
+                                               : std::string{};
+                    const auto model_classifier_enabled =
+                        bool_field("modelClassifierEnabled", false);
+                    const auto confidence_floor =
+                        confidence_value ? confidence_value->as_double() : 0.5;
+                    if (!safety_policy_id.empty() &&
+                        !ml_safety_governance->find_policy(safety_policy_id)) {
+                        return response(400, "Bad Request",
+                                        "{\"error\":\"safety_policy_not_found\"}");
+                    }
+                    if (!ml_inference_endpoints->set_policy(
+                            id, content_scan_enabled, block_on_scan_finding,
+                            block_answer_on_scan_finding, safety_policy_id,
+                            model_classifier_enabled, confidence_floor)) {
+                        return response(404, "Not Found",
+                                        "{\"error\":\"ml_endpoint_not_found\"}");
+                    }
+                    audit.append("ml.endpoint.policy", user->id, "success", id);
+                    return response(200, "OK", "{\"updated\":true}");
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_endpoint_policy\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
             if (request.method == "POST" &&
                 request.target.rfind(endpoints_prefix, 0U) == 0U &&
                 request.target.size() > 7U &&
@@ -4171,7 +4721,26 @@ public:
                     auto root = parse_json(request.body);
                     const auto text = root.required("text").as_string();
                     const auto report = scan_content_for_risks(text, &*policy);
-                    return response(200, "OK", content_scan_report_json(report));
+                    std::string body = content_scan_report_json(report);
+                    // Phase 74 (this pass): optional real ML-classifier pass
+                    // (scan_content_with_model_classifier) layered on top of
+                    // the heuristic report above, for bias/hallucination/
+                    // subtler-harmful-content categories keyword matching
+                    // structurally cannot catch. Opt-in via modelId because
+                    // it costs a real generation call, unlike the
+                    // always-on heuristic scan above.
+                    const auto* model_id_value = root.optional("modelId");
+                    if (model_id_value != nullptr) {
+                        const auto model_id = model_id_value->as_string();
+                        const auto classifier = scan_content_with_model_classifier(
+                            text, [&](const std::string& prompt) {
+                                return execute_rag_generation(model_id, prompt).text;
+                            });
+                        body.pop_back();  // drop closing '}'
+                        body += ",\"modelClassifier\":" +
+                               model_classifier_report_json(classifier) + "}";
+                    }
+                    return response(200, "OK", body);
                 } catch (const std::exception& error) {
                     return response(
                         400, "Bad Request",
@@ -4656,6 +5225,19 @@ public:
                            ? application_page(*user, "report-system")
                            : response(302, "Found", "", {"Location: /app"});
             }
+            // Phase 35: Performance administration sidebar -- one
+            // consolidated page (Overview, Local Runner Pool, Intranet
+            // Worker Pool, Adaptive Controller) rather than the plan's full
+            // thirteen-route enumeration; see the Phase 35 status note in
+            // docs/PLAN.md for the honest scope this condenses. Every
+            // figure it renders comes from the same GET routes already
+            // exposed by Phase 13/19/31/33/34, not a separately maintained
+            // display-only value.
+            if (target == "/app/performance") {
+                return is_administrator
+                           ? application_page(*user, "performance")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
             if (target == "/app/settings/config") {
                 return is_administrator
                            ? application_page(*user, "settings-config")
@@ -4931,7 +5513,24 @@ private:
             const auto data =
                 parse_tabular_csv(content.csv, content.target_column);
             ml_training_jobs->set_status(job.id, TrainingJobStatus::running);
-            report = train_tabular_model(data, options, model);
+            // Phase 78 (this pass): real live progress -- begin() marks this
+            // job in-flight for any concurrent GET .../live-progress poll on
+            // another connection thread, on_epoch feeds it a genuine
+            // (epoch, loss) pair after every real gradient-descent step, and
+            // end() (via the RAII-style guard below) always clears the
+            // in-flight entry on every exit path, success or failure, so a
+            // finished/failed job never reports stale "still running" state.
+            ml_training_progress.begin(job.id, options.epochs);
+            struct ProgressGuard {
+                TrainingProgressTracker& tracker;
+                const std::string& job_id;
+                ~ProgressGuard() { tracker.end(job_id); }
+            } progress_guard{ml_training_progress, job.id};
+            report = train_tabular_model(
+                data, options, model, nullptr,
+                [this, &job](const std::uint32_t epoch, const double loss) {
+                    ml_training_progress.update(job.id, epoch, loss);
+                });
         } catch (const std::exception&) {
             ml_training_jobs->set_status(job.id, TrainingJobStatus::failed);
             throw;
@@ -5309,6 +5908,7 @@ private:
             // so "Safety tests" catches secrets/prompt-injection phrasing
             // in the training data, not only the model-card approval check
             // above.
+            std::string classifier_note;
             if (!pipeline.dataset_id.empty()) {
                 const auto content = ml_dataset_content->find(pipeline.dataset_id);
                 if (content) {
@@ -5328,12 +5928,34 @@ private:
                         }
                         return {"failed", detail};
                     }
+                    // Phase 74 (this pass): a best-effort real ML-classifier
+                    // pass (scan_content_with_model_classifier) for bias/
+                    // hallucination/subtler-harmful-content categories the
+                    // heuristic scan above cannot catch. Deliberately
+                    // informational, not a stage-failing check: an
+                    // unavailable/misconfigured model must never block a
+                    // pipeline the heuristic scan already passed, since this
+                    // is the same judge model the pipeline's own dataset was
+                    // trained against, not an independent, always-on gate.
+                    const auto classifier = scan_content_with_model_classifier(
+                        content->csv.substr(0U, 4000U),
+                        [&](const std::string& prompt) {
+                            return execute_rag_generation(current_model_id, prompt).text;
+                        });
+                    if (classifier.available && !classifier.findings.empty()) {
+                        classifier_note = "; model classifier flagged " +
+                                          std::to_string(classifier.findings.size()) +
+                                          " potential issue(s)";
+                    } else if (!classifier.available) {
+                        classifier_note = "; model classifier unavailable (" +
+                                          classifier.diagnostic + ")";
+                    }
                 }
             }
             return {"completed", "approved model card " + approved_card_id +
                                       " covers model " + current_model_id +
                                       "; dataset content scan found no "
-                                      "issues"};
+                                      "issues" + classifier_note};
         };
         const auto run_request_approval_stage =
             [&]() -> std::pair<std::string, std::string> {
@@ -5495,9 +6117,47 @@ private:
                                               " is complete for this dataset"};
                 }
             }
-            return {"skipped",
-                    "no completed labeling task recorded for this dataset "
-                    "(this codebase has no automated labeler)"};
+            // No completed labeling task exists yet: run the real heuristic
+            // auto-labeler (auto_label_tabular_dataset, ml_engine.cpp)
+            // rather than reporting "skipped" -- persists the filled-in CSV
+            // back over the dataset's content and records a completed
+            // LabelTaskStore entry so a later run of this same stage (or a
+            // human reviewer opening the Labeling page) sees real, honestly
+            // attributed work, not a placeholder.
+            const auto content = ml_dataset_content->find(pipeline.dataset_id);
+            if (!content) {
+                any_failed = true;
+                return {"failed", "dataset has no uploaded content to label"};
+            }
+            try {
+                const auto report =
+                    auto_label_tabular_dataset(content->csv, content->target_column);
+                ml_dataset_content->put(pipeline.dataset_id, report.csv,
+                                        content->target_column);
+                const auto task = ml_label_tasks->create(
+                    user_id, pipeline.dataset_id,
+                    pipeline.name + " (automated labeling)",
+                    report.method == "existing_labels_validated"
+                        ? "all " + std::to_string(report.rows_total) +
+                              " row(s) already had a target value; validated, "
+                              "none invented"
+                        : "heuristic quantile-binning against column \"" +
+                              report.source_column + "\" (thresholds " +
+                              std::to_string(report.low_medium_threshold) + " / " +
+                              std::to_string(report.medium_high_threshold) + ")",
+                    "automated-heuristic", user_id);
+                ml_label_tasks->set_status(task.id, LabelTaskStatus::completed);
+                audit.append("ml.label_task.create", user_id, "success", task.id);
+                return {"completed",
+                        "labeling task " + task.id + " (" + report.method +
+                            "): " + std::to_string(report.rows_already_labeled) +
+                            " already labeled, " +
+                            std::to_string(report.rows_labeled) +
+                            " labeled by the heuristic"};
+            } catch (const std::exception& error) {
+                any_failed = true;
+                return {"failed", error.what()};
+            }
         };
         const auto run_split_data_stage =
             [&]() -> std::pair<std::string, std::string> {
@@ -6286,8 +6946,31 @@ private:
                 "embeddings-code-search category");
         }
         return [this, embedding_model](const std::string& text) {
-            ensure_model_loaded(embedding_model);
-            const auto result = inference->embed(text);
+            // Phase 33 (LOCAL-ONLY slice): prefer a dedicated pool runner
+            // whose capabilities include "embedding" (e.g. a runner set
+            // aside so bulk knowledge-indexing embedding calls do not
+            // compete with the default runner's own chat generations);
+            // falls back to the default `inference` supervisor exactly as
+            // before whenever no pool is configured or the pool runner
+            // fails. Embedding responses are never partial (one call
+            // either returns one complete vector or throws), so this
+            // fallback is always semantically safe -- no idempotency check
+            // is needed here the way generate() requires one.
+            const auto active =
+                select_and_warm_pool_runner(embedding_model, std::string{},
+                                            "embedding");
+            EmbeddingResult result;
+            if (!active.empty()) {
+                try {
+                    result = runner_pool->embed(active, text);
+                } catch (...) {
+                    ensure_model_loaded(embedding_model);
+                    result = inference->embed(text);
+                }
+            } else {
+                ensure_model_loaded(embedding_model);
+                result = inference->embed(text);
+            }
             if (result.model_id != embedding_model) {
                 throw std::runtime_error(
                     "embedding runner model changed during execution");
@@ -6396,12 +7079,30 @@ private:
         // every real generation call site (chat, RAG generation, inference
         // endpoints) -- see InferenceMetricsStore's class comment.
         const auto inference_metrics_snapshot = ml_inference_metrics.snapshot();
+        // Phase 78 (this pass): every tabular training job currently
+        // in-flight, each with its own real live epoch/loss, not a single
+        // "is anything training" boolean -- see TrainingProgressTracker's
+        // class comment.
+        std::string live_training_json = "[";
+        {
+            bool first = true;
+            for (const auto& job_id : ml_training_progress.active_job_ids()) {
+                if (!first) live_training_json += ",";
+                first = false;
+                const auto snapshot = ml_training_progress.snapshot(job_id);
+                live_training_json += "{\"jobId\":" + json_string(job_id) +
+                                      ",\"progress\":" +
+                                      training_progress_snapshot_json(snapshot) + "}";
+            }
+        }
+        live_training_json += "]";
         return "{\"systemResources\":" + hardware_info_json(hardware) +
                ",\"trainingJobCounts\":" + job_counts_json +
                ",\"evaluationMetrics\":" + evaluations_json +
                ",\"inferenceBenchmarks\":" + benchmarks_json +
                ",\"inferenceRequests\":" +
-               inference_metrics_json(inference_metrics_snapshot) + "}";
+               inference_metrics_json(inference_metrics_snapshot) +
+               ",\"liveTrainingProgress\":" + live_training_json + "}";
     }
 
     // Best-effort pre-warm: starts the same load ensure_model_loaded() would
@@ -6572,6 +7273,51 @@ private:
             return;
         }
         throw std::runtime_error("selected chat model was not found");
+    }
+
+    // Phase 33 (LOCAL-ONLY slice): resolves which local runner should serve
+    // one request and, if a pool is configured and a suitable runner is
+    // found, warms it. Returns "" to mean "use the default single-runner
+    // `inference` supervisor instead" -- the only possible outcome when
+    // runner_pool is null/empty, so single-runner behavior is completely
+    // unaffected when multi-runner is not configured. Never throws: any
+    // failure to select/warm a pool runner is treated the same as "no pool
+    // runner was suitable" rather than failing the whole request, which is
+    // the load-time half of the "runner failure does not crash the control
+    // plane" exit criterion (the generate-time half is
+    // LocalRunnerPool::generate()'s RunnerGenerationFailure handling above).
+    std::string select_and_warm_pool_runner(
+        const std::string& model_id, const std::string& project_id,
+        const std::string& required_capability = "generation") const {
+        if (runner_pool == nullptr || runner_pool->empty()) return {};
+        RunnerSelectionSignals signals;
+        signals.model_id = model_id;
+        signals.required_capability = required_capability;
+        signals.project_id = project_id;
+        const auto selected = runner_pool->select_runner(signals);
+        if (!selected.has_value()) return {};
+        const auto model = find_model(model_id);
+        if (!model) return {};
+        try {
+            runner_pool->ensure_model_loaded(
+                *selected, *model, configuration.chat_context_length,
+                configuration.runner_startup_timeout_seconds);
+            return *selected;
+        } catch (...) {
+            return {};
+        }
+    }
+
+    // Phase 33 (LOCAL-ONLY slice): the resident-memory figure Phase 13's
+    // query trace reports should always describe whichever runner is
+    // actually serving the request -- the pool runner named by
+    // `active_runner_id`, or the default `inference` supervisor when that
+    // is empty (the only case in a single-runner deployment).
+    RunnerMetrics active_runner_metrics(const std::string& active_runner_id) const {
+        if (!active_runner_id.empty() && runner_pool != nullptr) {
+            return runner_pool->metrics(active_runner_id);
+        }
+        return inference->metrics();
     }
 
     // Instruction-tuned models expect their own turn-delimiting markup
@@ -6869,9 +7615,12 @@ private:
         sockaddr_in address{};
         address.sin_family = AF_INET;
         address.sin_port = htons(endpoint.port);
-        address.sin_addr.s_addr = endpoint.host.empty() || endpoint.host == "0.0.0.0"
-                                      ? INADDR_ANY
-                                      : inet_addr(endpoint.host.c_str());
+        if (endpoint.host.empty() || endpoint.host == "0.0.0.0") {
+            address.sin_addr.s_addr = INADDR_ANY;
+        } else {
+            // inet_pton() is the non-deprecated replacement for inet_addr().
+            inet_pton(AF_INET, endpoint.host.c_str(), &address.sin_addr);
+        }
         if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
             listen(listener, 16) != 0) {
             log(LogLevel::error, "ml.endpoint.bind_failed",
@@ -6957,8 +7706,26 @@ private:
                     try {
                         auto root = parse_json(request.body);
                         const auto prompt_text = root.required("prompt").as_string();
-                        const auto prompt_scan = scan_content_for_risks(prompt_text);
-                        if (!prompt_scan.clean()) {
+                        // Phase 77 (this pass): the fixed, unconditional
+                        // scan every endpoint used to run is now this
+                        // endpoint's own configured policy -- re-read fresh
+                        // from the store on every request (not captured
+                        // once at thread start) so an administrator's
+                        // policy change takes effect on the very next
+                        // request without a listener restart.
+                        const auto live_endpoint = ml_inference_endpoints->find(endpoint.id);
+                        const auto policy_endpoint = live_endpoint ? *live_endpoint : endpoint;
+                        std::optional<SafetyPolicy> safety_policy;
+                        if (!policy_endpoint.safety_policy_id.empty()) {
+                            safety_policy = ml_safety_governance->find_policy(
+                                policy_endpoint.safety_policy_id);
+                        }
+                        ContentScanReport prompt_scan;
+                        if (policy_endpoint.content_scan_enabled) {
+                            prompt_scan = scan_content_for_risks(
+                                prompt_text, safety_policy ? &*safety_policy : nullptr);
+                        }
+                        if (!prompt_scan.clean() && policy_endpoint.block_on_scan_finding) {
                             status_line = "HTTP/1.1 400 Bad Request";
                             response_body =
                                 "{\"error\":\"content_scan_flagged_prompt\","
@@ -6966,21 +7733,48 @@ private:
                         } else {
                             const auto generated =
                                 execute_rag_generation(endpoint.model_id, prompt_text);
-                            const auto answer_scan =
-                                scan_content_for_risks(generated.text);
-                            status_line = "HTTP/1.1 200 OK";
-                            response_body =
-                                "{\"content\":\"" + json_escape(generated.text) +
-                                "\",\"promptTokens\":" +
-                                std::to_string(generated.prompt_tokens) +
-                                ",\"generatedTokens\":" +
-                                std::to_string(generated.generated_tokens) +
-                                ",\"elapsedMicroseconds\":" +
-                                std::to_string(generated.elapsed_microseconds) +
-                                ",\"contentScan\":" +
-                                content_scan_report_json(answer_scan) + "}";
-                            audit.append("ml.endpoint.request", endpoint.owner_id,
-                                        "success", endpoint.id);
+                            ContentScanReport answer_scan;
+                            if (policy_endpoint.content_scan_enabled) {
+                                answer_scan = scan_content_for_risks(
+                                    generated.text, safety_policy ? &*safety_policy : nullptr);
+                            }
+                            if (!answer_scan.clean() &&
+                                policy_endpoint.block_answer_on_scan_finding) {
+                                status_line = "HTTP/1.1 400 Bad Request";
+                                response_body =
+                                    "{\"error\":\"content_scan_flagged_response\","
+                                    "\"scan\":" + content_scan_report_json(answer_scan) + "}";
+                                audit.append("ml.endpoint.request", endpoint.owner_id,
+                                            "denied", endpoint.id);
+                            } else {
+                                std::string classifier_json;
+                                if (policy_endpoint.model_classifier_enabled) {
+                                    const auto classifier = scan_content_with_model_classifier(
+                                        generated.text,
+                                        [&](const std::string& prompt) {
+                                            return execute_rag_generation(
+                                                       endpoint.model_id, prompt)
+                                                .text;
+                                        },
+                                        policy_endpoint.model_classifier_confidence_floor);
+                                    classifier_json = ",\"modelClassifier\":" +
+                                                      model_classifier_report_json(classifier);
+                                }
+                                status_line = "HTTP/1.1 200 OK";
+                                response_body =
+                                    "{\"content\":\"" + json_escape(generated.text) +
+                                    "\",\"promptTokens\":" +
+                                    std::to_string(generated.prompt_tokens) +
+                                    ",\"generatedTokens\":" +
+                                    std::to_string(generated.generated_tokens) +
+                                    ",\"elapsedMicroseconds\":" +
+                                    std::to_string(generated.elapsed_microseconds) +
+                                    ",\"contentScan\":" +
+                                    content_scan_report_json(answer_scan) +
+                                    classifier_json + "}";
+                                audit.append("ml.endpoint.request", endpoint.owner_id,
+                                            "success", endpoint.id);
+                            }
                         }
                     } catch (const std::exception& error) {
                         status_line = "HTTP/1.1 409 Conflict";
@@ -7214,6 +8008,11 @@ private:
         std::string memory_lease_id;
         std::optional<ScheduledTicket> scheduler_ticket;
         bool scheduler_running = false;
+        // Phase 33 (LOCAL-ONLY slice): "" means the default single-runner
+        // `inference` supervisor -- the only value this ever holds unless
+        // runner_pool is configured AND select_and_warm_pool_runner()
+        // actually found and warmed a suitable pool runner below.
+        std::string active_runner_id;
         bool model_waiting_recorded = false;
         // Phase 78: set the moment this request is actually admitted into
         // the scheduler (see scheduler_ticket assignment below); used only
@@ -7232,7 +8031,19 @@ private:
             query_id = queries.begin(user.id, chat->project_id, chat->model_id);
             queries.transition(query_id, QueryStage::authentication,
                                QueryStatus::accepted);
-            ensure_model_loaded(chat->model_id);
+            // Phase 33 (LOCAL-ONLY slice): try an opt-in pool runner first;
+            // falls back to the always-available default `inference` path
+            // (unchanged from every pre-Phase-33 build) whenever no pool is
+            // configured, no runner qualifies, or the selected runner fails
+            // to load the model.
+            active_runner_id =
+                select_and_warm_pool_runner(chat->model_id, chat->project_id);
+            if (active_runner_id.empty()) {
+                ensure_model_loaded(chat->model_id);
+            }
+            queries.record_runner(query_id, active_runner_id.empty()
+                                                 ? std::string("inference")
+                                                 : active_runner_id);
             queries.transition(query_id, QueryStage::normalization,
                                QueryStatus::accepted);
             queries.transition(query_id, QueryStage::classification,
@@ -7412,6 +8223,13 @@ private:
                 }
                 session_decision = prompt_sessions->try_reuse(
                     chat_id, fingerprint, generation_prompt);
+                // Phase 78 (this pass): the real KV-cache-hit-rate telemetry
+                // the Phase 78 gap note said this adapter had no
+                // instrumentation for -- this is the actual reuse decision
+                // every generation on this path already makes, recorded
+                // only while session reuse is enabled (when it is disabled,
+                // "miss" would not reflect a genuine cache decision at all).
+                ml_inference_metrics.record_cache_decision(session_decision.reuse);
                 options.cache_prompt = session_decision.reuse;
                 if (session_decision.reuse) {
                     options.slot_id = session_decision.slot_id;
@@ -7511,8 +8329,13 @@ private:
             model_usage->decrement_waiting(chat->model_id);
             model_waiting_recorded = false;
             scheduler_running = true;
+            // Phase 33 (LOCAL-ONLY slice): observe whichever runner is
+            // actually about to serve this request -- active_runner_id is
+            // "" (meaning the default `inference` supervisor) unless a
+            // configured pool already warmed a specific runner for it above.
             queries.observe_resources(
-                query_id, inference->metrics().resident_memory_bytes);
+                query_id,
+                active_runner_metrics(active_runner_id).resident_memory_bytes);
             queries.transition(query_id, QueryStage::prompt_evaluation,
                                QueryStatus::evaluating_prompt);
             if (streaming && stream_started) {
@@ -7523,8 +8346,10 @@ private:
             const auto generation_started = std::chrono::steady_clock::now();
             bool first_token = true;
             std::uint64_t time_to_first_token = 0U;
-            const auto generated = inference->generate(
-                generation_prompt, options,
+            // Named (rather than inline at the call site) so the identical
+            // callback can be reused by both the primary generate() call and
+            // the safe same-request fallback to the default runner below.
+            const std::function<void(const std::string&)> on_chunk =
                 [&](const std::string& chunk) {
                     if (first_token) {
                         first_token = false;
@@ -7564,8 +8389,41 @@ private:
                             cancellation.store(true);
                         }
                     }
-                },
-                cancellation, configuration.runner_stall_timeout_seconds);
+                };
+            GenerationResult generated;
+            if (active_runner_id.empty()) {
+                generated = inference->generate(
+                    generation_prompt, options, on_chunk, cancellation,
+                    configuration.runner_stall_timeout_seconds);
+            } else {
+                try {
+                    generated = runner_pool->generate(
+                        active_runner_id, generation_prompt, options, on_chunk,
+                        cancellation, configuration.runner_stall_timeout_seconds);
+                } catch (const RunnerGenerationFailure& failure) {
+                    // Phase 33 (LOCAL-ONLY slice) exit criterion: a runner
+                    // failure must not crash the control plane, and a retry
+                    // must only happen when it cannot duplicate output the
+                    // client already received -- nothing has been persisted
+                    // from this request yet (persistence only happens after
+                    // generate() returns successfully, further below), so
+                    // the only thing that matters is whether any byte of
+                    // this attempt already reached the client's on_chunk.
+                    if (!retry_is_semantically_safe(failure.any_bytes_emitted,
+                                                    false)) {
+                        throw;
+                    }
+                    ensure_model_loaded(chat->model_id);
+                    generated = inference->generate(
+                        generation_prompt, options, on_chunk, cancellation,
+                        configuration.runner_stall_timeout_seconds);
+                    // The default runner ended up serving this request, not
+                    // the pool runner originally selected -- keep the trace
+                    // identity honest about who actually generated the reply.
+                    active_runner_id.clear();
+                    queries.record_runner(query_id, "inference");
+                }
+            }
             if (first_token) {
                 queries.transition(query_id, QueryStage::generation,
                                    QueryStatus::generating);
@@ -7573,7 +8431,8 @@ private:
             queries.record_inference(query_id, generated,
                                      time_to_first_token);
             queries.observe_resources(
-                query_id, inference->metrics().resident_memory_bytes);
+                query_id,
+                active_runner_metrics(active_runner_id).resident_memory_bytes);
             if (configuration.session_reuse_enabled) {
                 // A cancelled turn leaves the runner's KV state for that
                 // slot describing an incomplete reply -- never record it as
@@ -7748,6 +8607,13 @@ private:
     // every real generation call site (chat below, execute_rag_generation)
     // and surfaced by build_ml_monitoring_json().
     InferenceMetricsStore ml_inference_metrics;
+    // Phase 78 (this pass): live per-step tabular-training progress -- see
+    // TrainingProgressTracker's class comment in masterai.hpp. Populated by
+    // execute_training_job()'s on_epoch callback while a run is executing
+    // on its own request-handling thread, read by GET /api/v1/ml/training-
+    // jobs/{id}/live-progress and build_ml_monitoring_json() from any other
+    // connection thread.
+    TrainingProgressTracker ml_training_progress;
     // Phase 77: one background listener thread per `active` InferenceEndpoint
     // (see run_inference_endpoint), keyed by endpoint id. The
     // shared_ptr<atomic_bool> is that thread's own stop flag; flipping it
@@ -7810,6 +8676,24 @@ private:
     std::unique_ptr<SafetyGovernanceStore> ml_safety_governance;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
+    // Phase 33 (LOCAL-ONLY slice): opt-in local multi-runner pool. Null
+    // (the default) whenever configuration.local_runner_pool is empty --
+    // every request path below falls back to `inference` above exactly as
+    // it did before this phase, so single-runner mode is never required to
+    // change. See LocalRunnerPool's class comment in masterai.hpp.
+    std::unique_ptr<LocalRunnerPool> runner_pool;
+    // Phase 33 (INTRANET-WORKER slice): opt-in remote worker routing. Null
+    // (the default) whenever configuration.intranet_worker_pool is empty --
+    // consulted only as a fallback after runner_pool/`inference` in
+    // select_and_warm_pool_runner() below, never in place of them.
+    std::unique_ptr<IntranetWorkerPool> intranet_worker_pool;
+    // Phase 33 (INTRANET-WORKER slice): this machine's own worker-mode
+    // listener. Null unless configuration.worker_mode.enabled -- see
+    // WorkerListener's class comment. Runs on worker_listener_thread below,
+    // started in HttpServer::run() and stopped alongside every other
+    // background loop.
+    std::unique_ptr<WorkerListener> worker_listener;
+    std::thread worker_listener_thread;
     std::unique_ptr<DownloadManager> downloads;
     std::unique_ptr<BenchmarkStore> benchmarks;
     std::unique_ptr<server_internal::WorkloadHttpController> workloads;
@@ -7818,6 +8702,8 @@ private:
     // for inference work. Its interactive concurrency allowance is derived
     // from MemoryPolicy::maximum_active_inference in the constructor.
     std::unique_ptr<RequestScheduler> request_scheduler;
+    // Phase 34: always present -- see the constructor comment above.
+    std::unique_ptr<AdaptiveController> adaptive_controller;
     // Serializes the complete single-runner load/unload decision. A browser
     // message arriving during best-effort pre-warm waits for that same
     // bounded load rather than observing `starting` and failing immediately.
@@ -7850,6 +8736,13 @@ private:
     // so it only exists when inference.llamaServerExecutable is configured.
     std::unique_ptr<TuningProfileStore> tuning_profiles;
     std::unique_ptr<CalibrationService> calibration;
+    // Phase 31: bounded/quota-enforced/crash-recoverable scratch storage.
+    // Always constructed (unlike calibration/inference above, which are
+    // conditional on an external llama-server executable) -- scratch space
+    // is needed regardless of whether real inference is configured. Its own
+    // destructor calls shutdown_cleanup(), so no explicit call is needed in
+    // ~State() above; ordinary member-destruction order handles it.
+    std::unique_ptr<ScratchVolumeManager> scratch_volumes;
     // Phase 20: durable, administrator-controlled evidence/admission state.
     // Declared after records, which outlives it; constructed after open().
     std::unique_ptr<AdvancedOptimizationRegistry> advanced_optimizations;
@@ -7950,6 +8843,21 @@ bool HttpServer::run(std::atomic_bool& stop_requested) {
     }
 
     log(LogLevel::info, "server.started", host_ + ":" + std::to_string(port_));
+    // Phase 33 (INTRANET-WORKER slice): the worker-mode listener (if
+    // configured) runs its own accept loop on its own thread -- it is a
+    // deliberately separate, narrower listener from the loopback
+    // administrator socket above (see WorkerListener's class comment), not
+    // a route registered on this one.
+    if (state_->worker_listener != nullptr) {
+        state_->worker_listener_thread =
+            std::thread([this, &stop_requested] {
+                try {
+                    state_->worker_listener->run(stop_requested);
+                } catch (const std::exception& failure) {
+                    log(LogLevel::error, "worker_listener.failed", failure.what());
+                }
+            });
+    }
     while (!stop_requested.load() && !std::filesystem::exists(stop_file)) {
         fd_set readable;
         FD_ZERO(&readable);
@@ -8111,6 +9019,14 @@ bool HttpServer::run(std::atomic_bool& stop_requested) {
             std::lock_guard<std::mutex> lock(workers_mutex_);
             workers_.emplace_back(std::move(worker), std::move(finished));
         }
+    }
+    // Phase 33 (INTRANET-WORKER slice): the worker-listener thread started
+    // above only watches `stop_requested`, not the stop_file this loop also
+    // watches -- force it true here so a stop_file-triggered shutdown stops
+    // the worker listener too, not just the main loopback listener.
+    stop_requested.store(true);
+    if (state_->worker_listener_thread.joinable()) {
+        state_->worker_listener_thread.join();
     }
     // stop() closes the listener (if not already closed by an external
     // stop() call) and joins/detaches every in-flight worker thread. No

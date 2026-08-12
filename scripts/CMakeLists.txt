@@ -47,6 +47,8 @@ add_library(masterai_core STATIC
     ../src/kv_cache.cpp
     ../src/topology.cpp
     ../src/model_routing.cpp
+    ../src/scratch_storage.cpp
+    ../src/runner_pool.cpp
     ../src/performance_cli.cpp
     ../src/ml.cpp
     ../src/ml_engine.cpp
@@ -61,14 +63,55 @@ add_library(masterai_core STATIC
     ../src/web_ui.cpp
     ../src/workload_http.cpp
     ../src/server.cpp
+    ../src/gpu_vendor.cpp
+    ../src/intranet_worker.cpp
+    ../src/adaptive_controller.cpp
+    ../src/speculative_decoding.cpp
 )
 
 target_include_directories(masterai_core PUBLIC ../src)
+
+# Phase 33 (INTRANET-WORKER slice): OpenSSL is this codebase's ONE vendored
+# TLS/crypto dependency, used only by src/intranet_worker.cpp for the
+# optional mutual-TLS intranet worker protocol -- every other network path
+# in this codebase (the loopback administrator HTTP server, the loopback
+# runner IPC, outbound MCP) is either loopback-only or explicitly fail-
+# closed without it (see mcp_outbound.cpp's http_exchange() comment).
+# Optional, not REQUIRED: a build without OpenSSL development files still
+# succeeds, matching the PAM-optional pattern below -- IntranetWorkerPool/
+# WorkerListener/issue_worker_certificate() all fail closed at runtime with
+# a clear "not available in this build" error (see intranet_worker.cpp's
+# reject_no_openssl()) instead of the whole build refusing to configure.
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND)
+    target_compile_definitions(masterai_core PUBLIC MASTERAI_HAS_OPENSSL=1)
+    target_link_libraries(masterai_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+    message(STATUS "Intranet worker mutual TLS: OpenSSL found, Phase 33 enabled")
+else()
+    message(WARNING "OpenSSL development files unavailable: Phase 33 "
+                    "intranet worker mTLS fails closed at runtime")
+endif()
 
 if(MSVC)
     target_compile_options(masterai_core PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_compile_definitions(masterai_core PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(masterai_core PUBLIC bcrypt crypt32 ws2_32 advapi32 psapi dxgi)
+
+    # AMD ADLX (Phase 19 GPU utilization/thermal probing): vendored headers
+    # plus its own helper source under third_party/ADLX. ADLXHelper.cpp
+    # dynamically loads the driver-installed ADLX DLL itself at runtime, so
+    # this compiles against public interface headers only -- no AMD binary
+    # is linked. See docs/architecture/ADR-0001 for the vendor-SDK exception.
+    # WinAPIs.cpp supplies ADLXHelper.cpp's adlx_load_library/
+    # adlx_free_library/adlx_get_proc_address (thin LoadLibraryA/
+    # GetProcAddress/FreeLibrary wrappers) -- without it the link fails with
+    # unresolved externals, since ADLXHelper.cpp only declares, never
+    # defines, that platform boundary.
+    target_sources(masterai_core PRIVATE
+        ../third_party/ADLX/SDK/ADLXHelper/Windows/Cpp/ADLXHelper.cpp
+        ../third_party/ADLX/SDK/Platform/Windows/WinAPIs.cpp)
+    target_include_directories(masterai_core PRIVATE
+        ../third_party/ADLX/SDK/Include)
 else()
     target_compile_options(masterai_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     target_link_libraries(masterai_core PUBLIC pthread dl)
@@ -83,7 +126,6 @@ else()
     endif()
 endif()
 
-message(STATUS "Third-party coding foundations: prohibited")
 message(STATUS "Optional external inference backend: llama.cpp")
 message(STATUS "Password authentication: native OS-backed identity; no password storage")
 

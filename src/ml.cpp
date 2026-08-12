@@ -3521,11 +3521,13 @@ void InferenceEndpointStore::restore() {
         endpoint.protocol = fields[5];
         endpoint.authentication_method = fields[6];
         const auto rate_and_owner = unpack(fields[7]);
-        // Phase 77 added auth_token_hash as a 4th nested field; records
-        // written before that phase still have 3 and default it to empty
-        // (no enforced auth, matching their prior "records intent only"
-        // behavior).
-        if (rate_and_owner.size() != 3U && rate_and_owner.size() != 4U) {
+        // Phase 77 added auth_token_hash as a 4th nested field, then (this
+        // pass) a 5th nested field packing the per-endpoint policy fields;
+        // records written before either phase still have 3 or 4 and default
+        // the newer fields (no enforced auth / the pre-policy always-on
+        // heuristic-scan behavior), matching their prior "records intent
+        // only" behavior.
+        if (rate_and_owner.size() < 3U || rate_and_owner.size() > 5U) {
             throw std::runtime_error(
                 "persisted inference endpoint tail field count is wrong");
         }
@@ -3533,7 +3535,26 @@ void InferenceEndpointStore::restore() {
             static_cast<std::uint32_t>(std::stoul(rate_and_owner[0]));
         endpoint.owner_id = rate_and_owner[1];
         endpoint.status = parse_inference_endpoint_status(rate_and_owner[2]);
-        if (rate_and_owner.size() == 4U) endpoint.auth_token_hash = rate_and_owner[3];
+        if (rate_and_owner.size() >= 4U) endpoint.auth_token_hash = rate_and_owner[3];
+        if (rate_and_owner.size() == 5U) {
+            const auto policy = unpack(rate_and_owner[4]);
+            // block_answer_on_scan_finding was added as a 6th nested policy
+            // field after this policy block already shipped; 5-field
+            // records default it to false (the original always-on-listener
+            // "never withhold a flagged answer" behavior).
+            if (policy.size() != 5U && policy.size() != 6U) {
+                throw std::runtime_error(
+                    "persisted inference endpoint policy field count is wrong");
+            }
+            endpoint.content_scan_enabled = policy[0] == "1";
+            endpoint.block_on_scan_finding = policy[1] == "1";
+            endpoint.safety_policy_id = policy[2];
+            endpoint.model_classifier_enabled = policy[3] == "1";
+            endpoint.model_classifier_confidence_floor = std::stod(policy[4]);
+            if (policy.size() == 6U) {
+                endpoint.block_answer_on_scan_finding = policy[5] == "1";
+            }
+        }
         endpoints_[endpoint.id] = endpoint;
     }
 }
@@ -3547,7 +3568,13 @@ void InferenceEndpointStore::persist(const InferenceEndpoint& endpoint) {
              pack({std::to_string(endpoint.rate_limit_per_minute),
                   endpoint.owner_id,
                   inference_endpoint_status_name(endpoint.status),
-                  endpoint.auth_token_hash})}));
+                  endpoint.auth_token_hash,
+                  pack({endpoint.content_scan_enabled ? "1" : "0",
+                       endpoint.block_on_scan_finding ? "1" : "0",
+                       endpoint.safety_policy_id,
+                       endpoint.model_classifier_enabled ? "1" : "0",
+                       std::to_string(endpoint.model_classifier_confidence_floor),
+                       endpoint.block_answer_on_scan_finding ? "1" : "0"})})}));
 }
 
 InferenceEndpoint InferenceEndpointStore::create(
@@ -3611,6 +3638,25 @@ bool InferenceEndpointStore::set_status(const std::string& id,
     return true;
 }
 
+bool InferenceEndpointStore::set_policy(
+    const std::string& id, const bool content_scan_enabled,
+    const bool block_on_scan_finding, const bool block_answer_on_scan_finding,
+    const std::string& safety_policy_id, const bool model_classifier_enabled,
+    const double model_classifier_confidence_floor) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = endpoints_.find(id);
+    if (found == endpoints_.end()) return false;
+    found->second.content_scan_enabled = content_scan_enabled;
+    found->second.block_on_scan_finding = block_on_scan_finding;
+    found->second.block_answer_on_scan_finding = block_answer_on_scan_finding;
+    found->second.safety_policy_id = safety_policy_id;
+    found->second.model_classifier_enabled = model_classifier_enabled;
+    found->second.model_classifier_confidence_floor = model_classifier_confidence_floor;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
 bool InferenceEndpointStore::remove(const std::string& id) {
     const std::lock_guard<std::mutex> lock(mutex_);
     const auto found = endpoints_.find(id);
@@ -3635,7 +3681,18 @@ std::string inference_endpoint_json(const InferenceEndpoint& endpoint) {
            ",\"ownerId\":\"" + json_escape(endpoint.owner_id) +
            "\",\"status\":\"" +
            inference_endpoint_status_name(endpoint.status) +
-           "\",\"createdAtEpochSeconds\":" +
+           "\",\"contentScanEnabled\":" +
+           (endpoint.content_scan_enabled ? "true" : "false") +
+           ",\"blockOnScanFinding\":" +
+           (endpoint.block_on_scan_finding ? "true" : "false") +
+           ",\"blockAnswerOnScanFinding\":" +
+           (endpoint.block_answer_on_scan_finding ? "true" : "false") +
+           ",\"safetyPolicyId\":\"" + json_escape(endpoint.safety_policy_id) +
+           "\",\"modelClassifierEnabled\":" +
+           (endpoint.model_classifier_enabled ? "true" : "false") +
+           ",\"modelClassifierConfidenceFloor\":" +
+           std::to_string(endpoint.model_classifier_confidence_floor) +
+           ",\"createdAtEpochSeconds\":" +
            std::to_string(endpoint.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
            std::to_string(endpoint.updated_at_epoch_seconds) + "}";

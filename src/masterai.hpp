@@ -51,6 +51,153 @@ std::string sha256_file_hex(
 std::string hash_password(std::string password);
 bool verify_password(std::string password, const std::string& encoded_hash);
 
+// Phase 33 (LOCAL-ONLY slice, 2026-08-13): one entry in an opt-in local
+// multi-runner pool -- a per-GPU runner, a CPU+GPU split, or a dedicated
+// embedding/router/benchmark runner, all running concurrently alongside (or
+// instead of most requests going to) the single default `inference`
+// RunnerSupervisor every pre-Phase-33 build already has. An empty
+// AppConfig::local_runner_pool (the default) means exactly one control-plane
+// runner, completely unchanged -- this struct only ever describes
+// *additional* runners an administrator has explicitly configured.
+//
+// Scope note: this is deliberately the LOCAL-ONLY half of docs/PLAN.md
+// Phase 33. Every runner this struct can describe is a local child process
+// this control plane itself spawns via RunnerSupervisor/LlamaCppAdapter, on
+// the same trust footing as the pre-existing single-runner path. The
+// optional intranet-worker half of Phase 33 (mutual TLS, pinned/approved
+// private PKI, signed worker registration, model-digest verification,
+// encrypted transport, per-project authorization over a network boundary)
+// is NOT implemented by this struct or by LocalRunnerPool below, and
+// remains Planned/deferred -- see the Phase 33 section of docs/PLAN.md.
+struct LocalRunnerConfig {
+    // Stable identity used in routing decisions, status output, and the
+    // Phase 13 query-trace runner-identity field (QueryTrace::runner_id).
+    std::string id;
+    // Loopback IPC port this runner's llama.cpp backend listens on. Must be
+    // distinct from AppConfig::runner_port and from every other configured
+    // runner's port -- validated in ConfigurationManager::validate() the
+    // same way runner_port is already validated against the HTTP port.
+    std::uint16_t port{0U};
+    std::string accelerator_policy{"auto"};
+    // What kinds of request this runner is willing to serve, e.g.
+    // {"generation"}, {"embedding"}, {"router"}, {"benchmark"}. Empty means
+    // "generalist" -- accepts any capability, matching the single-runner
+    // default's own unrestricted behavior.
+    std::set<std::string> capabilities;
+    // Phase 2 project-bound authorization, reused (not reinvented) here:
+    // empty means no project restriction (the same open-by-default posture
+    // the single existing runner already has); non-empty restricts this
+    // runner to only ever serving the listed project ids, enforced by
+    // LocalRunnerPool::select_runner() as a hard filter, never a soft
+    // preference.
+    std::set<std::string> authorized_project_ids;
+    // Tie-break weight when multiple runners are otherwise equally
+    // suitable; higher serves first.
+    unsigned int priority{0U};
+};
+
+// Phase 33 (LOCAL-ONLY slice): every signal LocalRunnerPool::select_runner()
+// weighs when choosing which local runner process should serve one request.
+// Mirrors the "declare and disclose every signal, even ones a given decision
+// rule does not yet act on" discipline RoutingSignals (Phase 29,
+// model_routing.cpp) already established for model-*tier* selection -- this
+// is the equivalent declaration for runner-*process* selection, a distinct
+// decision that reuses the same disclosure shape rather than overloading
+// RoutingSignals with a second, unrelated meaning. Fields noted "disclosed
+// only" below are accepted and recorded but have no real probe behind them
+// yet in this pass, the same honesty convention already used elsewhere in
+// this project (e.g. Phase 78's documented cache-hit-rate gap).
+struct RunnerSelectionSignals {
+    std::string model_id;             // resident-model match signal
+    std::string required_capability;  // e.g. "generation", "embedding"
+    std::string project_id;           // Phase 2 project-bound authorization
+    unsigned int priority{0U};
+    // Disclosed only: no per-runner thermal/power probe exists in this
+    // pass (Phase 30/30A hardware probing is control-plane-wide, not
+    // per-child-process), so this is never populated by a real caller yet;
+    // kept here so the routing rule already accepts it once one exists.
+    std::optional<double> thermal_headroom_percent;
+};
+
+// Phase 33 (INTRANET-WORKER slice, 2026-08-13): this control plane's own
+// private worker PKI. One CA keypair signs every worker's client
+// certificate; certificate_file is the pinned public CA cert this control
+// plane verifies every worker's presented certificate chain against
+// (never the OS/system trust store -- a compromised public CA must never
+// be able to mint a certificate this control plane accepts), and
+// private_key_file is the CA's own signing key, which never leaves this
+// machine and is never transmitted over the wire. See
+// issue_worker_certificate() (src/intranet_worker.cpp) and the
+// WorkerListener/IntranetWorkerPool class comments below for how both
+// directions of the mutual handshake consume this.
+struct PrivateCertificateAuthority {
+    std::filesystem::path certificate_file;
+    std::filesystem::path private_key_file;
+};
+
+// Result of signing one worker's certificate against the private CA
+// (POST /api/v1/system/pki/workers, administrator-only). certificate_pem/
+// private_key_pem must be copied to the physical worker machine out of
+// band (an administrator-controlled file transfer this codebase does not
+// automate); this control plane itself retains only sha256_fingerprint,
+// which an operator then adds to an IntranetWorkerConfig's
+// expected_server_certificate_sha256 (if that worker is also being
+// configured as a routing target here) or to a WorkerModeConfig's
+// approved_client_certificate_sha256 (if this machine is the one being
+// configured to receive worker requests) -- never the private key itself.
+struct IssuedWorkerCertificate {
+    std::string certificate_pem;
+    std::string private_key_pem;
+    std::string sha256_fingerprint;  // of the DER-encoded certificate
+};
+
+// Phase 33 (INTRANET-WORKER slice): one administrator-approved remote
+// worker machine this control plane may route generation/embedding
+// requests to over a mutually authenticated, encrypted channel. See the
+// class comment on IntranetWorkerPool for the full trust model. Unlike
+// LocalRunnerConfig, a remote worker's model is fixed by that worker's own
+// local configuration and only ever reported back (never remotely
+// selected) by this control plane -- there is no "load this model on that
+// machine" RPC, closing off an entire class of remote resource-exhaustion
+// risk such a call would otherwise open.
+struct IntranetWorkerConfig {
+    std::string id;
+    std::string host;  // intranet address; never loopback (that is local_runner_pool's job)
+    std::uint16_t port{0U};
+    // SHA-256 of the worker's DER-encoded leaf certificate, pinned at
+    // configuration time and checked in addition to (not instead of) the
+    // normal CA-chain verification -- the same defense-in-depth
+    // digest-pinning convention Phase 9's outbound MCP executable pinning
+    // already established (see mcp_outbound.cpp's executable_sha256 check).
+    std::string expected_server_certificate_sha256;
+    std::set<std::string> capabilities;
+    std::set<std::string> authorized_project_ids;
+    unsigned int priority{0U};
+};
+
+// Phase 33 (INTRANET-WORKER slice): opt-in configuration for running this
+// same masterai executable as a worker -- i.e. accepting authenticated
+// requests from another control plane's IntranetWorkerPool, rather than
+// only ever serving the loopback administrator UI/API the way every other
+// deployment of this binary does. Disabled (enabled=false) by default:
+// every existing single-machine deployment is completely unaffected. When
+// enabled, this is the ONE deliberate, narrowly-scoped exception to
+// HttpServer's loopback-only constraint (see HttpServer::HttpServer's own
+// "127.0.0.1" check in server.cpp) -- WorkerListener speaks only the small
+// mutually authenticated worker protocol declared below, never the full
+// administrator HTTP/API surface, and refuses any connection whose client
+// certificate does not verify against ca_certificate_file AND match an
+// entry in approved_client_certificate_sha256.
+struct WorkerModeConfig {
+    bool enabled{false};
+    std::string bind_host;  // e.g. a specific intranet interface address
+    std::uint16_t port{0U};
+    std::filesystem::path ca_certificate_file;
+    std::filesystem::path server_certificate_file;
+    std::filesystem::path server_private_key_file;
+    std::set<std::string> approved_client_certificate_sha256;
+};
+
 struct AppConfig {
     int schema_version{1};
     std::string host{"127.0.0.1"};
@@ -123,6 +270,21 @@ struct AppConfig {
     // resolve_page_file_root()). Empty means "use the existing default"
     // (runtime_root/"cache"), not the real Windows pagefile.
     std::filesystem::path page_file_root;
+    // Phase 31: ScratchVolumeManager configuration. scratch_root defaults to
+    // runtime_root/"scratch" (resolved the same relative-to-settings-file
+    // way as runtime_root/models_root -- see resolve_scratch_root()) rather
+    // than reusing page_file_root/CacheManager's disk area, since scratch
+    // jobs and the durable disk cache have different lifetime and quota
+    // semantics (scratch is always per-job and always torn down; the cache
+    // is a standing, key-indexed store). scratch_global_quota_mib bounds
+    // total scratch usage across every concurrent job; scratch_free_space_
+    // reserve_mib is the free-space floor ScratchVolumeManager::reserve()/
+    // begin_job() refuse to go below (the concrete mechanism behind the
+    // "scratch files cannot fill the system drive" Phase 31 exit
+    // criterion).
+    std::filesystem::path scratch_root;
+    std::uint64_t scratch_global_quota_mib{4096ULL};
+    std::uint64_t scratch_free_space_reserve_mib{1024ULL};
     std::uint16_t runner_port{7081};
     // Previously hardcoded to 30 seconds at the RunnerSupervisor::load() call
     // site, which was too short for large models (e.g. DeepSeek-class) to
@@ -175,6 +337,26 @@ struct AppConfig {
     // time -- Phase 19 deliberately does not add a second, competing
     // persisted profile selector.
     bool performance_auto_tune{true};
+    // Phase 33 (LOCAL-ONLY slice): opt-in local multi-runner pool -- see
+    // LocalRunnerConfig's class comment. Empty (the default) means exactly
+    // one control-plane runner, identical to every pre-Phase-33 build;
+    // single-runner mode is never required to change when this stays empty.
+    std::vector<LocalRunnerConfig> local_runner_pool;
+    // Phase 33 (INTRANET-WORKER slice, 2026-08-13): opt-in remote worker
+    // routing -- see IntranetWorkerConfig's class comment. Empty (the
+    // default) means no remote worker is ever consulted; every existing
+    // deployment is unaffected. Requires private_ca and
+    // intranet_worker_client_certificate_file/_key_file to be set
+    // (ConfigurationManager::validate() enforces this) and this build to
+    // have been compiled with OpenSSL available.
+    std::vector<IntranetWorkerConfig> intranet_worker_pool;
+    PrivateCertificateAuthority private_ca;
+    std::filesystem::path intranet_worker_client_certificate_file;
+    std::filesystem::path intranet_worker_client_private_key_file;
+    // Phase 33 (INTRANET-WORKER slice): opt-in worker-mode listener -- see
+    // WorkerModeConfig's class comment. Disabled by default; every existing
+    // deployment stays loopback-only and unaffected.
+    WorkerModeConfig worker_mode;
 };
 
 class ConfigurationManager final {
@@ -194,6 +376,11 @@ public:
 // existing default of `runtime_root/"cache"`. Centralised here so every
 // caller (CacheManager construction, the System Report) agrees.
 std::filesystem::path resolve_page_file_root(const AppConfig& configuration);
+
+// Phase 31: resolves the effective ScratchVolumeManager root the same way
+// resolve_page_file_root() resolves the cache root above: an explicit
+// configuration.scratch_root if set, otherwise runtime_root/"scratch".
+std::filesystem::path resolve_scratch_root(const AppConfig& configuration);
 
 class RecordStore final {
 public:
@@ -254,6 +441,26 @@ struct HardwareInfo {
 };
 
 HardwareInfo probe_hardware(const std::filesystem::path& storage_root);
+
+// GPU vendor telemetry (utilization percent, temperature) for the Phase 19
+// calibration gap PLAN.md records as forward work: no vendor SDK was an
+// approved dependency until now. NVIDIA is read through NVML and AMD through
+// ADLX; both vendor libraries are loaded dynamically at runtime (NVML via the
+// driver-installed nvml.dll, ADLX via its own internal driver-DLL loader in
+// the vendored ADLXHelper), never linked, so a host without that vendor's
+// driver present fails closed to `available == false` instead of crashing or
+// failing to start. Only vendored on Windows today per the project's
+// Windows-first build scope; probe_gpu_vendor_telemetry() always returns
+// `available == false` elsewhere.
+struct GpuVendorTelemetry {
+    bool available{false};
+    std::string vendor;      // "nvidia" or "amd" when available
+    std::string device_name;
+    unsigned int utilization_percent{0};
+    int temperature_celsius{0};
+};
+
+std::vector<GpuVendorTelemetry> probe_gpu_vendor_telemetry();
 
 // Phase 28: topology probing plus a pure, testable thread-placement
 // recommendation function. Deliberately NOT wired into any real worker
@@ -397,6 +604,306 @@ StorageLatencyProfile probe_storage_latency(
 // slow link; fast local media gets a small bounded parallel depth. This is
 // intentionally conservative rather than throughput-maximizing.
 std::size_t adaptive_queue_depth(const StorageLatencyProfile& profile);
+
+// ---------------------------------------------------------------------
+// Phase 31: storage tiering, virtual drives, and scratch-volume management.
+// ---------------------------------------------------------------------
+//
+// Storage tiers exist so scratch/cache/model-placement decisions are made
+// from measured device behavior instead of an assumed "the disk is fast"
+// default. classify_storage_tier() below reuses probe_storage_class()'s
+// device-type signal and probe_storage_latency()'s measured 4KB random-read
+// latency -- both already gathered by Phase 21 -- so this phase adds no new
+// probing surface for the disk-tier part of the classification. Tier R (RAM-
+// backed) is the odd one out: it is not a disk tier at all, and
+// durable_data_class_allows_ram_tier() below is the hard prohibition the
+// plan requires against ever placing durable data there.
+enum class StorageTier {
+    fast_local,           // Tier A: NVMe-shaped local fixed storage
+    local_ssd,             // Tier B: SATA-SSD-shaped local fixed storage
+    local_hdd,             // Tier C: HDD-shaped local fixed storage
+    removable_or_network,  // Tier D: removable/network media, import-export only by default
+    ram_backed,             // Tier R: RAM disk -- reconstructable ephemeral artifacts only
+};
+
+std::string to_string(StorageTier tier);
+
+// Classifies a measured StorageLatencyProfile (device type + timed random-
+// read latency) into one of the five Phase 31 tiers. A pure function of the
+// evidence passed in -- never re-probes anything itself -- so it stays
+// trivially testable with synthetic profiles, matching select_load_mode()'s
+// existing shape in calibration.cpp.
+StorageTier classify_storage_tier(const StorageLatencyProfile& profile);
+
+// Categories of data a caller might ask ScratchVolumeManager to place.
+// `reconstructable_scratch` is the only category eligible for Tier R
+// (RAM-backed) placement; every other value names one of the durable-data
+// kinds docs/PLAN.md Phase 31 explicitly forbids from ever landing on
+// RAM-backed storage.
+enum class DurableDataClass {
+    reconstructable_scratch,
+    gguf_model,
+    durable_chat,
+    audit_record,
+    user_database,
+    resumable_download,
+    backup,
+    security_record,
+    index_generation_sole_copy,
+};
+
+std::string to_string(DurableDataClass data_class);
+
+// The hard prohibition itself: only reconstructable_scratch may ever be
+// placed on Tier R. Every ScratchVolumeManager entry point that accepts a
+// DurableDataClass calls this and refuses (throws) rather than silently
+// downgrading the request to a different tier -- see ScratchVolumeManager's
+// class comment below.
+bool durable_data_class_allows_ram_tier(DurableDataClass data_class) noexcept;
+
+// Best-effort filesystem introspection for a path under active model/index
+// storage. `detection_available` is false whenever the host platform or
+// filesystem could not be queried at all, so callers can tell "measured:
+// not present" apart from "could not measure" -- every other field defaults
+// to the conservative "not detected" value in that case.
+struct FilesystemIntegrityFlags {
+    bool detection_available{false};
+    bool compressed{false};
+    bool encrypted{false};
+    bool deduplicated{false};
+    bool virtual_disk{false};
+    bool network_redirected{false};
+    std::string volume_filesystem;  // e.g. "NTFS", "ReFS" -- empty if undetected
+};
+
+// Windows: GetVolumeInformationW (filesystem name), FSCTL_GET_COMPRESSION
+// (actual per-file/directory compression state, not just volume capability),
+// FILE_ATTRIBUTE_ENCRYPTED (actual EFS encryption state), GetDriveTypeW
+// (network/removable), and IOCTL_STORAGE_QUERY_PROPERTY's reported bus type
+// (BusTypeVirtual/BusTypeFileBackedVirtual, e.g. a mounted VHD/VHDX) for
+// virtual-disk detection. Deduplication is reported best-effort from an
+// IO_REPARSE_TAG_DEDUP reparse point when `path` names a regular file --
+// this project has no dependency on the (admin-only) Data Deduplication
+// PowerShell/WMI surface needed for a true volume-level check, so a
+// directory path leaves `deduplicated` at its conservative default rather
+// than guessing. Non-Windows: detection_available stays false and every
+// flag stays at its conservative default, per this project's Windows-first
+// build scope (see src/platform.cpp's existing #ifdef convention).
+FilesystemIntegrityFlags probe_filesystem_integrity_flags(
+    const std::filesystem::path& path);
+
+// Separate, non-conflated memory accounting (docs/PLAN.md Phase 31
+// deliverable): physical/available RAM and committed/commit-limit/pagefile
+// figures are reported as distinct fields rather than folded into one
+// "memory used" number. `hard_page_fault_rate_per_second` is a real measured
+// rate (two spaced samples, mirroring probe_system_utilization()'s existing
+// pattern) rather than a cumulative counter a caller would have to diff
+// itself -- see probe_memory_accounting()'s definition for the honest scope
+// note on what "hard" means here (Windows' GetProcessMemoryInfo does not
+// itself separate hard/disk-backed faults from soft ones; the reported rate
+// is the conservative superset, used the same directional way).
+// `model_mapped_bytes`/`model_resident_bytes` are caller-supplied so a model
+// admission decision can compare projected resident pages against real
+// physical headroom (see projected_resident_exceeds_safe_physical_capacity()
+// below) without this struct needing any runner-internal knowledge itself.
+struct MemoryAccountingSnapshot {
+    std::uint64_t physical_total_bytes{0};
+    std::uint64_t physical_available_bytes{0};
+    std::uint64_t committed_bytes{0};       // this process's own commit (private bytes)
+    std::uint64_t commit_limit_bytes{0};    // system-wide commit limit (RAM + pagefile)
+    std::uint64_t pagefile_used_bytes{0};   // system-wide commit charge beyond physical RAM
+    double hard_page_fault_rate_per_second{0.0};
+    std::uint64_t model_mapped_bytes{0};    // caller-supplied: model weights mapped (virtual)
+    std::uint64_t model_resident_bytes{0};  // caller-supplied: model weights actually resident
+};
+
+// Samples committed/commit-limit/pagefile and page-fault-rate evidence over
+// `interval_milliseconds` (blocks, like probe_system_utilization()).
+MemoryAccountingSnapshot probe_memory_accounting(
+    std::uint32_t interval_milliseconds = 100U,
+    std::uint64_t model_mapped_bytes = 0U,
+    std::uint64_t model_resident_bytes = 0U);
+
+// The Phase 31 exit criterion "a model is rejected or downgraded when
+// projected active pages exceed safe physical capacity even if commit
+// capacity remains": true only when projected_resident_bytes plus the
+// configured OS reserve would exceed physically available RAM, regardless
+// of how much commit/pagefile headroom the same snapshot reports separately
+// -- mirrors MemoryBudgetManager::reserve()'s existing "OS reserve" idea
+// (memory.cpp) but reasons about resident pages specifically, not the
+// broader reservation ledger.
+bool projected_resident_exceeds_safe_physical_capacity(
+    const MemoryAccountingSnapshot& snapshot,
+    std::uint64_t projected_resident_bytes,
+    std::uint64_t os_reserve_bytes) noexcept;
+
+// A storage-placement recommendation for active model/index storage, derived
+// from measured evidence (StorageLatencyProfile + FilesystemIntegrityFlags),
+// never from assumption -- the Phase 31 exit criterion "model placement
+// recommendations reflect measured storage, not assumption".
+struct StoragePlacementRecommendation {
+    StorageTier recommended_tier{StorageTier::local_hdd};
+    bool acceptable_for_active_model_storage{true};
+    std::vector<std::string> concerns;  // human-readable measured concerns
+};
+
+StoragePlacementRecommendation recommend_storage_placement(
+    const StorageLatencyProfile& latency,
+    const FilesystemIntegrityFlags& filesystem);
+
+// Bounded, quota-enforced, crash-recoverable scratch storage for ephemeral
+// per-job working directories (runner scratch, in-flight index builds,
+// download staging, etc.). ScratchVolumeManager is the single place that
+// creates/tracks/reclaims this ephemeral storage so:
+//   - scratch usage is bounded (per-job and global byte quotas) and can
+//     never fill the system drive (a free-space reserve is checked before
+//     every admission -- the concrete mechanism behind the "scratch files
+//     cannot fill the system drive" exit criterion);
+//   - a crash mid-job leaves a durable journal entry so the *next* startup
+//     can find and delete the orphaned directory instead of it silently
+//     accumulating forever (recover_orphans());
+//   - durable data is never silently placed on Tier R (RAM-backed) storage
+//     -- every entry point that accepts a DurableDataClass calls
+//     durable_data_class_allows_ram_tier() and refuses outright (throws)
+//     rather than downgrading the request to a different tier the caller
+//     didn't ask for.
+// Structurally a sibling of CalibrationService/AdvancedOptimizationRegistry
+// (calibration.cpp/optimization_registry.cpp): an in-process service with
+// its own small durable journal. It deliberately does not depend on
+// RecordStore -- scratch state is itself ephemeral and must be recoverable
+// (via its own journal) independently of whether the main record store even
+// opened successfully.
+class ScratchVolumeManager final {
+public:
+    // `root`: directory scratch jobs are created under (created if absent).
+    // `global_quota_bytes`: hard ceiling across every job's directory at
+    // once; begin_job()/reserve() refuse once reserved bytes would exceed
+    // it. `free_space_reserve_bytes`: reserve() and begin_job() both refuse
+    // whenever consuming the requested bytes would leave the underlying
+    // volume's free space below this threshold. `preferred_tier`: the tier
+    // `root` is asserted to sit on for reporting/policy purposes; this is
+    // *not* re-measured here -- callers pass classify_storage_tier()'s
+    // result for the volume `root` actually lives on.
+    ScratchVolumeManager(std::filesystem::path root,
+                        std::uint64_t global_quota_bytes,
+                        std::uint64_t free_space_reserve_bytes,
+                        StorageTier preferred_tier = StorageTier::fast_local);
+    ~ScratchVolumeManager();
+    ScratchVolumeManager(const ScratchVolumeManager&) = delete;
+    ScratchVolumeManager& operator=(const ScratchVolumeManager&) = delete;
+
+    // Deletes every job directory the crash-recovery journal still lists as
+    // open (no matching "end" record) from a previous process lifetime.
+    // Call once at startup, before any begin_job(). Returns the number of
+    // orphaned directories removed. Never throws: a single unreadable/
+    // unremovable orphan is skipped, not fatal to startup.
+    std::size_t recover_orphans();
+
+    // Creates (and journals) a new per-job scratch directory under `root`
+    // with its own byte quota. Throws std::invalid_argument if `data_class`
+    // is not reconstructable_scratch while `preferred_tier` is
+    // StorageTier::ram_backed (the hard RAM-tier prohibition), if the job id
+    // is invalid or already active, if the per-job quota would push global
+    // usage over global_quota_bytes, or if the volume's current free space
+    // is already below free_space_reserve_bytes.
+    std::filesystem::path begin_job(
+        const std::string& job_id, std::uint64_t quota_bytes,
+        DurableDataClass data_class = DurableDataClass::reconstructable_scratch);
+
+    // Admits `additional_bytes` more against `job_id`'s own quota, the
+    // manager's global quota, and the free-space reserve. Returns false
+    // (never throws) on refusal so hot write paths can treat it as ordinary
+    // backpressure rather than an exceptional condition.
+    bool reserve(const std::string& job_id, std::uint64_t additional_bytes);
+
+    // Atomic publication: copies `scratch_source` (which must be inside
+    // job_id's own scratch directory) to a `.tmp` sibling of
+    // `durable_destination`, flushes it, then atomically renames it over
+    // `durable_destination` -- so `durable_destination` is either fully
+    // absent/unchanged or fully written, never partially observable.
+    // Refuses (throws) if `durable_destination` resolves inside this
+    // manager's own scratch root unless `data_class` is
+    // reconstructable_scratch, which is the concrete mechanism behind the
+    // "durable data is never silently redirected to ephemeral storage" exit
+    // criterion.
+    std::filesystem::path publish(const std::string& job_id,
+                                  const std::filesystem::path& scratch_source,
+                                  const std::filesystem::path& durable_destination,
+                                  DurableDataClass data_class);
+
+    // Deletes job_id's scratch directory, releases its quota, and journals
+    // the matching "end" record so recover_orphans() never has to clean it
+    // up on a future startup. Safe to call more than once; a second call
+    // for an already-ended (or never-begun) job is a no-op.
+    void end_job(const std::string& job_id) noexcept;
+
+    // Ends every still-open job and removes their directories. Called from
+    // the server's own shutdown path so a clean shutdown never leaves
+    // scratch behind for recover_orphans() to find on the next startup.
+    void shutdown_cleanup() noexcept;
+
+    std::vector<std::string> active_job_ids() const;
+    std::uint64_t global_quota_bytes() const noexcept;
+    std::uint64_t global_reserved_bytes() const;
+    std::uint64_t free_space_reserve_bytes() const noexcept;
+    StorageTier preferred_tier() const noexcept;
+    const std::filesystem::path& root() const noexcept;
+
+private:
+    struct JobState {
+        std::filesystem::path directory;
+        std::uint64_t quota_bytes{0};
+        std::uint64_t reserved_bytes{0};
+    };
+    void append_journal(const std::string& operation, const std::string& job_id,
+                        const std::filesystem::path& directory);
+    bool free_space_available(std::uint64_t additional_bytes) const;
+
+    std::filesystem::path root_;
+    std::uint64_t global_quota_bytes_;
+    std::uint64_t free_space_reserve_bytes_;
+    StorageTier preferred_tier_;
+    mutable std::mutex mutex_;
+    std::map<std::string, JobState> jobs_;
+    std::uint64_t global_reserved_bytes_{0};
+};
+
+std::string scratch_volume_manager_status_json(const ScratchVolumeManager& manager);
+
+// Phase 31 (Priority B): tier-migration tooling for data that is already
+// durably placed. ScratchVolumeManager::publish() above handles the
+// scratch-to-durable placement decision made at creation time; this handles
+// the follow-up case the plan calls out explicitly -- an administrator
+// moving an already-placed file (e.g. a GGUF model) from one storage tier to
+// another after the fact. There is no central manifest in this codebase
+// mapping a durable path back to the record that owns it, so this function
+// only performs the verified, atomic file relocation itself; updating
+// whatever record references the old path remains the caller's
+// responsibility (the admin-facing endpoint surfaces this honestly rather
+// than silently rewriting record stores it does not own).
+struct StorageMigrationResult {
+    std::filesystem::path destination_path;
+    std::uint64_t bytes_migrated{0};
+    std::string sha256_hex;
+};
+
+// Copies `source_path` into `destination_directory` (created if absent),
+// verifies a SHA-256 digest match between source and staged copy, atomically
+// renames the verified copy into place (same stage-then-rename pattern as
+// ScratchVolumeManager::publish()), and only then removes the original.
+// Throws std::invalid_argument for an unreadable source, a destination that
+// resolves to the same file, or a destination directory that measures as
+// Tier R (RAM-backed) storage while `data_class` is not
+// reconstructable_scratch (the same hard RAM-tier prohibition
+// ScratchVolumeManager enforces, applied here too since a migration is
+// exactly the kind of operation that could otherwise "silently downgrade" a
+// durable file onto ephemeral storage); throws std::runtime_error if the
+// staging copy or checksum verification fails. In every throwing case the
+// original file at `source_path` is left completely untouched.
+StorageMigrationResult migrate_durable_file(
+    const std::filesystem::path& source_path,
+    const std::filesystem::path& destination_directory,
+    DurableDataClass data_class);
 
 // Result of one async read. `buffer` is only meaningful when `succeeded` is
 // true -- a cancelled or failed request always leaves it empty so no
@@ -1850,6 +2357,282 @@ private:
     unsigned int maximum_parallel_generations_{1U};
 };
 
+// Phase 33 (LOCAL-ONLY slice): a point-in-time view of one pool runner for
+// administration visibility (GET /api/v1/runner/pool) and for
+// LocalRunnerPool::status_json().
+struct RunnerPoolEntrySnapshot {
+    std::string id;
+    RunnerMetrics metrics;
+    std::set<std::string> capabilities;
+    std::set<std::string> authorized_project_ids;
+    unsigned int priority{0U};
+    // A runner is considered unhealthy after
+    // LocalRunnerPool::kMaxConsecutiveFailures consecutive generate()/
+    // ensure_model_loaded() failures and is excluded from select_runner()
+    // until it next succeeds -- see LocalRunnerPool's class comment.
+    bool healthy{true};
+    std::uint64_t consecutive_failures{0U};
+};
+
+// Thrown by LocalRunnerPool::generate() on any failure from the named
+// runner. `any_bytes_emitted` tells the caller, per
+// retry_is_semantically_safe() below, whether resending this request (to
+// another runner, or to the default single-runner fallback) could ever
+// duplicate output the caller has already forwarded on -- never a guess,
+// since it reflects exactly whether this call's own on_chunk wrapper fired
+// at least once before the failure.
+struct RunnerGenerationFailure final : std::runtime_error {
+    RunnerGenerationFailure(const std::string& message, std::string runner,
+                            bool bytes_emitted)
+        : std::runtime_error(message),
+          runner_id(std::move(runner)),
+          any_bytes_emitted(bytes_emitted) {}
+    std::string runner_id;
+    bool any_bytes_emitted;
+};
+
+// Phase 33 (LOCAL-ONLY slice) exit criterion "retries occur only when
+// semantically safe and never duplicate a persisted response": a retry is
+// safe only when the previous attempt is certain to have produced no
+// output the caller has already forwarded on AND nothing has already been
+// durably persisted from it. Centralised here so every retry decision in
+// this codebase applies the identical rule instead of re-deriving it ad hoc
+// at each call site.
+bool retry_is_semantically_safe(bool any_bytes_already_emitted_to_caller,
+                                bool request_already_marked_persisted);
+
+// Phase 33 (LOCAL-ONLY slice): supervises N RunnerSupervisor processes
+// concurrently from one control plane, generalizing the existing
+// single-runner supervision pattern (RunnerSupervisor itself, and how
+// ServerState::inference/ensure_model_loaded use it in server.cpp) rather
+// than inventing a parallel mechanism. Strictly additive/opt-in:
+// constructed only when AppConfig::local_runner_pool is non-empty; every
+// existing single-runner deployment is unaffected because nothing consults
+// LocalRunnerPool unless a caller explicitly asks for it.
+//
+// Failure isolation: every RunnerSupervisor call this class makes on behalf
+// of a caller is wrapped in try/catch. A failing runner is marked with an
+// incremented failure count and, past kMaxConsecutiveFailures, excluded
+// from select_runner() -- but the exception is always re-thrown as a typed
+// RunnerGenerationFailure/std::runtime_error the *caller* handles, never
+// swallowed into a crash and never allowed to take another runner's state
+// with it, since each RunnerSupervisor already owns its own process and
+// mutex completely independently of every other entry in entries_.
+class LocalRunnerPool final {
+public:
+    static constexpr std::uint64_t kMaxConsecutiveFailures = 3U;
+
+    LocalRunnerPool(std::vector<LocalRunnerConfig> runners,
+                    std::filesystem::path approved_backend,
+                    std::filesystem::path runtime_root);
+    ~LocalRunnerPool();
+    LocalRunnerPool(const LocalRunnerPool&) = delete;
+    LocalRunnerPool& operator=(const LocalRunnerPool&) = delete;
+
+    bool empty() const noexcept;
+
+    // Scores every configured, authorized, capable, healthy runner against
+    // `signals` and returns the winning runner id, or nullopt when none
+    // qualifies -- this never silently falls back to an unauthorized or
+    // incapable runner. See runner_pool.cpp for the scoring rule: resident
+    // model match first, then runner health/state, then priority, with
+    // authorization and capability applied as hard filters before scoring
+    // ever runs.
+    std::optional<std::string> select_runner(
+        const RunnerSelectionSignals& signals) const;
+
+    // Per-runner equivalent of ServerState::ensure_model_loaded(), scoped to
+    // one named pool runner instead of the single shared `inference`
+    // supervisor. Deliberately simpler than ensure_model_loaded() -- it does
+    // not integrate CalibrationService per-runner tuning in this pass; a
+    // caller that wants calibrated tuning for a pool runner passes its own
+    // `tuning` through, matching what ensure_model_loaded() itself would
+    // have resolved for the default runner.
+    void ensure_model_loaded(const std::string& runner_id,
+                             const ModelRecord& model,
+                             unsigned int context_length,
+                             std::uint32_t startup_timeout_seconds,
+                             unsigned int parallel_slots = 1U,
+                             const LaunchTuning& tuning = {});
+
+    // Failure-isolated, idempotency-disclosing generation -- see
+    // RunnerGenerationFailure and the class comment above.
+    GenerationResult generate(
+        const std::string& runner_id, const std::string& prompt,
+        const GenerationOptions& options,
+        const std::function<void(const std::string&)>& on_chunk,
+        const std::atomic_bool& cancellation,
+        std::uint32_t stall_timeout_seconds = 120U);
+
+    // Failure-isolated embedding call. Unlike generate(), an embedding
+    // response is never partial/streamed -- it either returns one complete
+    // vector or throws -- so a caller may always safely retry an embed()
+    // failure on a different runner without any idempotency check.
+    EmbeddingResult embed(const std::string& runner_id, const std::string& text);
+
+    RunnerSupervisor& runner(const std::string& runner_id);
+    RunnerMetrics metrics(const std::string& runner_id) const;
+    bool healthy(const std::string& runner_id) const;
+
+    std::vector<RunnerPoolEntrySnapshot> status() const;
+    static std::string status_json(const std::vector<RunnerPoolEntrySnapshot>& entries);
+
+private:
+    struct Entry;
+    Entry& required(const std::string& runner_id);
+    const Entry& required(const std::string& runner_id) const;
+    std::vector<std::unique_ptr<Entry>> entries_;
+};
+
+// Phase 33 (INTRANET-WORKER slice, 2026-08-13): signs one worker
+// certificate against `ca`, generating a fresh worker keypair. Throws if
+// this build was not compiled with OpenSSL available
+// (MASTERAI_HAS_OPENSSL) or if `ca` cannot be loaded -- fails closed, the
+// same precedent the PAM-optional OS-identity path already established for
+// a missing optional native dependency (see ConfigurationManager's PAM
+// warning in CMakeLists.txt).
+IssuedWorkerCertificate issue_worker_certificate(
+    const PrivateCertificateAuthority& ca, const std::string& worker_common_name);
+
+// Generates a fresh private CA keypair and self-signed certificate at the
+// paths named by `ca`, refusing to overwrite an existing certificate or
+// key (an administrator who wants a new CA must explicitly move the old
+// one aside first -- silently replacing a CA would invalidate every
+// already-issued worker certificate without warning).
+void initialize_private_certificate_authority(const PrivateCertificateAuthority& ca);
+
+// True only when this build was compiled with OpenSSL available. Every
+// mTLS-dependent entry point (IntranetWorkerPool, WorkerListener,
+// issue_worker_certificate(), initialize_private_certificate_authority())
+// checks this itself and throws a clear "not available in this build"
+// message rather than silently no-op'ing, so callers do not need to guard
+// every call site individually -- this is exposed only for administration
+// surfaces (e.g. GET /api/v1/system/pki) that want to report build
+// capability without provoking a throw.
+bool openssl_available() noexcept;
+
+// Phase 33 (INTRANET-WORKER slice): the encrypted, remote counterpart to
+// LocalRunnerPool. Every worker it can route to is an administrator-
+// approved intranet machine reached over mutual TLS: this control plane
+// verifies the worker's certificate against its own pinned private CA
+// (never the system trust store) AND against a pinned leaf-certificate
+// digest (defense in depth, the same convention Phase 9's outbound MCP
+// executable pinning uses -- see mcp_outbound.cpp); the worker equally
+// verifies this control plane's own client certificate before accepting
+// any request, so a network position between the two machines can neither
+// impersonate a worker nor impersonate this control plane. Requires this
+// build to have been compiled with OpenSSL available -- without it, every
+// method here fails closed with a clear "not available in this build"
+// error rather than silently downgrading to plaintext.
+//
+// Model-digest verification (Phase 33 deliverable): refresh_status() reads
+// back each worker's self-reported loaded-model sha256 over the already-
+// authenticated channel and only ever offers that worker to
+// select_worker() when the digest matches a model this control plane's own
+// registry also knows under the same id -- a worker can never be used to
+// silently serve an unexpected model. There is no "load this model on that
+// worker" RPC (see IntranetWorkerConfig's class comment): a worker's model
+// is fixed by that worker's own local configuration.
+//
+// Failure isolation mirrors LocalRunnerPool exactly: every network/TLS
+// call is wrapped in try/catch, a failing worker is recorded against its
+// own entry only and excluded past kMaxConsecutiveFailures, and nothing
+// here ever takes the control plane down with it.
+class IntranetWorkerPool final {
+public:
+    static constexpr std::uint64_t kMaxConsecutiveFailures = 3U;
+
+    IntranetWorkerPool(std::vector<IntranetWorkerConfig> workers,
+                       PrivateCertificateAuthority ca,
+                       std::filesystem::path client_certificate_file,
+                       std::filesystem::path client_private_key_file);
+    ~IntranetWorkerPool();
+    IntranetWorkerPool(const IntranetWorkerPool&) = delete;
+    IntranetWorkerPool& operator=(const IntranetWorkerPool&) = delete;
+
+    bool empty() const noexcept;
+
+    // Opens a fresh mutually-authenticated connection to the named worker,
+    // asks its /worker/status endpoint for its currently loaded model id
+    // and sha256, and records the result against that worker's entry --
+    // including marking it healthy/unhealthy. Never throws: a worker that
+    // cannot be reached or fails verification is simply marked unhealthy,
+    // matching LocalRunnerPool's failure-isolation convention.
+    // `known_model_sha256_by_id` is this control plane's own registry view
+    // (model id -> ModelManifest::model_sha256); a worker whose reported
+    // digest does not match is marked unhealthy with a diagnostic rather
+    // than trusted.
+    void refresh_status(
+        const std::string& worker_id,
+        const std::map<std::string, std::string>& known_model_sha256_by_id);
+    void refresh_all(
+        const std::map<std::string, std::string>& known_model_sha256_by_id);
+
+    std::optional<std::string> select_worker(
+        const RunnerSelectionSignals& signals) const;
+
+    GenerationResult generate(
+        const std::string& worker_id, const std::string& prompt,
+        const GenerationOptions& options,
+        const std::function<void(const std::string&)>& on_chunk,
+        const std::atomic_bool& cancellation,
+        std::uint32_t stall_timeout_seconds = 120U);
+
+    EmbeddingResult embed(const std::string& worker_id, const std::string& text);
+
+    bool healthy(const std::string& worker_id) const;
+    std::vector<RunnerPoolEntrySnapshot> status() const;
+    static std::string status_json(const std::vector<RunnerPoolEntrySnapshot>& entries);
+
+private:
+    struct Entry;
+    Entry& required(const std::string& worker_id);
+    const Entry& required(const std::string& worker_id) const;
+    std::vector<std::unique_ptr<Entry>> entries_;
+    PrivateCertificateAuthority ca_;
+    std::filesystem::path client_certificate_file_;
+    std::filesystem::path client_private_key_file_;
+};
+
+// Phase 33 (INTRANET-WORKER slice): the worker side of the protocol
+// IntranetWorkerPool speaks. Binds `configuration.worker_mode.bind_host`/
+// `port` (which may be non-loopback -- see WorkerModeConfig's class
+// comment for why that is a deliberate, narrowly-scoped exception) and
+// accepts ONLY: a TLS handshake presenting a client certificate that
+// chains to `configuration.worker_mode.ca_certificate_file` AND whose
+// SHA-256 digest is listed in `approved_client_certificate_sha256`, then
+// exactly two request shapes -- GET /worker/status (returns this worker's
+// own RunnerMetrics-shaped JSON, including its loaded model's sha256) and
+// POST /worker/generate or /worker/embed (forwards to the local
+// RunnerSupervisor this WorkerListener owns, the same isolated child-
+// process supervision every other MasterAI deployment already uses).
+// Never exposes the administrator web UI, model management, or any other
+// route the loopback HttpServer serves -- a compromised or misconfigured
+// worker-mode listener can therefore never be used as a path to this
+// machine's own administrator surface.
+class WorkerListener final {
+public:
+    WorkerListener(WorkerModeConfig configuration,
+                  std::filesystem::path approved_backend,
+                  std::filesystem::path runtime_root);
+    ~WorkerListener();
+    WorkerListener(const WorkerListener&) = delete;
+    WorkerListener& operator=(const WorkerListener&) = delete;
+
+    // Runs the accept loop until `stop_requested` is set. Returns once the
+    // listening socket is closed. Every accepted connection is handled on
+    // its own thread; a per-connection failure (bad handshake, malformed
+    // request, backend error) closes only that connection and never
+    // affects the listener or any other in-flight connection.
+    void run(std::atomic_bool& stop_requested);
+
+    RunnerSupervisor& runner();
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 struct ProjectRecord {
     std::string id;
     std::string display_name;
@@ -2295,6 +3078,18 @@ struct TuningProfile {
     // as it did before.
     ModelLoadMode recommended_load_mode{ModelLoadMode::mapped};
     PreTouchLevel recommended_pre_touch{PreTouchLevel::none};
+    // Phase 19 (real-hardware-class evidence, 2026-08-13): sampled by
+    // calibrate() from probe_gpu_vendor_telemetry() at the same 50ms cadence
+    // as the existing peak-resident-memory sampler, across whatever
+    // generation actually ran on the GPU. gpu_telemetry_available stays
+    // false (and the numeric fields stay at their zero defaults) on any host
+    // without an approved vendor SDK present -- this is disclosed evidence,
+    // never a fabricated measurement, matching this project's existing
+    // "declare the gap, don't guess" convention.
+    bool gpu_telemetry_available{false};
+    std::string gpu_vendor;
+    double average_gpu_utilization_percent{0.0};
+    int peak_gpu_temperature_celsius{0};
 };
 
 // A profile-name-keyed set of safe starting points (docs/PLAN.md section
@@ -4174,10 +4969,56 @@ struct TabularTrainingReport {
 // exactly -- fine-tuning adapts a model to more examples of the same
 // problem, not a different one -- and a mismatch throws
 // std::runtime_error before any training happens.
+// `on_epoch`, when set (Phase 78, this pass), is called synchronously after
+// every epoch's weight update with (epoch, this epoch's real loss) -- the
+// live per-step training curve the Phase 78 gap note said this codebase
+// could not provide, since the tabular trainer's run completes before a
+// post-hoc report could ever be sampled mid-run. server.cpp wires this to
+// TrainingProgressTracker::update() so a concurrent GET request on another
+// connection thread can observe genuinely in-flight epoch/loss values while
+// this run is still executing, not just the finished report.
 TabularTrainingReport train_tabular_model(
     const TabularDataset& data, const TabularTrainingOptions& options,
     TrainedTabularModel& model,
-    const TrainedTabularModel* warm_start = nullptr);
+    const TrainedTabularModel* warm_start = nullptr,
+    const std::function<void(std::uint32_t, double)>& on_epoch = {});
+
+// Phase 78 (this pass): in-process, deliberately non-persisted live
+// training-progress state -- the concrete mechanism behind "live per-step
+// training curves". A previous run's finished loss_history (TabularTraining
+// Report, above) is already real post-hoc data (Phase 56); what did not
+// exist was a way to observe an epoch/loss value *while* a run was still
+// executing on its own thread. begin()/update()/end() are called by the
+// training executor around/inside its train_tabular_model() call (via the
+// on_epoch callback for update()); snapshot() is what GET
+// /api/v1/ml/training-jobs/{id}/live-progress and build_ml_monitoring_json()
+// read. A job with no tracked entry (never started, or already finished and
+// cleared) reports running=false rather than stale or fabricated data.
+struct TrainingProgressSnapshot {
+    bool running{false};
+    std::uint32_t current_epoch{0};
+    std::uint32_t total_epochs{0};
+    double current_loss{0.0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class TrainingProgressTracker final {
+public:
+    void begin(const std::string& job_id, std::uint32_t total_epochs);
+    void update(const std::string& job_id, std::uint32_t epoch, double loss);
+    void end(const std::string& job_id) noexcept;
+    TrainingProgressSnapshot snapshot(const std::string& job_id) const;
+    // Every job this tracker currently considers in-flight (begin() called,
+    // end() not yet called) -- what build_ml_monitoring_json() iterates to
+    // report every live run at once, not just one job at a time.
+    std::vector<std::string> active_job_ids() const;
+
+private:
+    mutable std::mutex mutex_;
+    std::map<std::string, TrainingProgressSnapshot> progress_;
+};
+
+std::string training_progress_snapshot_json(const TrainingProgressSnapshot& snapshot);
 
 // Scores an existing model against a dataset with the same schema (feature
 // names must match; classification labels must be known to the model).
@@ -4239,6 +5080,34 @@ struct TabularPruneReport {
 };
 TabularPruneReport prune_tabular_model(TrainedTabularModel& model,
                                        double threshold = 1e-3);
+
+// Phase 72 (this pass): Automation Pipeline "Label data" stage support --
+// a real, deterministic auto-labeler rather than the "skipped, no automated
+// labeler exists" outcome Phase 72's initial pass left this stage with (see
+// masterai.hpp's LabelTaskStore comment). When every row already carries a
+// non-empty value in `target_column`, those are treated as real ground
+// truth and simply validated (method "existing_labels_validated"; no value
+// is invented). When one or more rows have an empty target, the labeler
+// picks the first fully-numeric non-target column, computes that column's
+// real 33rd/66th percentile thresholds across the dataset, and fills each
+// missing target with "low"/"medium"/"high" based on where that row's value
+// in the chosen column falls -- an honest, inspectable heuristic (the
+// source column and thresholds are reported so a reviewer can see exactly
+// why a row got the label it did), not a claim of semantic understanding.
+// Throws std::runtime_error if the CSV cannot be parsed at all or if no
+// fully-numeric column is available to derive labels from.
+struct TabularAutoLabelReport {
+    std::string csv;                  // dataset CSV with target_column filled
+    std::size_t rows_total{0};
+    std::size_t rows_already_labeled{0};
+    std::size_t rows_labeled{0};      // rows the heuristic actually filled in
+    std::string method;               // "existing_labels_validated" | "quantile_binning"
+    std::string source_column;        // binning column name (quantile_binning only)
+    double low_medium_threshold{0.0}; // 33rd percentile (quantile_binning only)
+    double medium_high_threshold{0.0}; // 66th percentile (quantile_binning only)
+};
+TabularAutoLabelReport auto_label_tabular_dataset(const std::string& csv,
+                                                  const std::string& target_column);
 
 // Persisted trained-model artifacts, keyed by ModelRegistryEntry id, so a
 // model trained in one server run predicts in the next.
@@ -4499,7 +5368,14 @@ InferenceEndpointStatus parse_inference_endpoint_status(
 // endpoint is `active` (see run_inference_endpoint in server.cpp), it
 // really enforces rate_limit_per_minute (an in-memory, per-endpoint,
 // per-minute counter -- not persisted, resets on restart), and it really
-// runs Phase 74's scan_content_for_risks over every request/response.
+// runs Phase 74's scan_content_for_risks over every request/response by
+// default. This pass replaces "by default" with real per-endpoint policy:
+// see the content_scan_enabled/block_on_scan_finding/safety_policy_id/
+// model_classifier_enabled fields below -- the scan is no longer fixed, an
+// administrator can disable it, make it advisory-only, attach a named
+// SafetyPolicy's restricted terms, or opt into Phase 74's LLM-judge
+// classifier pass, all re-read fresh on every request so a policy change
+// takes effect without restarting the listener.
 // `authentication_method` remains free text (an administrator-facing
 // label), but every non-"none" value is enforced identically: a single
 // Bearer shared-secret check against `auth_token_hash` below (this phase
@@ -4525,6 +5401,36 @@ struct InferenceEndpoint {
     // (key "inference-endpoint:<id>"), the same encrypted-at-rest store
     // Phase 75 also uses for telemetry-agent shared secrets.
     std::string auth_token_hash;
+    // Phase 77 (this pass): per-endpoint policy configuration, closing the
+    // "fixed content scan" gap the Phase 77 class comment above named --
+    // previously every active endpoint ran the exact same unconditional
+    // scan_content_for_risks() call with no way to tighten, loosen, or
+    // extend it per deployment. `content_scan_enabled` off skips the
+    // heuristic scan entirely (e.g. a trusted internal endpoint that
+    // already scans upstream); `block_on_scan_finding` off still runs the
+    // scan and reports findings but never rejects the request/response;
+    // `safety_policy_id`, when set to a real SafetyPolicy id, adds that
+    // policy's restricted_data_categories terms to the scan the same way
+    // the safety-policy scan route (POST .../safety-policies/{id}/scan)
+    // already does; `model_classifier_enabled` opts this endpoint into
+    // Phase 74's real LLM-judge classifier pass (scan_content_with_model_
+    // classifier) for bias/hallucination/subtler-harmful-content coverage
+    // the heuristic scan cannot provide -- off by default because it costs
+    // a second real generation call per request.
+    bool content_scan_enabled{true};
+    // Default true preserves the pre-policy behavior: a flagged prompt
+    // always 400s before generation runs.
+    bool block_on_scan_finding{true};
+    // Default false preserves the pre-policy behavior: a flagged answer is
+    // still returned alongside its scan result, not silently withheld,
+    // since the heuristic scanner can false-positive and an endpoint should
+    // not fail closed on it by default. Distinct from block_on_scan_finding
+    // above (which governs the prompt) so an administrator can tighten
+    // either side independently.
+    bool block_answer_on_scan_finding{false};
+    std::string safety_policy_id;
+    bool model_classifier_enabled{false};
+    double model_classifier_confidence_floor{0.5};
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -4545,6 +5451,12 @@ public:
     std::optional<InferenceEndpoint> find(const std::string& id) const;
     std::vector<InferenceEndpoint> list() const;
     bool set_status(const std::string& id, InferenceEndpointStatus status);
+    // Phase 77 (this pass): updates the policy fields documented above for
+    // an existing endpoint. Returns false (no-op) if `id` does not exist.
+    bool set_policy(const std::string& id, bool content_scan_enabled,
+                    bool block_on_scan_finding, bool block_answer_on_scan_finding,
+                    const std::string& safety_policy_id, bool model_classifier_enabled,
+                    double model_classifier_confidence_floor);
     bool remove(const std::string& id);
 
 private:
@@ -4879,6 +5791,44 @@ ContentScanReport scan_content_for_risks(const std::string& text,
 
 std::string content_scan_report_json(const ContentScanReport& report);
 
+// Phase 74 (this pass): a real ML-classifier-based scorer layered on top of
+// scan_content_for_risks()'s hand-rolled pattern matching above. Bias,
+// hallucination risk, and subtler harmful content are exactly the
+// categories keyword/substring matching structurally cannot catch (the
+// original Phase 74 gap note, docs/PLAN.md); this asks the same locally
+// loaded language model this server already runs inference through to
+// judge the text against those three categories via a fixed, low-
+// temperature, JSON-only prompt -- a real LLM-as-judge classifier, not a
+// second keyword list dressed up as one. `generate` is a caller-supplied
+// callback (server.cpp wires it to execute_rag_generation(), which is what
+// keeps this respecting the exact same memory/scheduler admission every
+// other generation call goes through) so this function stays independently
+// testable with a canned response and carries no direct RunnerSupervisor
+// dependency itself.
+struct ModelClassifierFinding {
+    std::string category;    // "bias" | "hallucination_risk" | "harmful_content"
+    double confidence{0.0};  // 0..1, as reported by the judge model
+    std::string rationale;
+};
+struct ModelClassifierReport {
+    bool available{false};   // false when `generate` threw or its reply did not
+                             // parse as the requested JSON shape
+    std::string diagnostic;  // populated when available is false
+    std::vector<ModelClassifierFinding> findings;  // only entries >= confidence_floor
+};
+
+// Never throws: any failure from `generate` (no model loaded, generation
+// error, unparseable reply) is reported as available=false with a
+// diagnostic, never silently treated as "clean" -- a classifier that could
+// not be evaluated is a different, honestly distinguishable outcome from a
+// classifier that ran and found nothing.
+ModelClassifierReport scan_content_with_model_classifier(
+    const std::string& text,
+    const std::function<std::string(const std::string&)>& generate,
+    double confidence_floor = 0.5);
+
+std::string model_classifier_report_json(const ModelClassifierReport& report);
+
 // Phase 75: remote/fleet Hardware and Compute telemetry -- the "agent
 // process on the node" ComputeNode's class comment said this codebase did
 // not build. run_telemetry_agent blocks the calling thread serving one
@@ -4919,8 +5869,18 @@ std::string fetch_remote_telemetry(const std::string& agent_url,
 // number. Deliberately does not track per-step training curves (the
 // tabular trainer's runs are synchronous and complete before there is a
 // meaningful "live" window to sample one from -- Phase 56 already exposes
-// real post-hoc loss curves) or cache-hit rate (no KV-cache-hit
-// instrumentation exists in the inference adapter to report on).
+// real post-hoc loss curves), closed by TrainingProgressTracker above, or
+// cache-hit rate, closed by record_cache_decision()/cache_hits/cache_misses
+// below (this pass): no KV-cache-hit instrumentation previously existed in
+// the inference adapter to report on. PromptSessionManager::try_reuse() is
+// the actual reuse decision every generation call site already makes
+// (chat_handler, server.cpp) -- record_cache_decision() is called with
+// exactly that decision's `reuse` bool right after, so the reported rate
+// reflects genuinely measured session-reuse outcomes, never a fabricated
+// number. Scope note, stated honestly: this counts *session-level* KV-slot
+// reuse decisions (whole-prompt-prefix cache hits), not sub-prompt/per-token
+// cache hits inside a single generation -- llama.cpp's own runner does not
+// expose that finer-grained counter to this adapter.
 class InferenceMetricsStore final {
 public:
     // Call once when a request is admitted into the scheduler (queue depth
@@ -4929,6 +5889,12 @@ public:
     // the latency recorded for the rolling percentile/throughput window).
     void begin_request();
     void end_request(std::uint64_t latency_microseconds);
+    // Phase 78 (this pass): records one real PromptSessionManager::
+    // try_reuse() outcome. `reuse` true = the request reused an existing
+    // KV-cache slot (a hit); false = it had to re-evaluate the prompt from
+    // scratch (a miss, including "session reuse is disabled" and "no prior
+    // session to reuse").
+    void record_cache_decision(bool reuse);
 
     struct Snapshot {
         std::int64_t current_queue_depth{0};
@@ -4936,6 +5902,9 @@ public:
         double p50_latency_ms{0.0};
         double p95_latency_ms{0.0};
         double p99_latency_ms{0.0};
+        std::uint64_t cache_hits{0};
+        std::uint64_t cache_misses{0};
+        double cache_hit_rate{0.0};  // 0 when cache_hits + cache_misses == 0
     };
     Snapshot snapshot() const;
 
@@ -4946,6 +5915,8 @@ private:
     // to the last 15 minutes on every access so this cannot grow without
     // bound on a long-running server.
     std::deque<std::pair<std::uint64_t, std::uint64_t>> samples_;
+    std::uint64_t cache_hits_{0};
+    std::uint64_t cache_misses_{0};
 };
 
 std::string inference_metrics_json(const InferenceMetricsStore::Snapshot& snapshot);
@@ -5035,6 +6006,12 @@ struct QueryTrace {
     // trace can see exactly why (e.g.) semantic search never ran, instead of
     // it silently appearing to have found nothing.
     std::vector<std::string> disabled_retrieval_strategies;
+    // Phase 33 (LOCAL-ONLY slice): which local runner process actually
+    // served this query -- "inference" for the always-present default
+    // single-runner supervisor, or a LocalRunnerConfig::id when an opt-in
+    // LocalRunnerPool routed the request elsewhere. Empty only for traces
+    // that never reached a runner (e.g. failed before admission).
+    std::string runner_id;
 };
 
 // Owns bounded, monotonic query traces. Callers explicitly transition through
@@ -5067,6 +6044,12 @@ public:
     // retrieval strategies considered for this query.
     void record_retrieval_strategy_skips(const std::string& id,
                                          std::vector<std::string> reasons);
+    // Phase 33 (LOCAL-ONLY slice): records which local runner process
+    // served this query -- see QueryTrace::runner_id. Follows the same
+    // "independent of the terminal diagnostic" convention as
+    // record_classification()/record_retrieval() so a later finish() call
+    // never erases it.
+    void record_runner(const std::string& id, std::string runner_id);
     void finish(const std::string& id, QueryStatus status,
                 std::string diagnostic = {});
     std::optional<QueryTrace> find(const std::string& id) const;
@@ -5180,6 +6163,16 @@ public:
     // send_chat_message()'s one-slot-under-cpu_only admission gate -- do not
     // have to keep a second copy of it in sync by hand.
     MemoryPolicy policy() const;
+    // Phase 34: the one live-mutable entry point the adaptive performance
+    // controller (adaptive_controller.cpp) actually adjusts at runtime --
+    // every subsequent reserve()/sample()/permits_background_work() call
+    // reads the newly assigned policy immediately, since they all read
+    // state_->policy fresh rather than a value captured at construction.
+    // Applies the exact same bound validation the constructor already
+    // enforces (throws std::invalid_argument on an out-of-bounds policy),
+    // so this can never be used to bypass the safety ceilings every other
+    // entry point already respects.
+    void set_policy(MemoryPolicy policy);
     static MemoryPolicy policy_for(ResourceProfile profile,
                                    const HardwareInfo& hardware,
                                    std::uint64_t hard_limit_bytes = 0U);
@@ -5822,6 +6815,276 @@ private:
     class State;
     std::unique_ptr<State> state_;
 };
+
+// Phase 34 (2026-08-13): named operating modes an administrator selects, or
+// leaves on `automatic` so AdaptiveController::evaluate() chooses the
+// best-fit mode itself each cycle from live signals.
+// `administrator_custom` applies exactly the configured PerformanceCeilings
+// with no automatic tuning at all; every other named mode biases
+// evaluate()'s scoring toward its own priority (e.g. `lowest_latency`
+// favors higher inference concurrency and shorter idle-unload;
+// `minimal_memory` favors the opposite).
+enum class PerformanceMode {
+    minimal_memory,
+    balanced,
+    lowest_latency,
+    maximum_throughput,
+    battery_saver,
+    quiet_thermal_conservative,
+    administrator_custom,
+    automatic
+};
+std::string to_string(PerformanceMode mode);
+
+// Administrator-configured ceilings no automatic adjustment may ever
+// exceed -- every value AdaptiveController proposes is clamped to this
+// struct before it is ever applied, and MemoryBudgetManager::set_policy()
+// independently re-validates its own bounds regardless. Defaults mirror
+// MemoryPolicy's own existing defaults rather than being more permissive.
+struct PerformanceCeilings {
+    std::uint32_t max_inference_concurrency{4U};
+    std::uint32_t max_queued_inference{16U};
+    std::uint32_t max_index_workers{4U};
+    std::uint32_t max_context_tokens{8192U};
+    std::uint32_t min_idle_unload_seconds{60U};
+    std::uint32_t max_idle_unload_seconds{3600U};
+    // Bounds how large one evaluate() call's step on any single numeric
+    // knob may be, expressed as a percentage of the knob's current value --
+    // the plan's "bounded step size" stability control.
+    unsigned int max_step_percent{25U};
+    // The plan's "max changes per interval" stability control.
+    std::uint32_t max_changes_per_interval{3U};
+    std::uint32_t interval_seconds{300U};
+    // The plan's "minimum dwell time" / "cooldown" stability controls: no
+    // second adjustment is applied until this many seconds have passed
+    // since the last one.
+    std::uint32_t minimum_dwell_seconds{120U};
+};
+
+// Every live signal the plan requires the controller to weigh, following
+// the same "declare and disclose every signal, even ones a given decision
+// rule does not yet act on" discipline RunnerSelectionSignals (Phase 33)
+// and RoutingSignals (Phase 29) already established. Fields marked
+// "disclosed only" below have no real rolling-aggregate probe behind them
+// in this pass -- left std::optional and populated only by a caller that
+// has computed one itself, the same honest-gap convention already used for
+// e.g. RunnerSelectionSignals::thermal_headroom_percent.
+struct AdaptiveSignalSnapshot {
+    MemoryStatus memory;
+    std::map<SchedulingClass, SchedulingClassStatus> scheduler;
+    CacheStatus cache;
+    // Disclosed only: Phase 13 records TTFT/tokens-per-second per
+    // individual QueryTrace, not as a rolling aggregate: a caller that
+    // wants this populated computes its own rolling average from recent
+    // traces (e.g. QueryTraceStore) before calling evaluate().
+    std::optional<double> average_ttft_ms;
+    std::optional<double> average_tokens_per_second;
+    // Disclosed only: Phase 78 records cache-hit decisions per request in
+    // InferenceMetricsStore; a caller aggregates its own rate the same way.
+    std::optional<double> cache_hit_rate_percent;
+    // Disclosed only: no per-cycle thermal/power probe is wired to this
+    // struct in this pass -- Phase 19/30A's GPU utilization/thermal probing
+    // is control-plane-wide evidence recorded through CalibrationService,
+    // not a live per-evaluate()-call signal yet.
+    std::optional<double> thermal_headroom_percent;
+    std::optional<double> estimated_power_draw_watts;
+    std::uint32_t active_user_count{0U};
+    bool on_battery_power{false};
+};
+
+// One proposed or applied change to a single named parameter.
+// `confidence` is the fraction of AdaptiveController's rolling pressure-
+// agreement window that supports this direction of change -- the plan's
+// "confidence requirement" stability control, disclosed rather than
+// hidden inside a boolean.
+struct AdaptiveAdjustment {
+    std::string parameter;
+    std::string reason;
+    double previous_value{0.0};
+    double proposed_value{0.0};
+    double confidence{0.0};
+};
+
+struct AdaptiveControllerReport {
+    PerformanceMode active_mode{PerformanceMode::automatic};
+    PerformanceMode selected_mode{PerformanceMode::balanced};
+    // Adjustments actually applied to a live-mutable target this cycle
+    // (currently: MemoryBudgetManager::set_policy() fields only -- see the
+    // AdaptiveController class comment's honest scope note).
+    std::vector<AdaptiveAdjustment> applied;
+    // Every other adjustment evaluate() computed but either has no live
+    // setter to apply to yet, or is gated by dwell time/cooldown/max-
+    // changes-per-interval/confidence this cycle -- still surfaced so the
+    // Phase 35 administration UI can show it as a recommendation.
+    std::vector<AdaptiveAdjustment> proposed_not_yet_applied;
+    std::uint64_t evaluation_epoch_seconds{0U};
+};
+
+// Phase 34: bounded, hysteresis-guarded automatic tuning extending Phase 19
+// CalibrationService's advisory profiles into a live controller. See
+// docs/PLAN.md Phase 34's stability-control deliverable -- minimum dwell
+// time, hysteresis, bounded step size, cooldown, rolling measurement,
+// confidence requirement, safe rollback, and max-changes-per-interval are
+// each a real, independently testable check in evaluate() below, not
+// asserted only in documentation.
+//
+// Honest scope note: evaluate() computes and returns a proposed value for
+// every parameter the plan lists (the "decide what should change"
+// engineering this phase's exit criteria are actually about), but only
+// ever *applies* the subset wired to a genuinely live-mutable target in
+// this codebase: MemoryBudgetManager::set_policy() (inference concurrency,
+// queued-inference ceiling, index worker count, default context tokens).
+// Every other named knob in the plan's deliverable list (read queue depth,
+// prefetch distance, cache quotas, batch size, idle-unload time, warm-up
+// policy, thread count, NUMA policy, GPU offload, KV placement,
+// background-job rate) has no live setter anywhere in this codebase yet to
+// apply to automatically -- evaluate() still computes and discloses a
+// proposed value for those on `proposed_not_yet_applied` (visible on the
+// Phase 35 administration UI as a recommendation), and an administrator
+// applies them manually via the existing Runner Configuration/Advanced
+// Optimizations surfaces. This is the same "computed, disclosed, not yet
+// wired to an automatic call site" pattern Phase 26/28 already established
+// elsewhere in this codebase (e.g. Phase 28's topology-aware thread-pinning
+// primitive, real but not yet called from a live worker thread's startup).
+class AdaptiveController final {
+public:
+    explicit AdaptiveController(PerformanceCeilings ceilings = {});
+
+    void set_mode(PerformanceMode mode);
+    PerformanceMode mode() const noexcept;
+    void set_ceilings(PerformanceCeilings ceilings);
+    PerformanceCeilings ceilings() const noexcept;
+
+    // Runs one evaluation cycle against `signals` and `memory` (whose
+    // set_policy() this may call when a due, confident, in-bounds
+    // memory-related adjustment exists). now_epoch_seconds drives dwell-
+    // time/cooldown/interval bookkeeping so this is deterministically
+    // testable without depending on a real wall clock.
+    AdaptiveControllerReport evaluate(const AdaptiveSignalSnapshot& signals,
+                                      MemoryBudgetManager& memory,
+                                      std::uint64_t now_epoch_seconds);
+
+    // Reverts the most recently applied change back to the MemoryPolicy
+    // that was active immediately before it -- the plan's "failed
+    // recommendations revert to the last safe profile" exit criterion.
+    // A no-op if nothing has been applied yet.
+    void rollback(MemoryBudgetManager& memory);
+
+    static std::string to_json(const AdaptiveControllerReport& report);
+
+private:
+    struct AppliedChange {
+        std::uint64_t applied_epoch_seconds{0U};
+        MemoryPolicy policy_before;
+    };
+    mutable std::mutex mutex_;
+    PerformanceMode mode_{PerformanceMode::automatic};
+    PerformanceCeilings ceilings_;
+    std::uint64_t last_change_epoch_seconds_{0U};
+    std::uint32_t changes_this_interval_{0U};
+    std::uint64_t current_interval_epoch_seconds_{0U};
+    std::optional<AppliedChange> last_applied_;
+    // Rolling agreement window over recent evaluate() calls' memory
+    // pressure reading -- AdaptiveAdjustment::confidence for a memory-
+    // related proposal is the fraction of this window agreeing with the
+    // proposed direction, so a single noisy sample can never trigger a
+    // live change on its own.
+    std::deque<MemoryPressure> pressure_history_;
+};
+
+// Phase 32 (2026-08-13, evidence-pending): speculative decoding
+// draft/target compatibility checking and the per-request enable/disable
+// decision engine. Honest scope note (see docs/PLAN.md Phase 32's status
+// entry for the full reasoning): this codebase's RunnerSupervisor/
+// LlamaCppAdapter launch exactly one model per external backend process
+// (see LaunchSpec in inference.cpp) -- there is no dual-model (draft +
+// target resident together) launch path yet, and adding one safely
+// requires Phase 26 warm-state management for a second concurrently
+// resident runner (itself only validated for a single model at a time so
+// far) plus Phase 27 KV accounting for the combined memory cost of two
+// models loaded at once, neither of which this pass touched. What ships
+// here is the real, independently testable decision logic every dual-model
+// execution path would need regardless of how it launches the second
+// model: exact compatibility checking, acceptance-rate tracking, and the
+// bounded per-request enable/disable rule -- deliberately NOT wired to any
+// live generation call site, so this phase changes no existing request's
+// behavior. The plan's exit criterion ("generation throughput improves on
+// representative prompts") is therefore explicitly unvalidated, not
+// claimed -- there is no execution path yet to measure.
+struct DraftTargetCompatibilityResult {
+    bool compatible{false};
+    std::vector<std::string> incompatibility_reasons;
+};
+
+// Exact-match compatibility, never a heuristic "close enough": speculative
+// decoding is only ever correct when the draft model's proposed tokens are
+// verified against literally the same vocabulary the target model uses, so
+// every check here is an exact equality, and a single mismatch anywhere
+// fails the whole check. Honest limitation: ModelManifest has no separate
+// vocabulary-size/tokenizer-identity field in this codebase (see
+// ModelManifest in this header) -- architecture string equality is used as
+// the best available proxy, which is a real but incomplete approximation
+// of true tokenizer/vocabulary identity; this is disclosed here rather
+// than silently treated as sufficient.
+DraftTargetCompatibilityResult check_draft_target_compatibility(
+    const ModelManifest& target, const ModelManifest& draft);
+
+// Rolling acceptance-rate tracker for one (target, draft) pair. Every
+// generate() step that would run under real dual-model execution records
+// how many of the draft's proposed tokens the target actually accepted;
+// this is the evidence dynamic per-request disablement (below) is judged
+// against, never a fixed assumption.
+class SpeculativeDecodingStats final {
+public:
+    explicit SpeculativeDecodingStats(std::size_t rolling_window = 50U);
+    void record_step(std::uint32_t draft_tokens_proposed,
+                     std::uint32_t draft_tokens_accepted);
+    // Fraction of proposed draft tokens accepted over the rolling window,
+    // or nullopt when no step has been recorded yet (never fabricates a
+    // starting assumption).
+    std::optional<double> acceptance_rate() const;
+    std::size_t steps_recorded() const noexcept;
+
+private:
+    mutable std::mutex mutex_;
+    std::size_t rolling_window_;
+    std::deque<std::pair<std::uint32_t, std::uint32_t>> steps_;  // proposed, accepted
+};
+
+// Every signal the plan requires the per-request disablement rule to
+// weigh, following the same "declare and disclose every signal" discipline
+// RunnerSelectionSignals/AdaptiveSignalSnapshot already established.
+struct SpeculativeDecodingRequestContext {
+    std::optional<double> measured_acceptance_rate;  // from SpeculativeDecodingStats
+    std::uint64_t combined_memory_estimate_bytes{0};
+    std::uint64_t available_memory_bytes{0};
+    std::uint32_t requested_max_tokens{0};
+    bool draft_runner_queued{false};
+    bool sampling_is_greedy_or_deterministic{true};
+    // Disclosed only: no per-runner thermal probe feeds this in this pass
+    // (see RunnerSelectionSignals::thermal_headroom_percent's identical
+    // honest gap).
+    std::optional<double> thermal_headroom_percent;
+};
+
+struct SpeculativeDecodingDecision {
+    bool enabled{false};
+    std::string reason;
+};
+
+// Pure decision function -- the plan's exact deliverable list: low
+// acceptance rate, overhead exceeding savings (approximated here as
+// combined memory pressure leaving no real headroom), short requests,
+// memory pressure, a queued draft runner, incompatible sampling settings,
+// or thermal throttling all independently disable speculative decoding for
+// this one request; every condition must clear for `enabled` to be true.
+// `minimum_acceptance_rate`/`minimum_tokens_to_bother` are administrator-
+// tunable rather than hardcoded, mirroring PerformanceCeilings' own
+// administrator-configured-bound convention (Phase 34).
+SpeculativeDecodingDecision decide_speculative_decoding_for_request(
+    const SpeculativeDecodingRequestContext& context,
+    double minimum_acceptance_rate = 0.6,
+    std::uint32_t minimum_tokens_to_bother = 64U);
 
 struct RetrievalCacheBenchmarkReport {
     std::uint64_t iterations{0};

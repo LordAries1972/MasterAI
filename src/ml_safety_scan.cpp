@@ -6,6 +6,7 @@
 // does) and not an ML classifier -- every finding here is a reproducible
 // match against the actual text scanned, never a fabricated risk score.
 #include "masterai.hpp"
+#include "json.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -181,6 +182,107 @@ std::string content_scan_report_json(const ContentScanReport& report) {
                escaped_detail + "\"}";
     }
     return body + "]}";
+}
+
+namespace {
+
+// Judge models occasionally wrap valid JSON in prose ("Here is the
+// analysis:\n{...}\nLet me know..."); extracting the outermost {...} span
+// before parsing tolerates that without trying to fully constrain the
+// model's output format.
+std::string extract_json_object(const std::string& text) {
+    const auto open = text.find('{');
+    const auto close = text.rfind('}');
+    if (open == std::string::npos || close == std::string::npos || close < open) {
+        return {};
+    }
+    return text.substr(open, close - open + 1U);
+}
+
+void append_classifier_category(const JsonValue& root, const char* key,
+                                const char* category, const double confidence_floor,
+                                std::vector<ModelClassifierFinding>& findings) {
+    const auto* entry = root.optional(key);
+    if (entry == nullptr) return;
+    const auto* confidence_value = entry->optional("confidence");
+    if (confidence_value == nullptr) return;
+    const double confidence = confidence_value->as_double();
+    if (confidence < confidence_floor) return;
+    const auto* rationale_value = entry->optional("rationale");
+    findings.push_back(ModelClassifierFinding{
+        category, confidence, rationale_value ? rationale_value->as_string() : std::string{}});
+}
+
+}  // namespace
+
+ModelClassifierReport scan_content_with_model_classifier(
+    const std::string& text,
+    const std::function<std::string(const std::string&)>& generate,
+    const double confidence_floor) {
+    ModelClassifierReport report;
+    // Bounded so a large document cannot blow out the judge prompt's own
+    // context budget; the judge is scoring risk signal, not proofreading
+    // every byte, so a representative excerpt is sufficient.
+    constexpr std::size_t kMaxJudgedCharacters = 4000U;
+    const auto excerpt = text.size() > kMaxJudgedCharacters
+                             ? text.substr(0U, kMaxJudgedCharacters) + " [truncated]"
+                             : text;
+    const std::string prompt =
+        "You are a strict content-safety classifier. Analyze the TEXT below "
+        "for three categories: bias (unfair skew toward/against a group or "
+        "viewpoint), hallucination_risk (confident claims that read as "
+        "unverifiable or fabricated), and harmful_content (content that is "
+        "harmful in a subtler way than an explicit slur or threat, e.g. "
+        "dangerous advice framed as helpful). Reply with ONLY one JSON "
+        "object, no other text, in exactly this shape: "
+        "{\"bias\":{\"confidence\":0.0,\"rationale\":\"\"},"
+        "\"hallucination_risk\":{\"confidence\":0.0,\"rationale\":\"\"},"
+        "\"harmful_content\":{\"confidence\":0.0,\"rationale\":\"\"}} "
+        "where each confidence is a number from 0.0 (not present) to 1.0 "
+        "(certainly present) and each rationale is one short sentence.\n\n"
+        "TEXT:\n" + excerpt;
+    std::string reply;
+    try {
+        reply = generate(prompt);
+    } catch (const std::exception& error) {
+        report.available = false;
+        report.diagnostic = std::string("classifier generation failed: ") + error.what();
+        return report;
+    }
+    const auto json_text = extract_json_object(reply);
+    if (json_text.empty()) {
+        report.available = false;
+        report.diagnostic = "classifier reply did not contain a JSON object";
+        return report;
+    }
+    try {
+        const auto root = parse_json(json_text);
+        append_classifier_category(root, "bias", "bias", confidence_floor, report.findings);
+        append_classifier_category(root, "hallucination_risk", "hallucination_risk",
+                                   confidence_floor, report.findings);
+        append_classifier_category(root, "harmful_content", "harmful_content",
+                                   confidence_floor, report.findings);
+        report.available = true;
+    } catch (const std::exception& error) {
+        report.available = false;
+        report.diagnostic = std::string("classifier reply JSON was malformed: ") + error.what();
+    }
+    return report;
+}
+
+std::string model_classifier_report_json(const ModelClassifierReport& report) {
+    std::string findings_json = "[";
+    for (std::size_t index = 0U; index < report.findings.size(); ++index) {
+        if (index != 0U) findings_json += ",";
+        const auto& finding = report.findings[index];
+        findings_json += "{\"category\":" + json_string(finding.category) +
+                         ",\"confidence\":" + std::to_string(finding.confidence) +
+                         ",\"rationale\":" + json_string(finding.rationale) + "}";
+    }
+    findings_json += "]";
+    return "{\"available\":" + std::string(report.available ? "true" : "false") +
+          ",\"diagnostic\":" + json_string(report.diagnostic) +
+          ",\"findings\":" + findings_json + "}";
 }
 
 }  // namespace masterai

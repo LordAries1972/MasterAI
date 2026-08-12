@@ -153,6 +153,49 @@ std::string array(const std::set<std::string>& values) {
     return result + "]";
 }
 
+// Phase 33 (LOCAL-ONLY slice): renders AppConfig::local_runner_pool the same
+// hand-written way every other configuration section in this file is
+// serialized (no generic JSON-object writer exists here -- see quote()/
+// array() above), so a saved settings file round-trips through load()
+// unchanged when nothing else changed.
+std::string local_runner_pool_array(const std::vector<LocalRunnerConfig>& pool) {
+    std::string result{"["};
+    bool first = true;
+    for (const auto& entry : pool) {
+        if (!first) result += ",";
+        first = false;
+        result += "{\"id\":" + quote(entry.id) +
+                  ",\"port\":" + std::to_string(entry.port) +
+                  ",\"acceleratorPolicy\":" + quote(entry.accelerator_policy) +
+                  ",\"capabilities\":" + array(entry.capabilities) +
+                  ",\"authorizedProjectIds\":" +
+                  array(entry.authorized_project_ids) +
+                  ",\"priority\":" + std::to_string(entry.priority) + "}";
+    }
+    return result + "]";
+}
+
+// Phase 33 (INTRANET-WORKER slice): renders AppConfig::intranet_worker_pool
+// the same hand-written way local_runner_pool_array() above does.
+std::string intranet_worker_pool_array(const std::vector<IntranetWorkerConfig>& pool) {
+    std::string result{"["};
+    bool first = true;
+    for (const auto& entry : pool) {
+        if (!first) result += ",";
+        first = false;
+        result += "{\"id\":" + quote(entry.id) +
+                  ",\"host\":" + quote(entry.host) +
+                  ",\"port\":" + std::to_string(entry.port) +
+                  ",\"expectedServerCertificateSha256\":" +
+                  quote(entry.expected_server_certificate_sha256) +
+                  ",\"capabilities\":" + array(entry.capabilities) +
+                  ",\"authorizedProjectIds\":" +
+                  array(entry.authorized_project_ids) +
+                  ",\"priority\":" + std::to_string(entry.priority) + "}";
+    }
+    return result + "]";
+}
+
 bool loopback(const std::string& host) {
     return host == "127.0.0.1" || host == "::1" || host == "localhost";
 }
@@ -172,7 +215,14 @@ AppConfig ConfigurationManager::load(
                             "workspace", "models", "inference", "downloads",
                             "knowledge", "memory", "hardware", "indexing",
                             "retrieval", "cache", "session", "performance",
-                            "storage", "machineLearning"}, "");
+                            "storage", "machineLearning",
+                            // Phase 33 (LOCAL-ONLY slice): optional, absent
+                            // in every pre-Phase-33 settings file.
+                            "localRunnerPool",
+                            // Phase 33 (INTRANET-WORKER slice): optional,
+                            // absent in every pre-this-pass settings file.
+                            "intranetWorkerPool", "privateCa", "workerMode"},
+                     "");
         config.schema_version =
             static_cast<int>(root.required("schemaVersion").as_integer());
 
@@ -254,9 +304,29 @@ AppConfig ConfigurationManager::load(
         // required since it is an ordinary directory, not a real Windows
         // pagefile.
         if (const auto* storage = root.optional("storage")) {
-            require_only(*storage, {"pageFileRoot"}, "storage.");
+            require_only(*storage,
+                         {"pageFileRoot", "scratchRoot", "scratchGlobalQuotaMiB",
+                          "scratchFreeSpaceReserveMiB"},
+                         "storage.");
             const auto raw = storage->required("pageFileRoot").as_string();
             if (!raw.empty()) config.page_file_root = resolve_workspace_path(raw);
+            // Phase 31: scratch fields are all optional so a pre-Phase-31
+            // settings file (with only pageFileRoot) keeps loading
+            // unchanged, defaulting to AppConfig's own safe values.
+            if (storage->optional("scratchRoot") != nullptr) {
+                const auto scratch_raw = storage->required("scratchRoot").as_string();
+                if (!scratch_raw.empty()) {
+                    config.scratch_root = resolve_workspace_path(scratch_raw);
+                }
+            }
+            if (storage->optional("scratchGlobalQuotaMiB") != nullptr) {
+                config.scratch_global_quota_mib =
+                    positive(*storage, "scratchGlobalQuotaMiB", 1048576ULL);
+            }
+            if (storage->optional("scratchFreeSpaceReserveMiB") != nullptr) {
+                config.scratch_free_space_reserve_mib =
+                    positive(*storage, "scratchFreeSpaceReserveMiB", 1048576ULL);
+            }
         }
 
         const auto& models = root.required("models");
@@ -324,6 +394,147 @@ AppConfig ConfigurationManager::load(
                     static_cast<std::uint32_t>(
                         positive(*inference, "stallTimeoutSeconds", 3600U));
             }
+        }
+
+        // Phase 33 (LOCAL-ONLY slice): opt-in local multi-runner pool. Absent
+        // entirely (the common case), config.local_runner_pool stays empty
+        // and single-runner mode is exactly what every pre-Phase-33 settings
+        // file already produces -- this array is purely additive.
+        if (const auto* pool = root.optional("localRunnerPool")) {
+            for (const auto& item : pool->as_array()) {
+                require_only(item,
+                             {"id", "port", "acceleratorPolicy",
+                              "capabilities", "authorizedProjectIds",
+                              "priority"},
+                             "localRunnerPool[].");
+                LocalRunnerConfig entry;
+                entry.id = item.required("id").as_string();
+                entry.port = static_cast<std::uint16_t>(
+                    positive(item, "port", 65535U));
+                if (item.optional("acceleratorPolicy") != nullptr) {
+                    entry.accelerator_policy =
+                        item.required("acceleratorPolicy").as_string();
+                }
+                if (item.optional("capabilities") != nullptr) {
+                    entry.capabilities = string_set(item, "capabilities");
+                }
+                if (item.optional("authorizedProjectIds") != nullptr) {
+                    entry.authorized_project_ids =
+                        string_set(item, "authorizedProjectIds");
+                }
+                if (item.optional("priority") != nullptr) {
+                    entry.priority = static_cast<unsigned int>(
+                        non_negative(item, "priority", 1000U));
+                }
+                config.local_runner_pool.push_back(std::move(entry));
+            }
+        }
+
+        // Phase 33 (INTRANET-WORKER slice): the private CA this control
+        // plane's own worker PKI is rooted at. Absent entirely means no
+        // private CA is configured -- intranetWorkerPool/workerMode both
+        // require one and ConfigurationManager::validate() rejects a
+        // non-empty one without it.
+        if (const auto* private_ca = root.optional("privateCa")) {
+            require_only(*private_ca, {"certificateFile", "privateKeyFile"},
+                        "privateCa.");
+            const auto certificate_raw =
+                private_ca->required("certificateFile").as_string();
+            const auto key_raw = private_ca->required("privateKeyFile").as_string();
+            if (!certificate_raw.empty()) {
+                config.private_ca.certificate_file =
+                    resolve_workspace_path(certificate_raw);
+            }
+            if (!key_raw.empty()) {
+                config.private_ca.private_key_file =
+                    resolve_workspace_path(key_raw);
+            }
+        }
+
+        // Phase 33 (INTRANET-WORKER slice): opt-in remote worker routing.
+        // Absent entirely (the common case), config.intranet_worker_pool
+        // stays empty and no remote worker is ever consulted -- purely
+        // additive, exactly like localRunnerPool above.
+        if (const auto* worker_pool_section = root.optional("intranetWorkerPool")) {
+            require_only(*worker_pool_section,
+                         {"clientCertificateFile", "clientPrivateKeyFile",
+                          "workers"},
+                         "intranetWorkerPool.");
+            const auto client_certificate_raw =
+                worker_pool_section->required("clientCertificateFile").as_string();
+            const auto client_key_raw =
+                worker_pool_section->required("clientPrivateKeyFile").as_string();
+            if (!client_certificate_raw.empty()) {
+                config.intranet_worker_client_certificate_file =
+                    resolve_workspace_path(client_certificate_raw);
+            }
+            if (!client_key_raw.empty()) {
+                config.intranet_worker_client_private_key_file =
+                    resolve_workspace_path(client_key_raw);
+            }
+            for (const auto& item : worker_pool_section->required("workers").as_array()) {
+                require_only(item,
+                             {"id", "host", "port",
+                              "expectedServerCertificateSha256",
+                              "capabilities", "authorizedProjectIds",
+                              "priority"},
+                             "intranetWorkerPool.workers[].");
+                IntranetWorkerConfig entry;
+                entry.id = item.required("id").as_string();
+                entry.host = item.required("host").as_string();
+                entry.port = static_cast<std::uint16_t>(
+                    positive(item, "port", 65535U));
+                entry.expected_server_certificate_sha256 =
+                    item.required("expectedServerCertificateSha256").as_string();
+                if (item.optional("capabilities") != nullptr) {
+                    entry.capabilities = string_set(item, "capabilities");
+                }
+                if (item.optional("authorizedProjectIds") != nullptr) {
+                    entry.authorized_project_ids =
+                        string_set(item, "authorizedProjectIds");
+                }
+                if (item.optional("priority") != nullptr) {
+                    entry.priority = static_cast<unsigned int>(
+                        non_negative(item, "priority", 1000U));
+                }
+                config.intranet_worker_pool.push_back(std::move(entry));
+            }
+        }
+
+        // Phase 33 (INTRANET-WORKER slice): opt-in worker-mode listener.
+        // Absent entirely (the common case), config.worker_mode.enabled
+        // stays false and this machine remains loopback-only, exactly like
+        // every pre-this-pass deployment.
+        if (const auto* worker_mode = root.optional("workerMode")) {
+            require_only(*worker_mode,
+                         {"enabled", "bindHost", "port", "caCertificateFile",
+                          "serverCertificateFile", "serverPrivateKeyFile",
+                          "approvedClientCertificateSha256"},
+                         "workerMode.");
+            config.worker_mode.enabled = worker_mode->required("enabled").as_boolean();
+            config.worker_mode.bind_host = worker_mode->required("bindHost").as_string();
+            config.worker_mode.port = static_cast<std::uint16_t>(
+                positive(*worker_mode, "port", 65535U));
+            const auto ca_certificate_raw =
+                worker_mode->required("caCertificateFile").as_string();
+            const auto server_certificate_raw =
+                worker_mode->required("serverCertificateFile").as_string();
+            const auto server_key_raw =
+                worker_mode->required("serverPrivateKeyFile").as_string();
+            if (!ca_certificate_raw.empty()) {
+                config.worker_mode.ca_certificate_file =
+                    resolve_workspace_path(ca_certificate_raw);
+            }
+            if (!server_certificate_raw.empty()) {
+                config.worker_mode.server_certificate_file =
+                    resolve_workspace_path(server_certificate_raw);
+            }
+            if (!server_key_raw.empty()) {
+                config.worker_mode.server_private_key_file =
+                    resolve_workspace_path(server_key_raw);
+            }
+            config.worker_mode.approved_client_certificate_sha256 =
+                string_set(*worker_mode, "approvedClientCertificateSha256");
         }
 
         if (const auto* session = root.optional("session")) {
@@ -477,11 +688,123 @@ void ConfigurationManager::validate(const AppConfig& config) {
     if (config.runner_port < 1024U || config.runner_port == config.port) {
         throw std::runtime_error("runner IPC port is outside policy");
     }
+    // Phase 33 (LOCAL-ONLY slice): every configured pool runner needs a
+    // unique, non-privileged, non-HTTP, non-default-runner port, and the
+    // pool as a whole requires llama_server_executable the same way the
+    // single default runner does -- there is no separate "pool backend"
+    // executable, only more instances of the same approved backend.
+    if (!config.local_runner_pool.empty() &&
+        config.llama_server_executable.empty()) {
+        throw std::runtime_error(
+            "local runner pool requires llamaServerExecutable to be set");
+    }
+    {
+        std::set<std::string> seen_ids;
+        std::set<std::uint16_t> seen_ports{config.runner_port};
+        for (const auto& entry : config.local_runner_pool) {
+            if (entry.id.empty() || !seen_ids.insert(entry.id).second) {
+                throw std::runtime_error(
+                    "local runner pool ids must be unique and non-empty");
+            }
+            if (entry.port < 1024U || entry.port == config.port ||
+                !seen_ports.insert(entry.port).second) {
+                throw std::runtime_error(
+                    "local runner pool port is outside policy or duplicated");
+            }
+        }
+    }
+    // Phase 33 (INTRANET-WORKER slice): the same "declared, then hard
+    // rejected before the feature can ever run" discipline as the
+    // local_runner_pool checks above -- any configuration that would leave
+    // this feature only partially wired is rejected here, before
+    // HttpServer ever constructs an IntranetWorkerPool/WorkerListener from
+    // it. Neither check runs on the common case (both empty/disabled).
+    const bool wants_intranet_worker_features =
+        !config.intranet_worker_pool.empty() || config.worker_mode.enabled;
+    if (wants_intranet_worker_features) {
+        if (!openssl_available()) {
+            throw std::runtime_error(
+                "intranet worker mTLS is configured but this build was "
+                "compiled without OpenSSL -- see docs/PLAN.md Phase 33");
+        }
+        if (config.private_ca.certificate_file.empty() ||
+            config.private_ca.private_key_file.empty()) {
+            throw std::runtime_error(
+                "intranet worker features require privateCa to be configured");
+        }
+    }
+    if (!config.intranet_worker_pool.empty()) {
+        if (config.intranet_worker_client_certificate_file.empty() ||
+            config.intranet_worker_client_private_key_file.empty()) {
+            throw std::runtime_error(
+                "intranetWorkerPool requires clientCertificateFile and "
+                "clientPrivateKeyFile to be configured");
+        }
+        std::set<std::string> seen_worker_ids;
+        for (const auto& worker : config.intranet_worker_pool) {
+            if (worker.id.empty() || !seen_worker_ids.insert(worker.id).second) {
+                throw std::runtime_error(
+                    "intranet worker pool ids must be unique and non-empty");
+            }
+            if (worker.host.empty() || worker.port == 0U) {
+                throw std::runtime_error(
+                    "intranet worker pool entries require a host and port");
+            }
+            if (worker.expected_server_certificate_sha256.empty()) {
+                throw std::runtime_error(
+                    "intranet worker pool entries require an expected "
+                    "server certificate digest");
+            }
+        }
+    }
+    if (config.worker_mode.enabled) {
+        if (config.worker_mode.bind_host.empty() ||
+            config.worker_mode.bind_host == "127.0.0.1" ||
+            config.worker_mode.bind_host == "localhost") {
+            throw std::runtime_error(
+                "workerMode.bindHost must be an explicit non-loopback "
+                "address -- loopback deployments never need worker mode");
+        }
+        if (config.worker_mode.port == 0U ||
+            config.worker_mode.port == config.port ||
+            config.worker_mode.port == config.runner_port) {
+            throw std::runtime_error(
+                "workerMode.port must be set and distinct from the "
+                "administrator HTTP port and runner IPC port");
+        }
+        if (config.worker_mode.ca_certificate_file.empty() ||
+            config.worker_mode.server_certificate_file.empty() ||
+            config.worker_mode.server_private_key_file.empty()) {
+            throw std::runtime_error(
+                "workerMode requires caCertificateFile, "
+                "serverCertificateFile, and serverPrivateKeyFile");
+        }
+        if (config.worker_mode.approved_client_certificate_sha256.empty()) {
+            throw std::runtime_error(
+                "workerMode requires at least one approved client "
+                "certificate digest");
+        }
+        if (config.llama_server_executable.empty()) {
+            throw std::runtime_error(
+                "workerMode requires llamaServerExecutable to be set -- a "
+                "worker still supervises its own local backend process");
+        }
+    }
     if (!config.page_file_root.empty() &&
         std::filesystem::exists(config.page_file_root) &&
         !std::filesystem::is_directory(config.page_file_root)) {
         throw std::runtime_error(
             "configured page file location is not a directory");
+    }
+    if (!config.scratch_root.empty() &&
+        std::filesystem::exists(config.scratch_root) &&
+        !std::filesystem::is_directory(config.scratch_root)) {
+        throw std::runtime_error(
+            "configured scratch location is not a directory");
+    }
+    if (config.scratch_global_quota_mib == 0U ||
+        config.scratch_free_space_reserve_mib == 0U) {
+        throw std::runtime_error("scratch quota/reserve configuration is invalid");
     }
 }
 
@@ -489,6 +812,12 @@ std::filesystem::path resolve_page_file_root(const AppConfig& configuration) {
     return configuration.page_file_root.empty()
                ? configuration.runtime_root / "cache"
                : configuration.page_file_root;
+}
+
+std::filesystem::path resolve_scratch_root(const AppConfig& configuration) {
+    return configuration.scratch_root.empty()
+               ? configuration.runtime_root / "scratch"
+               : configuration.scratch_root;
 }
 
 std::string ConfigurationManager::serialize(const AppConfig& c) {
@@ -517,7 +846,12 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         "  \"workspace\":{\"runtimeRoot\":" + quote(c.runtime_root.string()) +
         ",\"modelsRoot\":" + quote(c.models_root.string()) + "},\n"
         "  \"storage\":{\"pageFileRoot\":" +
-        quote(c.page_file_root.string()) + "},\n"
+        quote(c.page_file_root.string()) +
+        ",\"scratchRoot\":" + quote(c.scratch_root.string()) +
+        ",\"scratchGlobalQuotaMiB\":" +
+        std::to_string(c.scratch_global_quota_mib) +
+        ",\"scratchFreeSpaceReserveMiB\":" +
+        std::to_string(c.scratch_free_space_reserve_mib) + "},\n"
         "  \"models\":{\"memoryReserveMiB\":" +
         std::to_string(c.memory_reserve_mib) + "},\n"
         "  \"memory\":{\"hardLimitMiB\":" +
@@ -543,6 +877,30 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         ",\"llamaExportLoraExecutable\":" +
         quote(c.llama_export_lora_executable.string()) +
         "},\n"
+        "  \"localRunnerPool\":" + local_runner_pool_array(c.local_runner_pool) +
+        ",\n"
+        "  \"privateCa\":{\"certificateFile\":" +
+        quote(c.private_ca.certificate_file.string()) +
+        ",\"privateKeyFile\":" + quote(c.private_ca.private_key_file.string()) +
+        "},\n"
+        "  \"intranetWorkerPool\":{\"clientCertificateFile\":" +
+        quote(c.intranet_worker_client_certificate_file.string()) +
+        ",\"clientPrivateKeyFile\":" +
+        quote(c.intranet_worker_client_private_key_file.string()) +
+        ",\"workers\":" + intranet_worker_pool_array(c.intranet_worker_pool) +
+        "},\n"
+        "  \"workerMode\":{\"enabled\":" +
+        (c.worker_mode.enabled ? "true" : "false") +
+        ",\"bindHost\":" + quote(c.worker_mode.bind_host) +
+        ",\"port\":" + std::to_string(c.worker_mode.port) +
+        ",\"caCertificateFile\":" +
+        quote(c.worker_mode.ca_certificate_file.string()) +
+        ",\"serverCertificateFile\":" +
+        quote(c.worker_mode.server_certificate_file.string()) +
+        ",\"serverPrivateKeyFile\":" +
+        quote(c.worker_mode.server_private_key_file.string()) +
+        ",\"approvedClientCertificateSha256\":" +
+        array(c.worker_mode.approved_client_certificate_sha256) + "},\n"
         "  \"downloads\":{\"curlExecutable\":" +
         quote(c.curl_executable.string()) + "},\n"
         "  \"knowledge\":{\"parquetHelperExecutable\":" +

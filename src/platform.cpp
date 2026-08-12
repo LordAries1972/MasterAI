@@ -17,6 +17,12 @@
 #include <psapi.h>
 #include <dxgi.h>
 #include <wrl/client.h>
+// Phase 31: FSCTL_GET_COMPRESSION, IOCTL_STORAGE_QUERY_PROPERTY,
+// STORAGE_BUS_TYPE, and IO_REPARSE_TAG_DEDUP -- all standard SDK
+// definitions, usually pulled in transitively by <windows.h> but included
+// explicitly here since probe_filesystem_integrity_flags() depends on them
+// directly.
+#include <winioctl.h>
 #elif defined(__linux__)
 #include <dlfcn.h>
 #if defined(__x86_64__)
@@ -502,6 +508,217 @@ SystemUtilizationSample probe_system_utilization(
                                   : 0U;
 #endif
     return sample;
+}
+
+#if defined(_WIN32)
+namespace {
+
+// Best-effort virtual-disk (VHD/VHDX) detection: opens the volume device
+// object directly (e.g. "\\.\C:") and asks the storage stack what bus type
+// backs it. A mounted VHD/VHDX reports BusTypeVirtual or
+// BusTypeFileBackedVirtual here; a real local disk reports something else
+// (BusTypeSata/BusTypeNvme/etc). Returns false (leaving `bus_type`
+// unwritten) if the query could not be performed -- callers treat that as
+// "undetected", never as "definitely not virtual".
+bool query_volume_storage_bus_type(const std::wstring& drive_root, DWORD& bus_type) {
+    if (drive_root.size() < 2U) return false;
+    const std::wstring device_path = L"\\\\.\\" + drive_root.substr(0U, 2U);
+    HANDLE volume = CreateFileW(device_path.c_str(), 0,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                OPEN_EXISTING, 0, nullptr);
+    if (volume == INVALID_HANDLE_VALUE) return false;
+    STORAGE_PROPERTY_QUERY query{};
+    query.PropertyId = StorageDeviceProperty;
+    query.QueryType = PropertyStandardQuery;
+    std::vector<unsigned char> buffer(1024U);
+    DWORD returned = 0U;
+    const BOOL ok = DeviceIoControl(
+        volume, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), buffer.data(),
+        static_cast<DWORD>(buffer.size()), &returned, nullptr);
+    CloseHandle(volume);
+    if (!ok || returned < sizeof(STORAGE_DEVICE_DESCRIPTOR)) return false;
+    const auto* descriptor =
+        reinterpret_cast<const STORAGE_DEVICE_DESCRIPTOR*>(buffer.data());
+    bus_type = static_cast<DWORD>(descriptor->BusType);
+    return true;
+}
+
+// Narrow a wide Windows API string to UTF-8 for storage in
+// FilesystemIntegrityFlags::volume_filesystem (a plain std::string field,
+// matching every other reported string in this project's OS-probe structs).
+std::string wide_to_utf8(const std::wstring& value) {
+    if (value.empty()) return {};
+    const int required = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0,
+                                              nullptr, nullptr);
+    if (required <= 0) return {};
+    std::string result(static_cast<std::size_t>(required - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, result.empty() ? nullptr : &result[0],
+                        required, nullptr, nullptr);
+    return result;
+}
+
+// Best-effort per-file deduplication detection: a file that Windows Data
+// Deduplication has optimized carries a reparse point tagged
+// IO_REPARSE_TAG_DEDUP. Only meaningful for a regular file, never a
+// directory -- see probe_filesystem_integrity_flags()'s declaration comment
+// in masterai.hpp for why a directory path leaves `deduplicated` at its
+// conservative default instead.
+bool file_has_dedup_reparse_tag(const std::wstring& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U) {
+        return false;
+    }
+    HANDLE handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                nullptr, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                                nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    std::vector<unsigned char> buffer(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+    DWORD returned = 0U;
+    const BOOL ok = DeviceIoControl(handle, FSCTL_GET_REPARSE_POINT, nullptr, 0,
+                                    buffer.data(), static_cast<DWORD>(buffer.size()),
+                                    &returned, nullptr);
+    CloseHandle(handle);
+    if (!ok || returned < sizeof(DWORD)) return false;
+    constexpr DWORD kReparseTagDedup = 0x80000013U;  // IO_REPARSE_TAG_DEDUP
+    const auto tag = *reinterpret_cast<const DWORD*>(buffer.data());
+    return tag == kReparseTagDedup;
+}
+
+}  // namespace
+#endif
+
+// Phase 31: best-effort filesystem introspection for a path under active
+// model/index storage -- see the declaration in masterai.hpp for the full
+// API contract and what each Win32 primitive contributes.
+FilesystemIntegrityFlags probe_filesystem_integrity_flags(
+    const std::filesystem::path& path) {
+    FilesystemIntegrityFlags flags;
+#if defined(_WIN32)
+    std::error_code absolute_error;
+    const auto absolute = std::filesystem::absolute(path, absolute_error);
+    if (absolute_error) return flags;
+    const auto root = absolute.root_path().wstring();
+    if (root.empty()) return flags;
+
+    wchar_t filesystem_name[MAX_PATH]{};
+    DWORD filesystem_flags = 0U;
+    const BOOL volume_ok = GetVolumeInformationW(
+        root.c_str(), nullptr, 0U, nullptr, nullptr, &filesystem_flags,
+        filesystem_name,
+        static_cast<DWORD>(sizeof(filesystem_name) / sizeof(filesystem_name[0])));
+    if (!volume_ok) return flags;  // Volume unreachable: fail closed to "undetected".
+    flags.detection_available = true;
+    flags.volume_filesystem = wide_to_utf8(filesystem_name);
+
+    // Network/removable classification reuses the same GetDriveTypeW signal
+    // probe_storage_class() already relies on above.
+    flags.network_redirected = GetDriveTypeW(root.c_str()) == DRIVE_REMOTE;
+
+    DWORD bus_type = 0U;
+    if (query_volume_storage_bus_type(root, bus_type)) {
+        constexpr DWORD kBusTypeVirtual = 0x14U;
+        constexpr DWORD kBusTypeFileBackedVirtual = 0x15U;
+        flags.virtual_disk =
+            bus_type == kBusTypeVirtual || bus_type == kBusTypeFileBackedVirtual;
+    }
+
+    const auto path_text = absolute.wstring();
+    const DWORD attributes = GetFileAttributesW(path_text.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        flags.encrypted = (attributes & FILE_ATTRIBUTE_ENCRYPTED) != 0U;
+        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U) {
+            // Actual per-file compression state (FSCTL_GET_COMPRESSION),
+            // not just the volume's compression *capability* -- a file can
+            // sit uncompressed on a compression-capable NTFS volume.
+            HANDLE handle = CreateFileW(path_text.c_str(), GENERIC_READ,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+            if (handle != INVALID_HANDLE_VALUE) {
+                USHORT format = 0U;
+                DWORD returned = 0U;
+                if (DeviceIoControl(handle, FSCTL_GET_COMPRESSION, nullptr, 0, &format,
+                                    sizeof(format), &returned, nullptr)) {
+                    flags.compressed = format != COMPRESSION_FORMAT_NONE;
+                }
+                CloseHandle(handle);
+            }
+            flags.deduplicated = file_has_dedup_reparse_tag(path_text);
+        }
+    }
+#else
+    // Non-Windows: no filesystem introspection is attempted at all, per
+    // this project's Windows-first build scope -- detection_available
+    // stays false and every flag stays at its conservative default.
+    static_cast<void>(path);
+#endif
+    return flags;
+}
+
+// Phase 31: separate, non-conflated memory accounting -- see the struct's
+// declaration in masterai.hpp for why each field is reported distinctly
+// rather than folded into one "memory used" figure. Blocks for
+// approximately interval_milliseconds while it takes two spaced page-fault-
+// count samples to derive a real rate, mirroring probe_system_utilization()'s
+// existing two-sample pattern above.
+MemoryAccountingSnapshot probe_memory_accounting(
+    const std::uint32_t interval_milliseconds, const std::uint64_t model_mapped_bytes,
+    const std::uint64_t model_resident_bytes) {
+    MemoryAccountingSnapshot snapshot;
+    const auto hardware = probe_hardware(std::filesystem::current_path());
+    constexpr std::uint64_t bytes_per_mib = 1024ULL * 1024ULL;
+    snapshot.physical_total_bytes = hardware.total_ram_mib * bytes_per_mib;
+    snapshot.physical_available_bytes = hardware.available_ram_mib * bytes_per_mib;
+    snapshot.model_mapped_bytes = model_mapped_bytes;
+    snapshot.model_resident_bytes = model_resident_bytes;
+
+#if defined(_WIN32)
+    MEMORYSTATUSEX memory{};
+    memory.dwLength = sizeof(memory);
+    if (GlobalMemoryStatusEx(&memory) != 0) {
+        // ullTotalPageFile is the Windows *commit limit* (RAM + pagefile),
+        // not literal pagefile bytes on disk -- ullAvailPageFile is how much
+        // of that limit remains uncommitted system-wide.
+        snapshot.commit_limit_bytes = memory.ullTotalPageFile;
+        const auto committed_system_wide =
+            memory.ullTotalPageFile > memory.ullAvailPageFile
+                ? memory.ullTotalPageFile - memory.ullAvailPageFile
+                : 0ULL;
+        // Commit charge beyond total physical RAM must be backed by the
+        // pagefile (or is presently unmet, on a system configured with none)
+        // -- an approximation, not a literal "bytes currently paged out"
+        // figure, but one that is reported as its own distinct field rather
+        // than folded into commit_limit_bytes/committed_bytes.
+        snapshot.pagefile_used_bytes =
+            committed_system_wide > snapshot.physical_total_bytes
+                ? committed_system_wide - snapshot.physical_total_bytes
+                : 0ULL;
+    }
+#endif
+
+    // Scope note: GetProcessMemoryInfo's PageFaultCount (and Linux's
+    // ru_minflt+ru_majflt, used by probe_process_resources() on that
+    // platform) does not itself separate hard/disk-backed faults from soft
+    // ones satisfied purely in RAM -- a true hard-fault-only rate would
+    // require PDH/ETW counters this project does not yet depend on. The
+    // rate below is therefore the conservative superset (soft+hard), used
+    // the same directional way an exit-criterion check would use a true
+    // hard-fault rate: rising sharply signals paging pressure worth acting
+    // on either way.
+    const auto before = probe_process_resources();
+    snapshot.committed_bytes = before.commit_bytes;
+    std::this_thread::sleep_for(std::chrono::milliseconds(interval_milliseconds));
+    const auto after = probe_process_resources();
+    snapshot.committed_bytes = std::max(snapshot.committed_bytes, after.commit_bytes);
+    const auto fault_delta =
+        after.page_faults >= before.page_faults ? after.page_faults - before.page_faults : 0ULL;
+    snapshot.hard_page_fault_rate_per_second =
+        interval_milliseconds == 0U
+            ? 0.0
+            : static_cast<double>(fault_delta) * 1000.0 /
+                  static_cast<double>(interval_milliseconds);
+    return snapshot;
 }
 
 }  // namespace masterai

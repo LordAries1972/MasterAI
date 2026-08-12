@@ -49,6 +49,11 @@ void InferenceMetricsStore::end_request(const std::uint64_t latency_microseconds
     }
 }
 
+void InferenceMetricsStore::record_cache_decision(const bool reuse) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (reuse) ++cache_hits_; else ++cache_misses_;
+}
+
 InferenceMetricsStore::Snapshot InferenceMetricsStore::snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     Snapshot result;
@@ -67,6 +72,13 @@ InferenceMetricsStore::Snapshot InferenceMetricsStore::snapshot() const {
     result.p50_latency_ms = percentile(recent_latencies, 0.50);
     result.p95_latency_ms = percentile(recent_latencies, 0.95);
     result.p99_latency_ms = percentile(recent_latencies, 0.99);
+    result.cache_hits = cache_hits_;
+    result.cache_misses = cache_misses_;
+    const auto total_decisions = cache_hits_ + cache_misses_;
+    result.cache_hit_rate =
+        total_decisions > 0U
+            ? static_cast<double>(cache_hits_) / static_cast<double>(total_decisions)
+            : 0.0;
     return result;
 }
 
@@ -74,15 +86,21 @@ std::string inference_metrics_json(const InferenceMetricsStore::Snapshot& snapsh
     char p50[32];
     char p95[32];
     char p99[32];
+    char cache_hit_rate[32];
     std::snprintf(p50, sizeof(p50), "%.3f", snapshot.p50_latency_ms);
     std::snprintf(p95, sizeof(p95), "%.3f", snapshot.p95_latency_ms);
     std::snprintf(p99, sizeof(p99), "%.3f", snapshot.p99_latency_ms);
+    std::snprintf(cache_hit_rate, sizeof(cache_hit_rate), "%.4f",
+                 snapshot.cache_hit_rate);
     return "{\"currentQueueDepth\":" +
            std::to_string(snapshot.current_queue_depth) +
            ",\"requestsLastMinute\":" +
            std::to_string(snapshot.requests_last_minute) +
            ",\"p50LatencyMs\":" + p50 + ",\"p95LatencyMs\":" + p95 +
-           ",\"p99LatencyMs\":" + p99 + "}";
+           ",\"p99LatencyMs\":" + p99 + ",\"cacheHits\":" +
+           std::to_string(snapshot.cache_hits) + ",\"cacheMisses\":" +
+           std::to_string(snapshot.cache_misses) + ",\"cacheHitRate\":" +
+           cache_hit_rate + "}";
 }
 
 }  // namespace masterai
