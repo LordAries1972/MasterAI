@@ -4844,11 +4844,13 @@ void test_machine_learning_foundation_dashboard() {
     // Manager (Phase 39), Subject Knowledge Manager (Phase 40), Data
     // Labeling / Data Preparation (Phase 41), Training Jobs (Phase 42),
     // Model Builder (Phase 46), Evaluation Lab (Phase 56), Model Comparison
-    // (Phase 57), and the indexed retrieval surfaces (Phases 58-60) have
-    // real backing services; every other roadmap
-    // entry from docs/PLAN.md "Machine Learning Abilities" section 2 must
-    // still report planned rather than fabricating readiness ahead of its
-    // own phase.
+    // (Phase 57), the indexed retrieval surfaces (Phases 58-60), Fine-Tuning
+    // (Phase 70), Hardware and Compute (Phase 63/67/75), Automation
+    // Pipelines (Phase 64/69/71/72), Monitoring and Diagnostics (Phase 68),
+    // Audit Logs (Phase 66), and Machine Learning Settings have real backing
+    // services; every other roadmap entry from docs/PLAN.md "Machine
+    // Learning Abilities" section 2 must still report planned rather than
+    // fabricating readiness ahead of its own phase.
     for (const auto& interface : dashboard.interfaces) {
         if (interface.key == "dashboard" || interface.key == "projects" ||
             interface.key == "model-registry" ||
@@ -4861,7 +4863,13 @@ void test_machine_learning_foundation_dashboard() {
             interface.key == "evaluation-lab" ||
             interface.key == "model-comparison" ||
             interface.key == "embeddings-vector-stores" ||
-            interface.key == "retrieval-augmented-generation") {
+            interface.key == "retrieval-augmented-generation" ||
+            interface.key == "fine-tuning" ||
+            interface.key == "hardware-compute" ||
+            interface.key == "automation-pipelines" ||
+            interface.key == "monitoring-diagnostics" ||
+            interface.key == "audit-logs" ||
+            interface.key == "ml-settings") {
             continue;
         }
         require(interface.status == "planned",

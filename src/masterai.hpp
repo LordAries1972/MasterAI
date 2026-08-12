@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <iosfwd>
@@ -93,6 +94,15 @@ struct AppConfig {
     std::string accelerator_policy{"auto"};
     std::filesystem::path llama_server_executable;
     std::filesystem::path curl_executable;
+    // Phase 73: optional, administrator-vendored llama.cpp LoRA tooling
+    // (same manual-placement convention as llama_server_executable above --
+    // see README.md's "Where to get llama-server" section for the download
+    // instructions this mirrors). Empty disables real LLM LoRA fine-tuning;
+    // a FineTuningJob whose method names an LLM target then fails clearly
+    // with "llama-finetune/llama-export-lora not configured" rather than
+    // silently falling back to the tabular path.
+    std::filesystem::path llama_finetune_executable;
+    std::filesystem::path llama_export_lora_executable;
     // Phase: process-isolated DuckDB CLI backend (rule 15's second named
     // exception) used solely to convert Parquet knowledge-document uploads
     // to text before chunking (parquet_bridge.cpp). Empty disables Parquet
@@ -3263,6 +3273,76 @@ private:
 std::string fine_tuning_job_json(const FineTuningJob& job);
 std::string fine_tuning_jobs_json(const std::vector<FineTuningJob>& jobs);
 
+// Phase 73: real LLM LoRA fine-tuning, distinguished from Phase 70's
+// tabular fine-tuning path by a `FineTuningJob.method` value starting with
+// the "llm:" prefix (e.g. "llm:code assistant") -- a free-text convention,
+// matching this codebase's existing "free text, not a closed enum" choice
+// for `method` itself, rather than a second status/type field. Everything
+// below shells out to administrator-vendored llama.cpp tooling
+// (AppConfig::llama_finetune_executable / llama_export_lora_executable);
+// this codebase does not implement transformer backpropagation itself.
+// Exact CLI flags are version-dependent -- llama.cpp's finetune/
+// export-lora tooling interface has changed across releases -- so
+// LlmFineTuneOptions::extra_finetune_arguments/extra_export_lora_arguments
+// let an administrator adapt to whatever their vendored build actually
+// expects; a non-zero exit from either tool surfaces that tool's own
+// stderr tail as the error, never a fabricated success.
+struct LlmFineTuneOptions {
+    std::uint32_t epochs{1};
+    double learning_rate{1e-4};
+    std::string extra_finetune_arguments;
+    std::string extra_export_lora_arguments;
+};
+
+struct LlmFineTuneResult {
+    std::filesystem::path adapter_gguf;
+    std::filesystem::path merged_gguf;
+    std::string finetune_log_tail;
+    std::string export_lora_log_tail;
+};
+
+// Runs llama-finetune against base_model_gguf/training_text_path to
+// produce a LoRA adapter under output_directory, then llama-export-lora to
+// merge that adapter into a new standalone GGUF (also under
+// output_directory). Throws std::runtime_error -- naming which tool and
+// why -- if either executable is not configured, does not exist, or exits
+// non-zero.
+LlmFineTuneResult run_llama_lora_finetune(
+    const AppConfig& configuration, const std::filesystem::path& base_model_gguf,
+    const std::filesystem::path& training_text_path,
+    const std::filesystem::path& output_directory,
+    const LlmFineTuneOptions& options, const std::atomic_bool& cancellation);
+
+// Converts a dataset's stored CSV content into the plain instruction/
+// response text format llama.cpp's finetune tooling consumes (one
+// "### Instruction:\n<...>\n### Response:\n<...>\n\n" block per row).
+// Scoped-down and honest: only meaningful for datasets whose CSV header
+// already has a column named "instruction" or "prompt" and one named
+// "response", "output", or "completion" (case-insensitive) -- throws
+// std::runtime_error naming the missing column otherwise, rather than
+// guessing which columns to use.
+std::filesystem::path write_llm_finetune_training_text(
+    const std::string& csv, const std::filesystem::path& output_path);
+
+// Persisted outcome of the most recent LLM LoRA fine-tuning attempt for one
+// FineTuningJob, keyed by job id -- the async counterpart to
+// EvaluationResultStore above, since a real llama.cpp finetune run can take
+// far longer than the HTTP request timeout and therefore runs on a
+// detached background thread (see run_llm_fine_tuning_job in server.cpp),
+// with this store as the only way a caller polling GET .../llm-result
+// learns the outcome.
+class FineTuningRunResultStore final {
+public:
+    FineTuningRunResultStore() = default;
+    explicit FineTuningRunResultStore(RecordStore& records);
+    void put(const std::string& job_id, const std::string& result_json);
+    std::optional<std::string> find(const std::string& job_id) const;
+    bool remove(const std::string& job_id);
+
+private:
+    RecordStore* records_{nullptr};
+};
+
 // Phase 46: docs/PLAN.md "Machine Learning Abilities" section 9 (Model
 // Builder Interface), now implemented at full surface. The interface guides
 // an administrator through architecture, layer, tokenizer, optimiser,
@@ -4119,6 +4199,47 @@ struct TabularPrediction {
 TabularPrediction predict_tabular(const TrainedTabularModel& model,
                                   const std::vector<double>& features);
 
+// Phase 72: Automation Pipeline "Clean data" stage support. Removes blank
+// rows and exact-duplicate data rows from raw CSV text (the header row is
+// always kept as-is); reports real before/after row counts rather than a
+// fabricated outcome. Throws std::runtime_error if the CSV has no rows at
+// all to clean.
+struct TabularCleanReport {
+    std::string csv;
+    std::size_t rows_before{0};
+    std::size_t rows_after{0};
+    std::size_t blank_rows_removed{0};
+    std::size_t duplicate_rows_removed{0};
+};
+TabularCleanReport clean_tabular_csv(const std::string& csv);
+
+// Phase 72: Automation Pipeline "Split data" stage support. Parses the CSV
+// for real (so a malformed dataset fails the same way "Validate data"
+// does) and reports the exact train/holdout row counts
+// train_tabular_model's own internal deterministic split would produce for
+// the same holdout_fraction -- not a separately-computed, possibly
+// inconsistent number.
+struct TabularSplitReport {
+    std::size_t total_rows{0};
+    std::size_t train_rows{0};
+    std::size_t holdout_rows{0};
+};
+TabularSplitReport split_tabular_csv(const std::string& csv,
+                                     const std::string& target_column,
+                                     double holdout_fraction = 0.2);
+
+// Phase 72: Automation Pipeline "Optimize" stage support. Zeroes weights
+// whose magnitude is below `threshold` in place -- real magnitude pruning
+// on the model's already-learned weight matrix, not a simulated result --
+// and reports how many of the model's weights ended up pruned (zero)
+// afterward.
+struct TabularPruneReport {
+    std::size_t weights_total{0};
+    std::size_t weights_pruned{0};
+};
+TabularPruneReport prune_tabular_model(TrainedTabularModel& model,
+                                       double threshold = 1e-3);
+
 // Persisted trained-model artifacts, keyed by ModelRegistryEntry id, so a
 // model trained in one server run predicts in the next.
 class TrainedModelStore final {
@@ -4372,9 +4493,19 @@ InferenceEndpointStatus parse_inference_endpoint_status(
 
 // Phase 62: docs/PLAN.md "Machine Learning Abilities" section 35. Records
 // an administrator's intent to expose a model behind a controlled
-// endpoint. Deliberately does not open a real network listener, enforce
-// the rate limit, or apply the safety/tool policy -- those require the
-// live inference-serving path this phase does not build.
+// endpoint. Phase 77 closes the "does not open a real network listener,
+// enforce the rate limit, or apply the safety/tool policy" gap this
+// comment used to name in full: a listener now really starts while the
+// endpoint is `active` (see run_inference_endpoint in server.cpp), it
+// really enforces rate_limit_per_minute (an in-memory, per-endpoint,
+// per-minute counter -- not persisted, resets on restart), and it really
+// runs Phase 74's scan_content_for_risks over every request/response.
+// `authentication_method` remains free text (an administrator-facing
+// label), but every non-"none" value is enforced identically: a single
+// Bearer shared-secret check against `auth_token_hash` below (this phase
+// does not build a distinct wire format per named scheme) -- honest about
+// that simplification rather than claiming per-scheme fidelity it
+// doesn't have.
 struct InferenceEndpoint {
     std::string id;
     std::string name;
@@ -4387,6 +4518,13 @@ struct InferenceEndpoint {
     std::uint32_t rate_limit_per_minute{0};
     std::string owner_id;
     InferenceEndpointStatus status{InferenceEndpointStatus::draft};
+    // Phase 77: sha256_hex of the bearer token this endpoint requires when
+    // authentication_method != "none" -- never the plaintext, matching
+    // ComputeNode::agent_shared_secret_hash's convention. The plaintext
+    // itself lives only in HttpServer::State's `secrets` SecretStore
+    // (key "inference-endpoint:<id>"), the same encrypted-at-rest store
+    // Phase 75 also uses for telemetry-agent shared secrets.
+    std::string auth_token_hash;
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -4402,7 +4540,8 @@ public:
                              const std::string& host, std::uint16_t port,
                              const std::string& protocol,
                              const std::string& authentication_method,
-                             std::uint32_t rate_limit_per_minute);
+                             std::uint32_t rate_limit_per_minute,
+                             const std::string& auth_token = {});
     std::optional<InferenceEndpoint> find(const std::string& id) const;
     std::vector<InferenceEndpoint> list() const;
     bool set_status(const std::string& id, InferenceEndpointStatus status);
@@ -4435,7 +4574,14 @@ ComputeNodeStatus parse_compute_node_status(const std::string& status);
 // so its live CPU/RAM/GPU capacity can be probed in-process via
 // probe_hardware() on demand (see the compute-node telemetry endpoint in
 // server.cpp). Remote nodes still report only the static description
-// entered at creation time.
+// entered at creation time. Phase 75 closes the remote-agent case
+// unlocked for a node that names a real telemetry agent: `agent_url`
+// (`host:port` of a `masterai telemetry-agent` process running on that
+// node -- see run_telemetry_agent/fetch_remote_telemetry) and
+// `agent_shared_secret_hash` (sha256_hex of the shared secret that agent
+// requires, never the plaintext secret -- matching the setup-token hash
+// convention elsewhere in this codebase). A node with neither set still
+// reports only its static description, exactly as before.
 struct ComputeNode {
     std::string id;
     std::string name;
@@ -4447,6 +4593,8 @@ struct ComputeNode {
     std::string owner_id;
     ComputeNodeStatus status{ComputeNodeStatus::available};
     bool is_local{false};
+    std::string agent_url;
+    std::string agent_shared_secret_hash;
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -4460,7 +4608,9 @@ public:
                        const std::string& operating_system,
                        const std::string& cpu_description,
                        const std::string& gpu_description,
-                       std::uint64_t memory_mib, bool is_local);
+                       std::uint64_t memory_mib, bool is_local,
+                       const std::string& agent_url = {},
+                       const std::string& agent_shared_secret = {});
     std::optional<ComputeNode> find(const std::string& id) const;
     std::vector<ComputeNode> list() const;
     bool set_status(const std::string& id, ComputeNodeStatus status);
@@ -4517,10 +4667,15 @@ AutomationPipelineRunStatus parse_automation_pipeline_run_status(
 // documented scope of an approval workflow rather than live traffic
 // serving), and "Rollback" (the pipeline's most recent deployment is
 // rejected, i.e. its approval is revoked). "Monitor" also becomes real,
-// reusing Phase 68's build_ml_monitoring_json(). Import/clean/label/split
-// data, optimize, and staging tests remain honestly skipped -- this
-// codebase still has no data-labeling, data-cleaning, model-optimization,
-// or staging-test executor to call. A run no longer blocks the HTTP request
+// reusing Phase 68's build_ml_monitoring_json(). Phase 72 closes the
+// remaining six: "Import data" (a real content-presence check), "Clean
+// data" (real blank/duplicate row removal, persisted back to the
+// dataset), "Split data" (real train/holdout counts via the trainer's own
+// split formula), "Optimize" (a real ModelOptimizationRun that actually
+// prunes the model's learned weights), and "Staging tests" (a real
+// evaluation run). "Label data" still honestly reports "skipped" when no
+// completed LabelTaskStore entry exists for the dataset -- this codebase
+// has no automated labeler. A run no longer blocks the HTTP request
 // until every stage finishes: it now executes on a detached background
 // thread while GET .../runs reports live progress (current stage, and
 // completed/total stage counts) so the web UI can render a progress bar.
@@ -4617,11 +4772,13 @@ SafetyPolicyStatus parse_safety_policy_status(const std::string& status);
 // Phase 65: docs/PLAN.md "Machine Learning Abilities" section 40. A
 // governance policy records restricted data categories and an approval
 // requirement for a project/scope; a model card records the section-40
-// disclosure fields for one approved model. Deliberately does not run
-// harmful-content/bias/hallucination/prompt-injection testing or
-// credential/secret detection -- those require content-scanning executors
-// this phase does not build; the policy only records administrator intent
-// and an approval decision, matching Dataset/Deployment approval above.
+// disclosure fields for one approved model. The policy/model-card records
+// here only record administrator intent and an approval decision, matching
+// Dataset/Deployment approval above; Phase 74 (scan_content_for_risks
+// below) adds real secret-token, prompt-injection-phrasing, and
+// policy-restricted-term scanning, but that is heuristic pattern matching,
+// not a classifier -- bias, hallucination, and subtler harmful content
+// still have no real detector in this codebase.
 struct SafetyPolicy {
     std::string id;
     std::string name;
@@ -4691,6 +4848,107 @@ std::string safety_policy_json(const SafetyPolicy& policy);
 std::string safety_policies_json(const std::vector<SafetyPolicy>& policies);
 std::string model_card_json(const ModelCard& card);
 std::string model_cards_json(const std::vector<ModelCard>& cards);
+
+// Phase 74: real, local, heuristic/regex-based content scanning -- the
+// content-scanning executor SafetyPolicy's class comment above says this
+// module didn't have. Deliberately not an ML classifier: it detects
+// secret-shaped tokens (API-key patterns, PEM key headers, generic
+// high-entropy strings), prompt-injection phrasing (role-override/
+// instruction-override keyword patterns), and any of a SafetyPolicy's own
+// restricted_data_categories terms found verbatim in the scanned text.
+// Every finding is a real, reproducible pattern match against the actual
+// text passed in -- never a fabricated risk score. It does not detect
+// bias, hallucination, or subtler harmful content, since that needs a real
+// classifier this phase does not build.
+struct ContentScanFinding {
+    std::string category;  // "secret" | "prompt_injection" | "restricted_term"
+    std::string detail;    // human-readable description, e.g. which pattern/term matched
+};
+
+struct ContentScanReport {
+    std::vector<ContentScanFinding> findings;
+    bool clean() const { return findings.empty(); }
+};
+
+// Scans `text` for secret-shaped tokens and prompt-injection phrasing
+// unconditionally, plus a verbatim (case-insensitive) search for each
+// comma-separated term in `policy.restricted_data_categories` when
+// `policy` is supplied.
+ContentScanReport scan_content_for_risks(const std::string& text,
+                                         const SafetyPolicy* policy = nullptr);
+
+std::string content_scan_report_json(const ContentScanReport& report);
+
+// Phase 75: remote/fleet Hardware and Compute telemetry -- the "agent
+// process on the node" ComputeNode's class comment said this codebase did
+// not build. run_telemetry_agent blocks the calling thread serving one
+// authenticated `GET /telemetry` endpoint (a real probe_hardware()
+// snapshot) on a listener that, unlike HttpServer (which hard-enforces
+// loopback-only binding), can bind a non-loopback interface. Started via
+// `masterai telemetry-agent <host> <port> <shared-secret>` on the remote
+// node itself (see main.cpp), never by the main server process.
+void run_telemetry_agent(const std::string& host, std::uint16_t port,
+                         const std::string& shared_secret,
+                         const std::filesystem::path& storage_root,
+                         std::atomic_bool& stop_requested);
+
+// Client side of the same protocol: the ComputeNode `.../telemetry` route
+// (server.cpp) calls this to fetch a real probe_hardware() snapshot from a
+// non-local node's agent over plain HTTP, presenting shared_secret as a
+// Bearer token. Returns the agent's raw hardware_info_json() response body
+// verbatim -- embedded directly into the route's own JSON response rather
+// than re-parsed, since this codebase controls both ends of the wire
+// format. Throws std::runtime_error with a real network/auth error --
+// never fabricated numbers -- if the agent is unreachable, times out, or
+// rejects the shared secret. agent_url is `host:port` or `http://host:port`
+// (no TLS support -- this is a loopback-adjacent operator tool for a
+// trusted fleet, not an internet-facing endpoint).
+std::string fetch_remote_telemetry(const std::string& agent_url,
+                                   const std::string& shared_secret,
+                                   std::uint32_t timeout_seconds = 5U);
+
+// Phase 78: real per-request inference telemetry for Monitoring and
+// Diagnostics -- Phase 68's class comment on build_ml_monitoring_json()
+// (server.cpp) named live per-request instrumentation (latency, queue
+// depth, requests/sec) as something no request-path instrumentation
+// existed to report. This is that instrumentation: every real generation
+// call site (the chat handler, Phase 76's execute_rag_generation --
+// itself also used by Phase 77's inference-endpoint listener) calls
+// begin_request()/end_request() around admission and completion, so a
+// snapshot reflects genuinely measured activity, never a fabricated
+// number. Deliberately does not track per-step training curves (the
+// tabular trainer's runs are synchronous and complete before there is a
+// meaningful "live" window to sample one from -- Phase 56 already exposes
+// real post-hoc loss curves) or cache-hit rate (no KV-cache-hit
+// instrumentation exists in the inference adapter to report on).
+class InferenceMetricsStore final {
+public:
+    // Call once when a request is admitted into the scheduler (queue depth
+    // +1), and once when it leaves -- successfully, cancelled, or failed --
+    // with its real measured latency in microseconds (queue depth -1, and
+    // the latency recorded for the rolling percentile/throughput window).
+    void begin_request();
+    void end_request(std::uint64_t latency_microseconds);
+
+    struct Snapshot {
+        std::int64_t current_queue_depth{0};
+        std::uint64_t requests_last_minute{0};
+        double p50_latency_ms{0.0};
+        double p95_latency_ms{0.0};
+        double p99_latency_ms{0.0};
+    };
+    Snapshot snapshot() const;
+
+private:
+    mutable std::mutex mutex_;
+    std::int64_t queue_depth_{0};
+    // (epoch_seconds, latency_microseconds) per completed request, pruned
+    // to the last 15 minutes on every access so this cannot grow without
+    // bound on a long-running server.
+    std::deque<std::pair<std::uint64_t, std::uint64_t>> samples_;
+};
+
+std::string inference_metrics_json(const InferenceMetricsStore::Snapshot& snapshot);
 
 struct PerformanceSample {
     std::string name;

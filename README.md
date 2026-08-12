@@ -418,16 +418,23 @@ Status below reflects the evidence recorded in
 | 59 | Local embedding and vector indexing | Implemented; authored 128-dimensional hashing vectors and index profiles |
 | 60 | RAG retrieval and grounded context assembly | Implemented; approved-config query execution with ranked chunks and citations |
 | 61 | Learned embeddings and once-per-chat memory recall | Implemented; isolated llama.cpp embedding adapter, durable vector provenance, and retained chat memory snapshots |
-| 62 | Inference Endpoints | Implemented at a scoped-down record level; no live network listener |
-| 63 | Hardware and Compute | Implemented at a scoped-down record level; no live telemetry |
-| 64 | Automation Pipelines | Implemented at a scoped-down record level; "Run" records an outcome, no stage orchestration |
-| 65 | Safety and Governance | Implemented at a scoped-down policy/model-card approval level; no content scanning |
+| 62 | Inference Endpoints | Implemented at a scoped-down record level initially; Phase 77 adds a real network listener |
+| 63 | Hardware and Compute | Implemented at a scoped-down record level initially; Phase 67/75 add real local and remote telemetry |
+| 64 | Automation Pipelines | Implemented at a scoped-down record level initially; Phase 69/71/72 add real stage execution |
+| 65 | Safety and Governance | Implemented at a scoped-down policy/model-card approval level initially; Phase 74 adds real heuristic content scanning |
 | 66 | Audit Logs and Machine Learning Settings | Implemented; real read over the existing audit trail, and a real ML-scoped subset of System Configuration |
 | 67 | Hardware and Compute live telemetry | Implemented; a compute node flagged as the local host reports a genuinely fresh `probe_hardware()` snapshot on demand |
 | 68 | Monitoring and Diagnostics | Implemented; real aggregation of live local-host hardware, training-job counts, evaluation metrics, and benchmark throughput |
 | 69 | Automation Pipelines real executor | Implemented; "Train model"/"Evaluate model" stages genuinely run, every other named stage honestly reported as skipped |
 | 70 | Fine-Tuning real executor | Implemented; genuine warm-start gradient descent from a base model's trained weights, registered as a new model |
 | 71 | Automation Pipelines: more real stages and live progress | Implemented; "Validate data"/"Validate model"/"Safety tests"/"Request approval"/"Deploy staging"/"Deploy production"/"Rollback"/"Monitor" all genuinely execute (Import/clean/label/split data, optimize, and staging tests remain honestly skipped); a run now executes on a background thread and reports live per-stage progress the web UI renders as a progress bar |
+| 72 | Automation Pipelines: final six real stages | Implemented; "Import data"/"Clean data"/"Split data"/"Optimize"/"Staging tests" all genuinely execute; "Label data" honestly reports skipped unless a completed labeling task is on record |
+| 73 | Real LLM LoRA fine-tuning | Implemented when `llama_finetune_executable`/`llama_export_lora_executable` are configured (administrator-vendored, same manual-placement convention as `llama-server`); a `"llm:"`-prefixed fine-tuning job method runs a real LoRA train-and-merge pipeline on a background thread |
+| 74 | Safety and Governance real content scanning | Implemented; local heuristic secret/prompt-injection/restricted-term scanning (`scan_content_for_risks`), not an ML classifier |
+| 75 | Hardware and Compute remote telemetry agent | Implemented; `masterai telemetry-agent` run on a remote node, polled for real by a `ComputeNode` with a matching `agentUrl` |
+| 76 | RAG real answer generation | Implemented; the RAG query route's optional `"generate":true` mode produces a real generated answer grounded in the same retrieved context |
+| 77 | Inference Endpoints real listener | Implemented; an `active` endpoint opens a real listener enforcing authentication, rate limiting, and Phase 74's content scan |
+| 78 | Monitoring real per-request telemetry | Implemented; real latency percentiles, queue depth, and requests/minute from every real generation call site |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -649,6 +656,24 @@ order.
 > repository's source is also supported, and is the only way to pin an
 > exact revision (see [ADR-0003](docs/architecture/ADR-0003-release-1-product-baseline.md)
 > for the revision MasterAI's own Phase 4 validation was pinned against).
+
+> [!NOTE]
+> **Where to get `llama-finetune` / `llama-export-lora` (optional, real LLM
+> LoRA fine-tuning only).** Machine Learning's Fine-Tuning page can adapt an
+> LLM with real LoRA training when a `FineTuningJob`'s method starts with
+> `llm:` (e.g. `llm:code assistant`) — everything else in this module trains
+> the tabular linear/logistic models Phase 56 implements instead, which
+> needs neither of these tools. Like `llama-server` above, MasterAI does not
+> vendor or build these: download them from the same
+> `ggml-org/llama.cpp` GitHub Releases page and place them alongside
+> `llama-server.exe` in `tools/llama.cpp/` (or wherever you keep it), then
+> point `llama_finetune_executable` / `llama_export_lora_executable` in
+> `config/settings.json` at their full paths. Their exact command-line flags
+> have changed across `llama.cpp` releases; if a fine-tuning run fails,
+> check `GET /api/v1/ml/fine-tuning-jobs/{id}/llm-result` for the tool's own
+> error output, and use each job's `extraFinetuneArguments` /
+> `extraExportLoraArguments` request fields to adapt to whatever your
+> vendored build actually expects.
 
 ### 1. Build the binary
 

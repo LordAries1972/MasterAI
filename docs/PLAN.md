@@ -1347,6 +1347,242 @@ Current phase status:
   executor dispatch itself lives on the `Server` class and is exercised
   through the web UI/HTTP surface rather than a store-level unit test, the
   same boundary Phase 69's original two stages left untested.
+- Phase 72: Implemented (2026-08-12) — Automation Pipelines (section 2 item
+  21, section 37) closes the six stages Phase 71 left honestly `"skipped"`.
+  `ml_engine.cpp` gains three new real, tested helpers: `clean_tabular_csv`
+  (splits raw CSV text into lines, reports genuine before/after row counts,
+  and removes blank rows and exact-duplicate data rows — the header is
+  never touched), `split_tabular_csv` (parses the CSV for real via
+  `parse_tabular_csv`, then applies the identical `test_fraction * row_count`
+  formula `train_tabular_model` already uses internally, so the reported
+  train/holdout counts are exactly what a subsequent Train model stage will
+  use, not a second, possibly-inconsistent number), and
+  `prune_tabular_model` (zeroes weights below a magnitude threshold on a
+  `TrainedTabularModel`'s real learned weight matrix in place and reports
+  how many weights ended up pruned — real work, since these tabular models
+  are literally weight vectors). Six new stage lambdas in
+  `run_automation_pipeline()` (`server.cpp`) call them: "Import data" checks
+  `ml_dataset_content` actually has stored content for the pipeline's
+  dataset (distinct from "Validate data", which parses structure); "Clean
+  data" runs `clean_tabular_csv` and persists the cleaned CSV back over the
+  dataset's content via `ml_dataset_content->put()`, so later Train/
+  Evaluate/Staging-tests stages in the same pipeline see the cleaned rows;
+  "Split data" runs `split_tabular_csv` and reports the real counts;
+  "Optimize" creates a real `ModelOptimizationRun` (operation `"pruning"`,
+  via the existing `ml_model_optimizations` store from Phase 53) against
+  the pipeline's current model, runs `prune_tabular_model` against that
+  model's actual persisted weights, writes the pruned weights back via
+  `ml_trained_models->put()`, and moves the run to `completed`/`failed`;
+  "Staging tests" reuses `execute_evaluation_run()` — the same function
+  "Evaluate model" and the Evaluation Lab page already call — against the
+  pipeline's dataset. "Label data" is the one stage that remains honestly
+  `"skipped"` in the common case: it looks for a real `LabelTaskStore`
+  (Phase 41) entry targeting the pipeline's dataset in the `completed`
+  state and reports success referencing that task's id when one exists,
+  or "no completed labeling task recorded for this dataset" when none
+  does — this codebase still has no automated labeler to run one itself.
+  Every stage's outcome is a genuinely computed result; none fabricates
+  pass/fail.
+- Phase 73: Implemented (2026-08-12) — real LLM LoRA fine-tuning (section 2
+  item 10, section 18), gaining an execution path alongside Phase 70's
+  tabular warm-start path rather than replacing it: a `FineTuningJob` whose
+  `method` starts with the free-text `"llm:"` prefix (e.g.
+  `"llm:code assistant"` — matching `method`'s own existing "free text, not
+  a closed enum" convention) now routes `POST .../fine-tuning-jobs/{id}/run`
+  to a real LoRA adapter train-and-merge pipeline instead of the tabular
+  trainer. This codebase does not implement transformer backpropagation
+  itself: `src/ml_finetune.cpp` supervises administrator-vendored `llama.cpp`
+  tooling as external processes, the same isolation approach `inference.cpp`
+  already uses for the inference runner and `downloads.cpp` already uses for
+  `curl`. Two new optional `AppConfig` fields,
+  `llama_finetune_executable`/`llama_export_lora_executable` (settable via
+  `config/settings.json`'s `inference` section or
+  `MASTERAI_LLAMA_FINETUNE`/`MASTERAI_LLAMA_EXPORT_LORA`), follow
+  `llama_server_executable`'s existing manual-placement convention — this
+  codebase has no in-app downloader for any of these three tools, only for
+  GGUF models (`downloads.cpp`); README.md documents where to get them from
+  the same `ggml-org/llama.cpp` releases page. A real llama.cpp finetune run
+  can take far longer than the HTTP request timeout, so the run executes on
+  a detached background thread (`run_llm_fine_tuning_job` in `server.cpp`,
+  mirroring Phase 71's automation-pipeline background-thread pattern): the
+  job moves through `queued`/`preparing`/`running` for real, `POST .../run`
+  returns `202 Accepted` immediately, and a new `FineTuningRunResultStore`
+  (the async counterpart to `EvaluationResultStore`) records the real
+  outcome for `GET .../fine-tuning-jobs/{id}/llm-result` to report —
+  including each tool's own log tail on failure, never a fabricated
+  success. `write_llm_finetune_training_text` converts the job's dataset
+  CSV into the plain instruction/response text block format llama.cpp's
+  finetune tooling consumes, honestly requiring a recognizable
+  instruction/prompt column and a response/output/completion column rather
+  than guessing. The base model comes from the job's Model Registry entry's
+  `source` field, validated to be a real, existing GGUF file on disk before
+  anything runs (a 409 with a clear detail otherwise) — Model Registry
+  entries are administrator-entered metadata (Phase 39), not verified
+  against the separate inference `ModelManifest` catalog, so this is the
+  one link between them this phase adds. On success the merged GGUF is
+  registered as a new Model Registry entry (`format` `"gguf-lora-merged"`,
+  state `evaluation`), leaving the base model untouched, matching Phase
+  70's own base-model-preserving pattern. Honestly out of scope: the exact
+  CLI flags `run_llama_lora_finetune` passes match llama.cpp's historical
+  `finetune`/`export-lora` example tools, but that interface has changed
+  across `llama.cpp` releases and this codebase cannot verify which flags
+  an administrator's specific vendored build expects — each job's optional
+  `extraFinetuneArguments`/`extraExportLoraArguments` request fields exist
+  specifically so an administrator can adapt to their build rather than a
+  wrong guess silently producing nothing useful.
+- Phase 74: Implemented (2026-08-12) — real heuristic content scanning for
+  Safety and Governance (section 2 item 22, section 40), closing the
+  content-scanning gap Phase 65's class comment named. `src/ml_safety_scan.cpp`
+  adds `scan_content_for_risks()`: hand-rolled pattern matching (this
+  codebase does not use `<regex>` anywhere, favoring explicit character
+  scanning the same way `parse_tabular_csv`'s CSV splitter does), not an ML
+  classifier. It detects secret-shaped tokens (AWS `AKIA...` keys,
+  OpenAI-style `sk-...` keys, GitHub `ghp_...` tokens each checked by
+  prefix and length, PEM key/certificate blocks, and a generic 32+
+  character mixed-letter-and-digit token fallback for unlabeled secrets),
+  prompt-injection phrasing (a documented sixteen-phrase case-insensitive
+  list — "ignore previous instructions", "disregard the system prompt",
+  "you are now", etc.), and, when a `SafetyPolicy` is supplied, a verbatim
+  case-insensitive search for each of its comma-separated
+  `restricted_data_categories` terms. New `POST
+  /api/v1/ml/safety-policies/{id}/scan` (`ml.safety.view` scope — a
+  read-only diagnostic, not a mutation) scans arbitrary request text
+  against one policy. The Automation Pipeline's already-real "Safety
+  tests" stage (Phase 71) now also runs this scanner over the pipeline's
+  dataset content after its existing approved-ModelCard check, failing the
+  stage and naming every finding if the scan is not clean, rather than
+  only checking model-card approval. Every finding is a real, reproducible
+  pattern match against the actual text scanned — never a fabricated risk
+  score — and the class comment on `SafetyPolicy`/`ModelCard` is honest
+  about the remaining gap: bias, hallucination, and subtler harmful content
+  still have no real detector in this codebase, since that needs an ML
+  classifier this phase does not build.
+- Phase 75: Implemented (2026-08-12) — remote/fleet Hardware and Compute
+  telemetry (section 2 item 20, section 30), closing the "requires an
+  agent process on the node this phase does not build" gap Phase 63/67's
+  class comments named for every node except the local host. New
+  `src/telemetry_agent.cpp` implements both ends of a small, deliberately
+  single-endpoint protocol over plain HTTP: `run_telemetry_agent` blocks
+  serving one authenticated `GET /telemetry` route (a real
+  `probe_hardware()` snapshot) on a listener that — unlike `HttpServer`,
+  which hard-enforces loopback-only binding — can bind whatever host an
+  operator points it at, since it has to be reachable from the main server
+  on a different machine; `fetch_remote_telemetry` is the client side the
+  `.../telemetry` route now calls for a non-local node. Started via a new
+  `masterai telemetry-agent <host> <port> <shared-secret>` CLI subcommand
+  (main.cpp) run on the remote node itself — never by the main server
+  process. `ComputeNode` gains `agent_url` and `agent_shared_secret_hash`
+  (settable at creation via the existing `POST /api/v1/ml/compute-nodes`
+  route's new `agentUrl`/`agentSharedSecret` fields); only the secret's
+  `sha256_hex` hash is ever persisted on the `ComputeNode` record itself
+  (matching the setup-token hash convention), since that record is
+  returned to every `GET .../compute-nodes` caller. The plaintext secret
+  the server actually needs to *present* to the agent on each poll lives
+  only in `HttpServer::State`'s existing encrypted-at-rest `secrets`
+  `SecretStore` (key `"telemetry-agent:<node id>"`) — the same protection
+  `main.cpp` already gives the IDE MCP token — and is erased when its node
+  is deleted. Authentication is a Bearer shared secret compared with
+  `constant_time_equal` (never a raw string compare). A node with no
+  `agent_url` configured still 400s exactly as before; an unreachable
+  agent or a rejected secret is a real `502`, never fabricated numbers.
+  The Hardware and Compute dashboard tile's "real for the local host, not
+  for a fleet" caveat from Phase 67 is now resolved for any node an
+  administrator points at a running agent.
+- Phase 76: Implemented (2026-08-12) — real RAG answer generation (section
+  2 item 9, section 22), closing the "the response never fabricates a
+  generated-model answer" boundary Phase 60's route comment named (that
+  boundary meant "we will not fake one", not "we will never generate
+  one" — this phase adds the real path). `POST /api/v1/ml/rag-configs/
+  {id}/query` gains an optional `"generate":true` request field (with a
+  now-required `modelId` alongside it); when set, a new
+  `execute_rag_generation()` helper feeds the same retrieved context the
+  response already returns into `assemble_chat_prompt` and
+  `inference->generate` — the identical prompt-assembly and inference call
+  the chat handler uses, not a second, divergent implementation — and
+  returns a real generated answer plus real prompt/generated token counts
+  in a new `"answer"` response field. Critically, `execute_rag_generation`
+  also replicates the chat handler's full memory-lease and scheduler-
+  ticket admission contract (`memory->reserve`/`request_scheduler->admit`/
+  `wait_until_ready`, paired with `release`/`complete`/`cancel` on every
+  exit path, mirrored exactly rather than approximated) so a RAG-generated
+  answer cannot bypass the same concurrency/memory limits chat generation
+  is careful to enforce — it is a new, independent call site, not a
+  refactor of the existing chat path, so this adds no regression risk to
+  chat. Omitted deliberately, since they are chat-specific concerns a
+  one-shot answer has no need of: chat history, prompt-cache session-slot
+  reuse, and query-lifecycle (`/api/v1/queries/{id}`) tracking. The
+  default response (no `"generate"` field, or `false`) is byte-for-byte
+  unchanged from Phase 60 — context only, no generated answer — so no
+  existing caller's behavior changes.
+- Phase 77: Implemented (2026-08-12) — a real network listener for
+  Inference Endpoints (section 2 item 19, section 35), closing the "does
+  not open a real network listener, enforce the rate limit, or apply the
+  safety/tool policy" gap Phase 62's class comment named in full. When an
+  endpoint's status becomes `active`, a new background thread
+  (`run_inference_endpoint` in `server.cpp`) binds its own listener on
+  `endpoint.host`/`endpoint.port` — its own small accept loop, the same
+  hand-rolled Winsock/BSD pattern `HttpServer::run` already uses for the
+  main listener, since that socket layer was never a singleton object —
+  and serves exactly one route, `POST /v1/completions` with a
+  `{"prompt":"..."}` body, until the status changes away from `active` or
+  the endpoint is deleted (the thread's `shared_ptr<atomic_bool>` stop
+  flag is flipped and joined either way; `HttpServer::State` gained a
+  destructor that does the same for any still-running listener at
+  shutdown, so none can outlive the process or leak a bound port). Every
+  request is real, not simulated: authenticated (a Bearer token check
+  against `InferenceEndpoint::auth_token_hash` when
+  `authentication_method != "none"` — one enforced mechanism regardless of
+  the free-text label, an explicitly documented simplification, not
+  per-scheme fidelity), rate-limited (a genuine in-memory per-minute
+  counter local to the listener thread, capped at
+  `rate_limit_per_minute`, resetting each new minute — in-memory/
+  best-effort, not a distributed limiter, and not persisted across a
+  restart, both stated honestly), and scanned by Phase 74's real
+  `scan_content_for_risks` on both the incoming prompt and the generated
+  answer (a flagged prompt 400s before generation runs; a flagged answer
+  is still returned alongside its scan result, not silently withheld,
+  since Phase 74's scanner is heuristic and a false positive should not
+  make an endpoint fail closed). Generation itself reuses Phase 76's exact
+  `execute_rag_generation` path — the identical memory-lease/scheduler-
+  ticket admission contract, not a third divergent implementation — so an
+  endpoint request cannot bypass the same concurrency/memory limits chat
+  and RAG generation are careful to enforce. `InferenceEndpoint` gained
+  `auth_token_hash` (settable via the existing creation route's new
+  `authToken` field; only the hash persists on the record itself, matching
+  Phase 75's `ComputeNode`/`agent_shared_secret_hash` convention, with the
+  plaintext living in the same `secrets` `SecretStore`, key
+  `"inference-endpoint:<id>"`). Honestly out of scope: `/v1/completions`
+  is this codebase's own minimal surface, not an OpenAI-compatible API,
+  and per-endpoint tool/safety *policy* configuration beyond the fixed
+  content scan is still `Planned`.
+- Phase 78: Implemented (2026-08-12) — real per-request inference
+  telemetry for Monitoring and Diagnostics (section 2 item 23, section 44),
+  closing the per-request half of the gap Phase 68's route comment named
+  ("no request-path instrumentation exists"). New
+  `InferenceMetricsStore`/`src/inference_metrics.cpp`: `begin_request()`
+  marks a request queued (real queue-depth +1), `end_request(latency)`
+  marks it finished (queue-depth -1, latency recorded into a rolling
+  15-minute sample window pruned on every access so it cannot grow
+  unbounded on a long-running server); `snapshot()` reports the current
+  queue depth, requests in the last real minute, and p50/p95/p99 latency
+  (nearest-rank over the last-minute samples, empty window honestly
+  reports 0 rather than dividing by zero). Wired into every real
+  generation call site this codebase has: the chat handler (`begin_request`
+  at the same point `scheduler_ticket` is assigned -- real admission --
+  `end_request` on both the success path, using `generated
+  .elapsed_microseconds` as the authoritative latency the API response
+  itself already reports, and the failure/cancellation path, timed from
+  the same admission moment) and Phase 76's `execute_rag_generation`
+  (already shared by the RAG route and Phase 77's inference-endpoint
+  listener, so one instrumentation site covers all three). `GET
+  /api/v1/ml/monitoring` (`build_ml_monitoring_json()`) gained a new
+  `"inferenceRequests"` field carrying this real snapshot. Honestly still
+  not measurable, stated in both the route's and
+  `build_ml_monitoring_json()`'s comments: live per-step training curves
+  (the tabular trainer's runs are synchronous and complete before there is
+  a meaningful "live" window to sample from -- genuine post-hoc loss
+  curves already exist since Phase 56) and cache-hit rate (no KV-cache-hit
+  instrumentation exists in the inference adapter to report on).
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that

@@ -3521,7 +3521,11 @@ void InferenceEndpointStore::restore() {
         endpoint.protocol = fields[5];
         endpoint.authentication_method = fields[6];
         const auto rate_and_owner = unpack(fields[7]);
-        if (rate_and_owner.size() != 3U) {
+        // Phase 77 added auth_token_hash as a 4th nested field; records
+        // written before that phase still have 3 and default it to empty
+        // (no enforced auth, matching their prior "records intent only"
+        // behavior).
+        if (rate_and_owner.size() != 3U && rate_and_owner.size() != 4U) {
             throw std::runtime_error(
                 "persisted inference endpoint tail field count is wrong");
         }
@@ -3529,6 +3533,7 @@ void InferenceEndpointStore::restore() {
             static_cast<std::uint32_t>(std::stoul(rate_and_owner[0]));
         endpoint.owner_id = rate_and_owner[1];
         endpoint.status = parse_inference_endpoint_status(rate_and_owner[2]);
+        if (rate_and_owner.size() == 4U) endpoint.auth_token_hash = rate_and_owner[3];
         endpoints_[endpoint.id] = endpoint;
     }
 }
@@ -3541,7 +3546,8 @@ void InferenceEndpointStore::persist(const InferenceEndpoint& endpoint) {
              endpoint.authentication_method,
              pack({std::to_string(endpoint.rate_limit_per_minute),
                   endpoint.owner_id,
-                  inference_endpoint_status_name(endpoint.status)})}));
+                  inference_endpoint_status_name(endpoint.status),
+                  endpoint.auth_token_hash})}));
 }
 
 InferenceEndpoint InferenceEndpointStore::create(
@@ -3549,7 +3555,7 @@ InferenceEndpoint InferenceEndpointStore::create(
     const std::string& model_id, const std::string& runtime,
     const std::string& host, const std::uint16_t port,
     const std::string& protocol, const std::string& authentication_method,
-    const std::uint32_t rate_limit_per_minute) {
+    const std::uint32_t rate_limit_per_minute, const std::string& auth_token) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("inference endpoint name is invalid");
     }
@@ -3569,6 +3575,7 @@ InferenceEndpoint InferenceEndpointStore::create(
     endpoint.rate_limit_per_minute = rate_limit_per_minute;
     endpoint.owner_id = owner_id;
     endpoint.status = InferenceEndpointStatus::draft;
+    endpoint.auth_token_hash = auth_token.empty() ? std::string{} : sha256_hex(auth_token);
     endpoint.created_at_epoch_seconds = epoch_seconds();
     endpoint.updated_at_epoch_seconds = endpoint.created_at_epoch_seconds;
     endpoints_[endpoint.id] = endpoint;
@@ -3674,10 +3681,12 @@ ComputeNodeStore::ComputeNodeStore(RecordStore& records) : records_(&records) {
 void ComputeNodeStore::restore() {
     for (const auto& item : records_->list("ml_compute_nodes")) {
         const auto fields = unpack(item.second);
-        // Phase 67 added `is_local` as a 9th field; records written before
-        // that phase still have 8 and default to false (a remote/unknown
-        // node, matching their prior behavior exactly).
-        if (fields.size() != 8U && fields.size() != 9U) {
+        // Phase 67 added `is_local` as a 9th field; Phase 75 added
+        // `agent_url`/`agent_shared_secret_hash` as 10th/11th fields.
+        // Records written before either phase still have 8 or 9 fields and
+        // default the newer ones to empty/false, matching their prior
+        // behavior exactly.
+        if (fields.size() != 8U && fields.size() != 9U && fields.size() != 11U) {
             throw std::runtime_error(
                 "persisted compute node record field count is wrong");
         }
@@ -3691,7 +3700,11 @@ void ComputeNodeStore::restore() {
         node.memory_mib = std::stoull(fields[5]);
         node.owner_id = fields[6];
         node.status = parse_compute_node_status(fields[7]);
-        node.is_local = fields.size() == 9U && fields[8] == "1";
+        node.is_local = fields.size() >= 9U && fields[8] == "1";
+        if (fields.size() == 11U) {
+            node.agent_url = fields[9];
+            node.agent_shared_secret_hash = fields[10];
+        }
         nodes_[node.id] = node;
     }
 }
@@ -3702,14 +3715,16 @@ void ComputeNodeStore::persist(const ComputeNode& node) {
                        node.cpu_description, node.gpu_description,
                        std::to_string(node.memory_mib), node.owner_id,
                        compute_node_status_name(node.status),
-                       node.is_local ? "1" : "0"}));
+                       node.is_local ? "1" : "0", node.agent_url,
+                       node.agent_shared_secret_hash}));
 }
 
 ComputeNode ComputeNodeStore::create(
     const std::string& owner_id, const std::string& name,
     const std::string& address, const std::string& operating_system,
     const std::string& cpu_description, const std::string& gpu_description,
-    const std::uint64_t memory_mib, const bool is_local) {
+    const std::uint64_t memory_mib, const bool is_local,
+    const std::string& agent_url, const std::string& agent_shared_secret) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("compute node name is invalid");
     }
@@ -3725,6 +3740,11 @@ ComputeNode ComputeNodeStore::create(
     node.owner_id = owner_id;
     node.status = ComputeNodeStatus::available;
     node.is_local = is_local;
+    node.agent_url = agent_url;
+    // Never persist the plaintext secret -- only its hash, the same
+    // constant_time_equal-verified convention parse_setup_fields uses.
+    node.agent_shared_secret_hash =
+        agent_shared_secret.empty() ? std::string{} : sha256_hex(agent_shared_secret);
     node.created_at_epoch_seconds = epoch_seconds();
     node.updated_at_epoch_seconds = node.created_at_epoch_seconds;
     nodes_[node.id] = node;
@@ -3777,7 +3797,9 @@ std::string compute_node_json(const ComputeNode& node) {
            std::to_string(node.memory_mib) + ",\"ownerId\":\"" +
            json_escape(node.owner_id) + "\",\"status\":\"" +
            compute_node_status_name(node.status) + "\",\"isLocal\":" +
-           (node.is_local ? "true" : "false") +
+           (node.is_local ? "true" : "false") + ",\"agentUrl\":\"" +
+           json_escape(node.agent_url) + "\",\"hasAgentSecret\":" +
+           (node.agent_shared_secret_hash.empty() ? "false" : "true") +
            ",\"createdAtEpochSeconds\":" +
            std::to_string(node.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +

@@ -86,6 +86,7 @@ void show_usage() {
         << "Usage:\n"
         << "  masterai configure [settings-file]\n"
         << "  masterai serve [settings-file]\n"
+        << "  masterai telemetry-agent <host> <port> <shared-secret>\n"
         << "  masterai probe [storage-root]\n"
         << "  masterai scan-models [models-root]\n"
         << "  masterai verify-models [models-root]\n"
@@ -238,6 +239,29 @@ int main(int argc, char* argv[]) {
             std::signal(SIGTERM, handle_signal);
             masterai::HttpServer server(configuration, settings);
             return server.run(stop_requested) ? 0 : 1;
+        }
+        // Phase 75: a lightweight telemetry-only listener for a remote
+        // compute node -- run this on that node, then create a
+        // ComputeNode on the main server with a matching agentUrl/
+        // agentSharedSecret so its .../telemetry route can poll here for
+        // real. Deliberately not a `serve` variant: it exposes exactly one
+        // authenticated endpoint (GET /telemetry -> probe_hardware()),
+        // nothing else this codebase's main HTTP surface provides, and can
+        // bind a non-loopback host, which HttpServer refuses to do.
+        if (command == "telemetry-agent") {
+            if (argc < 5) {
+                throw std::runtime_error(
+                    "telemetry-agent requires <host> <port> <shared-secret>");
+            }
+            const std::string host = argv[2];
+            const auto port = static_cast<std::uint16_t>(std::stoul(argv[3]));
+            const std::string shared_secret = argv[4];
+            std::signal(SIGINT, handle_signal);
+            std::signal(SIGTERM, handle_signal);
+            masterai::run_telemetry_agent(host, port, shared_secret,
+                                          std::filesystem::current_path(),
+                                          stop_requested);
+            return 0;
         }
         if (command == "mcp-stdio") {
             if (argc > 4) {

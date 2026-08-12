@@ -387,6 +387,10 @@ public:
         ml_dataset_content = std::make_unique<DatasetContentStore>(records);
         ml_trained_models = std::make_unique<TrainedModelStore>(records);
         ml_evaluation_results = std::make_unique<EvaluationResultStore>(records);
+        // Phase 73: real LLM LoRA fine-tuning run outcomes (see
+        // ml_finetune.cpp).
+        ml_llm_finetune_results =
+            std::make_unique<FineTuningRunResultStore>(records);
         // Phase 57: real model comparison (see ml_engine.cpp).
         ml_model_comparisons = std::make_unique<ModelComparisonStore>(records);
         ml_comparison_results = std::make_unique<ComparisonResultStore>(records);
@@ -483,6 +487,19 @@ public:
             setup_hash = sha256_hex(setup_token);
             log(LogLevel::warning, "setup.token",
                 "One-time first-administrator token: " + setup_token);
+        }
+    }
+
+    // Phase 77: stops and joins every still-running InferenceEndpoint
+    // listener thread before this State (and the sockets/managers those
+    // threads call into) is destroyed -- without this, a joinable
+    // std::thread member outliving its object calls std::terminate, and a
+    // listener left running past shutdown would keep its port bound.
+    ~State() {
+        std::lock_guard<std::mutex> lock(inference_endpoint_threads_mutex);
+        for (auto& entry : inference_endpoint_threads) {
+            entry.second.second->store(true);
+            entry.second.first.join();
         }
     }
 
@@ -2272,6 +2289,90 @@ public:
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_fine_tuning_job_not_found\"}");
             }
+            // Phase 73: a "llm:"-prefixed method (e.g. "llm:code assistant")
+            // routes to the real LLM LoRA executor instead of Phase 70's
+            // tabular warm-start path -- a free-text convention matching
+            // FineTuningJob.method's own "free text, not a closed enum"
+            // design rather than a second type field. Runs on a detached
+            // background thread (run_llm_fine_tuning_job above) and returns
+            // 202 immediately, since a real llama.cpp finetune run can take
+            // far longer than the HTTP request timeout.
+            if (job->method.size() >= 4U &&
+                ascii_lower(job->method.substr(0U, 4U)) == "llm:") {
+                const auto base_entry = ml_models->find(job->model_id);
+                if (!base_entry) {
+                    return response(
+                        409, "Conflict",
+                        "{\"error\":\"ml_fine_tuning_base_model_not_found\"}");
+                }
+                if (base_entry->source.empty() ||
+                    !std::filesystem::is_regular_file(base_entry->source)) {
+                    return response(
+                        409, "Conflict",
+                        "{\"error\":\"ml_fine_tuning_base_model_file_missing\","
+                        "\"detail\":\"Model Registry entry " +
+                            json_escape(base_entry->id) +
+                            "'s source field is not a real, existing file "
+                            "path (\\\"" +
+                            json_escape(base_entry->source) +
+                            "\\\"); set it to the base GGUF's real path "
+                            "first\"}");
+                }
+                const auto content = ml_dataset_content->find(job->dataset_id);
+                if (!content) {
+                    return response(
+                        409, "Conflict",
+                        "{\"error\":\"ml_dataset_has_no_content\",\"detail\":"
+                        "\"upload CSV content to the job's dataset first\"}");
+                }
+                LlmFineTuneOptions llm_options;
+                try {
+                    if (!request.body.empty()) {
+                        auto root = parse_json(request.body);
+                        if (const auto* epochs = root.optional("epochs")) {
+                            llm_options.epochs = static_cast<std::uint32_t>(
+                                epochs->as_integer());
+                        }
+                        if (const auto* rate = root.optional("learningRate")) {
+                            llm_options.learning_rate = rate->as_double();
+                        }
+                        if (const auto* extra =
+                                root.optional("extraFinetuneArguments")) {
+                            llm_options.extra_finetune_arguments =
+                                extra->as_string();
+                        }
+                        if (const auto* extra =
+                                root.optional("extraExportLoraArguments")) {
+                            llm_options.extra_export_lora_arguments =
+                                extra->as_string();
+                        }
+                    }
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_llm_fine_tuning_options\","
+                        "\"detail\":\"" + json_escape(error.what()) + "\"}");
+                }
+                ml_fine_tuning_jobs->set_status(id, FineTuningJobStatus::queued);
+                const FineTuningJob job_copy = *job;
+                const ModelRegistryEntry base_entry_copy = *base_entry;
+                const DatasetContentStore::Content content_copy = *content;
+                const std::string acting_user_id = user->id;
+                std::thread([this, job_copy, base_entry_copy, content_copy,
+                            llm_options, acting_user_id]() {
+                    run_llm_fine_tuning_job(job_copy, base_entry_copy,
+                                            content_copy, llm_options,
+                                            acting_user_id);
+                }).detach();
+                audit.append("ml.fine_tuning_job.llm_run", user->id, "started",
+                            id);
+                return response(
+                    202, "Accepted",
+                    "{\"status\":\"queued\",\"jobId\":\"" + json_escape(id) +
+                        "\",\"detail\":\"LLM fine-tuning is running in the "
+                        "background; poll GET /api/v1/ml/fine-tuning-jobs/" +
+                        json_escape(id) + "/llm-result for the outcome\"}");
+            }
             const auto base_model = ml_trained_models->find(job->model_id);
             if (!base_model) {
                 return response(
@@ -2328,6 +2429,25 @@ public:
                     "{\"error\":\"ml_fine_tuning_failed\",\"detail\":\"" +
                         json_escape(error.what()) + "\"}");
             }
+        }
+        // Phase 73: polling endpoint for a background LLM LoRA fine-tuning
+        // run started by the "llm:"-prefixed branch of POST .../run above.
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/fine-tuning-jobs/", 0U) == 0U &&
+            request.target.size() > 11U &&
+            request.target.compare(request.target.size() - 11U, 11U,
+                                   "/llm-result") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.finetuning.view")) return *denied;
+            const auto id = request.target.substr(
+                28U, request.target.size() - 28U - 11U);
+            const auto result_json = ml_llm_finetune_results->find(id);
+            if (!result_json) {
+                return response(
+                    404, "Not Found",
+                    "{\"error\":\"ml_llm_fine_tuning_result_not_found\",\"detail\":"
+                    "\"no LLM fine-tuning run has completed for this job yet\"}");
+            }
+            return response(200, "OK", *result_json);
         }
         // Phase 46: Model Builder Interface (docs/PLAN.md "Machine Learning
         // Abilities" section 9) at full surface: identity/target-project/
@@ -2938,7 +3058,12 @@ public:
         }
         // Phase 60: execute one approved RAG configuration against its real
         // populated index and return ranked chunks plus citation-ready
-        // context. The response never fabricates a generated-model answer.
+        // context. Phase 76 adds an optional real generated answer
+        // (request field "generate":true plus "modelId") via
+        // execute_rag_generation, grounded in this same retrieved context
+        // -- never fabricated. Without "generate", the response is
+        // unchanged from Phase 60: context only, no generated-model
+        // answer.
         if (request.method == "POST" &&
             request.target.rfind("/api/v1/ml/rag-configs/", 0U) == 0U &&
             request.target.size() > 6U &&
@@ -2985,13 +3110,74 @@ public:
                 }
                 const auto vectorize = knowledge_vectorizer(
                     vector_store->embedding_model);
+                const auto query_text = root.required("query").as_string();
                 const auto result = retrieve_knowledge(
                     *ml_knowledge_index, config->vector_store_id,
-                    config->search_strategy,
-                    root.required("query").as_string(), top_k,
+                    config->search_strategy, query_text, top_k,
                     vector_store->embedding_model, vectorize);
                 const auto result_json = rag_retrieval_result_json(result);
                 audit.append("ml.rag.query", user->id, "success", id);
+                // Phase 76: optional real answer generation, grounded in
+                // the same retrieved context above -- reuses the exact
+                // inference path (execute_rag_generation ->
+                // assemble_chat_prompt -> inference->generate) the chat
+                // handler uses, so this never duplicates or diverges from
+                // it. Default (no "generate" field, or false) keeps the
+                // pre-Phase-76 context-only response unchanged for every
+                // existing caller.
+                const auto* generate_field = root.optional("generate");
+                if (generate_field != nullptr && generate_field->as_boolean()) {
+                    const auto* model_id_field = root.optional("modelId");
+                    if (model_id_field == nullptr) {
+                        return response(
+                            400, "Bad Request",
+                            "{\"error\":\"ml_rag_generate_requires_model\","
+                            "\"detail\":\"set modelId to the id of a ready "
+                            "model to generate a real answer\"}");
+                    }
+                    const auto model_id = model_id_field->as_string();
+                    try {
+                        // Rebuild the same citation-prefixed context text
+                        // rag_retrieval_result_json() reports as "context",
+                        // since RagRetrievalResult itself only holds the
+                        // ranked chunks, not a pre-joined string.
+                        std::string generation_prompt;
+                        for (const auto& item : result.chunks) {
+                            const std::string citation =
+                                "[" + item.chunk.file_name + "#chunk-" +
+                                std::to_string(item.chunk.chunk_index + 1U) +
+                                "]";
+                            if (!generation_prompt.empty()) {
+                                generation_prompt += "\n\n";
+                            }
+                            generation_prompt += citation + "\n" + item.chunk.text;
+                        }
+                        generation_prompt += "\n\n[Question]\n" + query_text;
+                        const auto generated =
+                            execute_rag_generation(model_id, generation_prompt);
+                        audit.append("ml.rag.generate", user->id, "success", id);
+                        return response(
+                            200, "OK",
+                            "{\"ragConfigId\":\"" + json_escape(id) +
+                                "\",\"result\":" + result_json +
+                                ",\"answer\":{\"content\":\"" +
+                                json_escape(generated.text) +
+                                "\",\"modelId\":\"" + json_escape(model_id) +
+                                "\",\"promptTokens\":" +
+                                std::to_string(generated.prompt_tokens) +
+                                ",\"generatedTokens\":" +
+                                std::to_string(generated.generated_tokens) +
+                                ",\"elapsedMicroseconds\":" +
+                                std::to_string(generated.elapsed_microseconds) +
+                                "}}");
+                    } catch (const std::exception& error) {
+                        audit.append("ml.rag.generate", user->id, "failure", id);
+                        return response(
+                            409, "Conflict",
+                            "{\"error\":\"ml_rag_generate_failed\",\"detail\":\"" +
+                                json_escape(error.what()) + "\"}");
+                    }
+                }
                 return response(200, "OK",
                                 "{\"ragConfigId\":\"" + json_escape(id) +
                                     "\",\"result\":" + result_json + "}");
@@ -3437,6 +3623,7 @@ public:
                     const auto* port_value = root.optional("port");
                     const auto* rate_limit_value =
                         root.optional("rateLimitPerMinute");
+                    const auto auth_token = text_field("authToken");
                     const auto endpoint = ml_inference_endpoints->create(
                         user->id, name, model_id, text_field("runtime"),
                         text_field("host"),
@@ -3445,7 +3632,13 @@ public:
                         text_field("protocol"),
                         text_field("authenticationMethod"),
                         static_cast<std::uint32_t>(
-                            rate_limit_value ? rate_limit_value->as_integer() : 0));
+                            rate_limit_value ? rate_limit_value->as_integer() : 0),
+                        auth_token);
+                    // Endpoint only ever persists the token's hash; the
+                    // plaintext this route just received is the only copy.
+                    if (!auth_token.empty()) {
+                        secrets->set("inference-endpoint:" + endpoint.id, auth_token);
+                    }
                     audit.append("ml.endpoint.create", user->id, "success",
                                  endpoint.id);
                     return response(201, "Created", inference_endpoint_json(endpoint));
@@ -3473,6 +3666,42 @@ public:
                         return response(404, "Not Found",
                                         "{\"error\":\"ml_endpoint_not_found\"}");
                     }
+                    // Phase 77: a real listener thread's lifecycle now
+                    // follows the status transition, not just the database
+                    // row -- `active` starts it (or restarts it, so an
+                    // authToken/rateLimit change on an already-active
+                    // endpoint takes effect without a manual disable/
+                    // re-enable), anything else stops it.
+                    {
+                        std::lock_guard<std::mutex> lock(
+                            inference_endpoint_threads_mutex);
+                        const auto existing = inference_endpoint_threads.find(id);
+                        if (existing != inference_endpoint_threads.end()) {
+                            existing->second.second->store(true);
+                            existing->second.first.join();
+                            inference_endpoint_threads.erase(existing);
+                        }
+                        if (status == InferenceEndpointStatus::active) {
+                            const auto endpoint = ml_inference_endpoints->find(id);
+                            const auto secret =
+                                secrets->get("inference-endpoint:" + id);
+                            std::string expected_authorization;
+                            if (endpoint->authentication_method != "none" &&
+                                !endpoint->authentication_method.empty() &&
+                                secret) {
+                                expected_authorization = "Bearer " + *secret;
+                            }
+                            auto stop_flag = std::make_shared<std::atomic_bool>(false);
+                            std::thread worker(
+                                [this, endpoint = *endpoint, expected_authorization,
+                                stop_flag]() {
+                                    run_inference_endpoint(
+                                        endpoint, expected_authorization, stop_flag);
+                                });
+                            inference_endpoint_threads.emplace(
+                                id, std::make_pair(std::move(worker), stop_flag));
+                        }
+                    }
                     audit.append("ml.endpoint.status", user->id, "success", id);
                     return response(200, "OK", "{\"updated\":true}");
                 } catch (const std::exception& error) {
@@ -3495,6 +3724,16 @@ public:
                     return response(404, "Not Found",
                                     "{\"error\":\"ml_endpoint_not_found\"}");
                 }
+                {
+                    std::lock_guard<std::mutex> lock(inference_endpoint_threads_mutex);
+                    const auto existing = inference_endpoint_threads.find(id);
+                    if (existing != inference_endpoint_threads.end()) {
+                        existing->second.second->store(true);
+                        existing->second.first.join();
+                        inference_endpoint_threads.erase(existing);
+                    }
+                }
+                secrets->erase("inference-endpoint:" + id);
                 audit.append("ml.endpoint.delete", user->id, "success", id);
                 return response(200, "OK", "{\"deleted\":true}");
             }
@@ -3533,7 +3772,21 @@ public:
                         memory_value ? static_cast<std::uint64_t>(
                                            memory_value->as_integer())
                                     : 0ULL,
-                        is_local_value ? is_local_value->as_boolean() : false);
+                        is_local_value ? is_local_value->as_boolean() : false,
+                        // Phase 75: a non-local node names a real
+                        // `masterai telemetry-agent` process's address and
+                        // shared secret so .../telemetry can poll it for
+                        // real, instead of remaining permanently 400.
+                        text_field("agentUrl"), text_field("agentSharedSecret"));
+                    // ComputeNode only ever persists the secret's hash; the
+                    // plaintext this route just received is the only copy,
+                    // so it goes into the encrypted-at-rest SecretStore
+                    // here, keyed by the node's new id, for
+                    // .../telemetry to retrieve later.
+                    const auto agent_secret = text_field("agentSharedSecret");
+                    if (!agent_secret.empty()) {
+                        secrets->set("telemetry-agent:" + node.id, agent_secret);
+                    }
                     audit.append("ml.compute_node.create", user->id, "success",
                                  node.id);
                     return response(201, "Created", compute_node_json(node));
@@ -3583,6 +3836,7 @@ public:
                     return response(404, "Not Found",
                                     "{\"error\":\"ml_compute_node_not_found\"}");
                 }
+                secrets->erase("telemetry-agent:" + id);
                 audit.append("ml.compute_node.delete", user->id, "success", id);
                 return response(200, "OK", "{\"deleted\":true}");
             }
@@ -3605,25 +3859,56 @@ public:
                     return response(404, "Not Found",
                                     "{\"error\":\"ml_compute_node_not_found\"}");
                 }
-                if (!node->is_local) {
+                const auto probed_at_epoch_seconds = std::to_string(
+                    static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count()));
+                if (node->is_local) {
+                    const auto hardware =
+                        probe_hardware(configuration.models_root);
+                    return response(
+                        200, "OK",
+                        "{\"telemetry\":" + hardware_info_json(hardware) +
+                            ",\"probedAtEpochSeconds\":" +
+                            probed_at_epoch_seconds + "}");
+                }
+                // Phase 75: a non-local node with a configured agent_url is
+                // polled for real over run_telemetry_agent's protocol --
+                // `secrets` (the same encrypted-at-rest SecretStore
+                // `ml.compute_node.create` above wrote to) holds the
+                // plaintext, since ComputeNode itself only ever persists
+                // its hash.
+                if (node->agent_url.empty()) {
                     return response(
                         400, "Bad Request",
                         "{\"error\":\"ml_compute_node_not_local\",\"detail\":"
                         "\"live telemetry requires a node flagged as the "
-                        "local host; remote nodes have no agent process to "
-                        "poll\"}");
+                        "local host, or one with an agentUrl configured\"}");
                 }
-                const auto hardware = probe_hardware(configuration.models_root);
-                return response(
-                    200, "OK",
-                    "{\"telemetry\":" + hardware_info_json(hardware) +
-                        ",\"probedAtEpochSeconds\":" +
-                        std::to_string(static_cast<std::uint64_t>(
-                            std::chrono::duration_cast<std::chrono::seconds>(
-                                std::chrono::system_clock::now()
-                                    .time_since_epoch())
-                                .count())) +
-                        "}");
+                const auto secret = secrets->get("telemetry-agent:" + id);
+                if (!secret) {
+                    return response(
+                        409, "Conflict",
+                        "{\"error\":\"ml_compute_node_agent_secret_missing\","
+                        "\"detail\":\"this node's shared secret was not "
+                        "found; re-create the node with agentSharedSecret "
+                        "set\"}");
+                }
+                try {
+                    const auto telemetry_json =
+                        fetch_remote_telemetry(node->agent_url, *secret);
+                    return response(
+                        200, "OK",
+                        "{\"telemetry\":" + telemetry_json +
+                            ",\"probedAtEpochSeconds\":" +
+                            probed_at_epoch_seconds + "}");
+                } catch (const std::exception& error) {
+                    return response(
+                        502, "Bad Gateway",
+                        "{\"error\":\"ml_compute_node_agent_unreachable\","
+                        "\"detail\":\"" + json_escape(error.what()) + "\"}");
+                }
             }
         }
         // Phase 64/69: Automation Pipelines (docs/PLAN.md "Machine Learning
@@ -3864,6 +4149,36 @@ public:
                 audit.append("ml.safety_policy.delete", user->id, "success", id);
                 return response(200, "OK", "{\"deleted\":true}");
             }
+            // Phase 74: real heuristic content scanning (see
+            // scan_content_for_risks in masterai.hpp/ml_safety_scan.cpp) --
+            // a read-only diagnostic, not a mutation, so it uses the same
+            // ml.safety.view scope GET routes above use.
+            if (request.method == "POST" &&
+                request.target.rfind(policies_prefix, 0U) == 0U &&
+                request.target.size() > 5U &&
+                request.target.compare(request.target.size() - 5U, 5U,
+                                       "/scan") == 0) {
+                if (auto denied = forbidden_unless(user->role, "ml.safety.view")) return *denied;
+                const auto id = request.target.substr(
+                    policies_prefix.size(),
+                    request.target.size() - policies_prefix.size() - 5U);
+                const auto policy = ml_safety_governance->find_policy(id);
+                if (!policy) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_safety_policy_not_found\"}");
+                }
+                try {
+                    auto root = parse_json(request.body);
+                    const auto text = root.required("text").as_string();
+                    const auto report = scan_content_for_risks(text, &*policy);
+                    return response(200, "OK", content_scan_report_json(report));
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_safety_scan_request\","
+                        "\"detail\":\"" + json_escape(error.what()) + "\"}");
+                }
+            }
             if (request.method == "GET" &&
                 request.target == "/api/v1/ml/model-cards") {
                 if (auto denied = forbidden_unless(user->role, "ml.safety.view")) return *denied;
@@ -3956,23 +4271,23 @@ public:
                                 audit_log_entries_json(audit.recent(200U, "ml.")) +
                                 "}");
         }
-        // Phase 68: Monitoring and Diagnostics (docs/PLAN.md "Machine
+        // Phase 68/78: Monitoring and Diagnostics (docs/PLAN.md "Machine
         // Learning Abilities" section 44). A read-only aggregation over
-        // data other real phases already measured -- no new store, no
-        // fabricated numbers. Deliberately does NOT report per-step
-        // gradient norm/learning-rate curves (the tabular trainer has no
-        // iterative training loop to sample), live per-request latency
-        // percentiles/queue depth/cache-hit rate/safety-filter rate/tool-
-        // call success/retrieval latency (no request-path instrumentation
-        // exists), or temperature/network activity (no sensor access this
-        // codebase has built) -- those all remain planned. What is real:
-        // live local-host CPU/RAM/GPU/disk via the same probe_hardware()
-        // Phase 67 uses, real training-job status counts, each completed
-        // evaluation run's genuinely measured metrics (Phase 56/57's
-        // EvaluationResultStore), and real prompt/generation throughput
-        // from actual BenchmarkStore runs -- the closest measured inference
-        // performance evidence this codebase has, explicitly not live
-        // production request telemetry.
+        // data other real phases already measured -- no fabricated
+        // numbers. Deliberately still does NOT report per-step gradient
+        // norm/learning-rate curves (the tabular trainer has no iterative
+        // training loop to sample), cache-hit rate (no KV-cache-hit
+        // instrumentation exists), safety-filter rate, tool-call success,
+        // retrieval latency, or temperature/network activity (no sensor
+        // access this codebase has built) -- those all remain planned.
+        // What is real: live local-host CPU/RAM/GPU/disk via the same
+        // probe_hardware() Phase 67 uses, real training-job status counts,
+        // each completed evaluation run's genuinely measured metrics
+        // (Phase 56/57's EvaluationResultStore), real prompt/generation
+        // throughput from actual BenchmarkStore runs, and -- as of Phase
+        // 78 -- real live per-request latency percentiles/queue depth/
+        // throughput (InferenceMetricsStore, fed by every real generation
+        // call site: chat, RAG generation, inference endpoints).
         if (request.method == "GET" &&
             request.target == "/api/v1/ml/monitoring") {
             if (auto denied = forbidden_unless(user->role, "ml.monitoring.view")) return *denied;
@@ -4722,6 +5037,60 @@ private:
         return {std::move(report), std::move(model), model_id};
     }
 
+    // Phase 73: the real LLM LoRA fine-tuning executor. Runs on a detached
+    // background thread (see the "llm:"-prefixed branch of POST
+    // .../fine-tuning-jobs/{id}/run below) because a genuine llama.cpp
+    // finetune run can take far longer than the HTTP request timeout, so
+    // `job`/`base_model_entry`/`content`/`user_id` all arrive already
+    // copied by value and this must not touch `request`/`user`. Writes its
+    // outcome to ml_llm_finetune_results (JSON), the only way a caller
+    // polling GET .../llm-result learns whether/how it finished; never
+    // reports success without a real merged GGUF file on disk.
+    void run_llm_fine_tuning_job(const FineTuningJob& job,
+                                 const ModelRegistryEntry& base_model_entry,
+                                 const DatasetContentStore::Content& content,
+                                 const LlmFineTuneOptions& options,
+                                 const std::string& user_id) {
+        ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::preparing);
+        const std::atomic_bool no_cancellation{false};
+        const auto work_directory =
+            configuration.runtime_root / "ml-finetune" / job.id;
+        try {
+            const auto training_text_path =
+                write_llm_finetune_training_text(
+                    content.csv, work_directory / "training.txt");
+            ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::running);
+            const auto result = run_llama_lora_finetune(
+                configuration, base_model_entry.source, training_text_path,
+                work_directory, options, no_cancellation);
+            const auto merged_entry = ml_models->create(
+                user_id, job.name + "-model", job.name + " (LoRA fine-tuned)",
+                "1", base_model_entry.family, base_model_entry.task,
+                "gguf-lora-merged", result.merged_gguf.string(), "");
+            ml_models->set_state(merged_entry.id, ModelRegistryState::evaluation);
+            const std::string result_json =
+                "{\"status\":\"completed\",\"jobId\":\"" + json_escape(job.id) +
+                "\",\"modelId\":\"" + json_escape(merged_entry.id) +
+                "\",\"mergedModelPath\":\"" +
+                json_escape(result.merged_gguf.string()) +
+                "\",\"finetuneLogTail\":\"" +
+                json_escape(result.finetune_log_tail) +
+                "\",\"exportLoraLogTail\":\"" +
+                json_escape(result.export_lora_log_tail) + "\"}";
+            ml_llm_finetune_results->put(job.id, result_json);
+            ml_fine_tuning_jobs->set_status(
+                job.id, FineTuningJobStatus::awaiting_evaluation);
+            audit.append("ml.fine_tuning_job.llm_run", user_id, "success", job.id);
+        } catch (const std::exception& error) {
+            const std::string result_json =
+                "{\"status\":\"failed\",\"jobId\":\"" + json_escape(job.id) +
+                "\",\"error\":\"" + json_escape(error.what()) + "\"}";
+            ml_llm_finetune_results->put(job.id, result_json);
+            ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::failed);
+            audit.append("ml.fine_tuning_job.llm_run", user_id, "failure", job.id);
+        }
+    }
+
     // Phase 56/69: the real evaluation harness's core, factored out the
     // same way as execute_training_job above -- shared by the single-run
     // POST .../evaluation-runs/{id}/run handler and the automation-
@@ -4747,7 +5116,7 @@ private:
         }
     }
 
-    // Phase 69/71: executes every recognized stage of one Automation
+    // Phase 69/71/72: executes every recognized stage of one Automation
     // Pipeline run, in the order the pipeline names them, persisting live
     // progress via AutomationPipelineStore::append_stage_result() before
     // and after each stage so a caller polling GET .../runs sees the run
@@ -4762,12 +5131,20 @@ private:
     // "Deploy production" (a real Deployment record created/approved for
     // that environment -- Deployment Manager's own documented scope is an
     // approval workflow, not live traffic serving), "Rollback" (that
-    // deployment's approval revoked), and "Monitor" (Phase 68's real
-    // monitoring snapshot) are all genuine, in-process calls to existing
-    // executors -- not fabricated results. Every other named stage (import/
-    // clean/label/split data, optimize, staging tests) is honestly recorded
-    // as skipped, since this codebase has no data-labeling, data-cleaning,
-    // model-optimization, or staging-test executor to call.
+    // deployment's approval revoked), "Monitor" (Phase 68's real
+    // monitoring snapshot), "Import data" (a real content-presence check),
+    // "Clean data" (real blank/duplicate row removal via clean_tabular_csv,
+    // persisted back to the dataset), "Split data" (real train/holdout
+    // counts via split_tabular_csv, which reuses the trainer's own split
+    // formula), "Optimize" (a real ModelOptimizationRun that actually
+    // prunes the current model's learned weights via
+    // prune_tabular_model), and "Staging tests" (a real evaluation run,
+    // reusing execute_evaluation_run) are all genuine, in-process calls to
+    // existing or Phase-72-added executors -- not fabricated results.
+    // "Label data" is the one remaining honestly-skipped stage: it looks
+    // for a real completed LabelTaskStore entry targeting the dataset and
+    // reports "skipped" when none exists, since this codebase still has no
+    // automated labeler.
     void run_automation_pipeline(const AutomationPipeline& pipeline,
                                  const std::string& run_id,
                                  const std::string& user_id,
@@ -4910,19 +5287,53 @@ private:
                         "no model available for safety review (run a Train "
                         "model stage first, or set the pipeline's model)"};
             }
+            bool has_approved_card = false;
+            std::string approved_card_id;
             for (const auto& card : ml_safety_governance->list_model_cards()) {
                 if (card.model_id == current_model_id &&
                     card.status == SafetyPolicyStatus::approved) {
-                    return {"completed", "approved model card " + card.id +
-                                              " covers model " +
-                                              current_model_id};
+                    has_approved_card = true;
+                    approved_card_id = card.id;
+                    break;
                 }
             }
-            any_failed = true;
-            return {"failed", "no approved model card exists for model " +
-                                   current_model_id +
-                                   " (create and approve one in Safety and "
-                                   "Governance)"};
+            if (!has_approved_card) {
+                any_failed = true;
+                return {"failed", "no approved model card exists for model " +
+                                       current_model_id +
+                                       " (create and approve one in Safety "
+                                       "and Governance)"};
+            }
+            // Phase 74: also runs a real content scan (see
+            // scan_content_for_risks) over the pipeline's dataset content,
+            // so "Safety tests" catches secrets/prompt-injection phrasing
+            // in the training data, not only the model-card approval check
+            // above.
+            if (!pipeline.dataset_id.empty()) {
+                const auto content = ml_dataset_content->find(pipeline.dataset_id);
+                if (content) {
+                    const auto report = scan_content_for_risks(content->csv);
+                    if (!report.clean()) {
+                        any_failed = true;
+                        std::string detail =
+                            "approved model card " + approved_card_id +
+                            " covers model " + current_model_id +
+                            ", but the dataset's content scan found " +
+                            std::to_string(report.findings.size()) +
+                            " issue(s): ";
+                        for (std::size_t index = 0;
+                            index < report.findings.size(); ++index) {
+                            if (index > 0U) detail += "; ";
+                            detail += report.findings[index].detail;
+                        }
+                        return {"failed", detail};
+                    }
+                }
+            }
+            return {"completed", "approved model card " + approved_card_id +
+                                      " covers model " + current_model_id +
+                                      "; dataset content scan found no "
+                                      "issues"};
         };
         const auto run_request_approval_stage =
             [&]() -> std::pair<std::string, std::string> {
@@ -5004,6 +5415,195 @@ private:
             [&]() -> std::pair<std::string, std::string> {
             return {"completed", build_ml_monitoring_json()};
         };
+        // Phase 72: the six stages Phase 71 left "skipped" gain real
+        // executors. "Import data" checks the dataset's uploaded content
+        // actually exists (distinct from "Validate data", which parses its
+        // structure). "Clean data" runs clean_tabular_csv (ml_engine.cpp)
+        // and persists the cleaned CSV back over the dataset's content, so
+        // later Train/Evaluate stages see the cleaned rows. "Label data"
+        // looks for a real completed LabelTaskStore entry targeting this
+        // dataset -- honestly still "skipped" when none exists, since this
+        // codebase has no automated labeler. "Split data" runs
+        // split_tabular_csv, which reuses train_tabular_model's own
+        // deterministic split formula so the reported counts are exactly
+        // what a Train model stage will use. "Optimize" creates a real
+        // ModelOptimizationRun (operation "pruning"), runs
+        // prune_tabular_model against the current model's real learned
+        // weights, and persists the pruned weights back. "Staging tests"
+        // reuses execute_evaluation_run (the same function "Evaluate
+        // model" and the Evaluation Lab page call) against the pipeline's
+        // dataset.
+        const auto run_import_data_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (pipeline.dataset_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "pipeline has no dataset configured to import"};
+            }
+            const auto content = ml_dataset_content->find(pipeline.dataset_id);
+            if (!content) {
+                any_failed = true;
+                return {"failed", "dataset " + pipeline.dataset_id +
+                                       " has no uploaded content to import"};
+            }
+            return {"completed",
+                    "dataset " + pipeline.dataset_id + " has " +
+                        std::to_string(content->csv.size()) +
+                        " byte(s) of uploaded content"};
+        };
+        const auto run_clean_data_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (pipeline.dataset_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "pipeline has no dataset configured to clean"};
+            }
+            const auto content = ml_dataset_content->find(pipeline.dataset_id);
+            if (!content) {
+                any_failed = true;
+                return {"failed", "dataset has no uploaded content"};
+            }
+            try {
+                const auto report = clean_tabular_csv(content->csv);
+                ml_dataset_content->put(pipeline.dataset_id, report.csv,
+                                        content->target_column);
+                return {"completed",
+                        std::to_string(report.rows_before) +
+                            " row(s) before, " +
+                            std::to_string(report.rows_after) +
+                            " after; removed " +
+                            std::to_string(report.blank_rows_removed) +
+                            " blank and " +
+                            std::to_string(report.duplicate_rows_removed) +
+                            " duplicate row(s)"};
+            } catch (const std::exception& error) {
+                any_failed = true;
+                return {"failed", error.what()};
+            }
+        };
+        const auto run_label_data_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (pipeline.dataset_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "pipeline has no dataset configured for labeling"};
+            }
+            for (const auto& task : ml_label_tasks->list()) {
+                if (task.dataset_id == pipeline.dataset_id &&
+                    task.status == LabelTaskStatus::completed) {
+                    return {"completed", "labeling task " + task.id +
+                                              " is complete for this dataset"};
+                }
+            }
+            return {"skipped",
+                    "no completed labeling task recorded for this dataset "
+                    "(this codebase has no automated labeler)"};
+        };
+        const auto run_split_data_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (pipeline.dataset_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "pipeline has no dataset configured to split"};
+            }
+            const auto content = ml_dataset_content->find(pipeline.dataset_id);
+            if (!content) {
+                any_failed = true;
+                return {"failed", "dataset has no uploaded content"};
+            }
+            try {
+                const auto report =
+                    split_tabular_csv(content->csv, content->target_column);
+                return {"completed",
+                        std::to_string(report.total_rows) + " row(s): " +
+                            std::to_string(report.train_rows) + " train, " +
+                            std::to_string(report.holdout_rows) + " holdout"};
+            } catch (const std::exception& error) {
+                any_failed = true;
+                return {"failed", error.what()};
+            }
+        };
+        const auto run_optimize_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (current_model_id.empty()) {
+                any_failed = true;
+                return {"failed", "no model available to optimize"};
+            }
+            auto model = ml_trained_models->find(current_model_id);
+            if (!model) {
+                any_failed = true;
+                return {"failed", "model " + current_model_id +
+                                       " has not been trained yet"};
+            }
+            const auto run = ml_model_optimizations->create(
+                user_id, current_model_id,
+                pipeline.name + " (pipeline pruning)",
+                "created by automation pipeline run", "pruning");
+            try {
+                const auto prune = prune_tabular_model(*model, 1e-3);
+                ml_trained_models->put(*model);
+                ml_model_optimizations->set_status(
+                    run.id, ModelOptimizationStatus::completed);
+                audit.append("ml.model_optimization.run", user_id, "success",
+                            run.id);
+                return {"completed",
+                        "optimization run " + run.id + " pruned " +
+                            std::to_string(prune.weights_pruned) + " of " +
+                            std::to_string(prune.weights_total) +
+                            " weight(s) below magnitude 0.001"};
+            } catch (const std::exception& error) {
+                any_failed = true;
+                ml_model_optimizations->set_status(
+                    run.id, ModelOptimizationStatus::failed);
+                audit.append("ml.model_optimization.run", user_id, "failure",
+                            run.id);
+                return {"failed", error.what()};
+            }
+        };
+        const auto run_staging_tests_stage =
+            [&]() -> std::pair<std::string, std::string> {
+            if (current_model_id.empty()) {
+                any_failed = true;
+                return {"failed",
+                        "no model available for staging tests (run a Train "
+                        "model stage first, or set the pipeline's model)"};
+            }
+            if (pipeline.dataset_id.empty()) {
+                any_failed = true;
+                return {"failed", "pipeline has no dataset configured for "
+                                   "staging tests"};
+            }
+            const auto model = ml_trained_models->find(current_model_id);
+            if (!model) {
+                any_failed = true;
+                return {"failed", "model " + current_model_id +
+                                       " has not been trained yet"};
+            }
+            const auto content = ml_dataset_content->find(pipeline.dataset_id);
+            if (!content) {
+                any_failed = true;
+                return {"failed", "dataset has no uploaded content"};
+            }
+            const auto eval_run = ml_evaluation_runs->create(
+                user_id, current_model_id, pipeline.dataset_id,
+                pipeline.name + " (pipeline staging tests)",
+                "created by automation pipeline run", "");
+            try {
+                execute_evaluation_run(eval_run, *model, *content);
+                audit.append("ml.evaluation_run.run", user_id, "success",
+                            eval_run.id);
+                return {"completed",
+                        "staging evaluation run " + eval_run.id +
+                            " completed; see GET "
+                            "/api/v1/ml/evaluation-runs/" +
+                            eval_run.id + "/result for metrics"};
+            } catch (const std::exception& error) {
+                any_failed = true;
+                audit.append("ml.evaluation_run.run", user_id, "failure",
+                            eval_run.id);
+                return {"failed", error.what()};
+            }
+        };
         std::uint32_t completed = 0;
         for (const auto& stage : stage_names) {
             const auto lower = ascii_lower(stage);
@@ -5033,6 +5633,18 @@ private:
                 outcome = run_rollback_stage();
             } else if (lower == "monitor") {
                 outcome = run_monitor_stage();
+            } else if (lower == "import data") {
+                outcome = run_import_data_stage();
+            } else if (lower == "clean data") {
+                outcome = run_clean_data_stage();
+            } else if (lower == "label data") {
+                outcome = run_label_data_stage();
+            } else if (lower == "split data") {
+                outcome = run_split_data_stage();
+            } else if (lower == "optimize") {
+                outcome = run_optimize_stage();
+            } else if (lower == "staging tests") {
+                outcome = run_staging_tests_stage();
             } else {
                 outcome = {"skipped",
                            "no automated executor exists for this stage yet"};
@@ -5699,7 +6311,13 @@ private:
     // Phase 71 factored this out of the GET /api/v1/ml/monitoring route so
     // an Automation Pipeline "Monitor" stage can attach the identical,
     // genuinely measured snapshot to its stage result instead of a second
-    // copy of the same query logic.
+    // copy of the same query logic. Phase 78 adds real per-request
+    // latency/queue-depth/throughput telemetry (ml_inference_metrics,
+    // fed by every real generation call site) -- still deliberately
+    // missing: live per-step training curves (the tabular trainer's runs
+    // are synchronous and complete before there is a meaningful "live"
+    // window to sample one from) and cache-hit rate (no KV-cache-hit
+    // instrumentation exists in the inference adapter to report on).
     std::string build_ml_monitoring_json() const {
         const auto hardware = probe_hardware(configuration.models_root);
         std::map<std::string, std::uint64_t> job_counts;
@@ -5774,10 +6392,16 @@ private:
             }
         }
         benchmarks_json += "]";
+        // Phase 78: real per-request latency/queue-depth telemetry, fed by
+        // every real generation call site (chat, RAG generation, inference
+        // endpoints) -- see InferenceMetricsStore's class comment.
+        const auto inference_metrics_snapshot = ml_inference_metrics.snapshot();
         return "{\"systemResources\":" + hardware_info_json(hardware) +
                ",\"trainingJobCounts\":" + job_counts_json +
                ",\"evaluationMetrics\":" + evaluations_json +
-               ",\"inferenceBenchmarks\":" + benchmarks_json + "}";
+               ",\"inferenceBenchmarks\":" + benchmarks_json +
+               ",\"inferenceRequests\":" +
+               inference_metrics_json(inference_metrics_snapshot) + "}";
     }
 
     // Best-effort pre-warm: starts the same load ensure_model_loaded() would
@@ -6112,6 +6736,275 @@ private:
         return materialize_prompt(segments);
     }
 
+    // Phase 76: real, single-turn, non-streaming generation for the RAG
+    // query route's optional `generate:true` mode -- reuses exactly the
+    // same prompt-assembly (assemble_chat_prompt) and inference call
+    // (inference->generate) the chat handler below uses, and honors the
+    // identical memory-admission/scheduler-admission contract (reserve/
+    // admit before generating, release/complete or cancel on every exit
+    // path) so a RAG answer cannot bypass the concurrency/memory limits
+    // the chat path is careful to enforce. Deliberately does not carry
+    // chat history, session-slot reuse, or query-lifecycle tracking --
+    // those are chat-specific concerns this one-shot call has no need of.
+    // Throws std::runtime_error (a real error, e.g. "inference backend not
+    // configured" or a memory/scheduler admission failure) rather than
+    // ever fabricating an answer.
+    GenerationResult execute_rag_generation(const std::string& model_id,
+                                            const std::string& prompt_text) {
+        if (inference == nullptr) {
+            throw std::runtime_error("inference backend is not configured");
+        }
+        const auto model = find_model(model_id);
+        if (!model) {
+            throw std::runtime_error("model \"" + model_id + "\" was not found");
+        }
+        ensure_model_loaded(model_id);
+        std::string stop_sequence;
+        const auto generation_prompt = assemble_chat_prompt(
+            model->manifest.architecture, {}, prompt_text, stop_sequence);
+        GenerationOptions options;
+        options.max_tokens = configuration.chat_max_reply_tokens;
+        if (!stop_sequence.empty()) options.stop_sequences.push_back(stop_sequence);
+        MemoryEstimate memory_estimate;
+        memory_estimate.runtime_buffer_bytes = 64ULL * 1024ULL * 1024ULL;
+        memory_estimate.kv_bytes_per_sequence = 128ULL * 1024ULL * 1024ULL;
+        memory_estimate.transient_bytes =
+            static_cast<std::uint64_t>(generation_prompt.size()) * 3U;
+        memory_estimate.safety_margin_bytes = 32ULL * 1024ULL * 1024ULL;
+        const auto admission =
+            memory->reserve(MemoryCategory::compute_buffers, memory_estimate, true);
+        if (!admission.admitted) {
+            throw std::runtime_error(admission.diagnostic);
+        }
+        std::string memory_lease_id = admission.lease_id;
+        const auto scheduling = request_scheduler->admit(
+            SchedulingClass::interactive_chat,
+            memory_estimate.runtime_buffer_bytes +
+                memory_estimate.kv_bytes_per_sequence +
+                memory_estimate.transient_bytes +
+                memory_estimate.safety_margin_bytes);
+        if (!scheduling.admitted || !scheduling.ticket.has_value()) {
+            memory->release(memory_lease_id);
+            throw std::runtime_error("inference queue admission failed: " +
+                                     scheduling.reason);
+        }
+        const auto scheduler_ticket = *scheduling.ticket;
+        model_usage->increment_waiting(model_id);
+        // Phase 78: real per-request telemetry -- begin_request() marks
+        // this request as queued/in-flight from admission through
+        // completion; end_request() always fires exactly once, with the
+        // real wall-clock latency, on every exit path below.
+        ml_inference_metrics.begin_request();
+        const auto request_started = std::chrono::steady_clock::now();
+        const auto record_end = [&]() {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - request_started);
+            ml_inference_metrics.end_request(static_cast<std::uint64_t>(
+                elapsed.count()));
+        };
+        const std::atomic_bool no_cancellation{false};
+        bool scheduler_running = false;
+        try {
+            if (!request_scheduler->wait_until_ready(scheduler_ticket,
+                                                     no_cancellation)) {
+                throw std::runtime_error(
+                    "inference request was cancelled or expired while queued");
+            }
+            model_usage->decrement_waiting(model_id);
+            scheduler_running = true;
+            const auto generated = inference->generate(
+                generation_prompt, options, [](const std::string&) {},
+                no_cancellation);
+            memory->release(memory_lease_id);
+            request_scheduler->complete(scheduler_ticket);
+            model_usage->record_use(model_id, epoch_seconds());
+            record_end();
+            return generated;
+        } catch (...) {
+            memory->release(memory_lease_id);
+            if (scheduler_running) {
+                request_scheduler->complete(scheduler_ticket);
+            } else {
+                model_usage->decrement_waiting(model_id);
+                request_scheduler->cancel(scheduler_ticket);
+            }
+            record_end();
+            throw;
+        }
+    }
+
+    // Phase 77: real network listener for one `active` InferenceEndpoint --
+    // closes the "does not open a real network listener, enforce the rate
+    // limit, or apply the safety/tool policy" gap InferenceEndpoint's class
+    // comment named. Runs on its own detached-from-the-caller background
+    // thread (started/stopped by the endpoint status route below), binds
+    // endpoint.host:endpoint.port with its own small accept loop (the same
+    // hand-rolled pattern HttpServer::run uses for the main listener --
+    // this codebase's socket layer is not a singleton object, so a second
+    // instance is a direct copy of that pattern, not new architecture),
+    // and serves exactly one route: `POST /v1/completions` with a
+    // `{"prompt":"..."}` body. Every request is authenticated (a Bearer
+    // token check against expected_authorization when the endpoint's
+    // authentication_method is not "none"), rate-limited (a real in-memory,
+    // per-minute counter local to this thread -- resets on restart, capped
+    // at endpoint.rate_limit_per_minute), and content-scanned (Phase 74's
+    // scan_content_for_risks, run over both the incoming prompt and the
+    // generated answer) before/after the exact same execute_rag_generation
+    // path Phase 76's RAG route uses -- no duplicated inference logic.
+    void run_inference_endpoint(const InferenceEndpoint endpoint,
+                                const std::string expected_authorization,
+                                const std::shared_ptr<std::atomic_bool> stop_flag) {
+#if defined(_WIN32)
+        WSADATA wsa_data{};
+        WSAStartup(MAKEWORD(2, 2), &wsa_data);
+#endif
+        const NativeSocket listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (listener == invalid_socket) {
+            log(LogLevel::error, "ml.endpoint.listen_failed", endpoint.id);
+            return;
+        }
+        const int reuse = 1;
+        setsockopt(listener, SOL_SOCKET, SO_REUSEADDR,
+                  reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(endpoint.port);
+        address.sin_addr.s_addr = endpoint.host.empty() || endpoint.host == "0.0.0.0"
+                                      ? INADDR_ANY
+                                      : inet_addr(endpoint.host.c_str());
+        if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
+            listen(listener, 16) != 0) {
+            log(LogLevel::error, "ml.endpoint.bind_failed",
+               endpoint.id + " " + endpoint.host + ":" +
+                   std::to_string(endpoint.port));
+            close_socket(listener);
+            return;
+        }
+        log(LogLevel::info, "ml.endpoint.listening",
+           endpoint.id + " " + endpoint.host + ":" +
+               std::to_string(endpoint.port));
+        std::uint64_t rate_window_minute = 0U;
+        std::uint32_t requests_this_window = 0U;
+        while (!stop_flag->load()) {
+            fd_set readable;
+            FD_ZERO(&readable);
+            FD_SET(listener, &readable);
+            timeval wait{};
+            wait.tv_sec = 0;
+            wait.tv_usec = 200000;
+#if defined(_WIN32)
+            const int selected = select(0, &readable, nullptr, nullptr, &wait);
+#else
+            const int selected = select(listener + 1, &readable, nullptr, nullptr, &wait);
+#endif
+            if (selected <= 0) continue;
+            const NativeSocket client = accept(listener, nullptr, nullptr);
+            if (client == invalid_socket) continue;
+            try {
+                std::string raw;
+                std::array<char, 8192> buffer{};
+                while (raw.size() < 16384U &&
+                      raw.find("\r\n\r\n") == std::string::npos) {
+                    const auto received =
+                        recv(client, buffer.data(), static_cast<int>(buffer.size()), 0);
+                    if (received <= 0) break;
+                    raw.append(buffer.data(), static_cast<std::size_t>(received));
+                }
+                const auto header_end = raw.find("\r\n\r\n");
+                if (header_end != std::string::npos) {
+                    const std::string headers = lower(raw.substr(0U, header_end));
+                    const std::string marker = "\r\ncontent-length:";
+                    const auto position = headers.find(marker);
+                    std::uint64_t content_length = 0U;
+                    if (position != std::string::npos) {
+                        const auto start =
+                            headers.find_first_not_of(' ', position + marker.size());
+                        const auto end = headers.find("\r\n", start);
+                        content_length = std::stoull(headers.substr(start, end - start));
+                    }
+                    while (content_length <= configuration.max_request_bytes &&
+                          raw.size() < header_end + 4U + content_length) {
+                        const auto received = recv(client, buffer.data(),
+                                                   static_cast<int>(buffer.size()), 0);
+                        if (received <= 0) break;
+                        raw.append(buffer.data(), static_cast<std::size_t>(received));
+                    }
+                }
+                const auto request = parse_request(raw, configuration.max_request_bytes);
+                const auto minute = epoch_seconds() / 60U;
+                if (minute != rate_window_minute) {
+                    rate_window_minute = minute;
+                    requests_this_window = 0U;
+                }
+                std::string response_body;
+                std::string status_line;
+                const auto authorization = request.headers.count("authorization")
+                                               ? request.headers.at("authorization")
+                                               : std::string{};
+                if (!expected_authorization.empty() &&
+                    !constant_time_equal(authorization, expected_authorization)) {
+                    status_line = "HTTP/1.1 401 Unauthorized";
+                    response_body = "{\"error\":\"unauthorized\"}";
+                } else if (request.method != "POST" ||
+                          request.target != "/v1/completions") {
+                    status_line = "HTTP/1.1 404 Not Found";
+                    response_body = "{\"error\":\"not_found\"}";
+                } else if (endpoint.rate_limit_per_minute > 0U &&
+                          ++requests_this_window > endpoint.rate_limit_per_minute) {
+                    status_line = "HTTP/1.1 429 Too Many Requests";
+                    response_body = "{\"error\":\"rate_limited\"}";
+                } else {
+                    try {
+                        auto root = parse_json(request.body);
+                        const auto prompt_text = root.required("prompt").as_string();
+                        const auto prompt_scan = scan_content_for_risks(prompt_text);
+                        if (!prompt_scan.clean()) {
+                            status_line = "HTTP/1.1 400 Bad Request";
+                            response_body =
+                                "{\"error\":\"content_scan_flagged_prompt\","
+                                "\"scan\":" + content_scan_report_json(prompt_scan) + "}";
+                        } else {
+                            const auto generated =
+                                execute_rag_generation(endpoint.model_id, prompt_text);
+                            const auto answer_scan =
+                                scan_content_for_risks(generated.text);
+                            status_line = "HTTP/1.1 200 OK";
+                            response_body =
+                                "{\"content\":\"" + json_escape(generated.text) +
+                                "\",\"promptTokens\":" +
+                                std::to_string(generated.prompt_tokens) +
+                                ",\"generatedTokens\":" +
+                                std::to_string(generated.generated_tokens) +
+                                ",\"elapsedMicroseconds\":" +
+                                std::to_string(generated.elapsed_microseconds) +
+                                ",\"contentScan\":" +
+                                content_scan_report_json(answer_scan) + "}";
+                            audit.append("ml.endpoint.request", endpoint.owner_id,
+                                        "success", endpoint.id);
+                        }
+                    } catch (const std::exception& error) {
+                        status_line = "HTTP/1.1 409 Conflict";
+                        response_body =
+                            "{\"error\":\"ml_endpoint_generation_failed\","
+                            "\"detail\":\"" + json_escape(error.what()) + "\"}";
+                        audit.append("ml.endpoint.request", endpoint.owner_id,
+                                    "failure", endpoint.id);
+                    }
+                }
+                const std::string wire = status_line +
+                    "\r\nContent-Type: application/json\r\nContent-Length: " +
+                    std::to_string(response_body.size()) +
+                    "\r\nConnection: close\r\n\r\n" + response_body;
+                send_all(client, wire);
+            } catch (const std::exception& error) {
+                log(LogLevel::warning, "ml.endpoint.request_failed", error.what());
+            }
+            close_socket(client);
+        }
+        close_socket(listener);
+        log(LogLevel::info, "ml.endpoint.stopped", endpoint.id);
+    }
+
     // Builds bounded chat context from attachments owned by the same user and
     // project, keeping attachment loops out of the streaming operation.
     std::string assemble_inference_prompt(
@@ -6322,6 +7215,11 @@ private:
         std::optional<ScheduledTicket> scheduler_ticket;
         bool scheduler_running = false;
         bool model_waiting_recorded = false;
+        // Phase 78: set the moment this request is actually admitted into
+        // the scheduler (see scheduler_ticket assignment below); used only
+        // to time the failure path below, since the success path already
+        // has generated.elapsed_microseconds as its real measured latency.
+        auto request_started = std::chrono::steady_clock::now();
         std::atomic_bool cancellation{false};
         // Tokens are streamed to the client as they arrive, so a client
         // watching the reply has already seen this text by the time
@@ -6574,6 +7472,10 @@ private:
                     "inference queue admission failed: " + scheduling.reason);
             }
             scheduler_ticket = scheduling.ticket;
+            // Phase 78: real per-request telemetry begins the moment this
+            // request actually enters the queue.
+            ml_inference_metrics.begin_request();
+            request_started = std::chrono::steady_clock::now();
             model_usage->increment_waiting(chat->model_id);
             model_waiting_recorded = true;
             const bool streaming = stream_socket != invalid_socket;
@@ -6724,6 +7626,7 @@ private:
             request_scheduler->complete(*scheduler_ticket);
             scheduler_running = false;
             model_usage->record_use(chat->model_id, epoch_seconds());
+            ml_inference_metrics.end_request(generated.elapsed_microseconds);
             audit.append("chat.generate", user.id, "success", chat_id);
             if (streaming) {
                 send_chunk(
@@ -6766,6 +7669,14 @@ private:
                     request_scheduler->cancel(*scheduler_ticket);
                 }
                 scheduler_running = false;
+                // Phase 78: this request was actually admitted (begin_request()
+                // ran above), so its failure must still be recorded, timed
+                // from the same request_started admission moment.
+                const auto elapsed = std::chrono::duration_cast<
+                    std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - request_started);
+                ml_inference_metrics.end_request(
+                    static_cast<std::uint64_t>(elapsed.count()));
             }
             if (configuration.session_reuse_enabled) {
                 prompt_sessions->release(chat_id);
@@ -6825,6 +7736,26 @@ private:
     AppConfig configuration;
     RecordStore records;
     AuditLog audit;
+    // Phase 75: holds each non-local ComputeNode's real telemetry-agent
+    // shared secret, keyed by node id, so the .../telemetry route can
+    // actually present it to the agent on every poll. ComputeNode itself
+    // only ever persists the secret's hash (agent_shared_secret_hash,
+    // matching the setup-token hash convention), since that record is
+    // returned to callers of GET .../compute-nodes; this is the one place
+    // the plaintext lives, encrypted at rest the same way SecretStore
+    // already protects the IDE MCP token in main.cpp.
+    // Phase 78: real per-request latency/queue-depth telemetry, fed by
+    // every real generation call site (chat below, execute_rag_generation)
+    // and surfaced by build_ml_monitoring_json().
+    InferenceMetricsStore ml_inference_metrics;
+    // Phase 77: one background listener thread per `active` InferenceEndpoint
+    // (see run_inference_endpoint), keyed by endpoint id. The
+    // shared_ptr<atomic_bool> is that thread's own stop flag; flipping it
+    // and joining is how a status change away from `active` (or delete)
+    // really stops the listener, not just the database record.
+    std::map<std::string, std::pair<std::thread, std::shared_ptr<std::atomic_bool>>>
+        inference_endpoint_threads;
+    std::mutex inference_endpoint_threads_mutex;
     // Phase 30A: empty unless the caller (HttpServer's two-argument
     // constructor, wired from main.cpp's `serve` command) supplied the real
     // settings.json path -- see the admin configuration API below, which
@@ -6867,6 +7798,7 @@ private:
     std::unique_ptr<DatasetContentStore> ml_dataset_content;
     std::unique_ptr<TrainedModelStore> ml_trained_models;
     std::unique_ptr<EvaluationResultStore> ml_evaluation_results;
+    std::unique_ptr<FineTuningRunResultStore> ml_llm_finetune_results;
     std::unique_ptr<ModelComparisonStore> ml_model_comparisons;
     std::unique_ptr<ComparisonResultStore> ml_comparison_results;
     std::unique_ptr<KnowledgeIndexStore> ml_knowledge_index;

@@ -28,10 +28,10 @@
   "claude:claude-sonnet-5": {
     "provider": "claude",
     "model": "claude-sonnet-5",
-    "structuredOutputValidCount": 5,
+    "structuredOutputValidCount": 34,
     "structuredOutputInvalidCount": 2,
-    "totalLatencyMs": 327437,
-    "latencySampleCount": 10,
+    "totalLatencyMs": 452263,
+    "latencySampleCount": 39,
     "patchAcceptedCount": 0,
     "patchRejectedCount": 0,
     "hallucinatedFileCount": 0,

@@ -102,6 +102,12 @@ void apply_values(AppConfig& config,
         } else if (item.first == "curlExecutable" ||
                    item.first == "MASTERAI_CURL") {
             config.curl_executable = item.second;
+        } else if (item.first == "llamaFinetuneExecutable" ||
+                   item.first == "MASTERAI_LLAMA_FINETUNE") {
+            config.llama_finetune_executable = item.second;
+        } else if (item.first == "llamaExportLoraExecutable" ||
+                   item.first == "MASTERAI_LLAMA_EXPORT_LORA") {
+            config.llama_export_lora_executable = item.second;
         } else if (item.first == "parquetHelperExecutable" ||
                    item.first == "MASTERAI_PARQUET_HELPER") {
             config.parquet_helper_executable = item.second;
@@ -166,7 +172,7 @@ AppConfig ConfigurationManager::load(
                             "workspace", "models", "inference", "downloads",
                             "knowledge", "memory", "hardware", "indexing",
                             "retrieval", "cache", "session", "performance",
-                            "storage"}, "");
+                            "storage", "machineLearning"}, "");
         config.schema_version =
             static_cast<int>(root.required("schemaVersion").as_integer());
 
@@ -281,10 +287,23 @@ AppConfig ConfigurationManager::load(
             require_only(*inference,
                          {"llamaServerExecutable", "runnerPort",
                           "chatMaxReplyTokens", "chatContextLength",
-                          "startupTimeoutSeconds", "stallTimeoutSeconds"},
+                          "startupTimeoutSeconds", "stallTimeoutSeconds",
+                          "llamaFinetuneExecutable",
+                          "llamaExportLoraExecutable"},
                          "inference.");
             config.llama_server_executable =
                 inference->required("llamaServerExecutable").as_string();
+            // Phase 73: optional -- empty disables real LLM LoRA
+            // fine-tuning (see LlmFineTuneOptions in masterai.hpp).
+            if (inference->optional("llamaFinetuneExecutable") != nullptr) {
+                config.llama_finetune_executable =
+                    inference->required("llamaFinetuneExecutable").as_string();
+            }
+            if (inference->optional("llamaExportLoraExecutable") != nullptr) {
+                config.llama_export_lora_executable =
+                    inference->required("llamaExportLoraExecutable")
+                        .as_string();
+            }
             config.runner_port = static_cast<std::uint16_t>(
                 positive(*inference, "runnerPort", 65535U));
             if (inference->optional("chatMaxReplyTokens") != nullptr) {
@@ -446,7 +465,8 @@ void ConfigurationManager::validate(const AppConfig& config) {
     }
     for (const auto& executable :
          {config.llama_server_executable, config.curl_executable,
-          config.parquet_helper_executable}) {
+          config.parquet_helper_executable, config.llama_finetune_executable,
+          config.llama_export_lora_executable}) {
         if (!executable.empty() &&
             (!std::filesystem::is_regular_file(executable) ||
              std::filesystem::is_symlink(executable))) {
@@ -518,6 +538,10 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         std::to_string(c.runner_startup_timeout_seconds) +
         ",\"stallTimeoutSeconds\":" +
         std::to_string(c.runner_stall_timeout_seconds) +
+        ",\"llamaFinetuneExecutable\":" +
+        quote(c.llama_finetune_executable.string()) +
+        ",\"llamaExportLoraExecutable\":" +
+        quote(c.llama_export_lora_executable.string()) +
         "},\n"
         "  \"downloads\":{\"curlExecutable\":" +
         quote(c.curl_executable.string()) + "},\n"

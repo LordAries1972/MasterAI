@@ -423,6 +423,92 @@ TabularDataset parse_tabular_csv(const std::string& csv,
     return data;
 }
 
+TabularCleanReport clean_tabular_csv(const std::string& csv) {
+    // Split into raw lines without dropping blanks yet (unlike
+    // parse_tabular_csv's line split) so blank rows can be counted rather
+    // than silently disappearing.
+    std::vector<std::string> raw_lines;
+    std::size_t position = 0U;
+    while (position <= csv.size()) {
+        const auto newline = csv.find('\n', position);
+        const auto end = newline == std::string::npos ? csv.size() : newline;
+        raw_lines.push_back(csv.substr(position, end - position));
+        if (newline == std::string::npos) break;
+        position = newline + 1U;
+    }
+    // A trailing newline produces one final empty "line" that is a
+    // formatting artifact, not a data row -- drop it before counting.
+    if (raw_lines.size() > 1U && trim(raw_lines.back()).empty()) {
+        raw_lines.pop_back();
+    }
+    if (raw_lines.empty()) {
+        throw std::runtime_error("dataset has no content to clean");
+    }
+    TabularCleanReport report;
+    const std::string header = trim(raw_lines.front());
+    report.rows_before = raw_lines.size() - 1U;
+    std::vector<std::string> cleaned;
+    std::set<std::string> seen;
+    for (std::size_t index = 1; index < raw_lines.size(); ++index) {
+        const auto trimmed = trim(raw_lines[index]);
+        if (trimmed.empty()) {
+            ++report.blank_rows_removed;
+            continue;
+        }
+        if (!seen.insert(trimmed).second) {
+            ++report.duplicate_rows_removed;
+            continue;
+        }
+        cleaned.push_back(trimmed);
+    }
+    report.rows_after = cleaned.size();
+    std::string rebuilt = header;
+    for (const auto& row : cleaned) {
+        rebuilt += "\n";
+        rebuilt += row;
+    }
+    report.csv = std::move(rebuilt);
+    return report;
+}
+
+TabularSplitReport split_tabular_csv(const std::string& csv,
+                                     const std::string& target_column,
+                                     const double holdout_fraction) {
+    // Real parse first, so a malformed dataset fails the split the same
+    // honest way "Validate data" fails validation.
+    const auto data = parse_tabular_csv(csv, target_column);
+    if (holdout_fraction < 0.0 || holdout_fraction > 0.9) {
+        throw std::runtime_error("holdout fraction must be in [0, 0.9]");
+    }
+    const std::size_t row_count = data.features.size();
+    // Identical formula to train_tabular_model's internal split, so the
+    // reported counts are exactly what a subsequent Train model stage will
+    // actually use, not a second, possibly-inconsistent calculation.
+    auto holdout_count = static_cast<std::size_t>(holdout_fraction *
+                                                   static_cast<double>(row_count));
+    if (holdout_count >= row_count) holdout_count = row_count - 1U;
+    TabularSplitReport report;
+    report.total_rows = row_count;
+    report.holdout_rows = holdout_count;
+    report.train_rows = row_count - holdout_count;
+    return report;
+}
+
+TabularPruneReport prune_tabular_model(TrainedTabularModel& model,
+                                       const double threshold) {
+    TabularPruneReport report;
+    for (auto& row : model.weights) {
+        for (auto& weight : row) {
+            ++report.weights_total;
+            if (std::abs(weight) < threshold) {
+                weight = 0.0;
+            }
+            if (weight == 0.0) ++report.weights_pruned;
+        }
+    }
+    return report;
+}
+
 DatasetContentStore::DatasetContentStore(RecordStore& records)
     : records_(&records) {}
 

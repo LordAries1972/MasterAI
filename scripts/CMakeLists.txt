@@ -51,6 +51,10 @@ add_library(masterai_core STATIC
     ../src/ml.cpp
     ../src/ml_engine.cpp
     ../src/ml_knowledge.cpp
+    ../src/ml_finetune.cpp
+    ../src/ml_safety_scan.cpp
+    ../src/telemetry_agent.cpp
+    ../src/inference_metrics.cpp
     ../src/parquet_bridge.cpp
     ../src/http_support.cpp
     ../src/integration_http.cpp

@@ -7,9 +7,9 @@
     "agentCoder.integration.defaultStrategy": "single",
     "agentCoder.integration.headlessReadOnlyEnabled": true,
     "agentCoder.integration.auditRetentionDays": 90,
-    "agentCoder.liveContext.enabled": false,
+    "agentCoder.liveContext.enabled": true,
     "agentCoder.liveValidation.continuous": true,
-    "agentCoder.liveValidation.debounceMs": 650,
+    "agentCoder.liveValidation.debounceMs": 1000,
     "agentCoder.liveValidation.publishDiagnostics": true,
     "agentCoder.liveValidation.persistHistory": true,
     "agentCoder.liveAI.enabled": true,
@@ -22,5 +22,7 @@
     "agentCoder.documenter.includeGeneratedFiles": true,
     "agentCoder.documenter.useAIOverview": true,
     "masterai.executable": "F:/Projects/C++/MasterAI/build/Windows-x64/Debug/masterai.exe",
-    "masterai.settingsFile": "F:/Projects/C++/MasterAI/runtime/validation/phase5-browser-20260805-2/settings.json"
+    "masterai.settingsFile": "F:/Projects/C++/MasterAI/runtime/validation/phase5-browser-20260805-2/settings.json",
+    "agentCoder.startup.coldStartTimeoutSeconds": 2,
+    "agentCoder.startup.licenseReverifyStaleMinutes": 1
 }

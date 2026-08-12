@@ -15,7 +15,7 @@
   "allowNewDependencies": true,
   "tokenBudget": {
     "maximumInputTokens": 30000,
-    "maximumOutputTokens": 15000,
+    "maximumOutputTokens": 20000,
     "reservedForRepair": 5000,
     "reservedForValidation": 2000
   },
@@ -124,7 +124,10 @@
     "localTestLaboratory": true,
     "problemSolvingContainer": true,
     "liveEngineeringContext": true,
-    "slopGuard": true
+    "slopGuard": true,
+    "invariantControlCentre": true,
+    "professionalPlanSystem": true,
+    "toolchainControlCentre": true
   },
   "autonomousTaskBudget": {
     "maximumDurationMs": 600000,
@@ -145,5 +148,6 @@
     "warnAtBudgetPercentage": 75,
     "requireApprovalAtBudgetPercentage": 90,
     "hardStopAtBudgetPercentage": 100
-  }
+  },
+  "maxScannedFileSizeMB": 10
 }
