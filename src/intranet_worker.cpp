@@ -740,6 +740,24 @@ struct IntranetWorkerPool::Entry {
         std::lock_guard<std::mutex> lock(health_mutex);
         return consecutive_failures;
     }
+
+    // Member rather than a free function taking a `const Entry&`: a free
+    // function cannot name the private nested type `Entry` in its own
+    // parameter list from outside IntranetWorkerPool, so this lives inside
+    // Entry's own scope instead.
+    SslPtr open_channel(const PrivateCertificateAuthority& ca,
+                        const std::filesystem::path& client_certificate_file,
+                        const std::filesystem::path& client_private_key_file,
+                        SslCtxPtr& ctx_storage) const {
+        ctx_storage = build_mutual_tls_context(false, ca.certificate_file,
+                                               client_certificate_file,
+                                               client_private_key_file);
+        auto ssl = connect_mutual_tls(ctx_storage.get(), config.host,
+                                      config.port, std::chrono::seconds(10));
+        verify_pinned_peer_certificate(
+            ssl.get(), config.expected_server_certificate_sha256);
+        return ssl;
+    }
 };
 
 IntranetWorkerPool::IntranetWorkerPool(std::vector<IntranetWorkerConfig> workers,
@@ -790,31 +808,14 @@ const IntranetWorkerPool::Entry& IntranetWorkerPool::required(
     throw std::runtime_error("unknown intranet worker id: " + worker_id);
 }
 
-namespace {
-SslPtr open_worker_channel(const IntranetWorkerPool::Entry& entry,
-                          const PrivateCertificateAuthority& ca,
-                          const std::filesystem::path& client_certificate_file,
-                          const std::filesystem::path& client_private_key_file,
-                          SslCtxPtr& ctx_storage) {
-    ctx_storage = build_mutual_tls_context(false, ca.certificate_file,
-                                           client_certificate_file,
-                                           client_private_key_file);
-    auto ssl = connect_mutual_tls(ctx_storage.get(), entry.config.host,
-                                  entry.config.port, std::chrono::seconds(10));
-    verify_pinned_peer_certificate(
-        ssl.get(), entry.config.expected_server_certificate_sha256);
-    return ssl;
-}
-}  // namespace
-
 void IntranetWorkerPool::refresh_status(
     const std::string& worker_id,
     const std::map<std::string, std::string>& known_model_sha256_by_id) {
     auto& entry = required(worker_id);
     try {
         SslCtxPtr ctx;
-        auto ssl = open_worker_channel(entry, ca_, client_certificate_file_,
-                                       client_private_key_file_, ctx);
+        auto ssl = entry.open_channel(ca_, client_certificate_file_,
+                                      client_private_key_file_, ctx);
         const auto result =
             tls_http(ssl.get(), "GET", "/worker/status", entry.config.host,
                     "", std::chrono::seconds(10));
@@ -921,8 +922,8 @@ GenerationResult IntranetWorkerPool::generate(
             ",\"top_p\":" + std::to_string(options.top_p) +
             ",\"top_k\":" + std::to_string(options.top_k) + ",\"stream\":false}";
         SslCtxPtr ctx;
-        auto ssl = open_worker_channel(entry, ca_, client_certificate_file_,
-                                       client_private_key_file_, ctx);
+        auto ssl = entry.open_channel(ca_, client_certificate_file_,
+                                      client_private_key_file_, ctx);
         if (cancellation.load()) {
             generated.cancelled = true;
             entry.record_success();
@@ -966,8 +967,8 @@ EmbeddingResult IntranetWorkerPool::embed(const std::string& worker_id,
     auto& entry = required(worker_id);
     try {
         SslCtxPtr ctx;
-        auto ssl = open_worker_channel(entry, ca_, client_certificate_file_,
-                                       client_private_key_file_, ctx);
+        auto ssl = entry.open_channel(ca_, client_certificate_file_,
+                                      client_private_key_file_, ctx);
         const std::string body =
             "{\"text\":\"" + json_string_escape(text) + "\"}";
         const auto result = tls_http(ssl.get(), "POST", "/worker/embed",

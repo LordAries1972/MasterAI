@@ -1510,11 +1510,12 @@ public:
             signals.memory = memory->sample();
             signals.scheduler = request_scheduler->status();
             signals.cache = cache->status();
-            const auto now = static_cast<std::uint64_t>(
+            const auto evaluate_now = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count());
-            const auto report = adaptive_controller->evaluate(signals, *memory, now);
+            const auto report =
+                adaptive_controller->evaluate(signals, *memory, evaluate_now);
             return response(200, "OK", AdaptiveController::to_json(report));
         }
         // Phase 34: administrator mode selection -- one of the named

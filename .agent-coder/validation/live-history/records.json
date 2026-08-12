@@ -1,49 +1,5 @@
 [
   {
-    "relativePath": "src/web_ui.cpp",
-    "languageId": "cpp",
-    "contentHash": "6675d1ddfe51f51b944d3299172a4de2aa66f94f53869cf6b53cb42fde23fbb6",
-    "documentVersion": 42,
-    "timestampMs": 1785819270705,
-    "outcome": "tool-unavailable",
-    "toolIdentity": "g++/clang++/cl",
-    "durationMs": 0,
-    "diagnosticFingerprints": []
-  },
-  {
-    "relativePath": "src/web_ui.cpp",
-    "languageId": "cpp",
-    "contentHash": "06dc41a7877b6ce8fb4375ca1368cbfceaaf29540ea3f5d89c6833fbcd5a09ba",
-    "documentVersion": 43,
-    "timestampMs": 1785819276891,
-    "outcome": "tool-unavailable",
-    "toolIdentity": "g++/clang++/cl",
-    "durationMs": 0,
-    "diagnosticFingerprints": []
-  },
-  {
-    "relativePath": "test/tests.cpp",
-    "languageId": "cpp",
-    "contentHash": "9a2b7d916d0d06507987a0d9e4e195f15f53221d1fbafef7fee8308d4e286590",
-    "documentVersion": 16,
-    "timestampMs": 1785819290787,
-    "outcome": "tool-unavailable",
-    "toolIdentity": "g++/clang++/cl",
-    "durationMs": 0,
-    "diagnosticFingerprints": []
-  },
-  {
-    "relativePath": "test/tests.cpp",
-    "languageId": "cpp",
-    "contentHash": "c776e4f060c3c95ecd6889f1634124150003f04d9809c5036e846e1ba38ddfc7",
-    "documentVersion": 17,
-    "timestampMs": 1785819305344,
-    "outcome": "tool-unavailable",
-    "toolIdentity": "g++/clang++/cl",
-    "durationMs": 0,
-    "diagnosticFingerprints": []
-  },
-  {
     "relativePath": "docs/PLAN.md",
     "languageId": "markdown",
     "contentHash": "e31f9dd2e61b1e2bb53504383b8eae3c9d859e541bd69ae9c4e282782f8155b8",
@@ -5498,6 +5454,50 @@
     "outcome": "valid",
     "toolIdentity": "g++",
     "durationMs": 3328,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "src/intranet_worker.cpp",
+    "languageId": "cpp",
+    "contentHash": "23c3dcd3c2b501fd29d6f98e77eade187f642a7944df885fe54acf63986a5c5e",
+    "documentVersion": 7,
+    "timestampMs": 1786578153248,
+    "outcome": "inconclusive",
+    "toolIdentity": "g++",
+    "durationMs": 107,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "src/intranet_worker.cpp",
+    "languageId": "cpp",
+    "contentHash": "f61cfedb253162aef73c8cec0759f258eb54e9ef04406abecda19501ef54ce47",
+    "documentVersion": 8,
+    "timestampMs": 1786578159403,
+    "outcome": "inconclusive",
+    "toolIdentity": "g++",
+    "durationMs": 96,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "src/intranet_worker.cpp",
+    "languageId": "cpp",
+    "contentHash": "7c0be933ff7c68f1696cce944ace2a4ce436ef5cee97077a20f51408331ae720",
+    "documentVersion": 9,
+    "timestampMs": 1786578174019,
+    "outcome": "inconclusive",
+    "toolIdentity": "g++",
+    "durationMs": 115,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "src/server.cpp",
+    "languageId": "cpp",
+    "contentHash": "8d493e761703e7b27fa937d67708af770e0aa0e6249ef3e3f38580321bae84d2",
+    "documentVersion": 13,
+    "timestampMs": 1786578196003,
+    "outcome": "inconclusive",
+    "toolIdentity": "g++",
+    "durationMs": 102,
     "diagnosticFingerprints": []
   }
 ]
