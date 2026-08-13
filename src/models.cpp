@@ -727,6 +727,37 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
     // calibration actually reasoned about.
     arguments.emplace_back("--ctx-checkpoints");
     arguments.emplace_back("2");
+    // Phase 32: the real dual-model (draft + target) launch path. Empty
+    // speculative_draft_model_file reproduces exactly today's single-model
+    // launch; every caller that never sets it is unaffected. The caller
+    // (server.cpp's ensure_model_loaded) is responsible for having already
+    // run check_draft_target_compatibility()/decide_speculative_decoding_
+    // for_request() and for only reaching here after AdvancedOptimization
+    // Registry has admitted "speculative_decoding" -- this function only
+    // ever emits the flags, it never re-derives whether launching together
+    // was actually a good idea.
+    if (!tuning.speculative_draft_model_file.empty()) {
+        if (!std::filesystem::is_regular_file(
+                tuning.speculative_draft_model_file)) {
+            throw std::runtime_error(
+                "speculative decoding draft model file does not exist");
+        }
+        arguments.emplace_back("--model-draft");
+        arguments.emplace_back(tuning.speculative_draft_model_file.string());
+        if (tuning.speculative_draft_gpu_layers > 0U) {
+            arguments.emplace_back("--gpu-layers-draft");
+            arguments.emplace_back(
+                std::to_string(tuning.speculative_draft_gpu_layers));
+        }
+        // llama.cpp's own documented defaults for the draft acceptance
+        // window: at most 16 tokens speculated per step, never fewer than
+        // 5 -- conservative, well below any context-length concern, and
+        // independent of context_length/parallel_slots above.
+        arguments.emplace_back("--draft-max");
+        arguments.emplace_back("16");
+        arguments.emplace_back("--draft-min");
+        arguments.emplace_back("5");
+    }
     std::map<std::string, std::string> environment;
     if (cpu_only) {
         // Hide every GPU from the runner process at the library level, so a

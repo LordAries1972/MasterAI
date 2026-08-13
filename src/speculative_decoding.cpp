@@ -7,7 +7,41 @@
 // existing request's behavior.
 #include "masterai.hpp"
 
+#include <cmath>
+
 namespace masterai {
+namespace {
+
+// Mirrors inference.cpp's own json_escape() exactly (this file cannot
+// include inference.cpp's anonymous-namespace helper directly) -- escapes a
+// raw string for embedding inside a manually-built JSON string literal.
+std::string json_escape(const std::string& value) {
+    std::string result;
+    result.reserve(value.size() + 16U);
+    for (const unsigned char character : value) {
+        switch (character) {
+            case '"': result += "\\\""; break;
+            case '\\': result += "\\\\"; break;
+            case '\b': result += "\\b"; break;
+            case '\f': result += "\\f"; break;
+            case '\n': result += "\\n"; break;
+            case '\r': result += "\\r"; break;
+            case '\t': result += "\\t"; break;
+            default:
+                if (character < 0x20U) {
+                    static constexpr char digits[] = "0123456789abcdef";
+                    result += "\\u00";
+                    result.push_back(digits[character >> 4U]);
+                    result.push_back(digits[character & 0x0fU]);
+                } else {
+                    result.push_back(static_cast<char>(character));
+                }
+        }
+    }
+    return result;
+}
+
+}  // namespace
 
 DraftTargetCompatibilityResult check_draft_target_compatibility(
     const ModelManifest& target, const ModelManifest& draft) {
@@ -129,6 +163,113 @@ SpeculativeDecodingDecision decide_speculative_decoding_for_request(
     }
     return {true, "draft/target compatible, acceptance rate and headroom "
                  "sufficient"};
+}
+
+std::optional<ModelRecord> select_speculative_draft_candidate(
+    const ModelManifest& target, const std::vector<ModelRecord>& candidates) {
+    const ModelRecord* best = nullptr;
+    for (const auto& candidate : candidates) {
+        if (candidate.manifest.id == target.id) continue;
+        if (!check_draft_target_compatibility(target, candidate.manifest)
+                 .compatible) {
+            continue;
+        }
+        if (best == nullptr ||
+            candidate.manifest.model_size_bytes <
+                best->manifest.model_size_bytes) {
+            best = &candidate;
+        }
+    }
+    if (best == nullptr) return std::nullopt;
+    return *best;
+}
+
+SpeculativeDecodingPairEvidenceStore::SpeculativeDecodingPairEvidenceStore(
+    RecordStore& records)
+    : records_(&records) {
+    for (const auto& item : records_->list("speculative_decoding_pairs")) {
+        if (item.first.size() != 129U || item.first[64] != '|') {
+            throw std::runtime_error(
+                "persisted speculative-decoding pair record is malformed");
+        }
+        PairRecord record;
+        record.target_model_sha256 = item.first.substr(0U, 64U);
+        record.draft_model_sha256 = item.first.substr(65U);
+        record.acceptance_rate = std::stod(item.second);
+        pairs_[item.first] = record;
+    }
+}
+
+std::string SpeculativeDecodingPairEvidenceStore::pair_key(
+    const std::string& target_model_sha256,
+    const std::string& draft_model_sha256) {
+    return target_model_sha256 + "|" + draft_model_sha256;
+}
+
+void SpeculativeDecodingPairEvidenceStore::record(
+    const std::string& target_model_sha256,
+    const std::string& draft_model_sha256, const double acceptance_rate) {
+    if (target_model_sha256.size() != 64U || draft_model_sha256.size() != 64U) {
+        throw std::invalid_argument(
+            "speculative-decoding pair evidence requires two full sha256 "
+            "digests");
+    }
+    if (!std::isfinite(acceptance_rate) || acceptance_rate < 0.0 ||
+        acceptance_rate > 1.0) {
+        throw std::invalid_argument(
+            "speculative-decoding acceptance rate must be within [0.0, 1.0]");
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    PairRecord entry;
+    entry.target_model_sha256 = target_model_sha256;
+    entry.draft_model_sha256 = draft_model_sha256;
+    entry.acceptance_rate = acceptance_rate;
+    const auto key = pair_key(target_model_sha256, draft_model_sha256);
+    pairs_[key] = entry;
+    if (records_ != nullptr) {
+        records_->put("speculative_decoding_pairs", key,
+                      std::to_string(acceptance_rate));
+    }
+}
+
+std::optional<double> SpeculativeDecodingPairEvidenceStore::lookup(
+    const std::string& target_model_sha256,
+    const std::string& draft_model_sha256) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found =
+        pairs_.find(pair_key(target_model_sha256, draft_model_sha256));
+    if (found == pairs_.end()) return std::nullopt;
+    return found->second.acceptance_rate;
+}
+
+std::vector<SpeculativeDecodingPairEvidenceStore::PairRecord>
+SpeculativeDecodingPairEvidenceStore::all() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PairRecord> result;
+    result.reserve(pairs_.size());
+    for (const auto& [key, record] : pairs_) {
+        static_cast<void>(key);
+        result.push_back(record);
+    }
+    return result;
+}
+
+std::string speculative_decoding_pairs_json(
+    const std::vector<SpeculativeDecodingPairEvidenceStore::PairRecord>& pairs) {
+    std::string result = "[";
+    bool first = true;
+    for (const auto& pair : pairs) {
+        if (!first) result += ",";
+        first = false;
+        result += "{\"targetModelSha256\":\"" +
+                  json_escape(pair.target_model_sha256) +
+                  "\",\"draftModelSha256\":\"" +
+                  json_escape(pair.draft_model_sha256) +
+                  "\",\"acceptanceRate\":" +
+                  std::to_string(pair.acceptance_rate) + "}";
+    }
+    result += "]";
+    return result;
 }
 
 }  // namespace masterai

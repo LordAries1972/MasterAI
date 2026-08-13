@@ -2101,6 +2101,21 @@ struct LaunchTuning {
     // HttpServer enables it only after AdvancedOptimizationRegistry admits
     // the measured `continuous_batching` candidate.
     bool continuous_batching{false};
+    // Phase 32: the dual-model (draft + target) launch path. Empty by
+    // default, reproducing exactly today's single-model launch for every
+    // existing caller. Populated only by a caller that has already run
+    // check_draft_target_compatibility() and decide_speculative_decoding_
+    // for_request() successfully, and only after AdvancedOptimizationRegistry
+    // has admitted "speculative_decoding" -- build_launch_spec() itself does
+    // not re-derive compatibility, it only emits the flags. Honest limitation
+    // (matches the LoRA fine-tune CLI flags' own disclosed gap in ml_finetune
+    // .cpp): these are llama.cpp server's long-standing, documented
+    // speculative-decoding flags, but this codebase cannot verify which
+    // flags an administrator-vendored llama-server binary actually accepts,
+    // so an incompatible binary surfaces as an ordinary runner-launch
+    // failure rather than a distinct diagnostic.
+    std::filesystem::path speculative_draft_model_file;
+    unsigned int speculative_draft_gpu_layers{0};
 };
 
 // Forward declaration only: RunnerSupervisor below stores an optional
@@ -7085,6 +7100,63 @@ SpeculativeDecodingDecision decide_speculative_decoding_for_request(
     const SpeculativeDecodingRequestContext& context,
     double minimum_acceptance_rate = 0.6,
     std::uint32_t minimum_tokens_to_bother = 64U);
+
+// Real dual-model launch path (closes the exact gap the Phase 32 status
+// entry named: "there is no dual-model (draft+target concurrently
+// resident) launch path yet"). Filters `candidates` down to every model
+// check_draft_target_compatibility() accepts against `target`, then returns
+// the smallest compatible one (the draft with the most speed potential --
+// mirrors this codebase's existing "smaller is always at least as good"
+// reasoning already used for other size-driven picks). Returns nullopt when
+// no candidate is compatible, never a best-effort guess at an incompatible
+// pair. `candidates` may include `target` itself; it is always excluded
+// (check_draft_target_compatibility() already rejects target.id == draft.id).
+std::optional<ModelRecord> select_speculative_draft_candidate(
+    const ModelManifest& target, const std::vector<ModelRecord>& candidates);
+
+// Phase 32: durable, administrator-submitted measured acceptance rate for
+// one (target, draft) model pair. Deliberately separate from
+// AdvancedOptimizationRegistry's evidence (Phase 20): that registry's
+// AdvancedOptimizationEvidence is a one-time global admission gate for the
+// "speculative_decoding" feature as a whole (before/after throughput,
+// never a per-pair figure), while decide_speculative_decoding_for_request()
+// needs a real measured acceptance rate for the *specific* pair about to be
+// launched together -- and this codebase never fabricates a starting
+// assumption for an unproven pair (see SpeculativeDecodingStats' own class
+// comment). An administrator records this only after actually observing a
+// pair run (e.g. via an external benchmark, or a vendor's published
+// figure); nothing here self-populates from live traffic in this pass.
+class SpeculativeDecodingPairEvidenceStore final {
+public:
+    SpeculativeDecodingPairEvidenceStore() = default;
+    explicit SpeculativeDecodingPairEvidenceStore(RecordStore& records);
+
+    // Throws for an acceptance_rate outside [0.0, 1.0] -- the same
+    // "reject rather than silently clamp a bad input" discipline every
+    // other evidence-recording entry point in this codebase already
+    // follows (see AdvancedOptimizationRegistry::record_evidence()).
+    void record(const std::string& target_model_sha256,
+               const std::string& draft_model_sha256,
+               double acceptance_rate);
+    std::optional<double> lookup(const std::string& target_model_sha256,
+                                 const std::string& draft_model_sha256) const;
+    struct PairRecord {
+        std::string target_model_sha256;
+        std::string draft_model_sha256;
+        double acceptance_rate{0.0};
+    };
+    std::vector<PairRecord> all() const;
+
+private:
+    static std::string pair_key(const std::string& target_model_sha256,
+                                const std::string& draft_model_sha256);
+    RecordStore* records_{nullptr};
+    mutable std::mutex mutex_;
+    std::map<std::string, PairRecord> pairs_;
+};
+
+std::string speculative_decoding_pairs_json(
+    const std::vector<SpeculativeDecodingPairEvidenceStore::PairRecord>& pairs);
 
 struct RetrievalCacheBenchmarkReport {
     std::uint64_t iterations{0};

@@ -318,6 +318,8 @@ public:
         records.open();
         advanced_optimizations =
             std::make_unique<AdvancedOptimizationRegistry>(records);
+        speculative_pair_evidence =
+            std::make_unique<SpeculativeDecodingPairEvidenceStore>(records);
         model_usage = std::make_unique<ModelUsagePredictor>();
         const auto hardware = probe_hardware(value.runtime_root);
         const auto profile =
@@ -1293,6 +1295,67 @@ public:
                 return response(
                     400, "Bad Request",
                     "{\"error\":\"advanced_optimization_rejected\"}");
+            }
+        }
+        // Phase 32: durable, administrator-submitted measured acceptance
+        // rate for one (target, draft) model pair -- separate from the
+        // Phase 20 advanced-optimizations route above, which only ever
+        // records a one-time global before/after admission figure, never a
+        // per-pair acceptance rate. GET lists every recorded pair; POST
+        // records one. Nothing here enables speculative decoding by itself
+        // -- ensure_model_loaded() only ever consults a recorded pair after
+        // "speculative_decoding" has separately been admitted.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/performance/speculative-pairs") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            using PairRecord = SpeculativeDecodingPairEvidenceStore::PairRecord;
+            return response(200, "OK",
+                            "{\"pairs\":" +
+                                speculative_decoding_pairs_json(
+                                    speculative_pair_evidence != nullptr
+                                        ? speculative_pair_evidence->all()
+                                        : std::vector<PairRecord>{}) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/performance/speculative-pairs") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                if (speculative_pair_evidence == nullptr) {
+                    throw std::runtime_error(
+                        "speculative-decoding pair evidence store is "
+                        "unavailable");
+                }
+                const auto root = parse_json(request.body);
+                if (root.as_object().size() != 3U) {
+                    throw std::invalid_argument("unexpected evidence field");
+                }
+                const auto target_sha256 =
+                    root.required("targetModelSha256").as_string();
+                const auto draft_sha256 =
+                    root.required("draftModelSha256").as_string();
+                const auto acceptance_rate =
+                    root.required("acceptanceRate").as_double();
+                speculative_pair_evidence->record(target_sha256, draft_sha256,
+                                                  acceptance_rate);
+                audit.append("performance.speculative-pair", user->id,
+                             "success", target_sha256 + ":" + draft_sha256);
+                return response(200, "OK",
+                                "{\"pairs\":" +
+                                    speculative_decoding_pairs_json(
+                                        speculative_pair_evidence->all()) +
+                                    "}");
+            } catch (const std::exception&) {
+                audit.append("performance.speculative-pair", user->id,
+                             "denied", "invalid-evidence");
+                return response(400, "Bad Request",
+                                "{\"error\":\"speculative_pair_rejected\"}");
             }
         }
         // Phase 31: storage tiering visibility. GET /api/v1/system/storage
@@ -7166,7 +7229,8 @@ private:
     // long as this model stays loaded and released by
     // release_runner_weights_lease() above on every unload path.
     void admit_runner_weights(const ModelRecord& model,
-                              unsigned int parallel_slots) const {
+                              unsigned int parallel_slots,
+                              const ModelRecord* speculative_draft = nullptr) const {
         const auto hardware = probe_hardware(configuration.models_root);
         const auto suitability = assess_model(
             model.manifest, hardware, configuration.memory_reserve_mib);
@@ -7176,6 +7240,16 @@ private:
         }
         MemoryEstimate estimate;
         estimate.weights_bytes = model.manifest.model_size_bytes;
+        // Phase 32: when a draft model is about to be launched alongside
+        // this target (dual-model speculative decoding), its weights are a
+        // second, fully separate resident allocation in the same runner
+        // process -- added here rather than estimated separately so the one
+        // real MemoryBudgetManager reservation below is the actual combined-
+        // memory-fit check, not a second parallel heuristic that could
+        // disagree with it.
+        if (speculative_draft != nullptr) {
+            estimate.weights_bytes += speculative_draft->manifest.model_size_bytes;
+        }
         // Backend graph/compute-buffer and tokenizer-state overhead: a
         // conservative flat heuristic (same order of magnitude as the 64 MiB
         // per-request compute_buffers estimate in send_chat_message(), just
@@ -7260,7 +7334,72 @@ private:
                 configuration.session_reuse_enabled
                     ? configuration.session_reuse_max_slots
                     : 1U;
-            admit_runner_weights(*model, parallel_slots);
+            // Phase 32: the real dual-model (draft + target) launch path.
+            // Gated by AdvancedOptimizationRegistry exactly like
+            // continuous_batching above -- an administrator must have
+            // already recorded real evidence and admitted
+            // "speculative_decoding" (see optimization_registry.cpp) before
+            // this ever does anything, so nothing self-enables.
+            std::optional<ModelRecord> speculative_draft;
+            if (advanced_optimizations != nullptr &&
+                advanced_optimizations->is_enabled("speculative_decoding")) {
+                std::vector<ModelRecord> ready_models;
+                for (auto& candidate :
+                     ModelRegistry(configuration.models_root,
+                                   probe_hardware(configuration.models_root),
+                                   configuration.memory_reserve_mib)
+                         .scan()) {
+                    if (candidate.state == ModelState::ready) {
+                        ready_models.push_back(std::move(candidate));
+                    }
+                }
+                speculative_draft = select_speculative_draft_candidate(
+                    model->manifest, ready_models);
+                if (speculative_draft.has_value()) {
+                    SpeculativeDecodingRequestContext context;
+                    context.measured_acceptance_rate =
+                        speculative_pair_evidence != nullptr
+                            ? speculative_pair_evidence->lookup(
+                                  model->manifest.model_sha256,
+                                  speculative_draft->manifest.model_sha256)
+                            : std::nullopt;
+                    context.combined_memory_estimate_bytes =
+                        model->manifest.model_size_bytes +
+                        speculative_draft->manifest.model_size_bytes;
+                    context.available_memory_bytes =
+                        memory->sample().available_physical_bytes;
+                    // This decision runs once at model-load time, before any
+                    // specific chat message's own sampling/max_tokens are
+                    // known (a chat session's runner is loaded once, not
+                    // re-launched per message -- see LaunchTuning::
+                    // speculative_draft_model_file's class comment).
+                    // configuration.chat_max_reply_tokens stands in for "a
+                    // normal-length reply". sampling_is_greedy_or_
+                    // deterministic is accurately false, not a placeholder:
+                    // this codebase's own apply_sampling_preset() never
+                    // produces an exactly-zero temperature for a live chat
+                    // reply (its lowest preset is 0.15), so no live chat
+                    // request through this control plane is ever actually
+                    // greedy/deterministic today.
+                    context.requested_max_tokens =
+                        configuration.chat_max_reply_tokens;
+                    context.draft_runner_queued = false;
+                    context.sampling_is_greedy_or_deterministic = false;
+                    if (!decide_speculative_decoding_for_request(context)
+                             .enabled) {
+                        speculative_draft.reset();
+                    }
+                }
+            }
+            if (speculative_draft.has_value()) {
+                tuning.speculative_draft_model_file =
+                    speculative_draft->directory /
+                    speculative_draft->manifest.model_file;
+                tuning.speculative_draft_gpu_layers = tuning.gpu_layers;
+            }
+            admit_runner_weights(
+                *model, parallel_slots,
+                speculative_draft.has_value() ? &*speculative_draft : nullptr);
             try {
                 inference->load(*model, configuration.chat_context_length,
                                 configuration.runner_port,
@@ -8747,6 +8886,10 @@ private:
     // Phase 20: durable, administrator-controlled evidence/admission state.
     // Declared after records, which outlives it; constructed after open().
     std::unique_ptr<AdvancedOptimizationRegistry> advanced_optimizations;
+    // Phase 32: durable, administrator-submitted per-(target,draft)-pair
+    // measured acceptance rate. Declared after records for the same reason
+    // advanced_optimizations is above.
+    std::unique_ptr<SpeculativeDecodingPairEvidenceStore> speculative_pair_evidence;
     // Phase 26: live, bounded, administrator-inspectable model recency/pin/
     // preference/waiting evidence. It records only real server events.
     std::unique_ptr<ModelUsagePredictor> model_usage;

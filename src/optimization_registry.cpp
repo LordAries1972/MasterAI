@@ -91,7 +91,14 @@ void AdvancedOptimizationRegistry::initialize_features() {
         {"speculative_decoding",
          "Speculative decoding with exact target/draft compatibility, "
          "separate memory accounting, and quality parity checks.",
-         false, true, false, std::nullopt},
+         // Phase 32: implementation_available flipped to true now that a
+         // real dual-model (draft + target) launch path exists
+         // (LlamaCppAdapter::build_launch_spec's --model-draft branch,
+         // select_speculative_draft_candidate(), and server.cpp's
+         // ensure_model_loaded wiring) -- admission still requires an
+         // administrator to separately record real evidence and admit, per
+         // this registry's own "evidence never self-enables" rule.
+         false, true, true, std::nullopt},
         {"numa_affinity",
          "NUMA-aware placement and affinity for measured multi-node hosts.",
          false, true, false, std::nullopt},

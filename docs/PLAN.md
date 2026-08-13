@@ -542,23 +542,54 @@ Current phase status:
   record stores it does not own -- closing the Priority B gap at the file-
   operation level this note used to describe as missing entirely. Priority
   A/B.
-- Phase 32: Implemented at a scoped-down level, evidence-pending
+- Phase 32: Implemented, real dual-model launch path added, evidence-pending
   (2026-08-13) — `check_draft_target_compatibility()`, `SpeculativeDecodingStats`
   (rolling acceptance-rate tracking), and `decide_speculative_decoding_for_request()`
-  (`src/speculative_decoding.cpp`) are real, independently testable
+  (`src/speculative_decoding.cpp`) remain the real, independently testable
   decision logic covering the plan's full deliverable list (exact
   compatibility checks, measured-acceptance-rate gating, memory-fit gating,
   short-request skip, queued-draft-runner skip, sampling-compatibility
-  gating, thermal gating). Deliberately NOT wired to any live generation
-  call site: this codebase's `RunnerSupervisor`/`LlamaCppAdapter` launch
-  exactly one model per external backend process, and there is no
-  dual-model (draft+target concurrently resident) launch path yet -- adding
-  one needs Phase 26 warm-state management validated for a second
-  concurrently resident runner and Phase 27 KV accounting for the combined
-  memory cost of two models at once, neither of which this pass touched.
-  Priority C. Exit criterion status: explicitly unvalidated, not claimed --
-  "generation throughput improves on representative prompts" has no
-  execution path yet to measure against.
+  gating, thermal gating), unchanged in behavior. This pass closes the
+  specific gap the phase's original entry named: `LaunchTuning` gained
+  `speculative_draft_model_file`/`speculative_draft_gpu_layers`, and
+  `LlamaCppAdapter::build_launch_spec` (`src/models.cpp`) emits llama.cpp
+  server's documented `--model-draft`/`--gpu-layers-draft`/`--draft-max`/
+  `--draft-min` flags when a caller sets them -- the real dual-model
+  (draft+target concurrently resident, one llama-server process) launch
+  path that did not exist before. `select_speculative_draft_candidate()`
+  picks the smallest `check_draft_target_compatibility()`-accepted model
+  from the verified/ready registry. `SpeculativeDecodingPairEvidenceStore`
+  (new, `src/speculative_decoding.cpp`) is a durable, administrator-
+  submitted measured acceptance rate per (target, draft) pair -- separate
+  from `AdvancedOptimizationRegistry`'s one-time global admission evidence
+  (Phase 20), since `decide_speculative_decoding_for_request()` needs a
+  real number for the *specific* pair, and this codebase never fabricates
+  a starting assumption for an unproven pair. `server.cpp`'s
+  `ensure_model_loaded()` wires all of this together at model-load time,
+  gated exactly like `continuous_batching` on
+  `AdvancedOptimizationRegistry::is_enabled("speculative_decoding")`
+  (`implementation_available` flipped to `true` for this feature in
+  `optimization_registry.cpp`, since a real implementation now exists;
+  admission still requires an administrator to separately record evidence
+  and admit) -- `admit_runner_weights()` extended to reserve the
+  draft model's weights too, so the combined-memory-fit check is a real
+  `MemoryBudgetManager` reservation, not a second parallel heuristic. New
+  administrator-only `GET`/`POST /api/v1/performance/speculative-pairs`
+  routes record/list the per-pair evidence. Honest limitation carried
+  forward from this pass: `ensure_model_loaded()` evaluates
+  `sampling_is_greedy_or_deterministic` once at load time using this
+  codebase's own real sampling presets (`apply_sampling_preset()`'s lowest
+  preset is temperature 0.15, never exactly 0/greedy) rather than a
+  specific upcoming request's settings, since a chat runner is loaded once
+  per model switch, not re-launched per message -- this is the accurate
+  value for every live chat request today, not a placeholder, so
+  speculative decoding will not actually activate for live chat traffic
+  under this codebase's current sampling presets even once admitted, until
+  a future pass either exposes a deterministic-sampling deployment option
+  or threads real per-request sampling context through model loading.
+  Priority C. Exit criterion status: still explicitly unvalidated, not
+  claimed -- "generation throughput improves on representative prompts"
+  has a real execution path now but no measured run against it yet.
 - Phase 33: Implemented (2026-08-13) — both halves. The local-only
   multi-runner orchestration half (2026-08-13, earlier pass):
   `LocalRunnerConfig`/`LocalRunnerPool` (`src/runner_pool.cpp`) generalize
@@ -1860,17 +1891,23 @@ recommendation; see its own status note. **Phase 35 is now implemented at a
 scoped-down level (2026-08-13)** -- one consolidated, fully real
 Performance administration page rather than the plan's full route
 enumeration; see its own status note for exactly which named pages remain
-deferred. Speculative decoding (Phase 32) also now has real,
-independently-tested decision logic (compatibility checking, acceptance-
-rate tracking, per-request enable/disable) implemented this pass, but
-deliberately not wired to any live generation call site: real-hardware
-benchmark evidence now exists (Phase 19/30A above) for a single resident
-model, but Phase 32 also depends on Phase 26 warm-state management for a
-second concurrently-resident draft runner and Phase 27 KV accounting for
-the combined memory cost of two models at once, neither of which this pass
-touched, so this codebase has no dual-model launch path to wire the
-decision logic into yet -- see its own status note. Phase 36 remains
-Planned.
+deferred. **Speculative decoding (Phase 32) now has a real dual-model
+launch path (2026-08-13)** -- `LlamaCppAdapter::build_launch_spec` emits
+llama.cpp's documented `--model-draft` flags, `select_speculative_draft_
+candidate()` picks a compatible draft from the verified registry, a new
+`SpeculativeDecodingPairEvidenceStore` holds administrator-submitted
+per-pair measured acceptance rates, and `server.cpp`'s
+`ensure_model_loaded()` wires all of it together behind the same
+`AdvancedOptimizationRegistry` evidence/admission gate `continuous_batching`
+already uses -- closing the "no dual-model launch path yet" gap the
+original pass named. The decision logic itself (compatibility checking,
+acceptance-rate tracking, per-request enable/disable) is unchanged. Still
+explicitly unvalidated: no real-hardware run has yet exercised the new
+launch path, and this codebase's own default chat sampling presets
+(lowest temperature 0.15, never exactly greedy) mean the per-request
+sampling-compatibility gate will not currently let it activate for live
+chat traffic even once admitted -- see its own status note for the exact
+remaining gap. Phase 36 remains Planned.
 
 Status policy:
 

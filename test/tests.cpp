@@ -2761,14 +2761,28 @@ void test_phase_twenty_advanced_optimization_admission() {
         after.begin(), after.end(), [](const auto& feature) {
             return feature.name == "speculative_decoding";
         });
+    // Phase 32: implementation_available is now true for
+    // "speculative_decoding" -- a real dual-model launch path exists (see
+    // LlamaCppAdapter::build_launch_spec's --model-draft branch and
+    // server.cpp's ensure_model_loaded wiring) -- but recording evidence
+    // still must never itself flip `enabled`; admission stays a separate,
+    // later, explicit administrator decision either way.
     require(found != after.end() && !found->enabled &&
-                !found->implementation_available,
-            "recording evidence enabled a Phase 20 feature; admission must "
-            "remain a separate, later decision");
+                found->implementation_available,
+            "speculative_decoding's implementation_available did not "
+            "reflect its real Phase 32 dual-model launch path, or "
+            "recording evidence enabled a Phase 20 feature");
+    registry.admit("speculative_decoding");
+    require(registry.is_enabled("speculative_decoding"),
+            "complete accepted evidence did not admit speculative_decoding "
+            "now that its implementation is real");
 
+    masterai::AdvancedOptimizationEvidence unavailable_evidence = evidence;
+    unavailable_evidence.feature_name = "numa_affinity";
+    registry.record_evidence("numa_affinity", unavailable_evidence);
     bool unavailable_rejected = false;
     try {
-        registry.admit("speculative_decoding");
+        registry.admit("numa_affinity");
     } catch (const std::exception&) {
         unavailable_rejected = true;
     }
@@ -2828,6 +2842,145 @@ void test_phase_twenty_advanced_optimization_admission() {
     }
     require(unknown_rejected,
             "recording evidence for an unknown feature name was accepted");
+}
+
+// Phase 32: the real dual-model (draft + target) launch path.
+// select_speculative_draft_candidate() must pick the smallest compatible
+// candidate and reject every incompatible one; build_launch_spec() must
+// actually emit --model-draft when a caller sets
+// LaunchTuning::speculative_draft_model_file, and must reproduce today's
+// single-model launch exactly when it does not; the pair evidence store
+// must round-trip and survive a restart, matching AdvancedOptimization
+// Registry's own durability convention.
+void test_phase_thirtytwo_speculative_decoding_launch() {
+    masterai::ModelManifest target;
+    target.id = "target-model";
+    target.architecture = "llama";
+    target.format = "gguf";
+    target.backend = "llama-cpp";
+    target.model_size_bytes = 8'000'000'000ULL;
+    target.license_accepted = true;
+
+    masterai::ModelRecord compatible_large;
+    compatible_large.manifest = target;
+    compatible_large.manifest.id = "compatible-large-draft";
+    compatible_large.manifest.model_size_bytes = 3'000'000'000ULL;
+
+    masterai::ModelRecord compatible_small;
+    compatible_small.manifest = target;
+    compatible_small.manifest.id = "compatible-small-draft";
+    compatible_small.manifest.model_size_bytes = 1'000'000'000ULL;
+
+    masterai::ModelRecord incompatible_architecture;
+    incompatible_architecture.manifest = target;
+    incompatible_architecture.manifest.id = "incompatible-architecture-draft";
+    incompatible_architecture.manifest.architecture = "mixtral";
+    incompatible_architecture.manifest.model_size_bytes = 500'000'000ULL;
+
+    const auto picked = masterai::select_speculative_draft_candidate(
+        target, {compatible_large, incompatible_architecture, compatible_small});
+    require(picked.has_value() &&
+                picked->manifest.id == "compatible-small-draft",
+            "select_speculative_draft_candidate() did not pick the smallest "
+            "compatible draft");
+
+    const auto none = masterai::select_speculative_draft_candidate(
+        target, {incompatible_architecture});
+    require(!none.has_value(),
+            "select_speculative_draft_candidate() accepted an incompatible "
+            "draft");
+
+    TemporaryDirectory temporary;
+    const auto target_directory = temporary.path() / "target";
+    std::filesystem::create_directories(target_directory);
+    const auto target_file = target_directory / "target.gguf";
+    write_text(target_file, "GGUF-target-fixture");
+    masterai::ModelRecord target_record;
+    target_record.directory = target_directory;
+    target_record.manifest.id = "target-model";
+    target_record.manifest.model_file = "target.gguf";
+    target_record.manifest.model_size_bytes =
+        std::filesystem::file_size(target_file);
+    target_record.manifest.model_sha256 =
+        masterai::sha256_file_hex(target_file);
+    target_record.state = masterai::ModelState::ready;
+
+    const auto draft_directory = temporary.path() / "draft";
+    std::filesystem::create_directories(draft_directory);
+    const auto draft_file = draft_directory / "draft.gguf";
+    write_text(draft_file, "GGUF-draft-fixture");
+
+    const auto backend = test_executable();
+    require(std::filesystem::is_regular_file(backend),
+            "test backend fixture is unavailable");
+    masterai::LlamaCppAdapter adapter(backend);
+
+    const auto baseline_spec =
+        adapter.build_launch_spec(target_record, 4096U, 8080U);
+    require(std::find(baseline_spec.arguments.begin(),
+                      baseline_spec.arguments.end(),
+                      "--model-draft") == baseline_spec.arguments.end(),
+            "an empty speculative_draft_model_file emitted --model-draft "
+            "anyway");
+
+    masterai::LaunchTuning tuning;
+    tuning.speculative_draft_model_file = draft_file;
+    const auto dual_spec =
+        adapter.build_launch_spec(target_record, 4096U, 8080U, 1U, tuning);
+    const auto draft_flag = std::find(dual_spec.arguments.begin(),
+                                      dual_spec.arguments.end(),
+                                      "--model-draft");
+    require(draft_flag != dual_spec.arguments.end() &&
+                std::next(draft_flag) != dual_spec.arguments.end() &&
+                *std::next(draft_flag) == draft_file.string(),
+            "build_launch_spec() did not emit --model-draft with the "
+            "configured draft model path");
+
+    masterai::LaunchTuning missing_draft_tuning;
+    missing_draft_tuning.speculative_draft_model_file =
+        draft_directory / "missing.gguf";
+    bool missing_draft_rejected = false;
+    try {
+        static_cast<void>(adapter.build_launch_spec(
+            target_record, 4096U, 8080U, 1U, missing_draft_tuning));
+    } catch (const std::exception&) {
+        missing_draft_rejected = true;
+    }
+    require(missing_draft_rejected,
+            "build_launch_spec() launched with a nonexistent draft model "
+            "file");
+
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    {
+        masterai::SpeculativeDecodingPairEvidenceStore store(records);
+        require(!store.lookup(std::string(64U, 'a'), std::string(64U, 'b'))
+                     .has_value(),
+                "lookup() reported evidence before any was recorded");
+        store.record(std::string(64U, 'a'), std::string(64U, 'b'), 0.82);
+        const auto looked_up =
+            store.lookup(std::string(64U, 'a'), std::string(64U, 'b'));
+        require(looked_up.has_value() && looked_up.value() == 0.82,
+                "recorded pair acceptance rate was not returned by lookup()");
+        require(store.all().size() == 1U,
+                "all() did not report the one recorded pair");
+        bool out_of_range_rejected = false;
+        try {
+            store.record(std::string(64U, 'a'), std::string(64U, 'b'), 1.5);
+        } catch (const std::exception&) {
+            out_of_range_rejected = true;
+        }
+        require(out_of_range_rejected,
+                "an out-of-range acceptance rate was accepted");
+    }
+    {
+        masterai::SpeculativeDecodingPairEvidenceStore restored(records);
+        const auto looked_up =
+            restored.lookup(std::string(64U, 'a'), std::string(64U, 'b'));
+        require(looked_up.has_value() && looked_up.value() == 0.82,
+                "speculative-decoding pair evidence did not survive a "
+                "restart");
+    }
 }
 
 // Phase 21: the read coalescer is pure/deterministic, so this drives it
@@ -7449,6 +7602,8 @@ int main() {
             test_phase_twentynine_model_tiering_and_cascade);
         run("advanced optimization admission",
             test_phase_twenty_advanced_optimization_admission);
+        run("speculative decoding dual-model launch path",
+            test_phase_thirtytwo_speculative_decoding_launch);
         run("async storage coalescing", test_phase_twentyone_coalescing_merges_adjacent);
         run("async storage cancellation", test_phase_twentyone_cancellation_releases_buffer);
         run("async storage bounded parallel batch",
