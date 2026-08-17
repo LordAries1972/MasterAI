@@ -167,6 +167,17 @@ The current source includes native implementations for:
   durable details apply automatically to newly created conversations; an
   active conversation retains its own history and startup snapshot. The
   collapsed Memory sidebar makes every capture visible and removable.
+- Agentic tool use (Phase 84, first-increment): a short confirm/implement/
+  proceed/go-ahead/make-the-changes/phase/plan/strategy composer message
+  puts a turn into auto-drive mode, where the model can call real
+  read/list/search/write/delete-file and admin-allow-listed run-command
+  tools — each shown live in the transcript as it happens — and keep
+  working the task across as many turns as it takes with no further input,
+  until it reports the task complete or Escape/Stop is pressed. Any
+  destructive action (delete, or a command matching a fixed destructive-
+  pattern table) always pauses on an explicit Approve/Deny card first,
+  regardless of mode. The admin allow-list has no management UI yet and
+  MCP-connected IDEs do not see these tools yet — see docs/PLAN.md Phase 84.
 - Resumable, journaled, hash-verified model downloads with quarantine on
   integrity failure.
 - Quick, standard, and extended benchmark profiles with compatible comparison
@@ -584,6 +595,7 @@ Status below reflects the evidence recorded in
 | 82 | Deployment Manager, Inference Endpoints, and Synthetic Data completion | Implemented; Synthetic Data gets a real generation executor (technique-specific prompts via `execute_rag_generation`); Deployment Manager gets its own real deploy/health/rollback action (approved-Model-Card gate, trained-weights health signal, supersede/rollback tracking); Inference Endpoints' already-real Phase 77 listener gets its missing auth-token/policy UI. All three roster entries move from `planned` to `available` |
 | 83 | Safety and Governance roster completion | Implemented; no new executor needed — Phase 74's real content scanning and Phase 82's approval-gated deployment/inference enforcement already met the bar, so the roster entry moves from `planned` to `available`; added the missing `SafetyGovernanceStore`/`scan_content_for_risks` store-level test |
 | — | ML forms clarity pass | Implemented; hover/focus "?" hint bubbles on ambiguous fields (toggleable off per-browser from Machine Learning Settings), every remaining raw-ID text field converted to a named dropdown, and every remaining comma-separated multi-id field converted to a checkbox multi-select |
+| 84 | Agentic tool use in chat | Implemented at a first-increment level, not yet build/host validated; real `read_file`/`list_directory`/`search`/`write_file`/`delete_file`/`run_command` tools, an auto-drive mode ("confirm"/"implement"/"proceed"-style composer messages) that keeps a turn working a stated plan across turns with no further input until the model reports it done, mandatory Approve/Deny for destructive actions regardless of mode, and every tool call/result shown live in the transcript. Admin allow-list management routes/UI and MCP inbound exposure of the new tools are not yet implemented |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04

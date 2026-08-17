@@ -2841,9 +2841,11 @@ struct ChatRecord {
     // or exceed the truncation this store applies when deriving it.
     std::string title{"New chat"};
     std::uint64_t created_at_epoch_seconds{0};
-    // Phase 61: one durable snapshot of the owner's memory records, loaded
-    // when this conversation starts and reused on every later turn. Legacy
-    // chats initialize lazily on their first post-upgrade message.
+    // Phase 61: a cached snapshot of the owner's durable memory records,
+    // refreshed on every turn (see send_chat_message()) so a "save to
+    // memory: ..." directive applies to the rest of the conversation it was
+    // typed into, not only to chats created afterward. Legacy chats without
+    // a snapshot yet get one on their first post-upgrade message.
     bool memory_context_initialized{false};
     std::string memory_context;
     std::vector<ChatMessage> messages;
@@ -2857,9 +2859,11 @@ public:
                       const std::string& project_id,
                       const std::string& model_id,
                       const std::string& memory_context = {});
-    // Initializes a legacy chat's memory snapshot exactly once. Returns
-    // false when the chat is absent, belongs to another owner, or was
-    // already initialized; an initialized empty snapshot is still durable.
+    // Overwrites a chat's cached memory snapshot with a freshly recalled
+    // one (see send_chat_message(), which calls this every turn whenever
+    // durable memory changed since the cached copy). Also used to give a
+    // legacy chat its first snapshot. Returns false only when the chat is
+    // absent or belongs to another owner.
     bool initialize_memory_context(const std::string& chat_id,
                                    const std::string& owner_id,
                                    const std::string& memory_context);
@@ -8424,6 +8428,170 @@ ApiTokenStore::Token store_ide_token(
     std::uint64_t now_epoch_seconds);
 void remove_ide_token(IdeClientKind client, SecretStore& secrets,
                       AuditLog& audit, const std::string& actor_id);
+
+// ---------------------------------------------------------------------------
+// Agentic chat tool use (docs/PLAN.md Phase 84).
+//
+// Gives a chat turn (and, through the same dispatch table, an MCP-connected
+// IDE) a small, explicit set of real tools -- read/list/search project
+// files, write a file, delete a file, and run one admin-allow-listed
+// external command -- instead of pure text completion. The design deliberately
+// mirrors the existing outbound-MCP registry/sandboxing/audit shape
+// (McpOutboundServer/McpOutboundRegistry/McpOutboundGateway above) rather
+// than inventing a parallel one: a RecordStore-backed allow-list registry, a
+// sandboxed-subprocess helper with the same Job Object/rlimit containment
+// invoke_stdio() already uses, and the same AuditLog convention.
+// ---------------------------------------------------------------------------
+
+// Whether a tool call may run immediately or must pause for an explicit
+// human Approve/Deny click. This is deliberately a separate axis from the
+// admin allow-list below: a destructive pattern (delete, rm, format, a
+// forced git reset, ...) is always high_risk even for an allow-listed
+// executable, and the allow-list can never downgrade it back to safe.
+enum class ChatToolRisk { safe, high_risk };
+
+// One admin-approved external executable a chat/MCP `run_command` tool call
+// is permitted to invoke, optionally restricted to specific projects. Tools
+// that never shell out (read_file, search, list_directory, write_file,
+// delete_file) do not need an entry here; only `run_command`'s target
+// executable is gated by this registry.
+struct AllowedCommandRecord {
+    std::string id;
+    // Matched against the caller-supplied executable name/path exactly
+    // (case-insensitive on Windows) -- never a glob or regex, so an
+    // allow-list entry cannot be widened by a clever argument.
+    std::string executable;
+    std::string description;
+    ChatToolRisk risk_default{ChatToolRisk::safe};
+    // Empty means every project the calling identity can already access;
+    // non-empty narrows this executable to only those projects.
+    std::set<std::string> allowed_project_ids;
+    bool enabled{false};
+};
+
+// Durable admin allow-list, persisted the same way McpOutboundRegistry
+// persists McpOutboundServer records (see AllowedCommandStore's
+// implementation in tool_exec.cpp).
+class AllowedCommandStore final {
+public:
+    explicit AllowedCommandStore(RecordStore& records);
+    AllowedCommandRecord register_command(AllowedCommandRecord command);
+    void remove(const std::string& command_id);
+    std::optional<AllowedCommandRecord> find_by_executable(
+        const std::string& executable) const;
+    std::vector<AllowedCommandRecord> list() const;
+
+private:
+    void restore();
+    void persist(const AllowedCommandRecord& command);
+    RecordStore& records_;
+    std::map<std::string, AllowedCommandRecord> commands_;
+    // Guards commands_ against concurrent register/remove/find/list calls.
+    mutable std::mutex mutex_;
+};
+
+// Result of one sandboxed external process run by run_sandboxed_process().
+// Mirrors McpOutboundResult's success/cancelled/diagnostic shape, plus the
+// exit code and separate stdout/stderr a shell-command tool result needs to
+// show the model and the chat transcript.
+struct ToolProcessResult {
+    bool succeeded{false};
+    bool cancelled{false};
+    bool timed_out{false};
+    int exit_code{-1};
+    std::string standard_output;
+    std::string standard_error;
+    std::string diagnostic;
+};
+
+// Runs one argv-array executable with no shell interpretation (so no
+// argument can ever be interpreted as shell syntax) inside the same
+// containment invoke_stdio() already applies to outbound MCP stdio
+// servers -- a Windows Job Object capping memory/process count, or Linux
+// rlimit(CPU/FSIZE/AS/NPROC) plus prctl(PR_SET_NO_NEW_PRIVS) -- bounded by
+// a wall-clock timeout, a combined stdout+stderr byte cap, and a
+// cancellation flag polled during the wait loop. Declared in masterai.hpp
+// (not mcp_outbound_internal.hpp) because it is shared by the chat tool
+// loop and the MCP inbound tool dispatch, not private to outbound MCP.
+ToolProcessResult run_sandboxed_process(
+    const std::filesystem::path& executable,
+    const std::vector<std::string>& arguments,
+    const std::filesystem::path& working_directory,
+    std::uint64_t timeout_seconds, std::uint64_t maximum_output_bytes,
+    std::atomic_bool& cancellation);
+
+// Classifies a proposed tool call by name and JSON arguments against the
+// fixed destructive-pattern table (delete_file always; write_file that
+// would blank out an existing file; run_command whose executable/arguments
+// match rm/del/rmdir/format/DROP/TRUNCATE/reset --hard/clean -f/push
+// --force/shutdown/taskkill/diskpart/reg delete and similar). This
+// classification cannot be weakened by the admin allow-list, auto-drive
+// mode, or the model's own request -- it is the single enforcement point
+// for "destructive actions always need a human's explicit approval."
+ChatToolRisk classify_tool_call_risk(const std::string& tool_name,
+                                     const JsonValue& arguments);
+
+// A tool call the chat loop has decided is high_risk and has therefore
+// paused on, waiting for a human Approve/Deny decision (see
+// PendingToolApprovalStore below and POST
+// /api/v1/chats/{id}/tool-approvals/{approvalId} in server.cpp).
+struct PendingToolApproval {
+    std::string id;
+    std::string chat_id;
+    std::string user_id;
+    std::string tool_name;
+    std::string arguments_json;
+    // Human-readable explanation of why this call was classified high_risk,
+    // shown directly in the chat's Approve/Deny card.
+    std::string reason;
+    std::uint64_t created_epoch_seconds{0};
+};
+
+// Short-lived durable store for pending approvals -- durable (not just
+// in-memory) so a paused turn survives a server restart, matching how
+// every other in-flight job state in this codebase (downloads, training
+// runs, memory-clean progress) is a RecordStore entry rather than
+// process memory.
+class PendingToolApprovalStore final {
+public:
+    explicit PendingToolApprovalStore(RecordStore& records);
+    PendingToolApproval create(PendingToolApproval approval);
+    std::optional<PendingToolApproval> find(const std::string& approval_id) const;
+    void remove(const std::string& approval_id);
+
+private:
+    RecordStore& records_;
+    mutable std::mutex mutex_;
+};
+
+// Outcome of one execute_chat_tool() call: `result_text` is what gets shown
+// back to the model as the tool's result (and, truncated, in the chat
+// transcript's tool-result card); `structured_json` is the same result in a
+// machine-shaped form for the `tool_result` NDJSON event / MCP
+// structuredContent.
+struct ChatToolCallResult {
+    bool succeeded{false};
+    std::string result_text;
+    std::string structured_json;
+};
+
+// Executes one of the six built-in tools -- read_file, list_directory,
+// search, write_file, delete_file, run_command -- against a single project.
+// The caller (server.cpp's chat tool loop, or mcp.cpp's tools/call
+// dispatch) is responsible for classify_tool_call_risk() and, for a
+// high_risk call, obtaining human approval *before* calling this function;
+// execute_chat_tool() itself always executes immediately. Shared verbatim
+// by both surfaces so chat and MCP tool behavior cannot drift apart. Only
+// run_command consults `allowed_commands` (its target executable must be a
+// registered, enabled, project-authorized entry); the other five tools are
+// always available, bounded only by the project root containment every
+// project file operation in this codebase already enforces (see
+// read_project_text_file()).
+ChatToolCallResult execute_chat_tool(const std::string& tool_name,
+                                     const JsonValue& arguments,
+                                     const ProjectRecord& project,
+                                     AllowedCommandStore& allowed_commands,
+                                     std::atomic_bool& cancellation);
 
 struct BackupReport {
     std::filesystem::path backup_path;

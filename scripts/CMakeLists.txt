@@ -29,6 +29,7 @@ add_library(masterai_core STATIC
     ../src/mcp.cpp
     ../src/mcp_outbound.cpp
     ../src/mcp_outbound_service.cpp
+    ../src/tool_exec.cpp
     ../src/ide.cpp
     ../src/operations.cpp
     ../src/operations_cli.cpp

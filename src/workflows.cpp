@@ -359,10 +359,14 @@ bool ChatStore::initialize_memory_context(
         throw std::invalid_argument("chat memory context is outside policy");
     }
     const auto found = chats_.find(chat_id);
-    if (found == chats_.end() || found->second.owner_id != owner_id ||
-        found->second.memory_context_initialized) {
+    if (found == chats_.end() || found->second.owner_id != owner_id) {
         return false;
     }
+    // No longer a one-shot gate: the caller (send_chat_message) now
+    // re-recalls durable memory every turn and calls this whenever it
+    // changed, so a "save to memory: ..." directive given mid-conversation
+    // takes effect on the very next reply in that same chat instead of only
+    // in chats created afterward.
     found->second.memory_context_initialized = true;
     found->second.memory_context = memory_context;
     persist_header(found->second);

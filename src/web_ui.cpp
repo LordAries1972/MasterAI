@@ -5,6 +5,12 @@
 // independently reviewable without introducing a web framework.
 #include "server_internal.hpp"
 
+#include <cctype>
+#include <chrono>
+#include <ctime>
+#include <iterator>
+#include <random>
+
 // Small inline-SVG glyphs for the primary submit button on every form --
 // mirrors the dynamically-built ICONS set in application_script() (used for
 // row-toolbar buttons) but as C++ literals, since these buttons are baked
@@ -3399,7 +3405,162 @@ std::string application_script() {
         "const SLASH_COMMANDS={'/clear':()=>location.href='/app',"
         "'/new':()=>location.href='/app',"
         "'/help':()=>{q('#actionStatus').textContent="
-        "'Commands: /clear or /new starts a fresh chat. /help shows this message.';}};"
+        "'Commands: /clear or /new starts a fresh chat. /help shows this "
+        "message. Auto-drive: short confirm/implement/proceed/go ahead/make "
+        "the changes/execute/apply/phase/plan/strategy messages ask the AI "
+        "to actually carry out its last reply -- using real read/write/"
+        "search/list/run-command tools, each shown in the transcript as it "
+        "happens -- across as many turns as it takes, pausing for your "
+        "Approve/Deny on anything destructive, until it reports done or "
+        "you press Escape/Stop.';}};"
+        // Word-boundary match against confirm/implement/proceed-style
+        // phrasing, restricted to short (<=10-word) messages so it can't
+        // fire inside an ordinary long sentence that happens to contain
+        // "plan" -- see apply_auto_drive_directive() in server.cpp for
+        // what turning this on actually asks the model to do.
+        "const AUTO_DRIVE_RE=/\\b(confirm(ed)?|implement(ed|ing)?|make "
+        "(the )?changes?|change it|proceed|go ahead|execute|apply( it| "
+        "that| the plan)?|do it|start phase|begin phase|phases?|the plan|"
+        "strategy)\\b/i;"
+        "function isTaskContinuationCommand(text){const t=(text||'').trim();"
+        "if(!t||t.split(/\\s+/).length>10)return false;"
+        "return AUTO_DRIVE_RE.test(t);}"
+        // Set once Escape/Stop is pressed (see the listeners below) so a
+        // continuation turn already queued up (autoDriveState:'continue',
+        // or a tool-approval resume in flight) does not fire after the
+        // user asked everything to stop -- generation.abort() alone only
+        // ever stops the *current* fetch, not turns still to come.
+        "let autoDriveAborted=false;let autoDriveTurns=0;"
+        "const AUTO_DRIVE_MAX_TURNS=25;"
+        // Live status text shown in place of the generic 'Thinking' spinner
+        // once something concrete is actually happening (a tool running) --
+        // only replaces the spinner while no real reply text has streamed
+        // yet, so it never clobbers a reply already in progress.
+        "function setLiveStatus(assistantEl,text){if(!assistantEl)return;"
+        "const bodyEl=assistantEl.querySelector('.msgBody');if(!bodyEl)return;"
+        "if(assistantEl.dataset.raw)return;"
+        "bodyEl.innerHTML='<span class=\"chatThinking\">"
+        "<span class=\"chatThinkingSpinner\"></span>'+text+'</span>';}"
+        // Tool-call/result cards reuse appendModelCard's plain-notice style;
+        // the approval card is richer (reason, arguments, Approve/Deny).
+        "function appendToolCard(box,text){if(!box)return null;"
+        "const card=document.createElement('div');"
+        "card.className='chatMsg chatMsg-modelChange';card.textContent=text;"
+        "box.append(card);box.scrollTop=box.scrollHeight;return card;}"
+        "function summarizeToolArguments(args){try{"
+        "const text=JSON.stringify(args);"
+        "return text&&text.length>200?text.slice(0,200)+'...':text;}"
+        "catch(e){return '';}}"
+        "function appendApprovalCard(box,chatId,event){"
+        "const card=document.createElement('div');"
+        "card.className='chatMsg chatMsg-assistant chatMsg-error';"
+        "const title=document.createElement('div');"
+        "title.className='chatMsg-errorTitle';"
+        "title.textContent='Approval needed: '+event.tool;"
+        "const body=document.createElement('div');"
+        "body.textContent=event.reason+' Arguments: '+"
+        "summarizeToolArguments(event.arguments);"
+        "const actions=document.createElement('div');"
+        "actions.style.marginTop='0.5em';"
+        "const approveBtn=document.createElement('button');"
+        "approveBtn.type='button';approveBtn.textContent='Approve';"
+        "const denyBtn=document.createElement('button');"
+        "denyBtn.type='button';denyBtn.textContent='Deny';"
+        "denyBtn.style.marginLeft='0.5em';"
+        "const resolve=async(decision)=>{"
+        "approveBtn.disabled=true;denyBtn.disabled=true;"
+        "await resumeToolApproval(chatId,event.approvalId,decision,box);};"
+        "approveBtn.addEventListener('click',()=>resolve('approve'));"
+        "denyBtn.addEventListener('click',()=>resolve('deny'));"
+        "actions.append(approveBtn,denyBtn);"
+        "card.append(title,body,actions);"
+        "box.append(card);box.scrollTop=box.scrollHeight;}"
+        // Reads one NDJSON tool_call/tool_result/tool_approval_required/
+        // complete/error/token stream from an already-started fetch Response
+        // and applies it to the transcript -- shared by runTurn() (the
+        // ordinary POST .../messages path) and resumeToolApproval() (POST
+        // .../tool-approvals/{id}, which streams the same event shapes).
+        // Returns the last 'complete' event seen (or null on error/abort),
+        // so the caller can decide whether to continue the auto-drive loop.
+        "async function readTurnStream(r,box,chatId,userEl,assistantEl){"
+        "const reader=r.body.getReader(),decoder=new TextDecoder();let pending='';"
+        "let completeEvent=null;"
+        "for(;;){const x=await reader.read();if(x.done)break;"
+        "pending+=decoder.decode(x.value,{stream:true});let n;"
+        "while((n=pending.indexOf('\\n'))>=0){const line=pending.slice(0,n);"
+        "pending=pending.slice(n+1);"
+        "if(!line)continue;const event=JSON.parse(line);"
+        "if(event.type==='token'){"
+        "if(!assistantEl){assistantEl=appendMessage(box,'assistant','');}"
+        "assistantEl.dataset.raw=(assistantEl.dataset.raw||'')+event.content;"
+        "const bodyEl=assistantEl.querySelector('.msgBody');"
+        "patchMsgBody(bodyEl,renderMarkdown(assistantEl.dataset.raw));"
+        "addCodeCopyButtons(bodyEl);box.scrollTop=box.scrollHeight;}"
+        "if(event.type==='tool_call'){"
+        "if(!assistantEl){assistantEl=appendMessage(box,'assistant','');}"
+        "setLiveStatus(assistantEl,'Running '+event.tool+"
+        "'('+summarizeToolArguments(event.arguments)+')...');"
+        "appendToolCard(box,'Running tool: '+event.tool+' '+"
+        "summarizeToolArguments(event.arguments));}"
+        "if(event.type==='tool_result'){"
+        "const outcome=event.succeeded?'Tool result':'Tool failed';"
+        "appendToolCard(box,outcome+' ('+event.tool+'): '+"
+        "summarizeToolArguments(event.result));}"
+        "if(event.type==='tool_approval_required'){"
+        "appendApprovalCard(box,chatId,event);}"
+        "if(event.type==='complete'){completeEvent=event;"
+        "if(userEl)setMsgTokens(userEl,'user',event.promptTokens||0);"
+        "if(assistantEl)setMsgTokens(assistantEl,'assistant',"
+        "event.generatedTokens||0);"
+        "if(event.memorySaved)refreshMemories().catch(()=>{});}"
+        "if(event.type==='error')throw new Error(event.error,"
+        "{cause:event.detail});}}"
+        "return completeEvent;}"
+        // Posts one turn's content (real user text on the very first turn
+        // of an exchange, 'Continue.' on every automatic follow-up) and,
+        // once it finishes, automatically posts the next turn itself when
+        // the stream reported autoDriveState:'continue' -- this is the
+        // client-side half of auto-drive mode (see docs/PLAN.md Phase 84
+        // for why the loop lives here, one ordinary POST per turn, rather
+        // than inside the server's own request handler). Bounded by
+        // AUTO_DRIVE_MAX_TURNS and stopped immediately by autoDriveAborted
+        // (Escape/Stop -- see the listeners below).
+        "async function runTurn(chatId,content,attachmentIds,autoDrive,box,userEl){"
+        "generation=new AbortController();"
+        "const assistantEl=appendMessage(box,'assistant','');"
+        // Shown until the first real event streams back -- reasoning models
+        // in particular can take a real amount of time to produce anything,
+        // and an empty bubble with no feedback reads as a hang.
+        "setLiveStatus(assistantEl,'Thinking');box.scrollTop=box.scrollHeight;"
+        "const r=await fetch('/api/v1/chats/'+encodeURIComponent(chatId)+'/messages',"
+        "{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},"
+        "body:JSON.stringify({content,attachmentIds:attachmentIds||[],"
+        "autoDrive:!!autoDrive,"
+        "effort:q('#modelEffort')?q('#modelEffort').value:'medium',"
+        "thinking:q('#modelThinking')?q('#modelThinking').value:'off'}),"
+        "signal:generation.signal});"
+        "if(!r.ok)throw new Error(await r.text());"
+        "const completeEvent=await readTurnStream(r,box,chatId,userEl,assistantEl);"
+        "if(completeEvent&&completeEvent.autoDriveState==='continue'&&"
+        "!autoDriveAborted&&autoDriveTurns<AUTO_DRIVE_MAX_TURNS){"
+        "autoDriveTurns++;"
+        "await runTurn(chatId,'Continue.',[],true,box,null);}}"
+        // Resumes a paused high-risk tool call from its Approve/Deny card,
+        // then keeps the auto-drive loop going the same way runTurn()'s own
+        // tail call does.
+        "async function resumeToolApproval(chatId,approvalId,decision,box){"
+        "try{generation=new AbortController();"
+        "const r=await fetch('/api/v1/chats/'+encodeURIComponent(chatId)+"
+        "'/tool-approvals/'+encodeURIComponent(approvalId),"
+        "{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},"
+        "body:JSON.stringify({decision}),signal:generation.signal});"
+        "if(!r.ok)throw new Error(await r.text());"
+        "const completeEvent=await readTurnStream(r,box,chatId,null,null);"
+        "if(completeEvent&&completeEvent.autoDriveState==='continue'&&"
+        "!autoDriveAborted&&autoDriveTurns<AUTO_DRIVE_MAX_TURNS){"
+        "autoDriveTurns++;await runTurn(chatId,'Continue.',[],true,box,null);}}"
+        "catch(x){showSystemError('Failed to resume: '+x.message);}"
+        "finally{generation=null;}}"
         // A brand-new chat (no project/model form of its own any more) is
         // created lazily on the first message: the composer's own project
         // and model pickers supply what /api/v1/chats needs, and the URL
@@ -3412,7 +3573,8 @@ std::string application_script() {
         "if(!content.trim())return;"
         "const command=SLASH_COMMANDS[content.trim().toLowerCase()];"
         "if(command){q('#messageContent').value='';command();return;}"
-        "let assistantEl=null;"
+        "const autoDrive=isTaskContinuationCommand(content);"
+        "autoDriveAborted=false;autoDriveTurns=0;"
         "try{let chatId=q('#messageChat').value;"
         "if(!chatId){const projectId=q('#chatProject').value,modelId=q('#chatModel').value;"
         "if(!projectId||!modelId){"
@@ -3450,46 +3612,7 @@ std::string application_script() {
         // query bubble's title with the prompt-token count.
         "const userEl=appendMessage(box,'user',content);"
         "box.scrollTop=box.scrollHeight;"
-        "generation=new AbortController();"
-        "assistantEl=appendMessage(box,'assistant','');"
-        // Shown until the first token actually streams back -- reasoning
-        // models in particular can take a real amount of time to produce
-        // anything, and an empty bubble with no feedback reads as a hang.
-        "assistantEl.querySelector('.msgBody').innerHTML='<span class=\"chatThinking\">"
-        "<span class=\"chatThinkingSpinner\"></span>Thinking</span>';"
-        "box.scrollTop=box.scrollHeight;"
-        "const r=await fetch('/api/v1/chats/'+encodeURIComponent(chatId)+'/messages',"
-        "{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},"
-        "body:JSON.stringify({content,attachmentIds,"
-        "effort:q('#modelEffort')?q('#modelEffort').value:'medium',"
-        "thinking:q('#modelThinking')?q('#modelThinking').value:'off'}),"
-        "signal:generation.signal});"
-        "if(!r.ok)throw new Error(await r.text());"
-        "const reader=r.body.getReader(),decoder=new TextDecoder();let pending='';"
-        "for(;;){const x=await reader.read();if(x.done)break;"
-        "pending+=decoder.decode(x.value,{stream:true});let n;"
-        "while((n=pending.indexOf('\\n'))>=0){const line=pending.slice(0,n);"
-        "pending=pending.slice(n+1);"
-        "if(line){const event=JSON.parse(line);"
-        "if(event.type==='token'){assistantEl.dataset.raw="
-        "(assistantEl.dataset.raw||'')+event.content;"
-        "const bodyEl=assistantEl.querySelector('.msgBody');"
-        // patchMsgBody() diffs against the live DOM instead of rebuilding
-        // it, so code blocks keep their scroll position (and their
-        // scrollbars stop flickering) while tokens stream in.
-        "patchMsgBody(bodyEl,renderMarkdown(assistantEl.dataset.raw));"
-        "addCodeCopyButtons(bodyEl);"
-        "box.scrollTop=box.scrollHeight;}"
-        // The final stream event carries the runner's real token figures --
-        // promptTokens (whole evaluated prompt, i.e. what this query cost)
-        // and generatedTokens (the reply) -- shown in each bubble's title.
-        "if(event.type==='complete'){"
-        "setMsgTokens(userEl,'user',event.promptTokens||0);"
-        "if(assistantEl)setMsgTokens(assistantEl,'assistant',"
-        "event.generatedTokens||0);"
-        "if(event.memorySaved)refreshMemories().catch(()=>{});}"
-        "if(event.type==='error')throw new Error(event.error,"
-        "{cause:event.detail});}}}}"
+        "await runTurn(chatId,content,attachmentIds,autoDrive,box,userEl);}"
         "catch(x){const cancelled=x.name==='AbortError';"
         // The server used to fold every generation-time exception (model not
         // loaded, runner crash, degraded model producing an empty reply,
@@ -3504,15 +3627,13 @@ std::string application_script() {
         "inventory and try again.';"
         "if(cancelled)s.textContent='Cancelled.';"
         // A cancelled turn already left whatever partial reply the user saw
-        // in assistantEl (the server persists it too, see streamed_text in
+        // on screen (the server persists it too, see streamed_text in
         // send_chat_message) -- overwriting it here would erase text the
         // user already read. A real failure, though, previously left an
         // empty bubble with the only explanation in the easy-to-miss status
-        // line above the composer; showing it inside the reply's own bubble
-        // (or as a new one, if the failure happened before any bubble
-        // existed -- e.g. no project/model chosen yet) puts it where the
-        // reply itself would have appeared.
-        "if(!cancelled){const el=assistantEl||appendMessage(box,'assistant','');"
+        // line above the composer; showing it as its own card puts it where
+        // a reply would have appeared.
+        "if(!cancelled){const el=appendMessage(box,'assistant','');"
         "el.className='chatMsg chatMsg-assistant chatMsg-error';el.replaceChildren();"
         "const title=document.createElement('div');"
         "title.className='chatMsg-errorTitle';title.textContent='SYSTEM ERROR!';"
@@ -3828,15 +3949,21 @@ std::string application_script() {
         "if(q('#messageContent'))q('#messageContent').addEventListener('keydown',"
         "e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();"
         "q('#newMessage').requestSubmit();}});"
+        // autoDriveAborted stops the *next* auto-drive turn/approval-resume
+        // from ever starting -- generation.abort() alone only stops
+        // whichever fetch is in flight right now, which would otherwise
+        // still let runTurn()'s own tail call queue up one more turn.
         "if(q('#cancelMessage'))q('#cancelMessage').addEventListener('click',"
-        "()=>{if(generation)generation.abort();});"
-        // Escape stops an in-flight reply immediately, mirroring the cancel
-        // button -- listens on the document (not just the textarea) so it
-        // works even while focus is elsewhere on the chat page, but only
-        // while a generation is actually running so it doesn't swallow
-        // Escape for anything else (closing a picker, blurring a field).
+        "()=>{autoDriveAborted=true;if(generation)generation.abort();});"
+        // Escape stops an in-flight reply (and any queued auto-drive
+        // continuation) immediately, mirroring the cancel button --
+        // listens on the document (not just the textarea) so it works even
+        // while focus is elsewhere on the chat page, but only while a
+        // generation is actually running so it doesn't swallow Escape for
+        // anything else (closing a picker, blurring a field).
         "if(q('#newMessage'))document.addEventListener('keydown',"
-        "e=>{if(e.key==='Escape'&&generation){generation.abort();}});"
+        "e=>{if(e.key==='Escape'&&generation){autoDriveAborted=true;"
+        "generation.abort();}});"
         "if(q('#downloadTier')){q('#downloadTier').addEventListener('change',refreshPresets);"
         "q('#downloadPreset').addEventListener('change',applyPreset);"
         "refreshPresets();q('#applyPreset').addEventListener('click',applyPreset);"
@@ -4439,6 +4566,114 @@ std::string sidebar_section(const std::string& key, const std::string& title,
           "</div></details>";
 }
 
+// Picks a random empty-state greeting for a brand new chat, using the
+// signed-in user's display name when one is on record. Bodies are stored
+// lowercase-start ("what's ...") so they read naturally both standalone
+// (capitalized here) and after a name salutation (left lowercase); this
+// avoids maintaining two parallel 64-entry message lists just to get
+// name-aware and anonymous phrasing out of the same pool.
+std::string chat_welcome_message(const std::string& display_name) {
+    static const char* const kBodies[] = {
+        "what's on the agenda today?", "where should we start?",
+        "what are we building today?", "what's the plan for today?",
+        "what can I help you tackle?", "what's next on your list?",
+        "ready when you are -- what's up?", "what should we dig into?",
+        "what's on your mind today?", "what are we working on?",
+        "what would you like to get done?", "what's the mission today?",
+        "what should we get moving on?", "what's today's focus?",
+        "what can I take off your plate?", "what's the first thing to tackle?",
+        "what's brewing today?", "what shall we work on?",
+        "what's the task at hand?", "what do you need help with?",
+        "what's on deck today?", "where do you want to begin?",
+        "what's today looking like?", "what should we knock out first?",
+        "what's the goal for this session?", "what are we solving today?",
+        "what's up -- what do you need?", "what's the priority today?",
+        "what can we get done together?", "what's the next thing to build?",
+        "what's calling for attention today?", "what should we chase down?",
+        "what's the challenge today?", "what's worth tackling first?",
+        "what's on the table today?", "what should we make progress on?",
+        "what's today's project?", "what's the next step?",
+        "what are we digging into today?", "what's the plan of attack?",
+        "what's on your desk today?", "what can I lend a hand with?",
+        "what's the task for today?", "what should we get into?",
+        "what's the focus for now?", "what's up next?",
+        "what should we start with?", "what's today's puzzle?",
+        "what's the job today?", "what's cooking today?",
+        "what can we knock out today?", "what's the target for today?",
+        "what should we sort out?", "what's the next build?",
+        "what's the itinerary today?", "what's the order of business?",
+        "what should we look at first?", "what's the agenda?",
+        "what's the game plan today?", "what can I get started on?",
+        "what's today's mission?", "what's the next problem to solve?",
+        "what's worth diving into?", "what's the first move today?",
+    };
+    // Time-neutral salutations are always eligible. "Morning"/"Afternoon"/
+    // "Evening" are only mixed in when the server's actual local clock is in
+    // that window -- otherwise a night-owl session would get greeted
+    // "Morning" at 2am, which is just wrong.
+    static const char* const kNeutralSalutations[] = {
+        "Hey {name} -- ", "Welcome back, {name} -- ", "{name}, ",
+        "Good to see you, {name} -- ", "Alright {name}, ", "",
+    };
+    static const char* const kMorningSalutations[] = {
+        "Morning, {name} -- ", "Good morning, {name} -- ",
+    };
+    static const char* const kAfternoonSalutations[] = {
+        "Afternoon, {name} -- ", "Good afternoon, {name} -- ",
+    };
+    static const char* const kEveningSalutations[] = {
+        "Evening, {name} -- ", "Good evening, {name} -- ",
+    };
+    static thread_local std::mt19937 rng{std::random_device{}()};
+
+    const char* body = kBodies[std::uniform_int_distribution<size_t>(
+        0, std::size(kBodies) - 1)(rng)];
+
+    if (display_name.empty()) {
+        std::string sentence(body);
+        sentence[0] = static_cast<char>(std::toupper(sentence[0]));
+        return sentence;
+    }
+
+    std::vector<const char*> candidates(std::begin(kNeutralSalutations),
+                                        std::end(kNeutralSalutations));
+    const std::time_t now_time =
+        std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm local_tm{};
+#if defined(_WIN32)
+    localtime_s(&local_tm, &now_time);
+#else
+    localtime_r(&now_time, &local_tm);
+#endif
+    const int hour = local_tm.tm_hour;
+    if (hour >= 5 && hour < 12) {
+        candidates.insert(candidates.end(), std::begin(kMorningSalutations),
+                          std::end(kMorningSalutations));
+    } else if (hour >= 12 && hour < 17) {
+        candidates.insert(candidates.end(), std::begin(kAfternoonSalutations),
+                          std::end(kAfternoonSalutations));
+    } else if (hour >= 17 && hour < 22) {
+        candidates.insert(candidates.end(), std::begin(kEveningSalutations),
+                          std::end(kEveningSalutations));
+    }
+    // 22:00-04:59 gets only the time-neutral pool -- there's no tasteful way
+    // to say "good 3am" to someone.
+
+    const char* salutation = candidates[std::uniform_int_distribution<size_t>(
+        0, candidates.size() - 1)(rng)];
+    std::string prefix(salutation);
+    const size_t token = prefix.find("{name}");
+    if (token != std::string::npos) {
+        prefix.replace(token, 6, display_name);
+    }
+    if (prefix.empty()) {
+        std::string sentence(body);
+        sentence[0] = static_cast<char>(std::toupper(sentence[0]));
+        return sentence;
+    }
+    return prefix + body;
+}
+
 // Presents one section (chat, projects, models/*, admin/*) of the workspace
 // as its own full document at its own URL (see server.cpp's /app/* routes),
 // with a sidebar of real links to every other section the caller's role can
@@ -4474,7 +4709,8 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<div id=\"chatTopBar\"><label>Project"
             "<select id=\"chatProject\"></select></label></div>"
             "<div id=\"chatEmpty\"" + std::string(is_new_chat ? "" : " hidden") +
-            "><h1>What's on the agenda today?</h1></div>"
+            "><h1>" + html_escape(chat_welcome_message(user.display_name)) +
+            "</h1></div>"
             "<div id=\"chatMessages\"></div>"
             "<div id=\"attachChips\" class=\"attachChips\"></div>"
             "<form id=\"newMessage\" class=\"composer\">"
@@ -7139,7 +7375,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "padding:.4rem;border:1px solid var(--panel-border);border-radius:.4rem;"
         "font-size:.75rem;line-height:1.35}"
         ".memoryItem span{flex:1;min-width:0;overflow-wrap:anywhere}"
+        // Matches .chatDeleteBtn's centering fix above: a button's default
+        // text layout doesn't reliably center a glyph both ways inside a
+        // fixed square, so force it explicitly instead of relying on UA
+        // text-align/line-height defaults.
         ".memoryDeleteBtn{flex:none;width:1.4rem;height:1.4rem;margin:0;padding:0;"
+        "display:flex;align-items:center;justify-content:center;"
         "background:transparent;color:var(--muted);line-height:1}"
         ".memoryDeleteBtn:hover{background:#3a0a0a;color:#ffd54a}"
         // Model Inventory page: a self-contained "container" (background,

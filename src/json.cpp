@@ -429,4 +429,50 @@ std::string json_string(const std::string& value) {
     return output;
 }
 
+std::string json_stringify(const JsonValue& value) {
+    switch (value.type()) {
+        case JsonValue::Type::null_value:
+            return "null";
+        case JsonValue::Type::boolean:
+            return value.as_boolean() ? "true" : "false";
+        case JsonValue::Type::number: {
+            // as_double() never throws for a number regardless of whether
+            // it was originally written as an integer or a fraction, but an
+            // integer value should round-trip without a trailing ".0" --
+            // try the exact-integer accessor first and only fall back to
+            // the floating form for values that actually need it.
+            try {
+                return std::to_string(value.as_integer());
+            } catch (const std::exception&) {
+                std::ostringstream stream;
+                stream << value.as_double();
+                return stream.str();
+            }
+        }
+        case JsonValue::Type::string:
+            return json_string(value.as_string());
+        case JsonValue::Type::array: {
+            std::string result = "[";
+            bool first = true;
+            for (const auto& item : value.as_array()) {
+                if (!first) result += ",";
+                first = false;
+                result += json_stringify(item);
+            }
+            return result + "]";
+        }
+        case JsonValue::Type::object: {
+            std::string result = "{";
+            bool first = true;
+            for (const auto& [key, item] : value.as_object()) {
+                if (!first) result += ",";
+                first = false;
+                result += json_string(key) + ":" + json_stringify(item);
+            }
+            return result + "}";
+        }
+    }
+    return "null";
+}
+
 }  // namespace masterai

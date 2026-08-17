@@ -19,6 +19,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -411,6 +412,13 @@ public:
             std::make_unique<McpOutboundRegistry>(records);
         mcp_outbound_gateway = std::make_unique<McpOutboundGateway>(
             *mcp_outbound_registry, *secrets, audit);
+        // Phase 84: agentic chat tool use -- the admin allow-list a
+        // `run_command` tool call's executable is checked against, and the
+        // durable record of a high-risk tool call currently paused waiting
+        // on a human Approve/Deny decision. See src/tool_exec.cpp.
+        allowed_commands = std::make_unique<AllowedCommandStore>(records);
+        pending_tool_approvals =
+            std::make_unique<PendingToolApprovalStore>(records);
         const auto projects_root = value.runtime_root / "projects";
         std::filesystem::create_directories(projects_root);
         projects = std::make_unique<ProjectCatalog>(projects_root, records);
@@ -6595,6 +6603,20 @@ public:
                                    "/messages") == 0) {
             return send_chat_message(request, *user, stream_socket);
         }
+        // Phase 84: resumes a turn paused on a high_risk tool call --
+        // matches "/api/v1/chats/{id}/tool-approvals/{approvalId}" via the
+        // "/tool-approvals/" marker (resolve_tool_approval() re-derives
+        // both ids from it) rather than a fixed suffix, since the trailing
+        // segment here is a variable approval id, not a fixed word like
+        // "/messages" or "/model" above.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/chats/", 0U) == 0U &&
+            request.target.find("/tool-approvals/") != std::string::npos) {
+            if (auto denied = forbidden_unless(user->role, "chats.write")) {
+                return *denied;
+            }
+            return resolve_tool_approval(request, *user, stream_socket);
+        }
         // Lets the composer's model picker stay usable after the first
         // message instead of locking to whatever model the chat started
         // with -- only future messages use the new model; past history is
@@ -8979,6 +9001,183 @@ private:
         }
     }
 
+    // Chat replies are ordinarily one model turn per one user turn (see
+    // send_chat_message()'s class comment on the endpoint). Auto-drive mode
+    // (composer trigger words such as "confirm"/"implement"/"proceed" -- see
+    // isTaskContinuationCommand() in application_script()) instead asks the
+    // model to keep working a previously stated plan to completion across
+    // several turns without the user re-typing anything each time. The
+    // directive below is folded only into inference_prompt (the model's own
+    // input), never into `prompt` (what gets persisted/echoed as this turn's
+    // user message -- see send_chat_message()), so the visible transcript
+    // still shows only what the user actually typed.
+    static constexpr const char* kAutoDriveContinueMarker = "[[TASK_CONTINUE]]";
+    static constexpr const char* kAutoDriveCompleteMarker = "[[TASK_COMPLETE]]";
+
+    // Phase 84: documents the same six tools execute_chat_tool() actually
+    // dispatches (see its own comment) and the [[TOOL_CALL]] convention a
+    // reply uses to invoke one. Split from the auto-drive continuation
+    // directive below (they used to be one block gated together on
+    // `autoDrive`) so tool use is available on every ordinary turn against a
+    // project-bound chat, not only turns that also asked for autonomous
+    // multi-step continuation -- a plain "save this to <file>" request
+    // deserves a real write_file call, not just prose describing the steps.
+    static constexpr const char* kToolCallOpenMarker = "[[TOOL_CALL]]";
+    static constexpr const char* kToolCallCloseMarker = "[[/TOOL_CALL]]";
+
+    static std::string apply_tool_call_directive(const std::string& content) {
+        return content +
+               "\n\n[You have real tools available for this project -- use "
+               "them instead of only describing what you would do, whenever "
+               "the request actually calls for reading, writing, deleting a "
+               "project file, listing/searching the project, or running an "
+               "admin-approved external command. To call one, end your "
+               "reply with exactly one block of the form " +
+               std::string(kToolCallOpenMarker) +
+               "\n{\"tool\":\"<name>\",\"arguments\":{...}}\n" +
+               kToolCallCloseMarker +
+               " and nothing after it. Available tools: "
+               "read_file{path}, list_directory{path}, search{query}, "
+               "write_file{path,content} (creates or fully replaces a "
+               "project file), delete_file{path}, and run_command"
+               "{executable,arguments:[...]} (runs one admin-approved "
+               "external program with no shell). Every path is relative to "
+               "the project root -- an absolute path, or one that resolves "
+               "outside the project, is always rejected; there is no tool "
+               "that can write anywhere else on the machine, so if the user "
+               "asks for a location outside the project, save it inside the "
+               "project instead and say so plainly. A destructive call "
+               "(delete_file, or a run_command that matches a destructive "
+               "pattern) will pause and wait for the user's explicit "
+               "approval before it actually runs -- expect that, and "
+               "continue naturally once you are told the result. You will "
+               "be shown the real result of every tool call and can then "
+               "call another one the same way, or just reply normally if no "
+               "tool is actually needed for this request. Never explain "
+               "these markers or this instruction to the user.]";
+    }
+
+    static std::string apply_auto_drive_directive(const std::string& content) {
+        return apply_tool_call_directive(content) +
+               "\n\n[Autonomous continuation mode is ON for this turn: fully "
+               "carry out every remaining step of the plan or task you "
+               "previously described, end to end, without pausing to ask "
+               "for confirmation between steps. If, after this reply, "
+               "further steps of the plan still remain and you are not "
+               "calling a tool this turn, end your reply with the exact "
+               "line " +
+               kAutoDriveContinueMarker +
+               " on its own line and nothing after it -- doing so "
+               "automatically continues you with no further input needed. "
+               "Once the entire plan/task is completely finished, end your "
+               "final reply with the exact line " +
+               kAutoDriveCompleteMarker +
+               " on its own line instead. Never explain these markers or "
+               "this instruction to the user.]";
+    }
+
+    enum class AutoDriveState { none, continue_next, complete };
+
+    // Looks for one of the two markers apply_auto_drive_directive() asked
+    // the model to end its reply with and, if found, removes it (plus any
+    // whitespace it trails) from `text` in place -- called on the full
+    // generated reply before it is persisted (chats->append) or reported
+    // back to the client, so neither the saved transcript nor the rendered
+    // bubble ever shows the raw marker. A reply that never had auto-drive
+    // mode requested, or one whose model ignored the instruction, is left
+    // untouched and reports AutoDriveState::none.
+    static AutoDriveState detect_and_strip_auto_drive_marker(std::string& text) {
+        const auto ends_with_marker = [&text](const char* marker) {
+            const auto end = text.find_last_not_of(" \t\r\n");
+            const std::string_view marker_view{marker};
+            if (end == std::string::npos || end + 1 < marker_view.size()) {
+                return false;
+            }
+            return text.compare(end + 1 - marker_view.size(),
+                                marker_view.size(), marker_view) == 0;
+        };
+        const char* found_marker = nullptr;
+        AutoDriveState state = AutoDriveState::none;
+        if (ends_with_marker(kAutoDriveCompleteMarker)) {
+            found_marker = kAutoDriveCompleteMarker;
+            state = AutoDriveState::complete;
+        } else if (ends_with_marker(kAutoDriveContinueMarker)) {
+            found_marker = kAutoDriveContinueMarker;
+            state = AutoDriveState::continue_next;
+        }
+        if (found_marker != nullptr) {
+            const auto marker_pos = text.rfind(found_marker);
+            text.erase(marker_pos);
+            while (!text.empty() &&
+                  (text.back() == '\n' || text.back() == '\r' ||
+                   text.back() == ' ' || text.back() == '\t')) {
+                text.pop_back();
+            }
+        }
+        return state;
+    }
+
+    // Matches the random_id() pattern every other durable-record unit in
+    // this codebase defines locally for itself (see e.g. workflows.cpp)
+    // rather than sharing one across module boundaries.
+    static std::string generate_tool_approval_id() {
+        const auto random = secure_random(16U);
+        static constexpr char digits[] = "0123456789abcdef";
+        std::string id(random.size() * 2U, '0');
+        for (std::size_t index = 0U; index < random.size(); ++index) {
+            id[index * 2U] = digits[random[index] >> 4U];
+            id[index * 2U + 1U] = digits[random[index] & 0x0fU];
+        }
+        return id;
+    }
+
+    // One [[TOOL_CALL]]...[[/TOOL_CALL]] block apply_auto_drive_directive()
+    // asked the model to end its reply with, parsed out of the raw text.
+    struct ToolCallRequest {
+        std::string tool_name;
+        JsonValue arguments;
+    };
+
+    // Looks for the tool-call block at the tail of a generated reply,
+    // mirroring detect_and_strip_auto_drive_marker()'s tail-anchored
+    // search. On a match, the block (open marker through close marker, plus
+    // any trailing whitespace) is erased from `text` in place -- callers
+    // persist/render only the clean prose before it -- and the parsed
+    // {tool, arguments} is returned. A block quoted mid-explanation rather
+    // than issued as the reply's actual final action (anything meaningful
+    // follows the close marker), or one with a malformed body, reports
+    // std::nullopt and leaves `text` untouched.
+    static std::optional<ToolCallRequest> detect_and_strip_tool_call(
+        std::string& text) {
+        const auto open_pos = text.rfind(kToolCallOpenMarker);
+        if (open_pos == std::string::npos) return std::nullopt;
+        const auto body_start = open_pos + std::strlen(kToolCallOpenMarker);
+        const auto close_pos = text.find(kToolCallCloseMarker, body_start);
+        if (close_pos == std::string::npos) return std::nullopt;
+        const auto after_close = close_pos + std::strlen(kToolCallCloseMarker);
+        if (text.find_first_not_of(" \t\r\n", after_close) != std::string::npos) {
+            return std::nullopt;
+        }
+        const auto body = text.substr(body_start, close_pos - body_start);
+        try {
+            const auto parsed = parse_json(body);
+            ToolCallRequest request;
+            request.tool_name = parsed.required("tool").as_string();
+            if (const auto* arguments = parsed.optional("arguments")) {
+                request.arguments = *arguments;
+            }
+            text.erase(open_pos);
+            while (!text.empty() &&
+                  (text.back() == '\n' || text.back() == '\r' ||
+                   text.back() == ' ' || text.back() == '\t')) {
+                text.pop_back();
+            }
+            return request;
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
     ChatTemplate chat_template_for_architecture(
         const std::string& architecture) const {
         if (architecture == "phi3") {
@@ -9369,12 +9568,12 @@ private:
         const JsonValue& root, const ChatRecord& chat,
         const UserRecord& user) const {
         // Bound matches send_chat_message()'s own parse of this same body:
-        // content, attachmentIds, and the optional effort/thinking fields.
-        // Only content/attachmentIds are read here -- effort/thinking are
-        // applied separately, against the model's architecture, once it's
-        // been resolved (see send_chat_message()).
+        // content, attachmentIds, and the optional effort/thinking/autoDrive
+        // fields. Only content/attachmentIds are read here -- effort/
+        // thinking/autoDrive are applied separately, against the model's
+        // architecture, once it's been resolved (see send_chat_message()).
         if (root.as_object().size() < 1U ||
-            root.as_object().size() > 4U) {
+            root.as_object().size() > 5U) {
             throw std::runtime_error("unexpected message field");
         }
         std::string result = root.required("content").as_string();
@@ -9461,21 +9660,6 @@ private:
             return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
         }
 
-        // Chats created before Phase 61 have no memory snapshot. Initialize
-        // such a chat once on its first post-upgrade turn, persist even an
-        // empty result, then use only the cached snapshot thereafter.
-        if (!chat->memory_context_initialized) {
-            const auto memory_context =
-                user_memories->recall_context(user.id, 4096U);
-            static_cast<void>(chats->initialize_memory_context(
-                chat_id, user.id, memory_context));
-            chat = chats->find_for_owner(chat_id, user.id);
-            if (!chat) {
-                return response(404, "Not Found",
-                                "{\"error\":\"chat_not_found\"}");
-            }
-        }
-
         // Parse and validate the user's message before touching the runner.
         // A whole-message "save to memory:" command is a server operation,
         // so it remains fast and works even when no inference backend is
@@ -9489,10 +9673,18 @@ private:
         // so this remains backward compatible.
         std::string effort = "medium";
         std::string thinking = "off";
+        // Set when the composer detected a "confirm"/"implement"/"proceed"
+        // style trigger word (see isTaskContinuationCommand() in
+        // application_script()) -- folds apply_auto_drive_directive() into
+        // this turn's model input so the reply keeps working the previously
+        // stated plan instead of stopping after one step. Optional and
+        // false by default for backward compatibility with older clients
+        // and direct API callers.
+        bool auto_drive = false;
         try {
             root = parse_json(request.body);
             if (root.as_object().size() < 1U ||
-                root.as_object().size() > 4U) {
+                root.as_object().size() > 5U) {
                 throw std::runtime_error("unexpected message field");
             }
             prompt = root.required("content").as_string();
@@ -9510,6 +9702,9 @@ private:
                 if (thinking != "off" && thinking != "on") {
                     throw std::runtime_error("invalid thinking level");
                 }
+            }
+            if (const auto* auto_drive_field = root.optional("autoDrive")) {
+                auto_drive = auto_drive_field->as_boolean();
             }
         } catch (const std::exception&) {
             return response(400, "Bad Request",
@@ -9623,6 +9818,29 @@ private:
             // already been re-authorized for this user just above via
             // chats->find_for_owner(), so a membership/policy change is
             // reflected on the very next message.
+            // Phase 61 originally froze one memory snapshot per chat at
+            // creation and reused it for every later turn, so a "save to
+            // memory: ..." directive given mid-conversation only took effect
+            // in *new* chats, never the one it was typed into -- the user
+            // has to be obeyed immediately, not on their next visit.
+            // Re-read durable memory on every turn instead (including any
+            // directive/auto-capture this very message just added above);
+            // recall_context() is a bounded, cheap in-memory lookup, so
+            // there's no real cost to staying current. Only writes back to
+            // the chat record when something actually changed.
+            {
+                const auto current_memory_context =
+                    user_memories->recall_context(user.id, 4096U);
+                if (!chat->memory_context_initialized ||
+                    chat->memory_context != current_memory_context) {
+                    static_cast<void>(chats->initialize_memory_context(
+                        chat_id, user.id, current_memory_context));
+                    chat = chats->find_for_owner(chat_id, user.id);
+                    if (!chat) {
+                        throw std::runtime_error("chat vanished mid-turn");
+                    }
+                }
+            }
             auto inference_prompt = assemble_inference_prompt(root, *chat, user);
             // Saved details are user-provided reference data, not trusted
             // system instructions. Keep them inside the current user turn,
@@ -9666,6 +9884,23 @@ private:
                                                   retrieved.classification);
                     queries.record_retrieval_strategy_skips(
                         query_id, retrieved.disabled_strategy_reasons);
+                }
+            }
+            // Tools operate against a project's files, so they're only ever
+            // meaningful for a chat that has one bound -- see
+            // execute_chat_tool()'s own "no project bound" fallback below.
+            const bool tools_available = !chat->project_id.empty();
+            if (auto_drive) {
+                inference_prompt = apply_auto_drive_directive(inference_prompt);
+                if (inference_prompt.size() > configuration.max_request_bytes) {
+                    throw std::runtime_error(
+                        "assembled chat context exceeds policy");
+                }
+            } else if (tools_available) {
+                inference_prompt = apply_tool_call_directive(inference_prompt);
+                if (inference_prompt.size() > configuration.max_request_bytes) {
+                    throw std::runtime_error(
+                        "assembled chat context exceeds policy");
                 }
             }
             queries.transition(query_id, QueryStage::ranking,
@@ -10081,6 +10316,23 @@ private:
                     "runner log for a pre-tokenizer warning); try a "
                     "different quantization or source for this model");
             }
+            // Auto-drive mode's marker (see apply_auto_drive_directive()) is
+            // meant purely as a signal to the client's continuation loop --
+            // strip it from the text that actually gets saved/returned so
+            // neither the persisted transcript nor the JSON payload below
+            // ever shows it. A turn that never requested auto-drive mode, or
+            // whose model ignored the instruction, is unaffected.
+            const AutoDriveState auto_drive_state =
+                detect_and_strip_auto_drive_marker(generated.text);
+            // Phase 84: a tool call is mutually exclusive with the
+            // continue/complete markers above (the directive only ever
+            // asks the model to end a reply with one or the other) --
+            // strip it the same tail-anchored way so the persisted
+            // transcript never shows the raw [[TOOL_CALL]] block either.
+            const std::optional<ToolCallRequest> tool_call =
+                (auto_drive || tools_available)
+                    ? detect_and_strip_tool_call(generated.text)
+                    : std::nullopt;
             // Persist the runner-reported token figures with the transcript:
             // the reply's generated count on the assistant message, and the
             // evaluated prompt count back-filled onto this turn's user
@@ -10102,6 +10354,131 @@ private:
             model_usage->record_use(chat->model_id, epoch_seconds());
             ml_inference_metrics.end_request(generated.elapsed_microseconds);
             audit.append("chat.generate", user.id, "success", chat_id);
+            // "none" for an ordinary turn or one auto-drive mode's model
+            // ignored; "continue" tells the client's loop (see
+            // application_script()'s runAutoDrive()) to send another turn
+            // with no further user input; "complete" tells it to stop.
+            const char* auto_drive_state_json =
+                auto_drive_state == AutoDriveState::continue_next
+                    ? "continue"
+                    : (auto_drive_state == AutoDriveState::complete
+                          ? "complete"
+                          : "none");
+            // Phase 84: a tool call this turn preempts the plain
+            // "complete" event above with one of two shapes instead --
+            // "tool_approval_required" (a high_risk call, executed nothing,
+            // the client shows an Approve/Deny card and this chat is done
+            // producing events until POST .../tool-approvals/{id} resumes
+            // it) or "complete" carrying a real "toolCall"/"toolResult"
+            // payload plus autoDriveState "continue" (a safe call already
+            // executed and its result already appended to the transcript,
+            // so the client's existing continuation loop sends the next
+            // turn with no further user input, exactly as it already does
+            // for a plain [[TASK_CONTINUE]]). Neither branch runs a second
+            // generate() call in this request -- see docs/PLAN.md Phase 84
+            // for why the loop lives client-side, one ordinary HTTP
+            // request per turn, rather than inside this function.
+            if (tool_call.has_value()) {
+                const auto risk =
+                    classify_tool_call_risk(tool_call->tool_name,
+                                            tool_call->arguments);
+                if (risk == ChatToolRisk::high_risk) {
+                    PendingToolApproval approval;
+                    approval.id = generate_tool_approval_id();
+                    approval.chat_id = chat_id;
+                    approval.user_id = user.id;
+                    approval.tool_name = tool_call->tool_name;
+                    approval.arguments_json =
+                        json_stringify(tool_call->arguments);
+                    approval.reason =
+                        "This action (" + tool_call->tool_name +
+                        ") was classified high-risk and needs your explicit "
+                        "approval before it runs.";
+                    approval.created_epoch_seconds = epoch_seconds();
+                    pending_tool_approvals->create(approval);
+                    audit.append("chat.tool_call", user.id, "pending_approval",
+                                chat_id + "/" + tool_call->tool_name);
+                    const std::string event =
+                        "{\"type\":\"tool_approval_required\","
+                        "\"approvalId\":\"" + json_escape(approval.id) + "\","
+                        "\"tool\":\"" + json_escape(tool_call->tool_name) +
+                        "\",\"arguments\":" +
+                        json_stringify(tool_call->arguments) +
+                        ",\"reason\":\"" + json_escape(approval.reason) +
+                        "\"}\n";
+                    if (streaming) {
+                        send_chunk(stream_socket, event);
+                        send_all(stream_socket, "0\r\n\r\n");
+                        return {};
+                    }
+                    return response(200, "OK", event.substr(0U, event.size() - 1U));
+                }
+                const auto project = projects->find(chat->project_id);
+                std::atomic_bool tool_cancellation{false};
+                const auto outcome =
+                    project.has_value()
+                        ? execute_chat_tool(tool_call->tool_name,
+                                            tool_call->arguments, *project,
+                                            *allowed_commands,
+                                            tool_cancellation)
+                        : ChatToolCallResult{
+                              false, "This chat has no project bound to it, "
+                                     "so file/command tools are unavailable.",
+                              "{\"error\":\"no_project\"}"};
+                audit.append("chat.tool_call",
+                             user.id,
+                             outcome.succeeded ? "success" : "failed",
+                             chat_id + "/" + tool_call->tool_name);
+                // Delimited clearly as a tool result rather than a real
+                // user message -- a model reading its own chat history
+                // back should never mistake this for something the human
+                // typed (see the auto-drive directive's own instruction to
+                // treat tool results as such).
+                const std::string tool_result_turn =
+                    "[Tool result for " + tool_call->tool_name + "]\n" +
+                    outcome.result_text;
+                chats->append(chat_id, ChatRole::user, tool_result_turn);
+                const std::string tool_call_event =
+                    "{\"type\":\"tool_call\",\"tool\":\"" +
+                    json_escape(tool_call->tool_name) + "\",\"arguments\":" +
+                    json_stringify(tool_call->arguments) + "}\n";
+                const std::string tool_result_event =
+                    "{\"type\":\"tool_result\",\"tool\":\"" +
+                    json_escape(tool_call->tool_name) + "\",\"succeeded\":" +
+                    std::string(outcome.succeeded ? "true" : "false") +
+                    ",\"result\":" + outcome.structured_json + "}\n";
+                if (streaming) {
+                    send_chunk(stream_socket, tool_call_event);
+                    send_chunk(stream_socket, tool_result_event);
+                    send_chunk(
+                        stream_socket,
+                        "{\"type\":\"complete\",\"promptTokens\":" +
+                            std::to_string(generated.prompt_tokens) +
+                            ",\"generatedTokens\":" +
+                            std::to_string(generated.generated_tokens) +
+                            ",\"elapsedMicroseconds\":" +
+                            std::to_string(generated.elapsed_microseconds) +
+                            ",\"requestId\":\"" + json_escape(query_id) +
+                            "\",\"cancelled\":false,\"autoDriveState\":"
+                            "\"continue\"}\n");
+                    send_all(stream_socket, "0\r\n\r\n");
+                    return {};
+                }
+                return response(
+                    200, "OK",
+                    "{\"content\":\"" + json_escape(generated.text) +
+                        "\",\"promptTokens\":" +
+                        std::to_string(generated.prompt_tokens) +
+                        ",\"generatedTokens\":" +
+                        std::to_string(generated.generated_tokens) +
+                        ",\"autoDriveState\":\"continue\""
+                        ",\"toolResult\":" +
+                        tool_result_event.substr(
+                            0U, tool_result_event.size() - 1U) +
+                        ",\"elapsedMicroseconds\":" +
+                        std::to_string(generated.elapsed_microseconds) +
+                        ",\"requestId\":\"" + json_escape(query_id) + "\"}");
+            }
             if (streaming) {
                 send_chunk(
                     stream_socket,
@@ -10114,6 +10491,8 @@ private:
                         ",\"requestId\":\"" + json_escape(query_id) + "\"" +
                         ",\"cancelled\":" +
                         std::string(generated.cancelled ? "true" : "false") +
+                        ",\"autoDriveState\":\"" +
+                        std::string(auto_drive_state_json) + "\"" +
                         "}\n");
                 send_all(stream_socket, "0\r\n\r\n");
                 return {};
@@ -10125,6 +10504,8 @@ private:
                     std::to_string(generated.prompt_tokens) +
                     ",\"generatedTokens\":" +
                     std::to_string(generated.generated_tokens) +
+                    ",\"autoDriveState\":\"" +
+                    std::string(auto_drive_state_json) + "\"" +
                     ",\"elapsedMicroseconds\":" +
                     std::to_string(generated.elapsed_microseconds) +
                     ",\"requestId\":\"" + json_escape(query_id) + "\"}");
@@ -10207,6 +10588,132 @@ private:
         }
     }
 
+    // Resumes a chat turn send_chat_message() paused on a high_risk tool
+    // call (see the "tool_approval_required" event it streams -- the
+    // PendingToolApproval record this reads was created right there).
+    // Deliberately does not call inference->generate() at all: approving or
+    // denying a tool only ever executes the tool (or records the denial)
+    // and appends its result as a chat turn, exactly like the safe-tool
+    // branch above already does inline -- the model's *next* reply is just
+    // the client's ordinary next POST to .../messages (autoDrive:true,
+    // "Continue."), reusing send_chat_message's normal single-call
+    // pipeline rather than this route trying to re-enter it.
+    std::string resolve_tool_approval(Request& request, const UserRecord& user,
+                                      const NativeSocket stream_socket) {
+        const std::string prefix{"/api/v1/chats/"};
+        const auto marker = request.target.find("/tool-approvals/");
+        if (marker == std::string::npos || marker <= prefix.size()) {
+            return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
+        }
+        const auto chat_id =
+            request.target.substr(prefix.size(), marker - prefix.size());
+        const auto approval_id = request.target.substr(
+            marker + std::string("/tool-approvals/").size());
+        auto chat = chats->find_for_owner(chat_id, user.id);
+        if (!chat) {
+            return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
+        }
+        const auto approval = pending_tool_approvals->find(approval_id);
+        if (!approval || approval->chat_id != chat_id ||
+            approval->user_id != user.id) {
+            return response(404, "Not Found",
+                            "{\"error\":\"tool_approval_not_found\"}");
+        }
+        bool approve = false;
+        try {
+            const auto root = parse_json(request.body);
+            if (root.as_object().size() != 1U) {
+                throw std::runtime_error("unexpected approval field");
+            }
+            const auto& decision = root.required("decision").as_string();
+            if (decision != "approve" && decision != "deny") {
+                throw std::runtime_error("invalid decision");
+            }
+            approve = decision == "approve";
+        } catch (const std::exception&) {
+            return response(400, "Bad Request",
+                            "{\"error\":\"invalid_tool_approval\"}");
+        }
+        // One-shot: consumed here whether approved or denied, so a repeat
+        // POST (a retried request, a second click) 404s instead of running
+        // the same destructive action twice.
+        pending_tool_approvals->remove(approval_id);
+
+        JsonValue arguments;
+        try {
+            arguments = parse_json(approval->arguments_json);
+        } catch (const std::exception&) {
+            // Leave arguments at its default null_value -- execute_chat_tool()
+            // fails closed on a tool that requires an argument it can't find.
+        }
+
+        std::string result_text;
+        std::string structured_json;
+        bool succeeded = false;
+        if (!approve) {
+            result_text = "Denied by the user.";
+            structured_json = "{\"error\":\"denied_by_user\"}";
+            audit.append("chat.tool_call", user.id, "denied",
+                         chat_id + "/" + approval->tool_name);
+        } else {
+            const auto project = projects->find(chat->project_id);
+            std::atomic_bool tool_cancellation{false};
+            const auto outcome =
+                project.has_value()
+                    ? execute_chat_tool(approval->tool_name, arguments,
+                                        *project, *allowed_commands,
+                                        tool_cancellation)
+                    : ChatToolCallResult{
+                          false, "This chat has no project bound to it, so "
+                                 "file/command tools are unavailable.",
+                          "{\"error\":\"no_project\"}"};
+            succeeded = outcome.succeeded;
+            result_text = outcome.result_text;
+            structured_json = outcome.structured_json;
+            audit.append("chat.tool_call", user.id,
+                         succeeded ? "success" : "failed",
+                         chat_id + "/" + approval->tool_name);
+        }
+        const std::string tool_result_turn =
+            "[Tool result for " + approval->tool_name + "]\n" + result_text;
+        chats->append(chat_id, ChatRole::user, tool_result_turn);
+
+        const std::string tool_call_event =
+            "{\"type\":\"tool_call\",\"tool\":\"" +
+            json_escape(approval->tool_name) + "\",\"arguments\":" +
+            json_stringify(arguments) + "}\n";
+        const std::string tool_result_event =
+            "{\"type\":\"tool_result\",\"tool\":\"" +
+            json_escape(approval->tool_name) + "\",\"succeeded\":" +
+            std::string(succeeded ? "true" : "false") +
+            ",\"result\":" + structured_json + "}\n";
+        if (stream_socket != invalid_socket) {
+            const std::string header =
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/x-ndjson; charset=utf-8\r\n"
+                "Transfer-Encoding: chunked\r\nConnection: close\r\n"
+                "Cache-Control: no-store\r\n"
+                "X-Content-Type-Options: nosniff\r\n"
+                "X-Frame-Options: DENY\r\n"
+                "Referrer-Policy: no-referrer\r\n\r\n";
+            if (!send_all(stream_socket, header)) return {};
+            send_chunk(stream_socket, tool_call_event);
+            send_chunk(stream_socket, tool_result_event);
+            send_chunk(stream_socket,
+                      "{\"type\":\"complete\",\"promptTokens\":0,"
+                      "\"generatedTokens\":0,\"elapsedMicroseconds\":0,"
+                      "\"requestId\":\"\",\"cancelled\":false,"
+                      "\"autoDriveState\":\"continue\"}\n");
+            send_all(stream_socket, "0\r\n\r\n");
+            return {};
+        }
+        return response(200, "OK",
+                        "{\"toolResult\":" +
+                            tool_result_event.substr(
+                                0U, tool_result_event.size() - 1U) +
+                            ",\"autoDriveState\":\"continue\"}");
+    }
+
     AppConfig configuration;
     RecordStore records;
     AuditLog audit;
@@ -10251,6 +10758,10 @@ private:
     std::unique_ptr<IdeIntegrationService> ide;
     std::unique_ptr<McpOutboundRegistry> mcp_outbound_registry;
     std::unique_ptr<McpOutboundGateway> mcp_outbound_gateway;
+    // Phase 84: agentic chat tool use -- see the construction-site comment
+    // next to mcp_outbound_gateway's own construction above.
+    std::unique_ptr<AllowedCommandStore> allowed_commands;
+    std::unique_ptr<PendingToolApprovalStore> pending_tool_approvals;
     std::unique_ptr<server_internal::IntegrationHttpController> integrations;
     std::unique_ptr<ChatStore> chats;
     std::unique_ptr<UserMemoryStore> user_memories;

@@ -6534,6 +6534,117 @@ Exit criteria:
   benefit, page-fault rates indicate destructive paging, an advanced
   optimization's fallback fails, or benchmark identity is incomplete.
 
+### Phase 84 — Agentic tool use in chat
+
+Status: Implemented at a first-increment level (2026-08-17), not yet built
+or validated on a live host (see Document Status conventions elsewhere in
+this file — this entry is honest about what has not been through that gate
+yet). Core mechanism is in place end-to-end; the admin allow-list has no
+management routes/UI yet (see Deliverables), and MCP inbound exposure of
+the new tools has not been added, so today this is a web-chat-only
+capability.
+
+Purpose:
+
+- Previously, chat (`send_chat_message`, Phase 5) was pure single-turn text
+  completion with no tool calling and no filesystem/command access at all —
+  a user asking the model to "confirm"/"implement"/"go ahead" on its own
+  prior plan only ever got another turn of prose, never a real change, and
+  had to manually relay "continue" after every step of a multi-step task.
+  This phase gives chat (and, once MCP exposure is added, connected IDEs) a
+  small, explicit tool set — read/list/search/write/delete a project file,
+  run one admin-approved external command — and an auto-drive mode that
+  keeps a turn going across as many model calls as a task needs, with no
+  further user input, until the model reports the task complete.
+
+Deliverables:
+
+- `AllowedCommandStore` (`src/tool_exec.cpp`, declared `src/masterai.hpp`):
+  durable admin allow-list of `run_command`-eligible executables, mirroring
+  `McpOutboundRegistry`'s `RecordStore`-backed shape. Implemented as a
+  store; no `/api/v1` management routes or web UI page exist yet, so an
+  allow-list entry can currently only be added by a direct `RecordStore`
+  write — `run_command` therefore always reports "not on the admin
+  allow-list" on an unmodified install. Follow-up work.
+- `run_sandboxed_process()` (`src/tool_exec.cpp`): one argv-array external
+  process (never a shell) contained the same way Phase 9's outbound-MCP
+  `invoke_stdio()` already contains a stdio server — a Windows Job Object
+  capping memory/process count, or Linux rlimit + no-new-privileges —
+  bounded by timeout, output-byte cap, and cancellation.
+- `classify_tool_call_risk()` (`src/tool_exec.cpp`): a fixed destructive-
+  pattern table (delete/rm/rmdir/format/DROP/TRUNCATE/reset --hard/
+  clean -f/push --force/shutdown/taskkill/diskpart/reg delete and similar)
+  that always forces a human Approve/Deny click before a matching call
+  executes, regardless of the allow-list or auto-drive mode.
+- `execute_chat_tool()` (`src/tool_exec.cpp`): the one dispatch table for
+  `read_file`, `list_directory`, `search`, `write_file`, `delete_file`, and
+  `run_command`, bounded to a project's root the same way
+  `read_project_text_file()` already is. `write_file` currently reports a
+  before/after byte-count summary alongside the new content rather than a
+  computed unified diff — real, but a plainer view than a full diff
+  algorithm; a follow-up, not a blocker.
+- Chat tool loop (`src/server.cpp`, `send_chat_message`): `apply_tool_call_
+  directive()` folds the tool set and the `[[TOOL_CALL]]...[[/TOOL_CALL]]`
+  convention into the model's prompt on every turn of a project-bound chat
+  (`tools_available = !chat->project_id.empty()`) — tool use is not gated
+  on the `autoDrive` trigger words any more (2026-08-17 fix: a plain "save
+  this to a file" request has no reason to require confirm/implement/
+  proceed-style phrasing before a real `write_file` call becomes possible).
+  An `autoDrive` request field additionally folds
+  `apply_auto_drive_directive()` in (which wraps the same tool directive
+  plus the `[[TASK_CONTINUE]]`/`[[TASK_COMPLETE]]` markers) so the model
+  also keeps working a previously stated multi-step plan without stopping.
+  A safe tool call executes inline and the turn ends with
+  `autoDriveState:"continue"` regardless of whether the triggering turn
+  itself requested auto-drive; a high-risk call instead persists a
+  `PendingToolApproval` and ends the turn on a `tool_approval_required`
+  event. Every tool stays bounded to the chat's own project root — there is
+  no path to write outside it, by design; a request for an absolute/
+  external path is expected to be declined with the file saved inside the
+  project instead. Deliberately does not loop internally — each step is one
+  ordinary HTTP request through the unmodified single-`generate()` pipeline
+  (preserving every existing scheduler-ticket/memory-lease/session-reuse/
+  runner-pool-failover behavior untouched); the loop itself lives
+  client-side (`runTurn()` in `application_script()`), which re-POSTs
+  `.../messages` with `"Continue."` whenever a turn reports
+  `autoDriveState:"continue"`, bounded to 25 turns.
+- `POST /api/v1/chats/{id}/tool-approvals/{approvalId}`
+  (`resolve_tool_approval()`, `src/server.cpp`): approves or denies a
+  paused high-risk call, appends its real result (or the denial) as a chat
+  turn, and hands back to the same client-side continuation loop — it does
+  not call `generate()` itself.
+- Composer trigger words (`isTaskContinuationCommand()`,
+  `application_script()`): a short (≤10-word) message matching confirm/
+  implement/proceed/go ahead/make (the) change(s)/change it/execute/apply/
+  do it/start|begin phase/phase(s)/(the) plan/strategy sets `autoDrive` for
+  that turn, which layers autonomous multi-step continuation on top of tool
+  use — tool use itself no longer needs this trigger (see above); `/help`
+  documents the behavior.
+- Chat transcript rendering: every `tool_call`/`tool_result` is shown as
+  its own card as it happens (not hidden), an `Approve`/`Deny` card for a
+  paused high-risk call, and a live status line ("Running `<tool>`...")
+  in place of the generic "Thinking" indicator while a tool is active.
+  Escape/the existing Stop button abort both the in-flight turn and any
+  further auto-drive continuation.
+
+Explicitly out of scope this pass:
+
+- Admin allow-list management routes/UI (see above).
+- MCP inbound exposure (`src/mcp.cpp` still lists only the four Phase 8
+  tools) — `execute_chat_tool()` is written to be shared by both surfaces,
+  but the MCP dispatch itself hasn't been extended yet.
+- A standalone VS Code/Visual Studio extension surfacing these tools (the
+  existing IDE integrations, Phase 10, are unchanged); full Claude-Code
+  tool parity (persistent shell sessions, web fetch/search, image tools); a
+  real line-level diff for `write_file`.
+
+Exit criteria (not yet met — tracked for the follow-up pass):
+
+- The allow-list is administrable from the web UI; the six tools are
+  callable identically through MCP `tools/call` as through chat; a live
+  host validation exercises a full confirm → tool calls → approval →
+  completion cycle end to end.
+
 ## Machine Learning Abilities
 
 Implementation status: Phase 37 (see the phase list above) implements the

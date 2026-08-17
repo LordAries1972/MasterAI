@@ -65,4 +65,14 @@ JsonValue parse_json(const std::string& input,
 // Encodes one UTF-8 value as a complete quoted JSON string.
 std::string json_string(const std::string& value);
 
+// Re-serializes a parsed JsonValue tree back into compact JSON text. Every
+// other JSON-producing site in this codebase builds its response by
+// concatenating literal fragments (see e.g. server.cpp's response
+// builders) rather than round-tripping a JsonValue, since the exact shape
+// is normally known at the call site; this is for the one place that isn't
+// true -- persisting/re-emitting a tool call's caller-supplied `arguments`
+// object (see server.cpp's chat tool loop, Phase 84) whose shape is
+// whatever the model produced.
+std::string json_stringify(const JsonValue& value);
+
 }  // namespace masterai
