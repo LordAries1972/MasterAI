@@ -2,6 +2,7 @@
 // class comment on PerformanceCertificationRecord/PerformanceCertificationRunner
 // in masterai.hpp for the honest scope note this pass operates under.
 #include "masterai.hpp"
+#include "json.hpp"
 
 #include <algorithm>
 #include <chrono>

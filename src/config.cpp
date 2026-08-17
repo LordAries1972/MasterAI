@@ -54,7 +54,9 @@ std::uint64_t positive(const JsonValue& value, const std::string& field,
                        const std::uint64_t maximum) {
     const auto number = value.required(field).as_integer();
     if (number <= 0 || static_cast<std::uint64_t>(number) > maximum) {
-        throw std::runtime_error(field + " is outside policy");
+        throw std::runtime_error(field + " must be between 1 and " +
+                                 std::to_string(maximum) + " (received " +
+                                 std::to_string(number) + ")");
     }
     return static_cast<std::uint64_t>(number);
 }
@@ -63,7 +65,9 @@ std::uint64_t non_negative(const JsonValue& value, const std::string& field,
                            const std::uint64_t maximum) {
     const auto number = value.required(field).as_integer();
     if (number < 0 || static_cast<std::uint64_t>(number) > maximum) {
-        throw std::runtime_error(field + " is outside policy");
+        throw std::runtime_error(field + " must be between 0 and " +
+                                 std::to_string(maximum) + " (received " +
+                                 std::to_string(number) + ")");
     }
     return static_cast<std::uint64_t>(number);
 }

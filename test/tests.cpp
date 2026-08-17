@@ -1489,9 +1489,12 @@ void test_phase_fifteen_disk_backed_indexing() {
     configuration.models_root = temporary.path() / "models";
     masterai::CacheManager workload_cache(temporary.path() / "http-cache",
                                           memory, masterai::CachePolicy{});
+    masterai::RequestScheduler workload_scheduler;
+    masterai::PerformanceCertificationStore workload_certifications;
     masterai::server_internal::WorkloadHttpController workloads(
         configuration, projects, attachments, nullptr, nullptr, benchmarks,
-        service, audit, workload_cache);
+        service, audit, workload_cache, workload_scheduler,
+        workload_certifications);
     const masterai::UserRecord administrator{
         "admin", "TEST\\operator", "Operator",
         masterai::UserRole::administrator, true};

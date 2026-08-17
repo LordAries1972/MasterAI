@@ -2,50 +2,6 @@
   {
     "relativePath": "docs/PLAN.md",
     "languageId": "markdown",
-    "contentHash": "0d5b784ea413b635860983b9c39e95e221c49e738b533a49d3fdd69ad583657e",
-    "documentVersion": 3,
-    "timestampMs": 1785945932759,
-    "outcome": "valid",
-    "toolIdentity": "markdown intrinsic grammar",
-    "durationMs": 0,
-    "diagnosticFingerprints": []
-  },
-  {
-    "relativePath": "docs/PLAN.md",
-    "languageId": "markdown",
-    "contentHash": "a0a14cc1bd3a7024b6a8d20bf5353df0c066eccc010cdd3aac05fdd6f27800a8",
-    "documentVersion": 4,
-    "timestampMs": 1785946113557,
-    "outcome": "valid",
-    "toolIdentity": "markdown intrinsic grammar",
-    "durationMs": 0,
-    "diagnosticFingerprints": []
-  },
-  {
-    "relativePath": "docs/PLAN.md",
-    "languageId": "markdown",
-    "contentHash": "64343d002a13bccd6cb8f79516139f38f9cf56cb20a764c8d93f4cade8e0bef5",
-    "documentVersion": 5,
-    "timestampMs": 1785946590266,
-    "outcome": "valid",
-    "toolIdentity": "markdown intrinsic grammar",
-    "durationMs": 0,
-    "diagnosticFingerprints": []
-  },
-  {
-    "relativePath": "docs/PLAN.md",
-    "languageId": "markdown",
-    "contentHash": "9720cfa20fa5122735762bd536b59e490ed40fbca3c5393277e71ca4da586094",
-    "documentVersion": 6,
-    "timestampMs": 1785946619526,
-    "outcome": "valid",
-    "toolIdentity": "markdown intrinsic grammar",
-    "durationMs": 0,
-    "diagnosticFingerprints": []
-  },
-  {
-    "relativePath": "docs/PLAN.md",
-    "languageId": "markdown",
     "contentHash": "76822384afa6213a38ea6222757f7f30ef5230b130a037297084c67dfe1d0d82",
     "documentVersion": 7,
     "timestampMs": 1785946651421,
@@ -5499,6 +5455,50 @@
     "outcome": "inconclusive",
     "toolIdentity": "g++",
     "durationMs": 95,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "src/regression_gate.cpp",
+    "languageId": "cpp",
+    "contentHash": "e0d5592401bcf52e32e2d589705a51c9a11b178178b1249ed1371a06ba48aa7e",
+    "documentVersion": 9,
+    "timestampMs": 1786952923796,
+    "outcome": "inconclusive",
+    "toolIdentity": "g++",
+    "durationMs": 7314,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "test/tests.cpp",
+    "languageId": "cpp",
+    "contentHash": "48871eeec40af5d6f995ff8b46ae71e4b84abb50c6ea80d2e4de6f5285efe618",
+    "documentVersion": 19,
+    "timestampMs": 1786952989935,
+    "outcome": "inconclusive",
+    "toolIdentity": "g++",
+    "durationMs": 120,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "src/web_ui.cpp",
+    "languageId": "cpp",
+    "contentHash": "0bd6ebb9845a3b833ced5c73bbbf8f94248d8643cb615222473ec94060e9f5a6",
+    "documentVersion": 85,
+    "timestampMs": 1786953257986,
+    "outcome": "inconclusive",
+    "toolIdentity": "g++",
+    "durationMs": 306,
+    "diagnosticFingerprints": []
+  },
+  {
+    "relativePath": "src/config.cpp",
+    "languageId": "cpp",
+    "contentHash": "be0ec813ceef28b36b1f2d0cd5560f1b8bcd8c687a1362963022044964f91e44",
+    "documentVersion": 3,
+    "timestampMs": 1786953277481,
+    "outcome": "inconclusive",
+    "toolIdentity": "g++",
+    "durationMs": 127,
     "diagnosticFingerprints": []
   }
 ]
