@@ -30,6 +30,12 @@
 
 namespace masterai {
 
+// Forward-declared rather than including json.hpp here: only
+// json_records_to_csv (ml_engine.cpp) takes a JsonValue by reference, and a
+// declaration needs no more than that -- every caller that actually
+// constructs a std::vector<JsonValue> already includes json.hpp itself.
+class JsonValue;
+
 enum class LogLevel { debug, info, warning, error };
 
 void log(LogLevel level, const std::string& event, const std::string& detail);
@@ -549,6 +555,64 @@ struct ProcessResourceSample {
 };
 
 ProcessResourceSample probe_process_resources();
+
+// Trims this process's own working set back to the OS and returns the
+// resident-memory delta freed (0 if the platform has no such primitive, or
+// the call did not reduce resident memory). This is the one memory-reclaim
+// action MasterAI can actually perform on the wider system's behalf: it
+// cannot force another process or the OS itself to release memory, only
+// shrink its own footprint, which is what increases OS-visible free RAM.
+std::uint64_t release_process_working_set();
+
+// System-wide Windows memory-manager primitives for the Model Inventory
+// page's "Memory Status" widget (docs/PLAN.md Phase 35 extension note).
+// Every one of these genuinely requires the MasterAI process itself to be
+// running elevated (Administrator) -- Windows only grants the underlying
+// privilege (SeProfileSingleProcessPrivilege, SeIncreaseQuotaPrivilege, or
+// SeDebugPrivilege) to an elevated token. Each fails closed (returns
+// false/0) rather than crashing or silently pretending to have worked when
+// the calling process isn't elevated, or on any non-Windows platform.
+
+// Enables `privilege_name` (e.g. "SeProfileSingleProcessPrivilege") in this
+// process's own token if the account holds it but it isn't active yet.
+// Returns whether the privilege is enabled after the call -- the honest
+// yes/no every function below checks before attempting its real operation.
+bool acquire_privilege_if_available(const char* privilege_name);
+
+// NtSetSystemInformation(SystemMemoryListInformation, MemoryFlushModifiedList)
+// -- the same primitive Sysinternals RAMMap's "Flush" uses.
+bool flush_modified_page_list();
+
+// NtSetSystemInformation(SystemMemoryListInformation, MemoryPurgeStandbyList).
+bool purge_standby_list();
+
+// NtSetSystemInformation(SystemMemoryListInformation,
+// MemoryPurgeLowPriorityStandbyList) -- purges only the lowest-priority
+// standby pages, leaving higher-priority cached pages (recently used)
+// alone.
+bool purge_low_priority_standby_list();
+
+// Trims the working set (EmptyWorkingSet) of every other running process
+// this account has permission to open, skipping any whose working set is
+// below `minimum_mib` (0 = no threshold) and, when
+// `protect_foreground_process` is set, skipping whatever process currently
+// owns the foreground window so the operator's active application doesn't
+// visibly stutter. Returns the number of processes successfully trimmed.
+std::uint32_t trim_other_process_working_sets(
+    std::uint64_t minimum_mib, bool protect_foreground_process);
+
+// Like trim_other_process_working_sets(), but with no size threshold and
+// requesting SeDebugPrivilege first so SYSTEM/service processes this
+// account would not otherwise be able to open are included too. Returns
+// the number of processes successfully trimmed.
+std::uint32_t empty_system_and_service_working_sets();
+
+// Forces the Windows system file cache down via the documented
+// SetSystemFileCacheSize() shrink-then-restore technique (the same one
+// Microsoft's own CacheSet/Clearmem tools use): briefly caps the cache's
+// working set to a small ceiling, then immediately restores the default
+// (unrestricted) limit.
+bool clear_system_file_cache();
 
 // Phase 19: a short blocking system-wide CPU-utilization and process-scoped
 // disk-byte sample used only for calibration evidence, never for admission
@@ -1678,6 +1742,13 @@ public:
         const std::string& os_principal) const;
     std::optional<UserRecord> find_by_id(const std::string& id) const;
     std::vector<UserRecord> all() const;
+    // Flips UserRecord::enabled without touching any other field --
+    // authentication (see the `!user->enabled` check in server.cpp) already
+    // refuses a disabled account, so this is how an administrator removes a
+    // user from authentication without discarding their audit history or id
+    // references elsewhere. Returns false for an unknown id rather than
+    // throwing, matching every other ml.* store's set_status() convention.
+    bool set_enabled(const std::string& id, bool enabled);
 
 private:
     RecordStore& records_;
@@ -5187,6 +5258,26 @@ TabularDataset parse_tabular_csv(
     const std::string& csv, const std::string& target_column,
     std::uint64_t maximum_csv_bytes = 8ULL * 1024ULL * 1024ULL);
 
+// Dataset content upload completion: Dataset Manager (docs/PLAN.md
+// "Machine Learning Abilities" section 10) originally accepted CSV text
+// only. These three converters let the same upload route accept JSON,
+// JSONL, and Parquet too, each converging on the exact CSV text
+// parse_tabular_csv above already validates -- DatasetContentStore and
+// every downstream trainer/evaluator/comparator stay CSV-only and
+// unchanged. json_records_to_csv is the shared tail: the header is every
+// key seen across all records (alphabetical, since JsonValue::Object is a
+// std::map), a record missing a key renders that cell empty, and a nested
+// array/object field is rejected (the tabular engine has no concept of a
+// nested column) rather than silently stringified.
+std::string json_records_to_csv(const std::vector<JsonValue>& records);
+// Parses `json_text` as a top-level JSON array of flat objects.
+std::string json_array_to_csv(const std::string& json_text);
+// Parses `jsonl_text` as one JSON object per non-blank line -- the same
+// shape parquet_bytes_to_json's DuckDB helper output already is, so a
+// Parquet upload is base64-decoded, run through parquet_bytes_to_json, and
+// handed to this same function.
+std::string jsonl_to_csv(const std::string& jsonl_text);
+
 // Raw uploaded content for one DatasetStore entry, keyed by dataset id.
 // Kept as the original CSV plus the chosen target column so training and
 // evaluation always re-parse from the exact bytes the administrator
@@ -6554,6 +6645,97 @@ private:
     class State;
     std::unique_ptr<State> state_;
 };
+
+// Model Inventory page "Memory Status" widget: the set of real memory-
+// reclaim actions an administrator can trigger by hand, and the progress
+// tracker the frontend polls while they run. Every action here is a real
+// operation this process can actually perform -- MasterAI cannot force
+// another process or the OS itself to release memory, only shrink its own
+// footprint (bounded caches, scratch/temp files, its own working set, and
+// optionally the loaded model), which is what increases OS-visible free RAM.
+enum class MemoryCleanupState { idle, running, complete, failed };
+
+struct MemoryCleanupOptions {
+    bool trim_caches{true};
+    bool clear_scratch{true};
+    bool release_working_set{true};
+    // Opt-in and defaulted off: unloading the active model is the most
+    // disruptive option (the next chat message has to reload it), so it
+    // must be explicitly requested rather than assumed.
+    bool unload_model{false};
+    // Windows system-memory options below (docs/PLAN.md Phase 35 extension
+    // note). Each calls a real OS-level memory-manager primitive rather
+    // than anything scoped to MasterAI's own process, and each genuinely
+    // requires the MasterAI process itself to be running elevated
+    // (Administrator) -- Windows only grants SeProfileSingleProcessPrivilege/
+    // SeIncreaseQuotaPrivilege/SeDebugPrivilege to elevated tokens. Every one
+    // of these fails closed (reports unavailable, never crashes or silently
+    // no-ops as if it worked) when the process isn't elevated -- see
+    // platform.cpp's acquire_privilege_if_available(). Defaulted off:
+    // trimming other applications or purging the standby list can make the
+    // OS momentarily slower (previously-cached pages have to be re-read from
+    // disk), so this is opt-in the same way unload_model is.
+    bool trim_other_process_working_sets{false};
+    // "Only applications using N MB or more" -- 0 means no threshold.
+    std::uint64_t trim_other_process_minimum_mib{100};
+    bool protect_foreground_application{true};
+    bool flush_modified_page_list{false};
+    bool purge_standby_list{false};
+    bool purge_low_priority_standby_pages{false};
+    bool empty_system_and_service_working_sets{false};
+    bool clear_system_file_cache{false};
+};
+
+struct MemoryCleanupResult {
+    std::string id;
+    MemoryCleanupState state{MemoryCleanupState::idle};
+    unsigned int percent{0};
+    std::string current_step;
+    std::uint64_t cache_bytes_freed{0};
+    std::size_t scratch_orphans_removed{0};
+    std::uint64_t process_working_set_bytes_freed{0};
+    bool model_unloaded{false};
+    std::uint32_t other_processes_trimmed{0};
+    bool modified_page_list_flushed{false};
+    bool standby_list_purged{false};
+    bool low_priority_standby_purged{false};
+    std::uint32_t system_working_sets_emptied{0};
+    bool system_file_cache_cleared{false};
+    // Names (matching the option, e.g. "purgeStandbyList") of every
+    // requested privileged step that could not run because the process
+    // isn't elevated -- surfaced to the administrator instead of a silent
+    // no-op, so "I checked the box and nothing happened" always has an
+    // honest, visible reason.
+    std::vector<std::string> privilege_denied_steps;
+    std::string diagnostic;
+};
+
+// Single-flight, poll-friendly tracker for the administrator-triggered
+// "Clean Memory" action. Mirrors DownloadJob's progress-reporting shape
+// (begin/record_progress-style updates a GET poll can observe mid-flight)
+// but intentionally simpler: cleanup runs to completion in one pass with no
+// pause/resume, so only current state/percent/step need to survive polls.
+class MemoryCleanupTracker final {
+public:
+    // Refuses (returns false, leaves any prior finished result untouched) if
+    // a run is already in flight, so two concurrent POSTs can't race each
+    // other's step sequencing or progress counter.
+    bool begin(std::string id, unsigned int total_steps);
+    // Marks one real sub-step as complete and recomputes percent from
+    // completed/total steps -- progress a caller can trust, not a fake timer.
+    void advance_step(std::string step_label);
+    void finish(MemoryCleanupResult partial);
+    void fail(std::string diagnostic);
+    MemoryCleanupResult status() const;
+
+private:
+    mutable std::mutex mutex_;
+    MemoryCleanupResult current_;
+    unsigned int total_steps_{0};
+    unsigned int completed_steps_{0};
+};
+
+std::string memory_cleanup_result_json(const MemoryCleanupResult& result);
 
 // Phase 30: bridges a FixedSizePool<T>'s bytes_reserved() to
 // MemoryBudgetManager's live category accounting, closing the gap the

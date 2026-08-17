@@ -322,6 +322,95 @@ std::string MemoryBudgetManager::to_json(const MemoryStatus& status) {
            ",\"activePressureActions\":" + actions + "}";
 }
 
+namespace {
+
+const char* memory_cleanup_state_name(const MemoryCleanupState state) noexcept {
+    switch (state) {
+        case MemoryCleanupState::idle: return "idle";
+        case MemoryCleanupState::running: return "running";
+        case MemoryCleanupState::complete: return "complete";
+        case MemoryCleanupState::failed: return "failed";
+    }
+    return "idle";
+}
+
+}  // namespace
+
+bool MemoryCleanupTracker::begin(std::string id, const unsigned int total_steps) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (current_.state == MemoryCleanupState::running) return false;
+    current_ = MemoryCleanupResult{};
+    current_.id = std::move(id);
+    current_.state = MemoryCleanupState::running;
+    total_steps_ = total_steps;
+    completed_steps_ = 0U;
+    return true;
+}
+
+void MemoryCleanupTracker::advance_step(std::string step_label) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (current_.state != MemoryCleanupState::running) return;
+    completed_steps_ = std::min(completed_steps_ + 1U, total_steps_);
+    current_.current_step = std::move(step_label);
+    current_.percent = total_steps_ == 0U
+                            ? 100U
+                            : completed_steps_ * 100U / total_steps_;
+}
+
+void MemoryCleanupTracker::finish(MemoryCleanupResult partial) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto id = current_.id;
+    current_ = std::move(partial);
+    current_.id = id;
+    current_.state = MemoryCleanupState::complete;
+    current_.percent = 100U;
+}
+
+void MemoryCleanupTracker::fail(std::string diagnostic) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_.state = MemoryCleanupState::failed;
+    current_.diagnostic = std::move(diagnostic);
+}
+
+MemoryCleanupResult MemoryCleanupTracker::status() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return current_;
+}
+
+std::string memory_cleanup_result_json(const MemoryCleanupResult& result) {
+    std::string privilege_denied{"["};
+    for (std::size_t index = 0U; index < result.privilege_denied_steps.size();
+         ++index) {
+        if (index != 0U) privilege_denied += ',';
+        privilege_denied += json_string(result.privilege_denied_steps[index]);
+    }
+    privilege_denied += "]";
+    return "{\"id\":" + json_string(result.id) +
+           ",\"state\":" + json_string(memory_cleanup_state_name(result.state)) +
+           ",\"percent\":" + std::to_string(result.percent) +
+           ",\"currentStep\":" + json_string(result.current_step) +
+           ",\"cacheBytesFreed\":" + std::to_string(result.cache_bytes_freed) +
+           ",\"scratchOrphansRemoved\":" +
+           std::to_string(result.scratch_orphans_removed) +
+           ",\"processWorkingSetBytesFreed\":" +
+           std::to_string(result.process_working_set_bytes_freed) +
+           ",\"modelUnloaded\":" + (result.model_unloaded ? "true" : "false") +
+           ",\"otherProcessesTrimmed\":" +
+           std::to_string(result.other_processes_trimmed) +
+           ",\"modifiedPageListFlushed\":" +
+           (result.modified_page_list_flushed ? "true" : "false") +
+           ",\"standbyListPurged\":" +
+           (result.standby_list_purged ? "true" : "false") +
+           ",\"lowPriorityStandbyPurged\":" +
+           (result.low_priority_standby_purged ? "true" : "false") +
+           ",\"systemWorkingSetsEmptied\":" +
+           std::to_string(result.system_working_sets_emptied) +
+           ",\"systemFileCacheCleared\":" +
+           (result.system_file_cache_cleared ? "true" : "false") +
+           ",\"privilegeDeniedSteps\":" + privilege_denied +
+           ",\"diagnostic\":" + json_string(result.diagnostic) + "}";
+}
+
 BoundedWorkQueue::BoundedWorkQueue(
     const std::size_t maximum_items,
     const std::uint64_t maximum_payload_bytes)

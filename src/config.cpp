@@ -513,8 +513,15 @@ AppConfig ConfigurationManager::load(
                          "workerMode.");
             config.worker_mode.enabled = worker_mode->required("enabled").as_boolean();
             config.worker_mode.bind_host = worker_mode->required("bindHost").as_string();
+            // 0 must parse cleanly: it's WorkerModeConfig::port's default and
+            // is exactly what serialize() emits for the common case of
+            // worker mode having never been configured, so every GET (via
+            // the admin settings panel) round-trips it right back here on
+            // save. positive() would reject that unconfigured 0 before
+            // validate() ever runs its enabled-only nonzero-port check
+            // below, breaking every settings save on a default install.
             config.worker_mode.port = static_cast<std::uint16_t>(
-                positive(*worker_mode, "port", 65535U));
+                non_negative(*worker_mode, "port", 65535U));
             const auto ca_certificate_raw =
                 worker_mode->required("caCertificateFile").as_string();
             const auto server_certificate_raw =

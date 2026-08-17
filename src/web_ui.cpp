@@ -117,7 +117,46 @@
     "color:#ffd9d9;font-size:.75rem;border-radius:.4rem;cursor:pointer}" \
     "#systemErrorBanner .systemErrorCopy:hover{background:rgba(255,217,217,.15)}" \
     ".checkboxLabel{display:flex;align-items:center;gap:.5rem}" \
-    ".checkboxLabel input{width:auto}"
+    ".checkboxLabel input{width:auto}" \
+    /* Field hint bubbles (ML forms clarity pass): a small "?" badge sits \
+       after a label's own text; hovering or focusing it reveals a detailed \
+       explanation in a floating bubble instead of cramming that text into \
+       the label itself. body.hintsOff (toggled from Machine Learning \
+       Settings, see the #cfgHintsEnabled checkbox) hides the badge \
+       entirely rather than just suppressing the bubble, so a user who \
+       finds them distracting gets a form with the same layout every other \
+       field already has. */ \
+    ".mlHint{display:inline-flex;align-items:center;justify-content:center;" \
+    "width:1.1rem;height:1.1rem;margin-left:.4rem;border-radius:50%;" \
+    "background:var(--panel-border);color:var(--muted);font-size:.7rem;" \
+    "font-weight:700;font-style:normal;cursor:help;position:relative;" \
+    "vertical-align:middle}" \
+    ".mlHint:hover,.mlHint:focus{background:var(--accent);color:#fff;" \
+    "outline:none}" \
+    ".mlHint:hover .mlHintBubble,.mlHint:focus .mlHintBubble{" \
+    "display:block}" \
+    ".mlHintBubble{display:none;position:absolute;z-index:30;left:0;" \
+    "top:1.5rem;width:18rem;max-width:70vw;padding:.6rem .75rem;" \
+    "border-radius:.5rem;background:var(--panel);" \
+    "border:1px solid var(--panel-border);color:var(--text);" \
+    "font-size:.8rem;font-weight:400;font-style:normal;line-height:1.4;" \
+    "box-shadow:0 4px 16px rgba(0,0,0,.4);text-align:left;" \
+    "white-space:normal;cursor:auto}" \
+    "body.hintsOff .mlHint{display:none}" \
+    /* Multi-select control (ML forms clarity pass): replaces a raw \
+       comma-separated free-text field (e.g. "Model IDs, comma-separated") \
+       with a scrollable checkbox list so the field's actual valid values \
+       are visible and clickable instead of requiring the administrator to \
+       already know and correctly spell every id/name. See multiSelect()/ \
+       multiSelectValues() in the shared JS below. */ \
+    ".multiSelect{display:flex;flex-wrap:wrap;gap:.3rem 1rem;padding:.5rem .6rem;" \
+    "border:1px solid var(--panel-border);border-radius:.5rem;" \
+    "max-height:10rem;overflow-y:auto;background:var(--bg)}" \
+    ".multiSelect label{display:flex;align-items:center;gap:.35rem;" \
+    "width:auto;margin:0;font-weight:400}" \
+    ".multiSelect input{width:auto}" \
+    ".multiSelect:empty::before{content:'Nothing to choose from yet.';" \
+    "color:var(--muted);font-size:.8rem}"
 
 namespace masterai::server_internal {
 // Supplies the small fetch/streaming client used by both browser documents.
@@ -226,6 +265,21 @@ std::string application_script() {
         "for(const item of items){const option=document.createElement('option');"
         "option.value=item.id;option.textContent=label(item);el.appendChild(option);}"
         "if([...el.options].some(x=>x.value===selected))el.value=selected;}"
+        // The checkbox-list counterpart to fillMlSelect() above, for a
+        // field that must accept more than one id at once (e.g. "test this
+        // instruction example against these models"): populates a
+        // '.multiSelect' container (see that CSS class) from a fetched
+        // list, preserving whichever boxes were already checked across the
+        // periodic re-render every load() does, the same preserved-value
+        // courtesy fillMlSelect gives a plain <select>.
+        "function fillMultiSelect(selector,items,valueOf,labelOf){"
+        "const el=q(selector);if(!el)return;"
+        "const checked=new Set([...el.querySelectorAll('input:checked')]"
+        ".map(i=>i.value));"
+        "el.innerHTML=items.map(item=>{const v=valueOf(item);"
+        "return '<label><input type=\"checkbox\" value=\"'+esc(v)+'\"'+"
+        "(checked.has(v)?' checked':'')+'> '+esc(labelOf(item))+"
+        "'</label>';}).join('');}"
         // Every action-failure catch block across the app raises through
         // here instead of quietly setting the small #actionStatus line --
         // a floating bubble pinned to a bottom corner, width-capped and
@@ -293,7 +347,8 @@ std::string application_script() {
         "s.textContent='Administrator created. Sign in below.';"
         "q('#setupSection').hidden=true;q('#loginSection').hidden=false;}"
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
-        "async function load(){csrf=sessionStorage.getItem('csrf')||'';try{"
+        "async function load(){csrf=sessionStorage.getItem('csrf')||'';"
+        "applyHintsPref();try{"
         "const [me,p,c,mem,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,mlse,mlhs,mlmo,mlck,mldp,mlcmp,mlkd,mlend,mlnode,mlpipe,mlpolicy,mlcard,mlaudit,mlmon,cfg,report]="
         "await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
@@ -392,7 +447,7 @@ std::string application_script() {
         ".map(x=>'<option value=\"'+esc(x.id)+'\">'+esc(x.displayName)+"
         "' (learned via llama.cpp)</option>').join('');}"
         "renderBenchmarks(b.benchmarks);renderDownloads(d.downloads);"
-        "renderUsers(u.users);renderMlDashboard(ml);renderMlProjects(mlp.projects);"
+        "renderUsers(u.users,me.id);renderMlDashboard(ml);renderMlProjects(mlp.projects);"
         "renderMlModels(mlm.models);renderMlDatasets(mld.datasets);"
         "renderMlSubjects(mls.subjects);"
         "renderMlLabelTasks(mllt.labelTasks);renderMlPrepJobs(mlpj.prepJobs);"
@@ -443,6 +498,7 @@ std::string application_script() {
         "'#mlPrepJobDatasetId','#mlTrainingJobDatasetId','#mlEvaluationRunDatasetId',"
         "'#mlExperimentDatasetId','#mlFineTuningJobDatasetId',"
         "'#mlInstructionExampleDatasetId','#mlInstructionExampleGenerateDatasetId',"
+        "'#mlInstructionExampleCheckDatasetId',"
         "'#mlSyntheticRecordDatasetId','#mlSyntheticRecordGenerateDatasetId',"
         "'#mlModelComparisonDatasetId','#mlPipelineDatasetId'])fillMlSelect(id,mld.datasets,"
         "'None / choose a dataset',x=>x.name);"
@@ -452,6 +508,24 @@ std::string application_script() {
         "'Choose a training job',x=>x.name+' ('+x.status+')');"
         "fillMlSelect('#mlLabelTaskAssigneeId',u.users,'Unassigned',"
         "x=>x.displayName+' ('+x.role+')');"
+        // ML forms clarity pass: every field below used to require pasting
+        // an opaque id copied from a table row; each now offers the same
+        // named choices fillMlSelect already gives model/dataset/project
+        // fields above.
+        "for(const id of ['#mlInstructionExampleContentId',"
+        "'#mlInstructionExampleTestId'])fillMlSelect(id,"
+        "mlie.instructionExamples,'Choose an instruction example',"
+        "x=>x.name+' ('+x.status+')');"
+        "fillMultiSelect('#mlInstructionExampleTestModelIds',mlm.models,"
+        "x=>x.id,x=>x.displayName||x.name);"
+        "fillMlSelect('#mlEndpointPolicyId',mlend.inferenceEndpoints,"
+        "'Choose an inference endpoint',x=>x.name+' ('+x.status+')');"
+        "fillMlSelect('#mlEndpointPolicySafetyPolicyId',mlpolicy.safetyPolicies,"
+        "'None / choose a safety policy',x=>x.name+' ('+x.status+')');"
+        "fillMlSelect('#mlExperimentCompareBaselineId',mlex.experiments,"
+        "'Choose the baseline experiment',x=>x.name+' ('+x.status+')');"
+        "fillMultiSelect('#mlExperimentCompareCandidateIds',mlex.experiments,"
+        "x=>x.id,x=>x.name+' ('+x.status+')');"
         "renderSystemConfig(cfg);"
         "renderSystemReport(report);"
         "fill('#chatProject',p.projects,x=>x.id,x=>x.displayName);"
@@ -971,6 +1045,48 @@ std::string application_script() {
         "attr,id,'');}"
         "function toolbar(){return '<div class=\"rowToolbar\">'+"
         "Array.prototype.slice.call(arguments).join('')+'</div>';}"
+        // Field hint bubbles (ML forms clarity pass): appended straight
+        // after a <label>'s own visible text (see every call site below),
+        // so the '?' badge sits inline with the field name it explains
+        // rather than as a separate row. tabindex=0 lets a keyboard user
+        // reach it (the CSS bubble also opens on :focus, not just :hover).
+        // Hidden entirely via body.hintsOff -- see the CSS comment on
+        // .mlHint and the settings checkbox wiring near applyHintsPref()
+        // below -- rather than merely left empty, so a user who turns
+        // hints off gets exactly the same layout as before this pass.
+        "function hint(text){return '<span class=\"mlHint\" tabindex=\"0\">"
+        "?<span class=\"mlHintBubble\">'+esc(text)+'</span></span>';}"
+        // Multi-select control (ML forms clarity pass): renders a
+        // scrollable checkbox list from [{value,label}] options -- the
+        // dropdown-of-names equivalent for a field that must accept more
+        // than one id/name at once (a plain <select> can only ever submit
+        // one value per name without multi-select semantics real users
+        // find awkward, e.g. ctrl-click). multiSelectValues() reads the
+        // checked boxes back out as the same comma-separated string the
+        // server already expects, so no server-side change was needed to
+        // adopt this control on an existing field.
+        "function multiSelect(id,options){"
+        "return '<div class=\"multiSelect\" id=\"'+id+'\">'+"
+        "options.map(o=>'<label><input type=\"checkbox\" value=\"'+"
+        "esc(o.value)+'\"> '+esc(o.label)+'</label>').join('')+'</div>';}"
+        "function multiSelectValues(id){const el=q('#'+id);if(!el)return'';"
+        "return Array.prototype.slice.call("
+        "el.querySelectorAll('input:checked')).map(i=>i.value).join(',');}"
+        "function multiSelectSetChecked(id,csv){const el=q('#'+id);"
+        "if(!el)return;const wanted=new Set((csv||'').split(',')"
+        ".map(s=>s.trim()).filter(Boolean));"
+        "el.querySelectorAll('input').forEach(i=>{"
+        "i.checked=wanted.has(i.value);});}"
+        // Reads the "Show field hints" preference (default on) from
+        // localStorage -- a personal per-browser display preference, not
+        // server configuration, so it needs no backend field and applies
+        // instantly without a save round-trip. Called once on every page
+        // load (see load() below) and again the moment the Machine
+        // Learning Settings checkbox changes.
+        "function applyHintsPref(){"
+        "const off=localStorage.getItem('mlHintsOff')==='1';"
+        "document.body.classList.toggle('hintsOff',off);"
+        "const cb=q('#cfgHintsEnabled');if(cb)cb.checked=!off;}"
         // Builds a simple two-column-plus-actions HTML table from rows,
         // replacing the raw JSON dumps every list used to show verbatim --
         // this is a user-facing screen, not a debugging console.
@@ -996,10 +1112,32 @@ std::string application_script() {
         "el.innerHTML=table(['Model','Profile','Passed','Tokens/sec'],"
         "benchmarks.map(x=>[esc(x.modelId),esc(x.profile),"
         "x.passedCases+' / '+x.totalCases,Number(x.tokensPerSecond).toFixed(1)]));}"
-        "function renderUsers(users){const el=q('#usersList');if(!el)return;"
-        "el.innerHTML=users.length?table(['User','Display name','Role'],"
-        "users.map(x=>[esc(x.username),esc(x.displayName),esc(x.role)])):"
-        "'<p>No users visible, or administrator access is required.</p>';}"
+        // Each row's toolbar lets an administrator remove a user from
+        // authentication (UserRecord::enabled -- see set_user_status's own
+        // comment in server.cpp) without deleting the account or its audit
+        // history. The current user's own row never gets the button: the
+        // server also refuses a self-disable, but hiding it here avoids a
+        // click that can only ever come back as an error.
+        "function renderUsers(users,meId){const el=q('#usersList');if(!el)return;"
+        "el.innerHTML=users.length?table(['User','Display name','Role','Status',''],"
+        "users.map(x=>[esc(x.username),esc(x.displayName),esc(x.role),"
+        "'<span class=\"stateTag stateTag-'+(x.enabled?'approved':'rejected')+"
+        "'\">'+(x.enabled?'enabled':'disabled')+'</span>',"
+        "x.id===meId?'':toolbar(x.enabled?"
+        "iconBtn('trash','Disable (remove from authentication)',"
+        "'disable-user',x.id,'iconBtn-delete'):"
+        "iconBtn('check','Enable (restore authentication)','enable-user',"
+        "x.id,'iconBtn-apply'))])):"
+        "'<p>No users visible, or administrator access is required.</p>';"
+        "for(const btn of el.querySelectorAll('[data-disable-user],"
+        "[data-enable-user]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const id=btn.dataset.disableUser||btn.dataset.enableUser;"
+        "const enabling=!!btn.dataset.enableUser;"
+        "try{await api('/api/v1/users/'+encodeURIComponent(id)+'/status',"
+        "'POST',{enabled:enabling});await load();}"
+        "catch(x){showSystemError((enabling?'Enable':'Disable')+"
+        "' user failed: '+x.message);}});}}"
         // Phase 30A system-configuration editor: reads/writes settings.json
         // fields by dotted path (matching each input's data-path attribute)
         // instead of one hand-written getter/setter pair per field --
@@ -2861,6 +2999,20 @@ std::string application_script() {
         "revision:'c1e2967a2531788fbbf5e6969ebaac55fec7fcae',"
         "sha256:'e2ad727d4893bc44add809e992c8f584e4fb1e986163a5b7510e2cc1f34b3c55',"
         "minRam:6144,recRam:8192,sizeBytes:7866070080},"
+        // Smallest coder tier -- nothing below 1.5B existed before this, so
+        // the lowest-RAM machines had no code-focused suggestion at all.
+        // Commit hash and SHA-256 read directly from the Hugging Face API.
+        "{id:'qwen25-coder-0.5b-q4km',tier:'1',"
+        "label:'Qwen2.5-Coder-0.5B-Instruct Q4_K_M (~0.46 GiB)',"
+        "category:'general-programming',modelId:'qwen25-coder-0.5b-q4km',"
+        "filename:'qwen2.5-coder-0.5b-instruct-q4_k_m.gguf',"
+        "sourceUrl:'https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/"
+        "ebb2015119c907b064c512bf053e945850b5875f/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf',"
+        "revision:'ebb2015119c907b064c512bf053e945850b5875f',"
+        "sha256:'1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6e1c4ff32',"
+        "minRam:768,recRam:1024,sizeBytes:491400064,"
+        "displayName:'Qwen2.5-Coder-0.5B-Instruct',architecture:'qwen2',"
+        "quantization:'Q4_K_M',licenseSpdx:'Apache-2.0'},"
         // General-purpose conversation/chat models, as distinct from the
         // coding-focused suggestions above -- same sourcing rule applies:
         // every commit hash and SHA-256 here was read directly from the
@@ -2897,7 +3049,159 @@ std::string application_script() {
         "sha256:'7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c',"
         "minRam:6144,recRam:8192,sizeBytes:4920739232,"
         "displayName:'Meta-Llama-3.1-8B-Instruct',architecture:'llama',"
-        "quantization:'Q4_K_M',licenseSpdx:'Llama-3.1'}];"
+        "quantization:'Q4_K_M',licenseSpdx:'Llama-3.1'},"
+        // Smallest real chat model in the Llama family tree -- fills the gap
+        // below the existing 3B entry for the lowest RAM tiers. Commit hash
+        // and SHA-256 read directly from the Hugging Face API.
+        "{id:'llama32-1b-instruct-q4km',tier:'2',"
+        "label:'Llama-3.2-1B-Instruct Q4_K_M (~0.75 GiB)',"
+        "category:'conversation',modelId:'llama32-1b-instruct-q4km',"
+        "filename:'Llama-3.2-1B-Instruct-Q4_K_M.gguf',"
+        "sourceUrl:'https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/"
+        "067b946cf014b7c697f3654f621d577a3e3afd1c/Llama-3.2-1B-Instruct-Q4_K_M.gguf',"
+        "revision:'067b946cf014b7c697f3654f621d577a3e3afd1c',"
+        "sha256:'6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83',"
+        "minRam:1024,recRam:1536,sizeBytes:807694464,"
+        "displayName:'Llama-3.2-1B-Instruct',architecture:'llama',"
+        "quantization:'Q4_K_M',licenseSpdx:'Llama-3.2'},"
+        // Fills the previously-missing 3B/7B chat tier -- only coder variants
+        // existed at these sizes before. Commit hash and SHA-256 read
+        // directly from the Hugging Face API.
+        "{id:'qwen25-3b-instruct-q4km',tier:'4',"
+        "label:'Qwen2.5-3B-Instruct Q4_K_M (~1.96 GiB)',"
+        "category:'conversation',modelId:'qwen25-3b-instruct-q4km',"
+        "filename:'qwen2.5-3b-instruct-q4_k_m.gguf',"
+        "sourceUrl:'https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/"
+        "7dabda4d13d513e3e842b20f0d435c732f172cbe/qwen2.5-3b-instruct-q4_k_m.gguf',"
+        "revision:'7dabda4d13d513e3e842b20f0d435c732f172cbe',"
+        "sha256:'626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d',"
+        "minRam:3072,recRam:4096,sizeBytes:2104932768,"
+        "displayName:'Qwen2.5-3B-Instruct',architecture:'qwen2',"
+        "quantization:'Q4_K_M',licenseSpdx:'Apache-2.0'},"
+        "{id:'qwen25-7b-instruct-q4km',tier:'8',"
+        "label:'Qwen2.5-7B-Instruct Q4_K_M (~4.36 GiB)',"
+        "category:'conversation',modelId:'qwen25-7b-instruct-q4km',"
+        "filename:'Qwen2.5-7B-Instruct-Q4_K_M.gguf',"
+        "sourceUrl:'https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/"
+        "8911e8a47f92bac19d6f5c64a2e2095bd2f7d031/Qwen2.5-7B-Instruct-Q4_K_M.gguf',"
+        "revision:'8911e8a47f92bac19d6f5c64a2e2095bd2f7d031',"
+        "sha256:'65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423',"
+        "minRam:6144,recRam:8192,sizeBytes:4683074240,"
+        "displayName:'Qwen2.5-7B-Instruct',architecture:'qwen2',"
+        "quantization:'Q4_K_M',licenseSpdx:'Apache-2.0'},"
+        // Google's small Gemma 2 chat model -- 'Gemma' is already an allowed
+        // license (used above for CodeGemma). Commit hash and SHA-256 read
+        // directly from the Hugging Face API.
+        "{id:'gemma2-2b-it-q4km',tier:'3',"
+        "label:'Gemma-2-2B-it Q4_K_M (~1.59 GiB)',"
+        "category:'conversation',modelId:'gemma2-2b-it-q4km',"
+        "filename:'gemma-2-2b-it-Q4_K_M.gguf',"
+        "sourceUrl:'https://huggingface.co/bartowski/gemma-2-2b-it-GGUF/resolve/"
+        "855f67caed130e1befc571b52bd181be2e858883/gemma-2-2b-it-Q4_K_M.gguf',"
+        "revision:'855f67caed130e1befc571b52bd181be2e858883',"
+        "sha256:'e0aee85060f168f0f2d8473d7ea41ce2f3230c1bc1374847505ea599288a7787',"
+        "minRam:2048,recRam:3072,sizeBytes:1708582752,"
+        "displayName:'Gemma-2-2B-it',architecture:'gemma',"
+        "quantization:'Q4_K_M',licenseSpdx:'Gemma'},"
+        // One of the most-referenced open 7B baselines -- previously absent
+        // from this catalog entirely. Commit hash and SHA-256 read directly
+        // from the Hugging Face API.
+        "{id:'mistral-7b-instruct-v03-q4km',tier:'8',"
+        "label:'Mistral-7B-Instruct-v0.3 Q4_K_M (~4.07 GiB)',"
+        "category:'conversation',modelId:'mistral-7b-instruct-v03-q4km',"
+        "filename:'Mistral-7B-Instruct-v0.3-Q4_K_M.gguf',"
+        "sourceUrl:'https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF/resolve/"
+        "61fd4167fff3ab01ee1cfe0da183fa27a944db48/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf',"
+        "revision:'61fd4167fff3ab01ee1cfe0da183fa27a944db48',"
+        "sha256:'1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6',"
+        "minRam:6144,recRam:8192,sizeBytes:4372812000,"
+        "displayName:'Mistral-7B-Instruct-v0.3',architecture:'mistral',"
+        "quantization:'Q4_K_M',licenseSpdx:'Apache-2.0'},"
+        // IBM Granite 3.1 -- enterprise-governed provenance, clean Apache-2.0
+        // license, both sizes so the smaller RAM tiers have an option too.
+        // Commit hash and SHA-256 read directly from the Hugging Face API.
+        "{id:'granite31-2b-instruct-q4km',tier:'3',"
+        "label:'Granite-3.1-2B-Instruct Q4_K_M (~1.44 GiB)',"
+        "category:'conversation',modelId:'granite31-2b-instruct-q4km',"
+        "filename:'granite-3.1-2b-instruct-Q4_K_M.gguf',"
+        "sourceUrl:'https://huggingface.co/bartowski/granite-3.1-2b-instruct-GGUF/resolve/"
+        "e47b8b46c04cede00f9e19d5a846551b14b2efce/granite-3.1-2b-instruct-Q4_K_M.gguf',"
+        "revision:'e47b8b46c04cede00f9e19d5a846551b14b2efce',"
+        "sha256:'774269c82fde2720ea18dcf457fb5bd028fe096139a0735f4ad59c0a270cfc9c',"
+        "minRam:2048,recRam:3072,sizeBytes:1545295424,"
+        "displayName:'Granite-3.1-2B-Instruct',architecture:'granite',"
+        "quantization:'Q4_K_M',licenseSpdx:'Apache-2.0'},"
+        "{id:'granite31-8b-instruct-q4km',tier:'8',"
+        "label:'Granite-3.1-8B-Instruct Q4_K_M (~4.6 GiB)',"
+        "category:'conversation',modelId:'granite31-8b-instruct-q4km',"
+        "filename:'granite-3.1-8b-instruct-Q4_K_M.gguf',"
+        "sourceUrl:'https://huggingface.co/bartowski/granite-3.1-8b-instruct-GGUF/resolve/"
+        "7a0f633d54069de889707a76353bc28b70361d9f/granite-3.1-8b-instruct-Q4_K_M.gguf',"
+        "revision:'7a0f633d54069de889707a76353bc28b70361d9f',"
+        "sha256:'b72cfca8e30f23af77f922ce18d6fe1a5d4925907dddf7249c0cabc2739d48c8',"
+        "minRam:6144,recRam:8192,sizeBytes:4942858720,"
+        "displayName:'Granite-3.1-8B-Instruct',architecture:'granite',"
+        "quantization:'Q4_K_M',licenseSpdx:'Apache-2.0'},"
+        // The following three are the 'teach a model locally' tier: small,
+        // cheap to iterate a LoRA run on (see run_llama_lora_finetune in
+        // ml_finetune.cpp -- any GGUF downloaded here is a valid base model
+        // for it), and chosen for well-documented provenance over raw
+        // benchmark leadership. Commit hashes and SHA-256s read directly
+        // from the Hugging Face API.
+        //
+        // AI2's OLMo 2 is the one genuinely 'fully open' line in this whole
+        // catalog: released weights *and* training data *and* recipe *and*
+        // intermediate checkpoints, not just weights.
+        "{id:'olmo2-7b-instruct-q4km',tier:'8',"
+        "label:'OLMo-2-1124-7B-Instruct Q4_K_M (~4.16 GiB)',"
+        "category:'conversation',modelId:'olmo2-7b-instruct-q4km',"
+        "filename:'OLMo-2-1124-7B-Instruct-Q4_K_M.gguf',"
+        "sourceUrl:'https://huggingface.co/bartowski/OLMo-2-1124-7B-Instruct-GGUF/resolve/"
+        "01a56cca7da47f11851889af56ec36a9e75ceac8/OLMo-2-1124-7B-Instruct-Q4_K_M.gguf',"
+        "revision:'01a56cca7da47f11851889af56ec36a9e75ceac8',"
+        "sha256:'88790198b8ab4f251b5b462756adc0265b3f6b9d9d87708d847645d9568bf168',"
+        "minRam:6144,recRam:8192,sizeBytes:4472020544,"
+        "displayName:'OLMo-2-1124-7B-Instruct',architecture:'olmo2',"
+        "quantization:'Q4_K_M',licenseSpdx:'Apache-2.0'},"
+        // HuggingFaceTB's SmolLM2 line exists specifically to be a good
+        // small, well-documented, fine-tuning-friendly model -- the 360M
+        // tier is cheap enough to iterate LoRA runs on in minutes on CPU.
+        "{id:'smollm2-360m-instruct-q8',tier:'1',"
+        "label:'SmolLM2-360M-Instruct Q8_0 (~0.36 GiB)',"
+        "category:'conversation',modelId:'smollm2-360m-instruct-q8',"
+        "filename:'smollm2-360m-instruct-q8_0.gguf',"
+        "sourceUrl:'https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct-GGUF/resolve/"
+        "593b5a2e04c8f3e4ee880263f93e0bd2901ad47f/smollm2-360m-instruct-q8_0.gguf',"
+        "revision:'593b5a2e04c8f3e4ee880263f93e0bd2901ad47f',"
+        "sha256:'48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201',"
+        "minRam:512,recRam:1024,sizeBytes:386404992,"
+        "displayName:'SmolLM2-360M-Instruct',architecture:'llama',"
+        "quantization:'Q8_0',licenseSpdx:'Apache-2.0'},"
+        "{id:'smollm2-1.7b-instruct-q4km',tier:'2',"
+        "label:'SmolLM2-1.7B-Instruct Q4_K_M (~0.98 GiB)',"
+        "category:'conversation',modelId:'smollm2-1.7b-instruct-q4km',"
+        "filename:'SmolLM2-1.7B-Instruct-Q4_K_M.gguf',"
+        "sourceUrl:'https://huggingface.co/unsloth/SmolLM2-1.7B-Instruct-GGUF/resolve/"
+        "e933f1cdf73cc87cb67915bf5dd6ea81d36080ca/SmolLM2-1.7B-Instruct-Q4_K_M.gguf',"
+        "revision:'e933f1cdf73cc87cb67915bf5dd6ea81d36080ca',"
+        "sha256:'61b6f90dd515fd3bffbd0f6ba716e87555dde77d9b0573a562c2c5e62afc4909',"
+        "minRam:1536,recRam:2048,sizeBytes:1055609504,"
+        "displayName:'SmolLM2-1.7B-Instruct',architecture:'llama',"
+        "quantization:'Q4_K_M',licenseSpdx:'Apache-2.0'},"
+        // Llama architecture at a fraction of the size -- same tooling and
+        // prompt-format knowledge transfers, smallest real chat model in
+        // that family tree, and a natural first LoRA target.
+        "{id:'tinyllama-1.1b-chat-q4km',tier:'2',"
+        "label:'TinyLlama-1.1B-Chat-v1.0 Q4_K_M (~0.62 GiB)',"
+        "category:'conversation',modelId:'tinyllama-1.1b-chat-q4km',"
+        "filename:'tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',"
+        "sourceUrl:'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/"
+        "52e7645ba7c309695bec7ac98f4f005b139cf465/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',"
+        "revision:'52e7645ba7c309695bec7ac98f4f005b139cf465',"
+        "sha256:'9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0',"
+        "minRam:1024,recRam:1536,sizeBytes:668788096,"
+        "displayName:'TinyLlama-1.1B-Chat-v1.0',architecture:'llama',"
+        "quantization:'Q4_K_M',licenseSpdx:'Apache-2.0'}];"
         // Rebuilds the suggestion dropdown for the selected RAM tier and
         // immediately applies the first match. Auto-applying here (rather
         // than requiring a separate button click) is what prevents the
@@ -3299,6 +3603,97 @@ std::string application_script() {
         "appendModelCard(box,'Model warmed: '+(opt?opt.textContent:st.modelId)+"
         "' is ready.');}}catch(x){console.warn('pollRunnerStatus: status "
         "poll failed, retrying next interval',x);}}"
+        // Model Inventory page "Memory Status" widget. Lives here (not an
+        // inline <script> on the page itself) because html_response()'s
+        // CSP is script-src 'self' -- an inline script is blocked outright,
+        // it never even runs. Every function below no-ops harmlessly on any
+        // page that doesn't have #memoryStatusSection, exactly like
+        // renderModels()/pollRunnerStatus() above already no-op via their
+        // own q(...)==null guards.
+        "function bytesMiB(b){return Math.round(b/1048576);}"
+        "function reportRow(label,value){return "
+        "'<tr><td class=\"reportLabel\">'+label+"
+        "'</td><td class=\"reportValue\">'+value+'</td></tr>';}"
+        "function renderMemoryStatusPanel(resources,mem,cacheStatus,"
+        "scratchStatus){"
+        "const el=q('#memoryStatusTable');if(!el)return;"
+        "let cacheUsed=0,cacheCapacity=0;"
+        "Object.values(cacheStatus.categories).forEach(v=>{"
+        "cacheUsed+=v.usedBytes;cacheCapacity+=v.capacityBytes;});"
+        "el.innerHTML='<table><tbody>'+"
+        "reportRow('Memory pressure',mem.pressure)+"
+        "reportRow('System RAM',resources.availableRamMiB+' MiB free of '+"
+        "resources.totalRamMiB+' MiB')+"
+        "reportRow('System virtual memory',resources.availableVirtualMemoryMiB+"
+        "' MiB free of '+resources.totalVirtualMemoryMiB+' MiB')+"
+        "reportRow('MasterAI cache usage',bytesMiB(cacheUsed)+' / '+"
+        "bytesMiB(cacheCapacity)+' MiB')+"
+        "reportRow('MasterAI temporary files',bytesMiB(scratchStatus."
+        "globalReservedBytes)+' / '+bytesMiB(scratchStatus.globalQuotaBytes)+"
+        "' MiB ('+scratchStatus.activeJobs.length+' active)')+"
+        "'</tbody></table>';}"
+        "async function refreshMemoryStatus(){"
+        "if(!q('#memoryStatusSection'))return;"
+        "try{const[resources,mem,cacheStatus,scratchStatus]="
+        "await Promise.all([api('/api/v1/system/resources'),"
+        "api('/api/v1/system/memory'),api('/api/v1/system/cache'),"
+        "api('/api/v1/system/scratch')]);"
+        "renderMemoryStatusPanel(resources,mem,cacheStatus,scratchStatus);}"
+        // Any failure (permission, network, a bad response) shows the real
+        // reason in place of the table instead of leaving it stuck on
+        // "Loading..." forever with no way to tell why.
+        "catch(e){const el=q('#memoryStatusTable');"
+        "if(el)el.textContent='Could not load memory status: '+e.message;}}"
+        "let cleanPollHandle=null;"
+        "const MEMORY_CLEAN_STEP_LABELS={trimOtherProcessWorkingSets:"
+        "'trim other applications\\' working sets',flushModifiedPageList:"
+        "'flush the modified page list',purgeStandbyList:'purge the standby "
+        "list',purgeLowPriorityStandbyPages:'purge low-priority standby "
+        "pages',emptySystemAndServiceWorkingSets:'empty system and service "
+        "working sets',clearSystemFileCache:'clear the system file cache'};"
+        "function summarizeMemoryClean(r){const parts=[];"
+        "if(r.cacheBytesFreed)parts.push(bytesMiB(r.cacheBytesFreed)+"
+        "' MiB of cache freed');"
+        "if(r.scratchOrphansRemoved)parts.push(r.scratchOrphansRemoved+"
+        "' orphaned temporary file(s) removed');"
+        "if(r.processWorkingSetBytesFreed)parts.push(bytesMiB("
+        "r.processWorkingSetBytesFreed)+' MiB released back to the OS');"
+        "if(r.modelUnloaded)parts.push('AI model unloaded');"
+        "if(r.otherProcessesTrimmed)parts.push(r.otherProcessesTrimmed+"
+        "' other application(s) trimmed');"
+        "if(r.modifiedPageListFlushed)parts.push('modified page list flushed');"
+        "if(r.standbyListPurged)parts.push('standby list purged');"
+        "if(r.lowPriorityStandbyPurged)parts.push('low-priority standby "
+        "pages purged');"
+        "if(r.systemWorkingSetsEmptied)parts.push(r.systemWorkingSetsEmptied+"
+        "' system/service working set(s) emptied');"
+        "if(r.systemFileCacheCleared)parts.push('system file cache cleared');"
+        "let summary=parts.length?'Done: '+parts.join(', ')+'.':"
+        "'Done: nothing further to free right now.';"
+        // Every requested-but-denied privileged step is named, not just
+        // counted -- an administrator who ticked a box and saw it do
+        // nothing needs to know it was refused, and why, not guess.
+        "if(r.privilegeDeniedSteps&&r.privilegeDeniedSteps.length){"
+        "summary+=' Skipped (requires MasterAI to run as Administrator): '+"
+        "r.privilegeDeniedSteps.map(s=>MEMORY_CLEAN_STEP_LABELS[s]||s)"
+        ".join(', ')+'.';}"
+        "return summary;}"
+        "async function pollCleanProgress(){"
+        "try{const r=await api('/api/v1/system/memory/clean');"
+        "const bar=q('#memCleanProgress');const status=q('#memCleanStatus');"
+        "if(bar)bar.value=r.percent;"
+        "if(status)status.textContent=r.state==='running'?"
+        "(r.currentStep||'Cleaning memory...')+' ('+r.percent+'%)':"
+        "(r.state==='failed'?'Failed: '+r.diagnostic:summarizeMemoryClean(r));"
+        "if(r.state==='complete'||r.state==='failed'){"
+        "clearInterval(cleanPollHandle);cleanPollHandle=null;"
+        "const btn=q('#memCleanStart');if(btn)btn.disabled=false;"
+        "if(bar)setTimeout(()=>{bar.hidden=true;},1500);"
+        "await refreshMemoryStatus();"
+        "try{const m=await api('/api/v1/models');"
+        "if(typeof renderModels==='function')renderModels(m.models);}"
+        "catch(e){}}"
+        "}catch(e){}}"
         // Fires when the composer's model picker changes while a chat is
         // already open -- persists the new model against the chat so it's
         // still selected (and used) on the next message and after a reload.
@@ -3383,6 +3778,44 @@ std::string application_script() {
         "if(q('#modelThinking'))q('#modelThinking')"
         ".addEventListener('change',saveCurrentModelSettings);"
         "if(q('#newMemory'))q('#newMemory').addEventListener('submit',addMemory);"
+        "if(q('#memoryStatusSection')){refreshMemoryStatus();"
+        "setInterval(refreshMemoryStatus,5000);"
+        "const startBtn=q('#memCleanStart');"
+        "if(startBtn)startBtn.addEventListener('click',async()=>{"
+        "startBtn.disabled=true;"
+        "const bar=q('#memCleanProgress');const status=q('#memCleanStatus');"
+        "if(bar){bar.hidden=false;bar.value=0;}"
+        "if(status)status.textContent='Starting...';"
+        // Polling has to start BEFORE the POST resolves, not after: the
+        // server runs every reclaim step synchronously and only responds
+        // once the whole job is finished, so awaiting it first would mean
+        // polling only ever began after there was nothing left to observe.
+        // setInterval's own initial delay (below) is what makes this safe
+        // against reading a stale previous run's finished status -- by the
+        // time the first tick fires the POST has always already reached
+        // the server and called begin(), which is what actually resets
+        // state to 'running' for this job.
+        "cleanPollHandle=setInterval(pollCleanProgress,400);"
+        "try{await api('/api/v1/system/memory/clean','POST',{"
+        "trimCaches:q('#memCleanTrimCaches').checked,"
+        "clearScratch:q('#memCleanScratch').checked,"
+        "releaseWorkingSet:q('#memCleanWorkingSet').checked,"
+        "unloadModel:q('#memCleanUnloadModel').checked,"
+        "trimOtherProcessWorkingSets:q('#memCleanTrimOtherProcesses').checked,"
+        "trimOtherProcessMinimumMib:"
+        "Number(q('#memCleanTrimOtherProcessesMinMib').value)||0,"
+        "protectForegroundApplication:q('#memCleanProtectForeground').checked,"
+        "flushModifiedPageList:q('#memCleanFlushModifiedList').checked,"
+        "purgeStandbyList:q('#memCleanPurgeStandby').checked,"
+        "purgeLowPriorityStandbyPages:"
+        "q('#memCleanPurgeLowPriorityStandby').checked,"
+        "emptySystemAndServiceWorkingSets:"
+        "q('#memCleanEmptySystemWorkingSets').checked,"
+        "clearSystemFileCache:q('#memCleanClearFileCache').checked});"
+        "await pollCleanProgress();}"
+        "catch(err){clearInterval(cleanPollHandle);cleanPollHandle=null;"
+        "startBtn.disabled=false;showSystemError(err.message);}"
+        "});}"
         // Enter sends the message, mirroring every mainstream chat client;
         // Shift+Enter still inserts a newline (the textarea's own default),
         // so multi-line prompts remain possible.
@@ -3411,6 +3844,9 @@ std::string application_script() {
         "if(q('#newUser'))q('#newUser').addEventListener('submit',createUser);"
         "if(q('#systemConfigForm'))q('#systemConfigForm').addEventListener("
         "'submit',submitSystemConfig);"
+        "if(q('#cfgHintsEnabled'))q('#cfgHintsEnabled').addEventListener("
+        "'change',e=>{localStorage.setItem('mlHintsOff',e.target.checked?"
+        "'0':'1');applyHintsPref();});"
         "if(q('#newMlProject'))q('#newMlProject').addEventListener('submit',"
         "e=>submit(e,'/api/v1/ml/projects',()=>({name:q('#mlProjectName').value,"
         "description:q('#mlProjectDescription').value,"
@@ -3433,19 +3869,35 @@ std::string application_script() {
         "source:q('#mlDatasetSource').value,"
         "license:q('#mlDatasetLicense').value,"
         "dataFormat:q('#mlDatasetFormat').value})));"
-        // Phase 56: dataset content upload -- posts the CSV to the real
-        // ingestion endpoint and shows the parsed profile it returns.
+        // Dataset content format completion phase: the upload originally
+        // accepted CSV only; the file's extension now also selects JSON (a
+        // top-level array of flat objects), JSONL (one flat object per
+        // line), or Parquet (base64-encoded the same way the Knowledge
+        // ingestion Parquet upload already does -- see that handler just
+        // below) -- server.cpp converts every format to CSV before storing,
+        // so the returned profile shape is identical either way.
         "if(q('#newMlDatasetContent'))q('#newMlDatasetContent')"
         ".addEventListener('submit',async e=>{e.preventDefault();"
         "const out=q('#mlDatasetContentResult');"
         "const file=q('#mlDatasetContentFile').files[0];"
-        "if(!file){showSystemError('Choose a CSV file first.');return;}"
-        "if(file.size>8*1024*1024){showSystemError('Dataset file exceeds the 8 MiB limit.');return;}"
+        "if(!file){showSystemError('Choose a dataset file first.');return;}"
+        "if(file.size>32*1024*1024){showSystemError('Dataset file exceeds the 32 MiB limit.');return;}"
         "out.textContent='Reading, uploading, and validating '+file.name+'...';"
-        "try{const csv=new TextDecoder('utf-8',{fatal:true}).decode("
-        "await file.arrayBuffer());const r=await api('/api/v1/ml/datasets/'+"
+        "try{const lower=file.name.toLowerCase();"
+        "const format=lower.endsWith('.parquet')?'parquet':"
+        "lower.endsWith('.jsonl')?'jsonl':lower.endsWith('.json')?'json':'csv';"
+        "let content;"
+        "if(format==='parquet'){"
+        "const bytes=new Uint8Array(await file.arrayBuffer());"
+        "let binary='';const chunkSize=0x8000;"
+        "for(let i=0;i<bytes.length;i+=chunkSize){"
+        "binary+=String.fromCharCode.apply(null,bytes.subarray(i,i+chunkSize));}"
+        "content=btoa(binary);}"
+        "else{content=new TextDecoder('utf-8',{fatal:true}).decode("
+        "await file.arrayBuffer());}"
+        "const r=await api('/api/v1/ml/datasets/'+"
         "encodeURIComponent(q('#mlDatasetContentId').value.trim())+'/content',"
-        "'POST',{csv,"
+        "'POST',{content,format,"
         "targetColumn:q('#mlDatasetContentTarget').value.trim()});"
         "out.textContent='Stored '+r.rows+' rows: '+r.featureColumns.length+"
         "' feature column(s) ['+r.featureColumns.join(', ')+'], target \\''+"
@@ -3552,8 +4004,17 @@ std::string application_script() {
         "if(q('#compareMlExperiments'))q('#compareMlExperiments')."
         "addEventListener('submit',async e=>{e.preventDefault();"
         "const out=q('#mlExperimentCompareResult');"
-        "const ids=q('#mlExperimentCompareIds').value.split(',')"
-        ".map(s=>s.trim()).filter(Boolean);"
+        // ML forms clarity pass: baseline is its own required <select> (so
+        // "baseline first" is a structural guarantee, not something an
+        // administrator has to remember to type in the right comma
+        // position), and every checked candidate follows it in whatever
+        // order fillMultiSelect listed them in -- comparisons run against
+        // the baseline regardless of candidate order, so only the
+        // baseline's own position in this array actually matters.
+        "const baselineId=q('#mlExperimentCompareBaselineId').value;"
+        "const candidateIds=multiSelectValues('mlExperimentCompareCandidateIds')"
+        ".split(',').map(s=>s.trim()).filter(s=>s&&s!==baselineId);"
+        "const ids=baselineId?[baselineId,...candidateIds]:candidateIds;"
         "try{const r=await api('/api/v1/ml/experiments/compare','POST',"
         "{experimentIds:ids});"
         "if(out)out.innerHTML=table(['Experiment','Status','Has result',"
@@ -3689,7 +4150,7 @@ std::string application_script() {
         "'submit',async e=>{e.preventDefault();"
         "const out=q('#mlInstructionExampleTestResult');"
         "if(out)out.textContent='Testing...';"
-        "const modelIds=q('#mlInstructionExampleTestModelIds').value."
+        "const modelIds=multiSelectValues('mlInstructionExampleTestModelIds')."
         "split(',').map(s=>s.trim()).filter(Boolean);"
         "try{const r=await api('/api/v1/ml/instruction-examples/'+"
         "encodeURIComponent(q('#mlInstructionExampleTestId').value)+"
@@ -3871,7 +4332,11 @@ std::string application_script() {
         "()=>({name:q('#mlPipelineName').value,"
         "projectId:q('#mlPipelineProjectId').value,"
         "description:q('#mlPipelineDescription').value,"
-        "stages:q('#mlPipelineStages').value,"
+        // Stages run in the fixed order the checkboxes are listed in (see
+        // that field's hint), not click order -- querySelectorAll already
+        // returns them in document order, so no extra sorting is needed.
+        "stages:Array.prototype.slice.call(document.querySelectorAll("
+        "'.mlPipelineStage:checked')).map(i=>i.value).join(','),"
         "datasetId:q('#mlPipelineDatasetId').value,"
         "modelId:q('#mlPipelineModelId').value})));"
         "if(q('#newMlSafetyPolicy'))"
@@ -3937,6 +4402,19 @@ std::string nav_link(const std::string& href, const std::string& label,
                      bool active) {
     return "<a class=\"navButton" + std::string(active ? " active" : "") +
            "\" href=\"" + href + "\">" + label + "</a>";
+}
+
+// ML forms clarity pass: a "?" badge placed immediately after a <label>'s
+// own visible text, revealing `text` in a floating bubble on hover/focus --
+// see the .mlHint/.mlHintBubble CSS and body.hintsOff's client-side
+// toggle (applyHintsPref() in application_script()) for how a user turns
+// this off from Machine Learning Settings. `text` is always a literal
+// string this function's own callers author (never live request/API data),
+// so it is written to avoid '<', '>', and '&' rather than carrying a full
+// HTML-escaper for content that is never actually untrusted.
+std::string field_hint(const std::string& text) {
+    return "<span class=\"mlHint\" tabindex=\"0\">?"
+           "<span class=\"mlHintBubble\">" + text + "</span></span>";
 }
 
 // Wraps one titled group of sidebar links (Workspace, Settings, Machine
@@ -4047,9 +4525,122 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<button title=\"Create project\">" ICON_PLUS_SVG " Create project</button></form>"
             "<div id=\"projectsList\">Loading...</div></div></section>";
     } else if (section == "models-inventory") {
+        // Memory Status: an administrator-only widget (its live figures come
+        // from /api/v1/system/cache and /api/v1/system/scratch, both already
+        // gated to administrators -- see server.cpp) showing real-time
+        // system and MasterAI memory usage underneath the inventory table,
+        // plus a "Clean Memory" action so freed RAM is reflected immediately
+        // without a page reload. Empty string for every other role, exactly
+        // like the newMemory form below is gated by can_write_chat.
+        const std::string memory_status_section =
+            is_administrator
+                ? "<section id=\"memoryStatusSection\">"
+                  "<h3>Memory Status</h3>"
+                  "<p class=\"memoryStatusHint\">Live system and MasterAI "
+                  "memory usage, refreshed every 5 seconds.</p>"
+                  "<div id=\"memoryStatusTable\">Loading...</div>"
+                  "<h4>Clean Memory options</h4>"
+                  "<div class=\"memoryCleanOptions\">"
+                  "<div class=\"memoryCleanOption\">"
+                  "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+                  "id=\"memCleanTrimCaches\" checked> Trim MasterAI's bounded "
+                  "caches</label>"
+                  "<span class=\"memoryStatusHint\">Evicts cache entries down "
+                  "to their configured size limit.</span></div>"
+                  "<div class=\"memoryCleanOption\">"
+                  "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+                  "id=\"memCleanScratch\" checked> Remove orphaned temporary "
+                  "files</label>"
+                  "<span class=\"memoryStatusHint\">Clears leftover scratch/"
+                  "working files left behind by interrupted jobs.</span></div>"
+                  "<div class=\"memoryCleanOption\">"
+                  "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+                  "id=\"memCleanWorkingSet\" checked> Release freed memory "
+                  "back to the OS</label>"
+                  "<span class=\"memoryStatusHint\">Trims MasterAI's own "
+                  "process memory footprint.</span></div>"
+                  "<div class=\"memoryCleanOption\">"
+                  "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+                  "id=\"memCleanUnloadModel\"> Unload the currently loaded AI "
+                  "model</label>"
+                  "<span class=\"memoryStatusHint\">Frees the most RAM, but "
+                  "the next chat message will need to reload it.</span></div>"
+                  "</div>"
+                  // Windows system-memory options: real OS-level memory-
+                  // manager primitives (standby list, modified page list,
+                  // system file cache, other processes' working sets), not
+                  // anything scoped to MasterAI's own process. Every one of
+                  // these genuinely requires MasterAI itself to be running
+                  // elevated (Administrator) -- the hint text says so
+                  // upfront rather than letting a checked box silently do
+                  // nothing; the result summary also reports exactly which
+                  // steps were skipped and why (see summarizeMemoryClean()).
+                  "<h4>Windows system memory options</h4>"
+                  "<p class=\"memoryStatusHint\">These act on the whole "
+                  "system, not just MasterAI, and only take effect if "
+                  "MasterAI itself is running as Administrator.</p>"
+                  "<div class=\"memoryCleanOptions memoryCleanOptionsGrid\">"
+                  "<div class=\"memoryCleanOption\">"
+                  "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+                  "id=\"memCleanTrimOtherProcesses\"> Trim other applications' "
+                  "working sets</label>"
+                  "<span class=\"memoryStatusHint\">Only applications using"
+                  "<input type=\"number\" id=\"memCleanTrimOtherProcessesMinMib\" "
+                  "min=\"0\" step=\"10\" value=\"100\" class=\"memoryStatusInlineNumber\">"
+                  "MB or more.</span></div>"
+                  "<div class=\"memoryCleanOption\">"
+                  "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+                  "id=\"memCleanProtectForeground\" checked> Protect the "
+                  "foreground application</label>"
+                  "<span class=\"memoryStatusHint\">Skips whichever "
+                  "application currently has focus, so it won't stutter."
+                  "</span></div>"
+                  "<div class=\"memoryCleanOption\">"
+                  "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+                  "id=\"memCleanFlushModifiedList\"> Flush the modified page "
+                  "list</label>"
+                  "<span class=\"memoryStatusHint\">Writes modified pages to "
+                  "disk so they can be discarded from RAM.</span></div>"
+                  "<div class=\"memoryCleanOption\">"
+                  "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+                  "id=\"memCleanPurgeStandby\"> Purge the standby list</label>"
+                  "<span class=\"memoryStatusHint\">Discards cached file "
+                  "pages Windows was keeping around speculatively."
+                  "</span></div>"
+                  "<div class=\"memoryCleanOption\">"
+                  "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+                  "id=\"memCleanPurgeLowPriorityStandby\"> Purge low-priority "
+                  "standby pages</label>"
+                  "<span class=\"memoryStatusHint\">A lighter version of the "
+                  "above: only the lowest-priority cached pages.</span></div>"
+                  "<div class=\"memoryCleanOption\">"
+                  "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+                  "id=\"memCleanEmptySystemWorkingSets\"> Empty system and "
+                  "service working sets</label>"
+                  "<span class=\"memoryStatusHint\">Also trims SYSTEM and "
+                  "service processes, not just user applications.</span></div>"
+                  "<div class=\"memoryCleanOption\">"
+                  "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+                  "id=\"memCleanClearFileCache\"> Clear the system file "
+                  "cache</label>"
+                  "<span class=\"memoryStatusHint\">Forces Windows' own file "
+                  "cache back down after briefly capping it.</span></div>"
+                  "</div>"
+                  "<button type=\"button\" id=\"memCleanStart\" "
+                  "title=\"Clean memory\">Clean Memory</button>"
+                  "<progress id=\"memCleanProgress\" value=\"0\" max=\"100\" "
+                  "hidden></progress>"
+                  "<p id=\"memCleanStatus\" class=\"memoryStatusHint\"></p>"
+                  "</section>"
+                : "";
+        // The widget's logic lives in application_script() (served from
+        // /assets/app.js), not an inline <script> here -- html_response()'s
+        // CSP is script-src 'self', which blocks inline scripts outright.
+        // See the DOMContentLoaded block's #memoryStatusSection guard.
         body =
             "<section id=\"panel-models-inventory\" class=\"panel\"><div>"
-            "<h2>Model inventory</h2><div id=\"modelsList\">Loading...</div>"
+            "<h2>Model inventory</h2><div id=\"modelsList\">Loading...</div>" +
+            memory_status_section +
             "</div></section>";
     } else if (section == "models-download") {
         body =
@@ -4273,19 +4864,29 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Data format<input id=\"mlDatasetFormat\" "
             "placeholder=\"e.g. JSONL, CSV\"></label>"
             "<button title=\"Register dataset\">" ICON_PLUS_SVG " Register dataset</button></form>"
-            // Phase 56: real content upload. The CSV is fully parsed and
-            // validated server-side before it is stored, and the returned
-            // profile (rows, columns, task) is shown below the form.
-            "<h2>Upload dataset content (CSV)</h2>"
+            // Phase 56: real content upload. The uploaded file is fully
+            // parsed and validated server-side before anything is stored,
+            // and the returned profile (rows, columns, task) is shown below
+            // the form. Dataset content format completion phase: CSV, JSON
+            // (a top-level array of flat objects), JSONL (one flat object
+            // per line), and Parquet (converted via the same DuckDB helper
+            // the Knowledge ingestion page uses) are all accepted -- the
+            // file's own extension picks the format, so nothing else on
+            // this form changes between them.
+            "<h2>Upload dataset content</h2>"
             "<form id=\"newMlDatasetContent\">"
             "<label>Dataset<select id=\"mlDatasetContentId\" required>"
             "<option value=\"\">Choose a registered dataset</option>"
             "</select></label>"
             "<label>Target column (the column to predict; blank uses the "
             "last column)<input id=\"mlDatasetContentTarget\"></label>"
-            "<label>CSV file (header row first; feature columns must be "
-            "numeric)<input id=\"mlDatasetContentFile\" type=\"file\" "
-            "accept=\".csv,text/csv\" required></label>"
+            "<label>Dataset file -- .csv, .json, .jsonl, or .parquet (a CSV/"
+            "JSONL row or JSON array entry is one training example; every "
+            "feature column must be numeric; Parquet requires an "
+            "administrator-configured DuckDB helper, see Machine Learning "
+            "Settings)<input id=\"mlDatasetContentFile\" type=\"file\" "
+            "accept=\".csv,text/csv,.json,application/json,.jsonl,"
+            "application/x-ndjson,.parquet\" required></label>"
             "<button title=\"Upload content\">" ICON_UPLOAD_SVG " Upload content</button></form>"
             "<p id=\"mlDatasetContentResult\"></p>"
             "</div><div>"
@@ -4507,9 +5108,24 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "now\" on an experiment whose dataset has uploaded content.</p>"
             "<h2>Compare experiments</h2>"
             "<form id=\"compareMlExperiments\">"
-            "<label>Experiment IDs (comma-separated, baseline first)"
-            "<input id=\"mlExperimentCompareIds\" required "
-            "placeholder=\"exp-id-1,exp-id-2\"></label>"
+            "<label>Baseline experiment" +
+            field_hint("Every other experiment's metric delta and "
+                      "regression flag in the result below are computed "
+                      "against this one -- it is always included in the "
+                      "comparison even if not also checked as a "
+                      "candidate.") +
+            "<select id=\"mlExperimentCompareBaselineId\" required>"
+            "<option value=\"\">Choose the baseline experiment</option>"
+            "</select></label>"
+            "<label>Candidate experiments" +
+            field_hint("Every checked experiment is compared against the "
+                      "baseline above in one run. An experiment needs a "
+                      "completed \"Run now\" (real metrics captured) to "
+                      "show a meaningful comparison -- one without a "
+                      "result still appears in the table with \"Has "
+                      "result: no\".") +
+            "<div class=\"multiSelect\" id=\"mlExperimentCompareCandidateIds\">"
+            "</div></label>"
             "<button title=\"Compare experiments\">Compare</button></form>"
             "<div id=\"mlExperimentCompareResult\"></div>"
             "</div></section>";
@@ -4697,9 +5313,16 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</div><div>"
             "<h2>Edit content</h2>"
             "<form id=\"mlInstructionExampleContentForm\">"
-            "<label>Example ID<input id=\"mlInstructionExampleContentId\" "
-            "required placeholder=\"click Edit content on a row, or paste "
-            "an ID\"></label>"
+            "<label>Instruction example" +
+            field_hint("Which instruction example's full content (system/"
+                      "user instruction, expected response, ...) this form "
+                      "edits. Clicking the Configure (gear) button on a "
+                      "row in the Instruction examples table below fills "
+                      "this in automatically -- you rarely need to pick it "
+                      "here by hand.") +
+            "<select id=\"mlInstructionExampleContentId\" required>"
+            "<option value=\"\">Choose an instruction example</option>"
+            "</select></label>"
             "<label>System instruction<textarea "
             "id=\"mlInstructionExampleSystemInstruction\" rows=\"2\">"
             "</textarea></label>"
@@ -4714,18 +5337,49 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Rejected response<textarea "
             "id=\"mlInstructionExampleRejectedResponse\" rows=\"3\">"
             "</textarea></label>"
-            "<label>Tool calls (JSON)<textarea "
+            "<label>Tool calls (JSON)" +
+            field_hint("Optional. The tool/function calls the model is "
+                      "expected to make while producing this example's "
+                      "response, as a JSON array -- e.g. "
+                      "[{\"name\":\"search\",\"arguments\":{\"query\":"
+                      "\"...\"}}]. Leave blank for an example that involves "
+                      "no tool use.") +
+            "<textarea "
             "id=\"mlInstructionExampleToolCallsJson\" rows=\"2\">"
             "</textarea></label>"
-            "<label>Tool results (JSON)<textarea "
+            "<label>Tool results (JSON)" +
+            field_hint("Optional. The results those tool calls returned, "
+                      "as a JSON array, paired positionally with Tool "
+                      "calls above -- what the model actually saw before "
+                      "producing Expected response.") +
+            "<textarea "
             "id=\"mlInstructionExampleToolResultsJson\" rows=\"2\">"
             "</textarea></label>"
-            "<label>Required output format<input "
+            "<label>Required output format" +
+            field_hint("Free text naming the response shape a grader "
+                      "should check for, e.g. json, markdown, plain, or a "
+                      "specific schema name. Only informational here -- "
+                      "the actual JSON-shape check runs from the \"Test "
+                      "against models\" and \"Validate\" actions below, "
+                      "not automatically from this field.") +
+            "<input "
             "id=\"mlInstructionExampleRequiredOutputFormat\" "
             "placeholder=\"e.g. json, markdown, plain\"></label>"
-            "<label>Difficulty<input id=\"mlInstructionExampleDifficulty\">"
+            "<label>Difficulty" +
+            field_hint("Free text, e.g. easy, medium, hard, or expert. "
+                      "Used only to help a human reviewer prioritize and "
+                      "filter examples -- no automated behavior reads "
+                      "this field.") +
+            "<input id=\"mlInstructionExampleDifficulty\">"
             "</label>"
-            "<label>Safety classification<input "
+            "<label>Safety classification" +
+            field_hint("Free text describing this example's safety "
+                      "sensitivity, e.g. benign, sensitive_topic, or "
+                      "refusal_required. Recorded for review and audit "
+                      "purposes -- it does not feed the Safety and "
+                      "Governance content scanner, which runs its own "
+                      "independent pattern/model-classifier checks.") +
+            "<input "
             "id=\"mlInstructionExampleSafetyClassification\"></label>"
             "<button title=\"Save content\">Save content</button></form>"
             "<p id=\"mlInstructionExampleContentStatus\"></p>"
@@ -4755,17 +5409,34 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</div><div>"
             "<h2>Test against models</h2>"
             "<form id=\"mlInstructionExampleTestForm\">"
-            "<label>Example ID<input id=\"mlInstructionExampleTestId\" "
-            "required></label>"
-            "<label>Model IDs (comma-separated)"
-            "<input id=\"mlInstructionExampleTestModelIds\" required></label>"
+            "<label>Instruction example" +
+            field_hint("Which example's system/user instruction and "
+                      "context get sent to each chosen model below; its "
+                      "expected response is what the models' real replies "
+                      "get compared against.") +
+            "<select id=\"mlInstructionExampleTestId\" required>"
+            "<option value=\"\">Choose an instruction example</option>"
+            "</select></label>"
+            "<label>Models to test against" +
+            field_hint("Every checked model gets a real generation call "
+                      "with this example's content, and the result is "
+                      "compared against Expected response. Check as many "
+                      "as you want to compare side by side in one run.") +
+            "<div class=\"multiSelect\" id=\"mlInstructionExampleTestModelIds\">"
+            "</div></label>"
             "<button title=\"Test against models\">Test</button></form>"
             "<div id=\"mlInstructionExampleTestResult\"></div>"
             "</div><div>"
             "<h2>Duplicates and contradictions</h2>"
             "<form id=\"mlInstructionExampleCheckForm\">"
-            "<label>Dataset ID<input id=\"mlInstructionExampleCheckDatasetId\" "
-            "required></label>"
+            "<label>Dataset" +
+            field_hint("Scans every instruction example belonging to this "
+                      "dataset for near-duplicate content and for pairs "
+                      "whose instructions look the same but expect "
+                      "contradictory responses -- both are real heuristic "
+                      "checks, not exact-text matching only.") +
+            "<select id=\"mlInstructionExampleCheckDatasetId\" required>"
+            "<option value=\"\">Choose a dataset</option></select></label>"
             "<button data-check=\"duplicates\" "
             "title=\"Check duplicates\">Check duplicates</button> "
             "<button data-check=\"contradictions\" "
@@ -4802,6 +5473,9 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</label>"
             "<button title=\"Create synthetic record\">" ICON_PLUS_SVG " Create synthetic record</button></form>"
             "</div><div>"
+            "<h2>Synthetic records</h2>"
+            "<div id=\"mlSyntheticRecordsList\">Loading...</div>"
+            "</div><div>"
             "<h2>Generate synthetic record</h2>"
             "<form id=\"mlSyntheticRecordGenerateForm\">"
             "<label>Dataset<select id=\"mlSyntheticRecordGenerateDatasetId\" "
@@ -4837,9 +5511,6 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<button title=\"Generate synthetic record\">" ICON_PLUS_SVG " Generate</button></form>"
             "<p id=\"mlSyntheticRecordGenerateStatus\">Generated records "
             "start as \"draft\" and need review before approval.</p>"
-            "</div><div>"
-            "<h2>Synthetic records</h2>"
-            "<div id=\"mlSyntheticRecordsList\">Loading...</div>"
             "</div></section>";
     } else if (section == "ml-vector-stores") {
         // Phases 49/61 (Machine Learning Abilities section 21):
@@ -5129,21 +5800,58 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "maxlength=\"160\"></label>"
             "<label>Model<select id=\"mlEndpointModelId\" required>"
             "<option value=\"\">Choose a model</option></select></label>"
-            "<label>Runtime<input id=\"mlEndpointRuntime\" "
+            "<label>Runtime" +
+            field_hint("Free text naming the inference backend this "
+                      "endpoint's listener runs against, e.g. llama.cpp. "
+                      "Informational -- MasterAI's own listener "
+                      "(run_inference_endpoint) is what actually serves "
+                      "requests once this endpoint is active.") +
+            "<input id=\"mlEndpointRuntime\" "
             "placeholder=\"e.g. llama.cpp\"></label>"
-            "<label>Host<input id=\"mlEndpointHost\" "
+            "<label>Host" +
+            field_hint("The network interface the real listener binds to "
+                      "when this endpoint is set active, e.g. 127.0.0.1 "
+                      "for loopback-only, or 0.0.0.0 to accept "
+                      "connections from other machines.") +
+            "<input id=\"mlEndpointHost\" "
             "placeholder=\"e.g. 127.0.0.1\"></label>"
-            "<label>Port<input id=\"mlEndpointPort\" type=\"number\" min=\"0\" "
+            "<label>Port" +
+            field_hint("The TCP port the real listener binds to. Must be "
+                      "free on the host and not already used by another "
+                      "active endpoint or by MasterAI's own web server.") +
+            "<input id=\"mlEndpointPort\" type=\"number\" min=\"0\" "
             "max=\"65535\"></label>"
-            "<label>Protocol<input id=\"mlEndpointProtocol\" "
+            "<label>Protocol" +
+            field_hint("Free text naming the wire protocol clients use "
+                      "against this endpoint, e.g. rest, websocket, mcp. "
+                      "Informational -- the real listener always speaks "
+                      "POST /v1/completions regardless of this value.") +
+            "<input id=\"mlEndpointProtocol\" "
             "placeholder=\"e.g. rest, websocket, mcp\"></label>"
-            "<label>Authentication method<input "
+            "<label>Authentication method" +
+            field_hint("Free text naming how callers authenticate, e.g. "
+                      "api_token. Leave blank or set to \"none\" only if "
+                      "you deliberately want this endpoint to accept "
+                      "unauthenticated requests -- otherwise Bearer token "
+                      "below is required and actually enforced.") +
+            "<input "
             "id=\"mlEndpointAuthenticationMethod\" "
             "placeholder=\"e.g. api_token\"></label>"
             "<label>Bearer token (required unless authentication method is "
-            "blank or \"none\")<input id=\"mlEndpointAuthToken\" "
+            "blank or \"none\")" +
+            field_hint("The exact value a caller must send as "
+                      "\"Authorization: Bearer <token>\" on every request "
+                      "to this endpoint's real listener. Stored and "
+                      "checked server-side -- there is no way to view it "
+                      "again after saving, so keep a copy somewhere safe.") +
+            "<input id=\"mlEndpointAuthToken\" "
             "type=\"password\" autocomplete=\"new-password\"></label>"
-            "<label>Rate limit, requests per minute<input "
+            "<label>Rate limit, requests per minute" +
+            field_hint("The real per-minute cap the listener enforces "
+                      "once this endpoint is active; a caller exceeding it "
+                      "gets a real 429 response. 0 or blank means no "
+                      "limit.") +
+            "<input "
             "id=\"mlEndpointRateLimit\" type=\"number\" min=\"0\"></label>"
             "<button title=\"Create inference endpoint\">" ICON_PLUS_SVG " Create inference endpoint</button></form>"
             "</div><div>"
@@ -5155,23 +5863,63 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</div><div>"
             "<h2>Endpoint policy</h2>"
             "<form id=\"mlEndpointPolicyForm\">"
-            "<label>Endpoint ID<input id=\"mlEndpointPolicyId\" required>"
+            "<label>Inference endpoint" +
+            field_hint("Which endpoint this policy applies to. Re-read "
+                      "live on every request the endpoint's real listener "
+                      "serves -- saving a change here takes effect on that "
+                      "endpoint's very next request, no restart required.") +
+            "<select id=\"mlEndpointPolicyId\" required>"
+            "<option value=\"\">Choose an inference endpoint</option>"
+            "</select></label>"
+            "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+            "id=\"mlEndpointPolicyContentScanEnabled\" checked> Content "
+            "scan enabled" +
+            field_hint("Runs the real heuristic content scanner (secret-"
+                      "shaped tokens, prompt-injection phrasing, and this "
+                      "policy's own restricted data categories) over every "
+                      "prompt and answer this endpoint handles.") +
             "</label>"
             "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
-            "id=\"mlEndpointPolicyContentScanEnabled\" "
-            "checked> Content scan enabled</label>"
+            "id=\"mlEndpointPolicyBlockOnScanFinding\" checked> Block "
+            "request on scan finding" +
+            field_hint("If the content scan above finds something in the "
+                      "incoming prompt, refuse the request outright "
+                      "instead of letting it reach the model.") +
+            "</label>"
             "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
-            "id=\"mlEndpointPolicyBlockOnScanFinding\" checked> Block request "
-            "on scan finding</label>"
+            "id=\"mlEndpointPolicyBlockAnswerOnScanFinding\"> Block answer "
+            "on scan finding" +
+            field_hint("If the content scan finds something in the "
+                      "model's generated answer, withhold that answer from "
+                      "the caller instead of returning it.") +
+            "</label>"
+            "<label>Safety policy (optional)" +
+            field_hint("Attaches a Safety and Governance policy so this "
+                      "endpoint's content scan also checks that policy's "
+                      "own restricted data categories, not just the "
+                      "built-in secret/prompt-injection patterns. Leave "
+                      "unset to scan with only the built-in patterns.") +
+            "<select id=\"mlEndpointPolicySafetyPolicyId\">"
+            "<option value=\"\">None / choose a safety policy</option>"
+            "</select></label>"
             "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
-            "id=\"mlEndpointPolicyBlockAnswerOnScanFinding\"> Block answer on "
-            "scan finding</label>"
-            "<label>Safety policy ID (optional)<input "
-            "id=\"mlEndpointPolicySafetyPolicyId\"></label>"
-            "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
-            "id=\"mlEndpointPolicyModelClassifierEnabled\"> Model classifier "
-            "enabled</label>"
-            "<label>Model classifier confidence floor<input "
+            "id=\"mlEndpointPolicyModelClassifierEnabled\"> Model "
+            "classifier enabled" +
+            field_hint("Also runs a real LLM-as-judge classifier (the "
+                      "locally loaded model rating text for bias, "
+                      "hallucination risk, and harmful content) alongside "
+                      "the heuristic scan above. Slower, since it makes an "
+                      "extra generation call per request; a failed/"
+                      "unavailable classifier never blocks a request the "
+                      "heuristic scan already passed.") +
+            "</label>"
+            "<label>Model classifier confidence floor" +
+            field_hint("Only classifier findings at or above this "
+                      "confidence (0 to 1, as reported by the judge model) "
+                      "count as a finding. Higher values mean fewer, "
+                      "more-confident flags; lower values catch more but "
+                      "risk more false positives.") +
+            "<input "
             "id=\"mlEndpointPolicyConfidenceFloor\" type=\"number\" min=\"0\" "
             "max=\"1\" step=\"0.05\" value=\"0.5\"></label>"
             "<button title=\"Save policy\">Save policy</button></form>"
@@ -5233,10 +5981,43 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</label>"
             "<label>Description<textarea id=\"mlPipelineDescription\" "
             "rows=\"2\"></textarea></label>"
-            "<label>Stages, comma-separated<input id=\"mlPipelineStages\" "
-            "placeholder=\"e.g. Validate data,Train model,Evaluate model,"
-            "Validate model,Safety tests,Request approval,Deploy staging,"
-            "Deploy production,Monitor\"></label>"
+            "<label>Stages" +
+            field_hint("Every checked stage runs, in the fixed order "
+                      "listed here (top to bottom), on Run -- this "
+                      "codebase does not support reordering them "
+                      "independently of this list. Each one is a real "
+                      "executor, not a placeholder: Train model/Evaluate "
+                      "model run the same real tabular engine as Training "
+                      "Jobs/Evaluation Lab, Safety tests checks for an "
+                      "approved Model Card, Deploy staging/Deploy "
+                      "production/Rollback create and approve/revoke a "
+                      "real Deployment record, and so on -- see the "
+                      "Automation Pipelines page notes for the full list. "
+                      "Label data reports itself skipped unless a "
+                      "completed labeling task already exists for the "
+                      "dataset, since this codebase has no automated "
+                      "labeler.") +
+            "<div class=\"multiSelect\">" +
+            [] {
+                static const char* const stages[] = {
+                    "Import data", "Validate data", "Clean data",
+                    "Label data", "Split data", "Train model",
+                    "Validate model", "Evaluate model", "Safety tests",
+                    "Optimize", "Request approval", "Deploy staging",
+                    "Staging tests", "Deploy production", "Monitor",
+                    "Rollback"};
+                std::string html;
+                for (const char* stage : stages) {
+                    html += "<label><input type=\"checkbox\" "
+                            "class=\"mlPipelineStage\" value=\"";
+                    html += stage;
+                    html += "\"> ";
+                    html += stage;
+                    html += "</label>";
+                }
+                return html;
+            }() +
+            "</div></label>"
             "<label>Training/evaluation dataset (for Train model / Evaluate "
             "model / Validate data stages)<select id=\"mlPipelineDatasetId\">"
             "<option value=\"\">None / choose a dataset</option></select>"
@@ -5360,6 +6141,19 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<p>The Machine Learning subset of the System Configuration "
             "page. See Settings &gt; System Configuration for every other "
             "server setting.</p>"
+            // Field hint bubbles preference (ML forms clarity pass): a
+            // personal per-browser display toggle, not server
+            // configuration, so it deliberately lives outside
+            // #systemConfigForm and its Save button -- unchecking it
+            // applies immediately via its own 'change' listener (see
+            // applyHintsPref() and this checkbox's wiring near the bottom
+            // of the shared JS), with no save round-trip and no effect on
+            // any other browser or administrator.
+            "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+            "id=\"cfgHintsEnabled\" checked> Show field hints (the '?' "
+            "bubbles next to form fields across every Machine Learning "
+            "page) -- unchecking this is saved to this browser only"
+            "</label>"
             "<form id=\"systemConfigForm\">"
             "<label>Tabular dataset upload limit, bytes &mdash; the "
             "Dataset Manager's CSV content-upload cap"
@@ -5372,8 +6166,8 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<input id=\"cfgKnowledgeMaximumDocumentBytes\" type=\"number\" "
             "min=\"1\" data-path=\"knowledge.maximumDocumentBytes\"></label>"
             "<label>Parquet helper executable (restart required) &mdash; "
-            "the DuckDB CLI path used to convert Parquet knowledge uploads; "
-            "leave empty to disable Parquet ingestion"
+            "the DuckDB CLI path used to convert Parquet knowledge and "
+            "dataset uploads; leave empty to disable Parquet ingestion"
             "<input id=\"cfgParquetHelperExecutable\" type=\"text\" "
             "data-path=\"knowledge.parquetHelperExecutable\"></label>"
             "<button title=\"Save Machine Learning settings\">" ICON_SAVE_SVG " Save Machine Learning settings</button>"
@@ -6049,6 +6843,36 @@ std::string application_page(const UserRecord& user, const std::string& section,
         ".memoryDeleteBtn{flex:none;width:1.4rem;height:1.4rem;margin:0;padding:0;"
         "background:transparent;color:var(--muted);line-height:1}"
         ".memoryDeleteBtn:hover{background:#3a0a0a;color:#ffd54a}"
+        // Model Inventory page: a self-contained "container" (background,
+        // border, radius) matching the look #systemReport's own
+        // .reportSection cards use, but scoped to its own id rather than
+        // that page's id since this widget lives on a different page.
+        "#memoryStatusSection{background:var(--panel);"
+        "border:1px solid var(--panel-border);border-radius:.6rem;"
+        "padding:.9rem 1.1rem;margin-top:1.25rem}"
+        "#memoryStatusSection h3{margin:0 0 .3rem;font-size:.75rem;"
+        "font-weight:600;text-transform:uppercase;letter-spacing:.05em;"
+        "color:var(--muted)}"
+        "#memoryStatusSection h4{margin:1rem 0 .2rem;font-size:.7rem;"
+        "font-weight:600;text-transform:uppercase;letter-spacing:.05em;"
+        "color:var(--muted)}"
+        "#memoryStatusSection table{table-layout:fixed}"
+        "#memoryStatusSection td{border-bottom:1px solid var(--panel-border);"
+        "vertical-align:top}"
+        "#memoryStatusSection tr:last-child td{border-bottom:none}"
+        ".memoryCleanOption{margin-top:.6rem}"
+        ".memoryCleanOption .checkboxLabel{font-size:.85rem;color:var(--text)}"
+        // Two-column layout for the longer "Windows system memory options"
+        // group, matching a familiar memory-cleaner tool's own checkbox
+        // grid rather than a single long list.
+        ".memoryCleanOptionsGrid{display:grid;"
+        "grid-template-columns:repeat(auto-fit,minmax(220px,1fr));"
+        "column-gap:1.5rem}"
+        ".memoryStatusInlineNumber{width:4rem;display:inline-block;"
+        "margin:0 .3rem;padding:.15rem .3rem}"
+        ".memoryStatusHint{display:block;color:var(--muted);font-size:.72rem;"
+        "line-height:1.35;margin:.15rem 0 0}"
+        "#memCleanProgress{margin-top:.6rem}"
         ".panel{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));"
         "gap:1.25rem}"
         // Same min-width:auto default problem one level down: a grid track
@@ -6272,6 +7096,10 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "#systemReport td.reportValue{font-variant-numeric:tabular-nums}"
         "@media (max-width:640px){"
         "#systemReport td.reportLabel{width:9rem}}"
+        "#memoryStatusSection td.reportLabel{width:12rem;color:var(--muted)}"
+        "#memoryStatusSection td.reportValue{font-variant-numeric:tabular-nums}"
+        "@media (max-width:640px){"
+        "#memoryStatusSection td.reportLabel{width:8rem}}"
         // The sidebar's user-resized width (persisted in localStorage, see
         // the sidebar script below) can otherwise still eat most of a
         // narrow window's space -- these two breakpoints claw it back

@@ -161,6 +161,28 @@ void test_record_recovery_users_and_persistent_sessions() {
     require(masterai::role_allows(masterai::UserRole::developer, "models.read") &&
             !masterai::role_allows(masterai::UserRole::viewer, "models.load"),
             "role permission boundaries are incorrect");
+
+    // User administration: an administrator can remove a user from
+    // authentication without deleting the account -- UserStore::set_enabled
+    // flips UserRecord::enabled, which the request handler's own
+    // `!user->enabled` check already refuses (server.cpp).
+    const auto second_user = users.add("TEST\\second", "Second Operator",
+                                       masterai::UserRole::developer);
+    require(second_user.enabled, "a newly added user must start enabled");
+    require(users.set_enabled(second_user.id, false),
+            "set_enabled() rejected a known user id");
+    require(!users.find_by_id(second_user.id)->enabled,
+            "set_enabled(false) did not persist as disabled");
+    require(!users.set_enabled("nonexistent-user", false),
+            "set_enabled() must no-op for an unknown user id, not throw");
+    masterai::UserStore reloaded_users(records);
+    require(!reloaded_users.find_by_id(second_user.id)->enabled,
+            "UserStore did not restore a persisted disabled status after "
+            "reload");
+    require(users.set_enabled(second_user.id, true),
+            "set_enabled() rejected re-enabling a known user id");
+    require(users.find_by_id(second_user.id)->enabled,
+            "set_enabled(true) did not persist as re-enabled");
     masterai::ApiTokenStore api_tokens(records);
     const auto api_token = api_tokens.create(
         administrator.id, {"identity.read", "models.read"}, 100U, 100U,
@@ -7708,6 +7730,48 @@ void test_machine_learning_real_training_and_prediction() {
         rejected_target = true;
     }
     require(rejected_target, "an unknown target column must be rejected");
+
+    // Dataset content format completion phase: JSON/JSONL dataset uploads
+    // convert to the exact same CSV text a hand-written CSV upload would
+    // produce, so parse_tabular_csv (and everything downstream) never has
+    // to know a dataset started as anything else.
+    const auto json_array_csv = masterai::json_array_to_csv(
+        "[{\"a\":1,\"b\":2,\"label\":0},{\"a\":3,\"b\":4,\"label\":1}]");
+    const auto json_array_parsed =
+        masterai::parse_tabular_csv(json_array_csv, "label");
+    require(json_array_parsed.feature_names.size() == 2U &&
+                json_array_parsed.classification &&
+                json_array_parsed.targets.size() == 2U,
+            "json_array_to_csv did not produce a trainable dataset from a "
+            "JSON array of flat objects");
+
+    const auto jsonl_csv = masterai::jsonl_to_csv(
+        "{\"a\":1,\"b\":2,\"label\":0}\n"
+        "{\"a\":3,\"b\":4,\"label\":1}\n"
+        "\n");
+    require(jsonl_csv == json_array_csv,
+            "jsonl_to_csv must produce the exact same CSV text as the "
+            "equivalent JSON array, blank lines skipped");
+
+    // A record missing a key seen in another record renders that cell
+    // empty rather than dropping the column or throwing.
+    const auto ragged_csv = masterai::json_array_to_csv(
+        "[{\"a\":1,\"label\":0},{\"a\":2,\"b\":9,\"label\":1}]");
+    require(ragged_csv.find("a,b,label") != std::string::npos &&
+                ragged_csv.find("1,,0") != std::string::npos,
+            "json_records_to_csv did not render a missing field as an "
+            "empty cell");
+
+    // A nested array/object field has no tabular meaning and must be
+    // rejected with a clear reason, not silently stringified.
+    bool rejected_nested_field = false;
+    try {
+        masterai::json_array_to_csv("[{\"a\":[1,2],\"label\":0}]");
+    } catch (const std::exception&) {
+        rejected_nested_field = true;
+    }
+    require(rejected_nested_field,
+            "a nested array/object dataset field must be rejected");
 
     // Dataset content and evaluation result stores round-trip.
     masterai::DatasetContentStore content(records);

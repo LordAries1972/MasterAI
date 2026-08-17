@@ -17,6 +17,7 @@
 #include <numeric>
 #include <random>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 
 namespace masterai {
@@ -501,7 +502,105 @@ std::string join_csv_row(const std::vector<std::string>& fields) {
     return row;
 }
 
+// Renders one JSON record field as a CSV cell. Nested arrays/objects are
+// rejected (the tabular engine has no concept of a nested column) rather
+// than silently stringified into something parse_tabular_csv would then
+// reject anyway with a less useful error.
+std::string json_scalar_to_csv_field(const std::string& field_name,
+                                     const JsonValue& value) {
+    switch (value.type()) {
+        case JsonValue::Type::null_value:
+            return "";
+        case JsonValue::Type::boolean:
+            return value.as_boolean() ? "true" : "false";
+        case JsonValue::Type::string:
+            return value.as_string();
+        case JsonValue::Type::number: {
+            try {
+                return std::to_string(value.as_integer());
+            } catch (const std::exception&) {
+                std::ostringstream stream;
+                stream << value.as_double();
+                return stream.str();
+            }
+        }
+        default:
+            throw std::runtime_error(
+                "dataset record field '" + field_name +
+                "' is a nested array/object; only flat scalar fields "
+                "(numbers, strings, booleans, null) are supported");
+    }
+}
+
 }  // namespace
+
+// Converts a flat array of JSON objects into CSV text: the header is every
+// key seen across all records (JsonValue::Object is a std::map, so the
+// column order is alphabetical -- deterministic, if not insertion order),
+// and a record missing a given key renders that cell empty. This is the
+// shared tail for JSON, JSONL, and Parquet (via parquet_bytes_to_json, which
+// already emits one JSON object per line) dataset uploads -- every format
+// converges on the exact same CSV text parse_tabular_csv already validates,
+// so the tabular engine downstream never has to know a dataset started as
+// anything but CSV.
+std::string json_records_to_csv(const std::vector<JsonValue>& records) {
+    if (records.empty()) {
+        throw std::runtime_error("dataset content has no records");
+    }
+    std::set<std::string> columns;
+    for (const auto& record : records) {
+        if (!record.is_object()) {
+            throw std::runtime_error(
+                "every dataset record must be a JSON object of column "
+                "name to value");
+        }
+        for (const auto& field : record.as_object()) columns.insert(field.first);
+    }
+    const std::vector<std::string> ordered_columns(columns.begin(), columns.end());
+    std::string csv = join_csv_row(ordered_columns);
+    for (const auto& record : records) {
+        std::vector<std::string> row;
+        row.reserve(ordered_columns.size());
+        for (const auto& column : ordered_columns) {
+            const auto* value = record.optional(column);
+            row.push_back(value ? json_scalar_to_csv_field(column, *value)
+                                : std::string{});
+        }
+        csv += "\n";
+        csv += join_csv_row(row);
+    }
+    return csv;
+}
+
+std::string json_array_to_csv(const std::string& json_text) {
+    const auto parsed = parse_json(json_text, 32ULL * 1024ULL * 1024ULL);
+    if (parsed.type() != JsonValue::Type::array) {
+        throw std::runtime_error(
+            "dataset JSON content must be a top-level array of objects");
+    }
+    return json_records_to_csv(parsed.as_array());
+}
+
+std::string jsonl_to_csv(const std::string& jsonl_text) {
+    std::vector<JsonValue> records;
+    std::size_t start = 0U;
+    while (start <= jsonl_text.size()) {
+        auto end = jsonl_text.find('\n', start);
+        if (end == std::string::npos) end = jsonl_text.size();
+        const auto line = jsonl_text.substr(start, end - start);
+        start = end + 1U;
+        bool blank = true;
+        for (const char character : line) {
+            if (character != ' ' && character != '\r' && character != '\t') {
+                blank = false;
+                break;
+            }
+        }
+        if (!blank) records.push_back(parse_json(line, 4ULL * 1024ULL * 1024ULL));
+        if (end == jsonl_text.size()) break;
+    }
+    return json_records_to_csv(records);
+}
 
 TabularAutoLabelReport auto_label_tabular_dataset(const std::string& csv,
                                                   const std::string& target_column) {

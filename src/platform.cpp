@@ -23,6 +23,7 @@
 // explicitly here since probe_filesystem_integrity_flags() depends on them
 // directly.
 #include <winioctl.h>
+#include <tlhelp32.h>
 #elif defined(__linux__)
 #include <dlfcn.h>
 #if defined(__x86_64__)
@@ -420,6 +421,228 @@ ProcessResourceSample probe_process_resources() {
     }
 #endif
     return sample;
+}
+
+// Trims MasterAI's own working set back to the OS. Windows-only primitive
+// (EmptyWorkingSet) per this project's Windows-first build scope; elsewhere
+// this is a documented no-op returning 0, never a fabricated estimate.
+std::uint64_t release_process_working_set() {
+#if defined(_WIN32)
+    const auto before = probe_process_resources().resident_memory_bytes;
+    if (EmptyWorkingSet(GetCurrentProcess()) == 0) return 0U;
+    const auto after = probe_process_resources().resident_memory_bytes;
+    return before > after ? before - after : 0U;
+#else
+    return 0U;
+#endif
+}
+
+#if defined(_WIN32)
+namespace {
+
+// NtSetSystemInformation(SystemMemoryListInformation, ...) is the same
+// undocumented-but-stable primitive Sysinternals RAMMap uses for its
+// Flush/Purge buttons -- not in any public SDK header, so both the function
+// pointer and the small set of values it needs are declared by hand here.
+using NtSetSystemInformationFn =
+    LONG(WINAPI*)(ULONG SystemInformationClass, PVOID SystemInformation,
+                  ULONG SystemInformationLength);
+constexpr ULONG kSystemMemoryListInformation = 0x50;
+enum class SystemMemoryListCommand : ULONG {
+    empty_working_sets = 2,
+    flush_modified_list = 3,
+    purge_standby_list = 4,
+    purge_low_priority_standby_list = 5,
+};
+
+bool call_nt_memory_list_command(const SystemMemoryListCommand command) {
+    const auto ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (ntdll == nullptr) return false;
+    const auto nt_set_system_information =
+        reinterpret_cast<NtSetSystemInformationFn>(
+            GetProcAddress(ntdll, "NtSetSystemInformation"));
+    if (nt_set_system_information == nullptr) return false;
+    auto value = command;
+    // STATUS_SUCCESS is 0; anything else (most commonly
+    // STATUS_PRIVILEGE_NOT_HELD when the process isn't elevated) is a
+    // genuine failure this function reports honestly rather than masking.
+    return nt_set_system_information(kSystemMemoryListInformation, &value,
+                                     sizeof(value)) == 0L;
+}
+
+// Trims (EmptyWorkingSet) every process satisfying `predicate`, skipping
+// processes this account has no permission to open rather than failing the
+// whole sweep -- the same "best effort across many independent targets,
+// one denial is not fatal" shape ScratchVolumeManager::recover_orphans()
+// already uses for orphaned directories. Returns how many were trimmed.
+std::uint32_t trim_process_working_sets_matching(
+    const std::function<bool(DWORD pid, std::uint64_t working_set_bytes)>&
+        predicate) {
+    const auto snapshot =
+        CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0U;
+    std::uint32_t trimmed = 0U;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    const auto self_pid = GetCurrentProcessId();
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (entry.th32ProcessID == 0U ||
+                entry.th32ProcessID == self_pid) {
+                continue;
+            }
+            const auto process = OpenProcess(
+                PROCESS_SET_QUOTA | PROCESS_QUERY_INFORMATION, FALSE,
+                entry.th32ProcessID);
+            if (process == nullptr) continue;
+            PROCESS_MEMORY_COUNTERS counters{};
+            counters.cb = sizeof(counters);
+            const auto working_set_bytes =
+                GetProcessMemoryInfo(process, &counters, sizeof(counters))
+                    ? static_cast<std::uint64_t>(counters.WorkingSetSize)
+                    : 0U;
+            if (predicate(entry.th32ProcessID, working_set_bytes) &&
+                EmptyWorkingSet(process) != 0) {
+                ++trimmed;
+            }
+            CloseHandle(process);
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return trimmed;
+}
+
+}  // namespace
+#endif
+
+bool acquire_privilege_if_available(const char* privilege_name) {
+#if defined(_WIN32)
+    HANDLE token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(),
+                         TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token) == 0) {
+        return false;
+    }
+    LUID luid{};
+    // MultiByteToWideChar avoids pulling in a wide-string literal helper
+    // for what is always one of a small fixed set of ASCII privilege names.
+    wchar_t wide_name[64]{};
+    MultiByteToWideChar(CP_UTF8, 0, privilege_name, -1, wide_name,
+                        static_cast<int>(std::size(wide_name)));
+    if (LookupPrivilegeValueW(nullptr, wide_name, &luid) == 0) {
+        CloseHandle(token);
+        return false;
+    }
+    TOKEN_PRIVILEGES privileges{};
+    privileges.PrivilegeCount = 1U;
+    privileges.Privileges[0].Luid = luid;
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    const auto adjusted = AdjustTokenPrivileges(
+        token, FALSE, &privileges, sizeof(privileges), nullptr, nullptr);
+    // AdjustTokenPrivileges can report success while silently granting
+    // nothing if the account never held the privilege in the first place
+    // (an unelevated token) -- GetLastError() is the only way to tell.
+    const auto held = adjusted != 0 && GetLastError() == ERROR_SUCCESS;
+    CloseHandle(token);
+    return held;
+#else
+    static_cast<void>(privilege_name);
+    return false;
+#endif
+}
+
+bool flush_modified_page_list() {
+#if defined(_WIN32)
+    if (!acquire_privilege_if_available("SeProfileSingleProcessPrivilege")) {
+        return false;
+    }
+    return call_nt_memory_list_command(
+        SystemMemoryListCommand::flush_modified_list);
+#else
+    return false;
+#endif
+}
+
+bool purge_standby_list() {
+#if defined(_WIN32)
+    if (!acquire_privilege_if_available("SeProfileSingleProcessPrivilege")) {
+        return false;
+    }
+    return call_nt_memory_list_command(
+        SystemMemoryListCommand::purge_standby_list);
+#else
+    return false;
+#endif
+}
+
+bool purge_low_priority_standby_list() {
+#if defined(_WIN32)
+    if (!acquire_privilege_if_available("SeProfileSingleProcessPrivilege")) {
+        return false;
+    }
+    return call_nt_memory_list_command(
+        SystemMemoryListCommand::purge_low_priority_standby_list);
+#else
+    return false;
+#endif
+}
+
+std::uint32_t trim_other_process_working_sets(
+    const std::uint64_t minimum_mib, const bool protect_foreground_process) {
+#if defined(_WIN32)
+    const auto minimum_bytes = minimum_mib * 1024ULL * 1024ULL;
+    DWORD foreground_pid = 0U;
+    if (protect_foreground_process) {
+        const auto foreground_window = GetForegroundWindow();
+        if (foreground_window != nullptr) {
+            GetWindowThreadProcessId(foreground_window, &foreground_pid);
+        }
+    }
+    return trim_process_working_sets_matching(
+        [minimum_bytes, foreground_pid](const DWORD pid,
+                                        const std::uint64_t working_set_bytes) {
+            if (foreground_pid != 0U && pid == foreground_pid) return false;
+            return working_set_bytes >= minimum_bytes;
+        });
+#else
+    static_cast<void>(minimum_mib);
+    static_cast<void>(protect_foreground_process);
+    return 0U;
+#endif
+}
+
+std::uint32_t empty_system_and_service_working_sets() {
+#if defined(_WIN32)
+    // SeDebugPrivilege is what lets OpenProcess() succeed against SYSTEM
+    // and other-user service processes at all -- without it this reduces to
+    // the same set trim_other_process_working_sets(0, false) would already
+    // reach, so this reports honestly (0 trimmed) rather than pretending a
+    // narrower sweep was the full system/service set.
+    if (!acquire_privilege_if_available("SeDebugPrivilege")) return 0U;
+    return trim_process_working_sets_matching(
+        [](DWORD, std::uint64_t) { return true; });
+#else
+    return 0U;
+#endif
+}
+
+bool clear_system_file_cache() {
+#if defined(_WIN32)
+    if (!acquire_privilege_if_available("SeIncreaseQuotaPrivilege")) {
+        return false;
+    }
+    // The documented CacheSet/Clearmem technique: briefly cap the cache's
+    // working set to a small hard ceiling, forcing pages out, then restore
+    // the unrestricted default -- SetSystemFileCacheSize() itself has no
+    // "purge now" mode, only min/max limits.
+    constexpr SIZE_T kShrinkTargetBytes = 1024ULL * 1024ULL;
+    const auto shrunk = SetSystemFileCacheSize(
+        0, kShrinkTargetBytes, FILE_CACHE_MAX_HARD_ENABLE);
+    const auto restored = SetSystemFileCacheSize(
+        static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1), 0);
+    return shrunk != 0 && restored != 0;
+#else
+    return false;
+#endif
 }
 
 // Phase 19 calibration evidence: system-wide CPU utilization plus this

@@ -748,6 +748,61 @@ Current phase status:
   stats accessor in this codebase today), so this stays honest about what
   is and is not real rather than fabricating a page with nothing behind
   it.
+  Extended 2026-08-17: a second, narrower "Memory Status" widget added to
+  the Model Inventory page (`/app/models-inventory`, `src/web_ui.cpp`),
+  administrator-only, so an administrator does not have to leave the
+  models list to see whether a model is RAM-blocked and do something about
+  it. Auto-refreshes every 5 seconds from the same real routes the
+  Performance page already reads (`GET /api/v1/system/resources`, `GET
+  /api/v1/system/memory`, `GET /api/v1/system/cache`, `GET
+  /api/v1/system/scratch`) — system RAM, system virtual memory (pagefile),
+  and MasterAI's own cache/scratch usage. A new "Clean Memory" action (`GET`/
+  `POST /api/v1/system/memory/clean`, `MemoryCleanupTracker` in
+  `src/memory.cpp`) lets an administrator choose which real reclaim steps to
+  run — trim bounded caches (`CacheManager::trim()`), remove orphaned
+  scratch/temp files (`ScratchVolumeManager::recover_orphans()`), release
+  MasterAI's own process memory back to the OS (`release_process_working_set()`,
+  `EmptyWorkingSet` on Windows in `src/platform.cpp`; a documented no-op
+  elsewhere), and optionally unload the currently loaded model
+  (`RunnerSupervisor::unload()`) — and watch genuine step-by-step percent
+  progress while it runs, polled from a single-flight tracker rather than a
+  fabricated animation. On completion the widget re-fetches both itself and
+  `GET /api/v1/models` so a model that was previously RAM-blocked is shown
+  as ready immediately, without a page reload — `model_inventory()`
+  already re-probes hardware on every call, so no caching needed
+  invalidating. Honest scope note: MasterAI cannot force another process or
+  the OS itself to release memory, only shrink its own footprint; the
+  widget's copy and this note both say so rather than implying a
+  system-wide sweep.
+  Extended again 2026-08-17 (same pass): added the true system-wide Windows
+  memory-manager options a dedicated memory-cleaner tool would offer,
+  alongside the process-scoped ones above — trim other applications'
+  working sets (with a configurable minimum-size threshold and a
+  protect-the-foreground-application option), flush the modified page
+  list, purge the standby list, purge only low-priority standby pages,
+  empty system/service working sets, and clear the system file cache. Each
+  is a real primitive in `src/platform.cpp`
+  (`trim_other_process_working_sets()`, `flush_modified_page_list()`,
+  `purge_standby_list()`, `purge_low_priority_standby_list()`,
+  `empty_system_and_service_working_sets()`, `clear_system_file_cache()`),
+  the last five wrapping the same undocumented-but-stable
+  `NtSetSystemInformation(SystemMemoryListInformation, ...)` primitive
+  Sysinternals RAMMap uses, or (for the file cache) the documented
+  `SetSystemFileCacheSize()` shrink-then-restore technique. Every one of
+  these genuinely requires the MasterAI process itself to be running
+  elevated (Administrator) — `acquire_privilege_if_available()` enables the
+  underlying Windows privilege (`SeProfileSingleProcessPrivilege`,
+  `SeIncreaseQuotaPrivilege`, or `SeDebugPrivilege`) only if the process
+  token actually holds it, and every function fails closed (returns
+  false/0) rather than crashing or silently pretending to have worked when
+  it doesn't. `MemoryCleanupResult::privilege_denied_steps` names exactly
+  which requested steps were skipped and why, surfaced verbatim in both the
+  API response and the widget's completion summary — trimming other
+  processes (which only needs ordinary same-user process access, not
+  elevation) was confirmed working end-to-end in an unelevated test run;
+  the five true kernel-level operations were confirmed to fail closed with
+  the correct named reason in that same run, since verifying their success
+  path requires MasterAI itself to be launched elevated.
 - Phase 36: Planned — full performance benchmark matrix, regression
   thresholds per optimization, and automated build-to-build comparison
   gating releases.
@@ -1406,6 +1461,34 @@ Current phase status:
   failed/canceled) rather than orchestrating the other stores' real
   training/evaluation/deployment jobs. `GET/POST /api/v1/ml/automation-
   pipelines`, `.../status`, `.../run`, `.../runs`, `.../delete`.
+- ML forms clarity pass (2026-08-17): a "?" hint badge (`.mlHint`/
+  `.mlHintBubble` CSS, `field_hint()` in `src/web_ui.cpp`) sits after a
+  label's own text and reveals a detailed explanation on hover/focus,
+  toggleable off from Machine Learning Settings (`#cfgHintsEnabled`, a
+  `localStorage`-only client preference — no server config field, so it
+  never touches `admin_config_put`'s strict schema). Named to avoid
+  colliding with the pre-existing `<p class="fieldHint">` note already on
+  the Knowledge ingestion form (`ml-subjects`). Every remaining opaque
+  "paste an ID" text field across the Machine Learning forms is now a
+  `<select>` populated from the actual entity list (`fillMlSelect()`), and
+  every remaining comma-separated multi-id field is now a checkbox
+  `.multiSelect` list (`fillMultiSelect()` for a fetched list, or a literal
+  checkbox list for a fixed vocabulary): Instruction Example content-edit/
+  test target, Test-against-models model list, Duplicates/contradictions
+  dataset, Inference Endpoint policy's endpoint and safety-policy targets,
+  Experiment Compare's baseline (its own required `<select>`, so "baseline
+  first" is structural rather than a typing convention) and candidate list,
+  and Automation Pipeline's stage list (a fixed 16-entry checkbox list in
+  canonical lifecycle order, since stages execute in list order and
+  free-typed stage names risked a silent-no-match typo against the exact
+  strings `run_automation_pipeline` matches). Dataset Manager's content-
+  upload format (see the dataset multi-format entry above) also gained a
+  hint naming its four accepted extensions. Deliberately did not touch
+  every already-clear field (most free-text fields already carry a
+  `placeholder="e.g. ..."` example) or any non-ML form (Workspace Projects'
+  project-id slug, the Model Inventory download form's model-id) — both are
+  administrator-chosen identifiers, not a reference into an existing list,
+  so a dropdown would be wrong there.
 - Phase 65: Implemented (2026-08-11) — Safety and Governance (section 2 item
   22, section 40). A governance policy (name, scope, restricted data
   categories) and a per-model card (purpose, intended/prohibited use,
@@ -2167,6 +2250,42 @@ Current phase status:
   labels were missing the `checkboxLabel` CSS class every other checkbox
   label in this codebase uses, so the checkbox and its text wrapped onto
   separate lines instead of sitting on one line (`src/web_ui.cpp`).
+- User administration: the Users panel gains a per-row Disable/Enable
+  action. `UserStore::set_enabled()` (`src/storage.cpp`) flips the
+  already-persisted but previously unwired `UserRecord::enabled` field;
+  `POST /api/v1/users/{id}/status` (`users.manage`) exposes it, and every
+  authenticated request already refused a disabled account (`!user->enabled`
+  in the request handler, present since the field was added) so this is
+  disable, not delete — a user's id, audit history, and any records owned
+  by that id are left intact, and re-enabling restores authentication
+  immediately. Refuses to let an administrator disable their own account (a
+  400, checked before touching the store) so a single click can never lock
+  every administrator out.
+- Dataset Manager content-upload format completion (docs/PLAN.md "Machine
+  Learning Abilities" section 10): `POST /api/v1/ml/datasets/{id}/content`
+  originally accepted CSV text only; a new `format` request field (default
+  `"csv"`, so every existing caller is unaffected) also accepts `"json"` (a
+  top-level JSON array of flat objects), `"jsonl"` (one flat JSON object per
+  line), and `"parquet"` (base64-encoded bytes, the same convention the
+  Knowledge ingestion Parquet upload already uses). `json_records_to_csv`/
+  `json_array_to_csv`/`jsonl_to_csv` (`src/ml_engine.cpp`) convert all three
+  to the exact CSV text `parse_tabular_csv` already validates -- the header
+  is every key seen across records (alphabetical, since `JsonValue::Object`
+  is a `std::map`), a record missing a key renders that cell empty, and a
+  nested array/object field is rejected with a clear reason. Parquet reuses
+  the existing `parquet_bytes_to_json` DuckDB helper (its output is already
+  one JSON object per line) rather than adding a second Parquet path.
+  `DatasetContentStore` and every downstream trainer/evaluator/comparator
+  stay CSV-only and unchanged -- this is purely an upload-time conversion.
+  The web UI's dataset content form picks the format from the uploaded
+  file's own extension (`.csv`/`.json`/`.jsonl`/`.parquet`) so nothing else
+  on the form changes between formats, and raised the client-side size
+  guard from 8 MiB to 32 MiB (`configuration.tabular_dataset_maximum_csv_
+  bytes` still enforces the real, administrator-configurable ceiling
+  server-side). Covered by new assertions in
+  `test_machine_learning_real_training_and_prediction` (`test/tests.cpp`):
+  a JSON array and the equivalent JSONL text produce byte-identical CSV, a
+  missing field renders as an empty cell, and a nested field is rejected.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that

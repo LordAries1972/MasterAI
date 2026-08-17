@@ -567,6 +567,15 @@ std::vector<UserRecord> UserStore::all() const {
     return result;
 }
 
+bool UserStore::set_enabled(const std::string& id, const bool enabled) {
+    const auto found = find_by_id(id);
+    if (!found.has_value()) return false;
+    UserRecord updated = *found;
+    updated.enabled = enabled;
+    records_.put("users", updated.id, user_value(updated));
+    return true;
+}
+
 AuditLog::AuditLog(std::filesystem::path path) : path_(std::move(path)) {}
 
 void AuditLog::append(const std::string& event, const std::string& actor,

@@ -349,7 +349,23 @@ The current source includes native implementations for:
   scheduler, advanced optimizations, and calibration profiles, backed
   entirely by the real routes above -- condensed from the plan's full
   named-page enumeration into one working page rather than many
-  placeholders.
+  placeholders. Extended with a "Memory Status" widget on the Model
+  Inventory page (`/app/models-inventory`, administrator-only):
+  auto-refreshes every 5 seconds (system RAM, system virtual memory, and
+  MasterAI's own cache/scratch usage) and offers a "Clean Memory" action
+  (`GET`/`POST /api/v1/system/memory/clean`) with selectable real reclaim
+  steps -- trim bounded caches, remove orphaned scratch/temp files, release
+  MasterAI's own process memory back to the OS, and optionally unload the
+  loaded model -- shown as genuine step-by-step progress, not a fabricated
+  animation. Refreshes the models table immediately afterward so a
+  previously RAM-blocked model shows as ready without a page reload. Also
+  offers true system-wide Windows memory options -- trim other
+  applications' working sets (size threshold, foreground-protect), flush
+  the modified page list, purge the (optionally low-priority-only) standby
+  list, empty system/service working sets, and clear the system file
+  cache. These require MasterAI itself to be running elevated
+  (Administrator); each fails closed and names itself in the result when it
+  can't acquire the privilege, rather than silently doing nothing.
 - Phase 32 (evidence-pending): speculative decoding. `check_draft_target_
   compatibility()`, `SpeculativeDecodingStats`, and
   `decide_speculative_decoding_for_request()`
@@ -516,7 +532,7 @@ Status below reflects the evidence recorded in
 | 53 | Model Optimization | Implemented at a scoped-down record level; no optimizer executor |
 | 54 | Checkpoint Management | Implemented at a scoped-down retention-record level initially; Phase 79 adds real mid-training weight-snapshot capture and a resume-training executor |
 | 55 | Deployment Manager | Implemented at a scoped-down approval-record level initially; Phase 82 adds a real deploy/health/rollback executor |
-| 56 | Real ML execution engine (tabular training, evaluation, prediction) | Implemented |
+| 56 | Real ML execution engine (tabular training, evaluation, prediction) | Implemented; dataset content upload accepts CSV, JSON (array of flat objects), JSONL, and Parquet (via the same DuckDB helper Knowledge ingestion uses), all converted to CSV before validation |
 | 57 | Model Comparison (real baseline-vs-candidate benchmark executor) | Implemented |
 | 58 | Knowledge-file ingestion | Implemented; bounded text upload, SHA-256 provenance, durable chunk records |
 | 59 | Local embedding and vector indexing | Implemented; authored 128-dimensional hashing vectors and index profiles |
@@ -544,6 +560,7 @@ Status below reflects the evidence recorded in
 | 81 | Prompt and Instruction Training real content and operations | Implemented; a real content record (system/user instruction, context, expected/rejected response, tool calls/results, output format, difficulty, safety classification), real draft generation and multi-model testing via `execute_rag_generation`, heuristic duplicate/contradiction detection, real JSON structured-output validation, and enforced approval-requires-content |
 | 82 | Deployment Manager, Inference Endpoints, and Synthetic Data completion | Implemented; Synthetic Data gets a real generation executor (technique-specific prompts via `execute_rag_generation`); Deployment Manager gets its own real deploy/health/rollback action (approved-Model-Card gate, trained-weights health signal, supersede/rollback tracking); Inference Endpoints' already-real Phase 77 listener gets its missing auth-token/policy UI. All three roster entries move from `planned` to `available` |
 | 83 | Safety and Governance roster completion | Implemented; no new executor needed — Phase 74's real content scanning and Phase 82's approval-gated deployment/inference enforcement already met the bar, so the roster entry moves from `planned` to `available`; added the missing `SafetyGovernanceStore`/`scan_content_for_risks` store-level test |
+| — | ML forms clarity pass | Implemented; hover/focus "?" hint bubbles on ambiguous fields (toggleable off per-browser from Machine Learning Settings), every remaining raw-ID text field converted to a named dropdown, and every remaining comma-separated multi-id field converted to a checkbox multi-select |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -1357,6 +1374,9 @@ Key controls include:
   on Linux) as an explicit opt-in (`allow_os_identity_accounts`, off by
   default) for operators who want accounts mapped to their OS/Windows
   identity instead of, or alongside, locally stored passwords.
+- An administrator can disable a user from the Users panel to immediately
+  remove their ability to authenticate, without deleting the account or its
+  audit history; disabling your own account is refused server-side.
 - No storage, hashing, reversible encryption, logging, or forwarding of OS
   passwords
 - Immediate erasure of transient credential buffers

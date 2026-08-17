@@ -263,6 +263,57 @@ std::optional<CacheCategory> parse_cache_clear_category(
     return parsed;
 }
 
+// Model Inventory "Memory Status" widget: parses the optional cleanup-
+// options body accepted by POST /api/v1/system/memory/clean. A missing
+// field keeps MemoryCleanupOptions' own default for it, so an empty body
+// requests the default cleanup (every safe, process-scoped reclaim action;
+// every system-wide Windows option defaults off -- see the struct comment
+// in masterai.hpp for why).
+MemoryCleanupOptions parse_memory_cleanup_options(const std::string& body) {
+    MemoryCleanupOptions options;
+    if (body.empty()) return options;
+    const auto root = parse_json(body);
+    if (const auto* field = root.optional("trimCaches")) {
+        options.trim_caches = field->as_boolean();
+    }
+    if (const auto* field = root.optional("clearScratch")) {
+        options.clear_scratch = field->as_boolean();
+    }
+    if (const auto* field = root.optional("releaseWorkingSet")) {
+        options.release_working_set = field->as_boolean();
+    }
+    if (const auto* field = root.optional("unloadModel")) {
+        options.unload_model = field->as_boolean();
+    }
+    if (const auto* field = root.optional("trimOtherProcessWorkingSets")) {
+        options.trim_other_process_working_sets = field->as_boolean();
+    }
+    if (const auto* field = root.optional("trimOtherProcessMinimumMib")) {
+        const auto value = field->as_integer();
+        options.trim_other_process_minimum_mib =
+            value > 0 ? static_cast<std::uint64_t>(value) : 0U;
+    }
+    if (const auto* field = root.optional("protectForegroundApplication")) {
+        options.protect_foreground_application = field->as_boolean();
+    }
+    if (const auto* field = root.optional("flushModifiedPageList")) {
+        options.flush_modified_page_list = field->as_boolean();
+    }
+    if (const auto* field = root.optional("purgeStandbyList")) {
+        options.purge_standby_list = field->as_boolean();
+    }
+    if (const auto* field = root.optional("purgeLowPriorityStandbyPages")) {
+        options.purge_low_priority_standby_pages = field->as_boolean();
+    }
+    if (const auto* field = root.optional("emptySystemAndServiceWorkingSets")) {
+        options.empty_system_and_service_working_sets = field->as_boolean();
+    }
+    if (const auto* field = root.optional("clearSystemFileCache")) {
+        options.clear_system_file_cache = field->as_boolean();
+    }
+    return options;
+}
+
 // Phase 69: docs/PLAN.md "Machine Learning Abilities" section 37
 // (Automated Machine Learning Pipelines). Splits a pipeline's comma-joined
 // stage list, trimming whitespace around each entry and dropping empty
@@ -832,6 +883,13 @@ public:
         }
         if (request.method == "POST" && request.target == "/api/v1/users") {
             return create_user(request, *user);
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/users/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/status") == 0) {
+            return set_user_status(request, *user);
         }
         if (request.method == "GET" &&
             request.target == "/api/v1/admin/config") {
@@ -1724,6 +1782,194 @@ public:
             return response(200, "OK",
                             "{\"orphansRemoved\":" + std::to_string(removed) + "}");
         }
+        // Model Inventory page "Memory Status" widget. GET is what the
+        // frontend polls (every ~400ms while a clean is in flight) to render
+        // the progress bar; POST performs the selected reclaim actions
+        // synchronously on this request's thread -- exactly the same shape
+        // DownloadManager::run() already uses (server.cpp's download /run
+        // route blocks on the transfer while the frontend polls a separate
+        // list route on another connection). Administrator-only: the same
+        // gate as /api/v1/system/cache and /api/v1/system/scratch above,
+        // whose figures this widget also displays.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/system/memory/clean") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            return response(200, "OK",
+                            memory_cleanup_result_json(memory_cleanup.status()));
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/system/memory/clean") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            MemoryCleanupOptions options;
+            try {
+                options = parse_memory_cleanup_options(request.body);
+            } catch (const std::exception&) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_memory_clean_request\"}");
+            }
+            const unsigned int total_steps =
+                (options.trim_caches ? 1U : 0U) +
+                (options.clear_scratch ? 1U : 0U) +
+                (options.release_working_set ? 1U : 0U) +
+                (options.unload_model ? 1U : 0U) +
+                (options.trim_other_process_working_sets ? 1U : 0U) +
+                (options.flush_modified_page_list ? 1U : 0U) +
+                (options.purge_standby_list ? 1U : 0U) +
+                (options.purge_low_priority_standby_pages ? 1U : 0U) +
+                (options.empty_system_and_service_working_sets ? 1U : 0U) +
+                (options.clear_system_file_cache ? 1U : 0U);
+            if (total_steps == 0U) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"no_cleanup_action_selected\"}");
+            }
+            const auto job_id = sha256_hex(std::to_string(epoch_seconds()) +
+                                           user->id)
+                                    .substr(0U, 16U);
+            if (!memory_cleanup.begin(job_id, total_steps)) {
+                return response(409, "Conflict",
+                                "{\"error\":\"cleanup_already_running\"}");
+            }
+            MemoryCleanupResult result;
+            result.id = job_id;
+            // Each real reclaim step below completes in low single-digit
+            // milliseconds -- far faster than any poll interval could ever
+            // observe, which is exactly why the progress bar previously
+            // appeared to do nothing (the job was always finished before
+            // the frontend's first poll landed). This short, honestly-
+            // labelled pause after each step is what makes the already-real
+            // per-step progress actually observable to a human watching it,
+            // the same way installer progress bars pace visually distinct
+            // steps rather than racing through them faster than the eye can
+            // follow -- it does not fabricate a percentage, it only gives
+            // the genuine one time to be seen.
+            const auto pace_step = []() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            };
+            if (options.trim_caches) {
+                std::uint64_t before = 0U;
+                for (const auto& [category, status] : cache->status().categories) {
+                    static_cast<void>(category);
+                    before += status.used_bytes;
+                }
+                cache->trim();
+                std::uint64_t after = 0U;
+                for (const auto& [category, status] : cache->status().categories) {
+                    static_cast<void>(category);
+                    after += status.used_bytes;
+                }
+                result.cache_bytes_freed = before > after ? before - after : 0U;
+                memory_cleanup.advance_step("Trimming bounded caches");
+                pace_step();
+            }
+            if (options.clear_scratch) {
+                result.scratch_orphans_removed = scratch_volumes->recover_orphans();
+                memory_cleanup.advance_step("Removing orphaned scratch files");
+                pace_step();
+            }
+            if (options.release_working_set) {
+                result.process_working_set_bytes_freed =
+                    release_process_working_set();
+                memory_cleanup.advance_step(
+                    "Releasing process memory back to the OS");
+                pace_step();
+            }
+            if (options.unload_model && inference != nullptr) {
+                inference->unload();
+                if (prompt_sessions) prompt_sessions->reset();
+                result.model_unloaded = true;
+                memory_cleanup.advance_step("Unloading the loaded AI model");
+                pace_step();
+            } else if (options.unload_model) {
+                memory_cleanup.advance_step("No AI model was loaded");
+                pace_step();
+            }
+            // Windows system-memory options: each genuinely requires the
+            // MasterAI process to be running elevated (see the platform.cpp
+            // functions' own comments). A requested step that can't acquire
+            // its privilege is recorded in privilege_denied_steps instead of
+            // being silently skipped, so "I checked the box and nothing
+            // happened" always has a visible, honest reason.
+            if (options.trim_other_process_working_sets) {
+                result.other_processes_trimmed = trim_other_process_working_sets(
+                    options.trim_other_process_minimum_mib,
+                    options.protect_foreground_application);
+                if (result.other_processes_trimmed == 0U) {
+                    result.privilege_denied_steps.push_back(
+                        "trimOtherProcessWorkingSets");
+                }
+                memory_cleanup.advance_step("Trimming other applications' working sets");
+                pace_step();
+            }
+            if (options.flush_modified_page_list) {
+                result.modified_page_list_flushed = flush_modified_page_list();
+                if (!result.modified_page_list_flushed) {
+                    result.privilege_denied_steps.push_back("flushModifiedPageList");
+                }
+                memory_cleanup.advance_step("Flushing the modified page list");
+                pace_step();
+            }
+            if (options.purge_standby_list) {
+                result.standby_list_purged = purge_standby_list();
+                if (!result.standby_list_purged) {
+                    result.privilege_denied_steps.push_back("purgeStandbyList");
+                }
+                memory_cleanup.advance_step("Purging the standby list");
+                pace_step();
+            }
+            if (options.purge_low_priority_standby_pages) {
+                result.low_priority_standby_purged =
+                    purge_low_priority_standby_list();
+                if (!result.low_priority_standby_purged) {
+                    result.privilege_denied_steps.push_back(
+                        "purgeLowPriorityStandbyPages");
+                }
+                memory_cleanup.advance_step("Purging low-priority standby pages");
+                pace_step();
+            }
+            if (options.empty_system_and_service_working_sets) {
+                result.system_working_sets_emptied =
+                    empty_system_and_service_working_sets();
+                if (result.system_working_sets_emptied == 0U) {
+                    result.privilege_denied_steps.push_back(
+                        "emptySystemAndServiceWorkingSets");
+                }
+                memory_cleanup.advance_step(
+                    "Emptying system and service working sets");
+                pace_step();
+            }
+            if (options.clear_system_file_cache) {
+                result.system_file_cache_cleared = clear_system_file_cache();
+                if (!result.system_file_cache_cleared) {
+                    result.privilege_denied_steps.push_back("clearSystemFileCache");
+                }
+                memory_cleanup.advance_step("Clearing the system file cache");
+                pace_step();
+            }
+            memory_cleanup.finish(result);
+            audit.append("system.memory.clean", user->id, "success",
+                        "cacheBytesFreed=" +
+                            std::to_string(result.cache_bytes_freed) +
+                            " scratchOrphansRemoved=" +
+                            std::to_string(result.scratch_orphans_removed) +
+                            " workingSetBytesFreed=" +
+                            std::to_string(result.process_working_set_bytes_freed) +
+                            " modelUnloaded=" +
+                            (result.model_unloaded ? "true" : "false") +
+                            " otherProcessesTrimmed=" +
+                            std::to_string(result.other_processes_trimmed) +
+                            " systemWorkingSetsEmptied=" +
+                            std::to_string(result.system_working_sets_emptied) +
+                            " privilegeDeniedSteps=" +
+                            std::to_string(result.privilege_denied_steps.size()));
+            return response(200, "OK",
+                            memory_cleanup_result_json(memory_cleanup.status()));
+        }
         // Phase 31 (Priority B): tier-migration tooling. Relocates an
         // already-published durable file (e.g. a GGUF model sitting on Tier
         // C) to a different tier's directory, verified byte-for-byte via
@@ -2087,11 +2333,50 @@ public:
                                 "{\"error\":\"ml_dataset_not_found\"}");
             }
             try {
-                auto root = parse_json(request.body);
-                const auto csv = root.required("csv").as_string();
+                auto root = parse_json(request.body, configuration.max_request_bytes);
+                // Dataset content completion phase: the upload accepted CSV
+                // text only; "format" (default "csv", matching every caller
+                // before this phase) also accepts "json" (a top-level JSON
+                // array of flat objects), "jsonl" (one flat JSON object per
+                // line), and "parquet" (base64-encoded bytes, the same
+                // convention the Knowledge ingestion Parquet upload already
+                // uses -- see is_parquet_knowledge_upload's comment). All
+                // four converge on the exact CSV text parse_tabular_csv
+                // below already validates, via json_array_to_csv/
+                // jsonl_to_csv/parquet_bytes_to_json+jsonl_to_csv
+                // (masterai.hpp/ml_engine.cpp/parquet_bridge.cpp) --
+                // DatasetContentStore keeps storing CSV text regardless of
+                // which format the administrator uploaded, so training,
+                // evaluation, comparison, and every other reader of dataset
+                // content stays unchanged.
+                const auto* format_value = root.optional("format");
+                const auto format = format_value ? format_value->as_string() : "csv";
+                const auto raw_content = root.optional("content")
+                                     ? root.required("content").as_string()
+                                     : root.required("csv").as_string();
                 const auto* target = root.optional("targetColumn");
                 const auto target_column =
                     target ? target->as_string() : std::string{};
+                std::string csv;
+                if (format == "csv") {
+                    csv = raw_content;
+                } else if (format == "json") {
+                    csv = json_array_to_csv(raw_content);
+                } else if (format == "jsonl") {
+                    csv = jsonl_to_csv(raw_content);
+                } else if (format == "parquet") {
+                    if (configuration.parquet_helper_executable.empty()) {
+                        return response(
+                            409, "Conflict",
+                            "{\"error\":\"parquet_helper_not_configured\"}");
+                    }
+                    csv = jsonl_to_csv(parquet_bytes_to_json(
+                        configuration.parquet_helper_executable,
+                        base64_decode(raw_content)));
+                } else {
+                    return response(400, "Bad Request",
+                                    "{\"error\":\"unknown_dataset_content_format\"}");
+                }
                 // Parse before storing so bad content is rejected now, not
                 // at training time.
                 const auto parsed = parse_tabular_csv(
@@ -7655,6 +7940,38 @@ private:
         }
     }
 
+    // Removes (enabled:false) or restores (enabled:true) a user's ability to
+    // authenticate without deleting their account -- see UserStore::
+    // set_enabled's own comment for why this is disable rather than delete.
+    // Refuses to let an administrator disable their own account so a single
+    // click can never lock every administrator out at once.
+    std::string set_user_status(Request& request, const UserRecord& admin) {
+        if (auto denied = forbidden_unless(admin.role, "users.manage")) return *denied;
+        const std::string prefix = "/api/v1/users/";
+        const auto id = request.target.substr(
+            prefix.size(), request.target.size() - prefix.size() - 7U);
+        if (id == admin.id) {
+            return response(400, "Bad Request",
+                            "{\"error\":\"cannot_disable_own_account\"}");
+        }
+        try {
+            const auto root = parse_json(request.body);
+            const auto enabled = root.required("enabled").as_boolean();
+            if (!users->set_enabled(id, enabled)) {
+                return response(404, "Not Found", "{\"error\":\"user_not_found\"}");
+            }
+            // Disabling must invalidate any cached permission/session
+            // decision keyed to this user, the same reason create_user()
+            // does after adding one.
+            cache->invalidate_policy();
+            audit.append(enabled ? "users.enable" : "users.disable", admin.id,
+                        "success", id);
+            return response(200, "OK", "{\"updated\":true}");
+        } catch (const std::exception&) {
+            return response(400, "Bad Request", "{\"error\":\"invalid_user_status_request\"}");
+        }
+    }
+
     // Phase 30A: administrator-only view of the live settings.json this
     // process started from (the same document `masterai configure` writes),
     // so the accelerator policy and other local-configuration knobs the rest
@@ -9970,6 +10287,12 @@ private:
     // torn down.
     std::unique_ptr<ProjectWatcher> watcher;
     std::unique_ptr<CacheManager> cache;
+    // Model Inventory page "Memory Status" widget: tracks the single-flight,
+    // administrator-triggered "Clean Memory" action's progress so a poll
+    // (GET /api/v1/system/memory/clean) can observe it mid-flight while the
+    // POST that started it is still running. No teardown dependency on any
+    // other member -- it holds no thread and no reference to them.
+    MemoryCleanupTracker memory_cleanup;
     std::unique_ptr<PromptSessionManager> prompt_sessions;
     // Phase 30A: declared (and therefore destroyed) before `memory`,
     // `inference`, `cache`, and `prompt_sessions` themselves so its
