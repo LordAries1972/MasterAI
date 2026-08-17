@@ -91,6 +91,12 @@
     "box-shadow:0 6px 20px rgba(0,0,0,.45);" \
     "display:flex;flex-direction:column;" \
     "transition:border-color .4s ease}" \
+    /* The ID selector above outranks the browser's default \
+       [hidden]{display:none} (an attribute selector), so without this \
+       explicit override setting el.hidden=true from hideSystemError() -- \
+       both the close button and the 10-second auto-hide use it -- never \
+       actually hid the banner; it just sat there after "closing". */ \
+    "#systemErrorBanner[hidden]{display:none}" \
     "#systemErrorBanner.systemErrorFading{border-color:#000}" \
     "#systemErrorBanner .systemErrorTitleBar{display:flex;align-items:center;" \
     "justify-content:space-between;gap:.75rem;padding:.55rem .75rem;" \
@@ -6532,6 +6538,278 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "async()=>{try{await api('/api/v1/system/scratch/cleanup','POST',{});"
             "await refresh();}catch(err){showSystemError(err.message);}});}"
             "})();</script>";
+    } else if (section == "performance-benchmarks") {
+        body =
+            "<section id=\"panel-performance-benchmarks\" class=\"panel\">"
+            "<div><h2>Benchmarks &amp; Regression</h2>"
+            "<p>The Phase 36 full performance benchmark matrix and "
+            "regression gate. Every run below is a real quality-benchmark "
+            "pass plus five regression check groups (runner attribution, "
+            "low memory, prompt cache, calibration, model routing) against "
+            "this codebase's own live decision logic. A run is only ever "
+            "compared against a previous <em>accepted</em> run that shares "
+            "its exact fingerprint (model, backend, hardware, settings, "
+            "prompt suite, cache state, and profile) -- mismatched "
+            "environments are never presented as a direct comparison. "
+            "Honest scope note: this control plane runs every dimension it "
+            "can control in software on this one host (cache cold/warm, "
+            "sequential concurrency, prompt/context size); it cannot "
+            "manufacture multiple physical storage media or GPU hardware "
+            "on demand, so the plan's full cross-device matrix still "
+            "depends on an administrator running this page on each real "
+            "target host.</p>"
+            "<div class=\"reportSection\"><h3>Run a certification</h3>"
+            "<form id=\"certRunForm\">"
+            "<label>Model id" +
+            field_hint("The model id exactly as it appears on the Model "
+                      "Inventory page.") +
+            "<input id=\"certModelId\" required></label>"
+            "<label>Backend version" +
+            field_hint("The llama.cpp backend build identifier this run is "
+                      "measuring, so results are never compared across a "
+                      "silent backend upgrade.") +
+            "<input id=\"certBackendVersion\" required></label>"
+            "<label>Build id" +
+            field_hint("This MasterAI build's own version/commit "
+                      "identifier.") +
+            "<input id=\"certBuildId\" required></label>"
+            "<label>Hardware id" +
+            field_hint("An identifier for the physical host running this "
+                      "benchmark, so results are never compared across "
+                      "different machines.") +
+            "<input id=\"certHardwareId\" required></label>"
+            "<label>Profile" +
+            field_hint("Quick runs 2 cases, standard 5, extended the full "
+                      "suite -- larger profiles take longer but carry "
+                      "more evidence.") +
+            "<select id=\"certProfile\">"
+            "<option value=\"quick\">Quick</option>"
+            "<option value=\"standard\">Standard</option>"
+            "<option value=\"extended\">Extended</option></select></label>"
+            "<label>Cache state" +
+            field_hint("Cold trims every bounded cache first so the run "
+                      "measures a genuinely cold cache; warm leaves "
+                      "caches as they are.") +
+            "<select id=\"certCacheState\">"
+            "<option value=\"warm\">Warm</option>"
+            "<option value=\"cold\">Cold</option></select></label>"
+            "<label>Concurrency" +
+            field_hint("How many times the suite repeats; each repetition "
+                      "is a real generate() call run one after another on "
+                      "this single-process host, not a literally "
+                      "simultaneous load.") +
+            "<input id=\"certConcurrency\" type=\"number\" min=\"1\" "
+            "value=\"1\"></label>"
+            "<button type=\"submit\" title=\"Run certification\">" ICON_SAVE_SVG
+            " Run certification</button></form>"
+            "<p id=\"certRunStatus\" role=\"status\"></p></div>"
+            "<div class=\"reportSection\"><h3>Regression thresholds</h3>"
+            "<form id=\"certThresholdsForm\">"
+            "<label>Max TTFT regression %" +
+            field_hint("How much slower the first response is allowed to "
+                      "get before the gate rejects the run.") +
+            "<input id=\"certMaxTtft\" type=\"number\" step=\"0.1\"></label>"
+            "<label>Max memory increase %" +
+            field_hint("How much higher peak resident memory is allowed "
+                      "to get before the gate rejects the run.") +
+            "<input id=\"certMaxMemory\" type=\"number\" step=\"0.1\">"
+            "</label>"
+            "<label>Min throughput %" +
+            field_hint("How much generation throughput is allowed to "
+                      "drop (negative) or must improve (positive) to "
+                      "pass.") +
+            "<input id=\"certMinThroughput\" type=\"number\" step=\"0.1\">"
+            "</label>"
+            "<label>Max quality regression %" +
+            field_hint("How much lower the benchmark pass rate is allowed "
+                      "to get before the gate rejects the run.") +
+            "<input id=\"certMaxQuality\" type=\"number\" step=\"0.1\">"
+            "</label>"
+            "<label>Max CPU increase %" +
+            field_hint("How much higher average CPU utilization is "
+                      "allowed to get before the gate rejects the run.") +
+            "<input id=\"certMaxCpu\" type=\"number\" step=\"0.1\"></label>"
+            "<label>Max queue-wait increase %" +
+            field_hint("How much longer a request is allowed to wait in "
+                      "the scheduler's queue before the gate rejects the "
+                      "run.") +
+            "<input id=\"certMaxQueueWait\" type=\"number\" step=\"0.1\">"
+            "</label>"
+            "<label>Max storage amplification %" +
+            field_hint("How much higher disk bytes read per generated "
+                      "token is allowed to get before the gate rejects "
+                      "the run.") +
+            "<input id=\"certMaxStorage\" type=\"number\" step=\"0.1\">"
+            "</label>"
+            "<button type=\"submit\" title=\"Save thresholds\">" ICON_SAVE_SVG
+            " Save thresholds</button></form></div>"
+            "<div class=\"reportSection\"><h3>Regression history</h3>"
+            "<div id=\"certHistory\">Loading...</div></div>"
+            "</div></section>"
+            "<script>(function(){"
+            "function certRow(label,value){return '<tr><td class="
+            "\"reportLabel\">'+label+'</td><td class=\"reportValue\">'+"
+            "value+'</td></tr>';}"
+            "function renderThresholds(t){"
+            "q('#certMaxTtft').value=t.maxTtftRegressionPercent;"
+            "q('#certMaxMemory').value=t.maxMemoryIncreasePercent;"
+            "q('#certMinThroughput').value=t.minThroughputPercent;"
+            "q('#certMaxQuality').value=t.maxQualityRegressionPercent;"
+            "q('#certMaxCpu').value=t.maxCpuIncreasePercent;"
+            "q('#certMaxQueueWait').value=t.maxQueueWaitIncreasePercent;"
+            "q('#certMaxStorage').value=t.maxStorageAmplificationPercent;}"
+            "function renderHistory(list){const el=q('#certHistory');"
+            "if(!el)return;if(!list.length){el.textContent='No "
+            "certification runs recorded yet.';return;}"
+            "el.innerHTML='<table><thead><tr><th>When</th><th>Model</th>"
+            "<th>Profile</th><th>Cache</th><th>Accelerator</th>"
+            "<th>Quality</th><th>Accepted</th><th>Reason</th></tr></thead>"
+            "<tbody>'+list.map(c=>'<tr><td>'+"
+            "new Date(c.createdEpochSeconds*1000).toLocaleString()+"
+            "'</td><td>'+c.modelId+'</td><td>'+c.profile+'</td><td>'+"
+            "c.cacheState+'</td><td>'+c.acceleratorMode+'</td><td>'+"
+            "Math.round(c.qualityScore*100)+'%</td><td>'+"
+            "(c.accepted?'yes':'no')+'</td><td>'+(c.rejectionReason||'')+"
+            "'</td></tr>').join('')+'</tbody></table>';}"
+            "async function refresh(){"
+            "try{renderThresholds(await api("
+            "'/api/v1/performance/certification/thresholds'));}catch(e){}"
+            "try{const r=await api('/api/v1/performance/certification');"
+            "renderHistory(r.certifications);}catch(e){}}"
+            "if(q('#panel-performance-benchmarks')){refresh();"
+            "const runForm=q('#certRunForm');"
+            "if(runForm)runForm.addEventListener('submit',async(e)=>{"
+            "e.preventDefault();q('#certRunStatus').textContent="
+            "'Running...';"
+            "try{await api('/api/v1/performance/certification','POST',{"
+            "modelId:q('#certModelId').value,"
+            "backendVersion:q('#certBackendVersion').value,"
+            "buildId:q('#certBuildId').value,"
+            "hardwareId:q('#certHardwareId').value,"
+            "profile:q('#certProfile').value,"
+            "cacheState:q('#certCacheState').value,"
+            "concurrency:parseInt(q('#certConcurrency').value,10)});"
+            "q('#certRunStatus').textContent='Certification complete.';"
+            "await refresh();}catch(err){"
+            "q('#certRunStatus').textContent='';"
+            "showSystemError(err.message);}});"
+            "const thresholdsForm=q('#certThresholdsForm');"
+            "if(thresholdsForm)thresholdsForm.addEventListener('submit',"
+            "async(e)=>{e.preventDefault();"
+            "try{await api("
+            "'/api/v1/performance/certification/thresholds','POST',{"
+            "maxTtftRegressionPercent:parseFloat(q('#certMaxTtft').value),"
+            "maxMemoryIncreasePercent:parseFloat(q('#certMaxMemory').value),"
+            "minThroughputPercent:parseFloat(q('#certMinThroughput').value),"
+            "maxQualityRegressionPercent:parseFloat("
+            "q('#certMaxQuality').value),"
+            "maxCpuIncreasePercent:parseFloat(q('#certMaxCpu').value),"
+            "maxQueueWaitIncreasePercent:parseFloat("
+            "q('#certMaxQueueWait').value),"
+            "maxStorageAmplificationPercent:parseFloat("
+            "q('#certMaxStorage').value)});"
+            "await refresh();}catch(err){showSystemError(err.message);}"
+            "});}"
+            "})();</script>";
+    } else if (section == "settings-api-reference") {
+        body =
+            "<section id=\"panel-settings-api-reference\" class=\"panel\">"
+            "<div><h2>API Reference</h2>"
+            "<p>Every HTTP and MCP endpoint an external system, script, or "
+            "another local application can call against this MasterAI "
+            "instance -- what it is for, and how to authenticate. This "
+            "page documents integration surface; it never calls anything "
+            "itself.</p>"
+            "<div class=\"reportSection\"><h3>Authenticating without an "
+            "interactive login</h3>"
+            "<p>A local system or external service that has no human user "
+            "signing in through this web UI should never try to reuse the "
+            "browser's cookie session -- that session is tied to one "
+            "signed-in person. Instead, sign in once to obtain a session, "
+            "then call <code>POST /api/v1/tokens</code> (scopes and an "
+            "optional expiry in the request body; "
+            "<code>POST /api/v1/tokens/revoke</code> to revoke one later) "
+            "to mint a durable API token, and call every endpoint below "
+            "with <code>Authorization: Bearer "
+            "&lt;token&gt;</code>. This is the recommended path for chat "
+            "access with no interactive login: point the token at the "
+            "Chat API endpoints in the next section, scoped to only "
+            "<code>chats.read</code>/<code>chats.write</code> if the "
+            "integration only needs to send and read messages. Every "
+            "token is scope-limited and revocable independently of any "
+            "person's own password.</p></div>"
+            "<div class=\"reportSection\"><h3>Chat &amp; completions</h3>"
+            "<table><thead><tr><th>Endpoint</th><th>Purpose</th></tr>"
+            "</thead><tbody>"
+            "<tr><td>POST /api/v1/chats</td><td>Create a new chat.</td>"
+            "</tr>"
+            "<tr><td>GET /api/v1/chats</td><td>List chats visible to the "
+            "authenticated user/token.</td></tr>"
+            "<tr><td>GET /api/v1/chats/{id}</td><td>Read one chat's full "
+            "message history.</td></tr>"
+            "<tr><td>POST /api/v1/chats/{id}/messages</td><td>Send a new "
+            "message and receive the model's reply (streamed).</td></tr>"
+            "<tr><td>GET /api/v1/memories</td><td>List saved user-memory "
+            "details recalled into every chat's prompt.</td></tr>"
+            "<tr><td>POST /v1/completions</td><td>OpenAI-request-shaped "
+            "single-turn completion, but only ever reachable on a "
+            "per-model deployed inference endpoint's own listener port "
+            "(Machine Learning &gt; Inference Endpoints), not this "
+            "administrative server -- see that page for a given model's "
+            "port and bearer token. This is this codebase's own surface, "
+            "not a full OpenAI-compatible API.</td></tr>"
+            "</tbody></table></div>"
+            "<div class=\"reportSection\"><h3>Models &amp; system "
+            "information</h3>"
+            "<table><thead><tr><th>Endpoint</th><th>Purpose</th></tr>"
+            "</thead><tbody>"
+            "<tr><td>GET /api/v1/models</td><td>The verified model "
+            "inventory: id, display name, category, architecture, and "
+            "readiness state.</td></tr>"
+            "<tr><td>GET /api/v1/system/resources</td><td>Live hardware "
+            "snapshot: CPU, RAM, GPU, storage class.</td></tr>"
+            "<tr><td>GET /api/v1/system/memory</td><td>MasterAI's own "
+            "memory budget, pressure, and category breakdown.</td></tr>"
+            "<tr><td>GET /api/v1/runner/status</td><td>The currently "
+            "loaded model's runner state, requested-vs-actual accelerator "
+            "settings.</td></tr>"
+            "<tr><td>GET /api/v1/performance/adaptive</td><td>The active "
+            "performance mode and any applied/recommended tuning "
+            "changes.</td></tr>"
+            "<tr><td>GET /api/v1/performance/certification</td><td>"
+            "Regression-gate history for benchmarked builds (Phase 36)."
+            "</td></tr>"
+            "<tr><td>GET /health/live, /health/ready</td><td>Unauthenticated "
+            "liveness/readiness probes for a supervising process or load "
+            "balancer.</td></tr>"
+            "</tbody></table></div>"
+            "<div class=\"reportSection\"><h3>MCP (Model Context "
+            "Protocol) integration</h3>"
+            "<p>MasterAI is both an MCP <strong>server</strong> (other "
+            "tools can call into it) and an MCP <strong>client</strong> "
+            "(it can call out to other MCP servers you register).</p>"
+            "<table><thead><tr><th>Endpoint</th><th>Purpose</th></tr>"
+            "</thead><tbody>"
+            "<tr><td>POST /mcp</td><td>Inbound MCP JSON-RPC endpoint -- "
+            "an external MCP client (an IDE, another agent) connects here "
+            "to list and call this MasterAI instance's own registered "
+            "tools. Requires the same Bearer API token authentication as "
+            "the REST API, scoped per tool.</td></tr>"
+            "<tr><td>Outbound MCP servers</td><td>Configured under "
+            "Projects &gt; MCP Servers, not a fixed endpoint: register an "
+            "external MCP server's own URL and credentials there so "
+            "MasterAI's chat/agent flows can call its tools during a "
+            "conversation.</td></tr>"
+            "</tbody></table>"
+            "<p>To integrate a new external system: decide whether it "
+            "needs to call MasterAI (use an API token against the REST/"
+            "MCP endpoints above) or whether MasterAI needs to call it "
+            "(register it as an outbound MCP server under a project). "
+            "Most local automation -- scripts, other applications on the "
+            "same machine reading chat/model state -- only ever needs the "
+            "first: an API token and the Chat/Models endpoints above.</p>"
+            "</div>"
+            "</div></section>";
     } else if (section == "admin-create") {
         body =
             "<section id=\"panel-admin-create\" class=\"panel\">"
@@ -6597,7 +6875,9 @@ std::string application_page(const UserRecord& user, const std::string& section,
             nav_link("/app/models/download", "Download a model",
                      section == "models-download") +
             nav_link("/app/models/benchmarks", "Benchmarks",
-                     section == "models-benchmarks");
+                     section == "models-benchmarks") +
+            nav_link("/app/settings/api-reference", "API Reference",
+                     section == "settings-api-reference");
         if (is_administrator) {
             settings_links +=
                 nav_link("/app/settings/config", "System configuration",
@@ -6624,7 +6904,16 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // those phases already exposed.
         sidebar_links += sidebar_section(
             "performance", "Performance",
-            nav_link("/app/performance", "Overview", section == "performance"));
+            nav_link("/app/performance", "Overview", section == "performance") +
+                // Phase 36: full performance benchmark matrix and
+                // regression gate -- the "Benchmarks" and "Regression
+                // History" pages the Phase 35 status note named as
+                // deferred (no dedicated telemetry route existed for them
+                // yet); GET/POST /api/v1/performance/certification now
+                // gives this page real data to render.
+                nav_link("/app/performance/benchmarks",
+                         "Benchmarks & Regression",
+                         section == "performance-benchmarks"));
         // Ordered to match the chronological order of actually building a
         // model -- an administrator works top to bottom, project through
         // deployment/monitoring, with the two packaging/inspection steps

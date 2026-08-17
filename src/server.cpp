@@ -483,6 +483,10 @@ public:
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
+        // Phase 36: constructed alongside `benchmarks` -- cheap, and its
+        // regression-gate history should persist across restarts just like
+        // the quality benchmark records it wraps.
+        certifications = std::make_unique<PerformanceCertificationStore>(records);
         // Phase 31: constructed before anything that might want scratch
         // space of its own. classify_storage_tier() reasons from a real
         // measured StorageLatencyProfile of the actual scratch volume (which
@@ -606,7 +610,8 @@ public:
         workloads = std::make_unique<
             server_internal::WorkloadHttpController>(
             configuration, *projects, *attachments, inference.get(),
-            downloads.get(), *benchmarks, *indexes, audit, *cache);
+            downloads.get(), *benchmarks, *indexes, audit, *cache,
+            *request_scheduler, *certifications);
         if (users->setup_required()) {
             const auto bytes = secure_random(24U);
             static constexpr char digits[] = "0123456789abcdef";
@@ -764,6 +769,10 @@ public:
                        request.target.rfind("/api/v1/benchmarks", 0U) == 0U) {
                 required_scope = "benchmarks.read";
             } else if (request.method == "GET" &&
+                       request.target.rfind("/api/v1/performance/certification",
+                                            0U) == 0U) {
+                required_scope = "benchmarks.read";
+            } else if (request.method == "GET" &&
                        (request.target == "/api/v1/system/resources" ||
                         request.target == "/api/v1/system/memory" ||
                         request.target.rfind("/api/v1/requests/", 0U) == 0U)) {
@@ -813,6 +822,14 @@ public:
                     request.target == "/api/v1/benchmarks"
                         ? "benchmarks.run"
                         : "benchmarks.read";
+            } else if (request.method == "POST" &&
+                       request.target ==
+                           "/api/v1/performance/certification") {
+                required_scope = "benchmarks.run";
+            } else if (request.method == "POST" &&
+                       request.target ==
+                           "/api/v1/performance/certification/thresholds") {
+                required_scope = "settings.manage";
             } else if (request.method == "POST" &&
                        request.target.rfind("/api/v1/models/", 0U) == 0U) {
                 required_scope = "models.load";
@@ -6439,9 +6456,27 @@ public:
                            ? application_page(*user, "performance")
                            : response(302, "Found", "", {"Location: /app"});
             }
+            // Phase 36: full performance benchmark matrix and regression
+            // gate -- see the Phase 36 status note in docs/PLAN.md.
+            if (target == "/app/performance/benchmarks") {
+                return is_administrator
+                           ? application_page(*user, "performance-benchmarks")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
             if (target == "/app/settings/config") {
                 return is_administrator
                            ? application_page(*user, "settings-config")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            // API Reference: a static documentation page listing every
+            // HTTP/MCP endpoint an external system can call, gated the
+            // same as the Model Inventory/Benchmarks pages
+            // (can_manage_settings: developer or administrator) since it
+            // documents integration surface rather than mutating anything
+            // itself.
+            if (target == "/app/settings/api-reference") {
+                return can_manage_settings
+                           ? application_page(*user, "settings-api-reference")
                            : response(302, "Found", "", {"Location: /app"});
             }
             if (target == "/app/admin/create") {
@@ -6643,6 +6678,27 @@ public:
         if (request.method == "POST" &&
             request.target == "/api/v1/benchmarks") {
             return workloads->run_benchmark(request, *user);
+        }
+        // Phase 36: full performance benchmark matrix and regression gate.
+        // See PerformanceCertificationRunner's class comment in
+        // masterai.hpp for the honest scope this pass operates under.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/performance/certification") {
+            return workloads->list_certifications();
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/performance/certification") {
+            return workloads->run_certification(request, *user);
+        }
+        if (request.method == "GET" &&
+            request.target ==
+                "/api/v1/performance/certification/thresholds") {
+            return workloads->get_certification_thresholds();
+        }
+        if (request.method == "POST" &&
+            request.target ==
+                "/api/v1/performance/certification/thresholds") {
+            return workloads->set_certification_thresholds(request, *user);
         }
         if (auto integration_response =
                 integrations->handle_authenticated(
@@ -10259,6 +10315,8 @@ private:
     std::thread worker_listener_thread;
     std::unique_ptr<DownloadManager> downloads;
     std::unique_ptr<BenchmarkStore> benchmarks;
+    // Phase 36: full performance benchmark matrix and regression gate.
+    std::unique_ptr<PerformanceCertificationStore> certifications;
     std::unique_ptr<server_internal::WorkloadHttpController> workloads;
     std::unique_ptr<MemoryBudgetManager> memory;
     // Phase 25: the single live admission/fairness/backpressure authority

@@ -366,6 +366,29 @@ The current source includes native implementations for:
   cache. These require MasterAI itself to be running elevated
   (Administrator); each fails closed and names itself in the result when it
   can't acquire the privilege, rather than silently doing nothing.
+- Phase 36: full performance benchmark matrix and regression gate.
+  `PerformanceCertificationRunner`/`PerformanceCertificationStore`
+  (`src/regression_gate.cpp`) run the existing quality benchmark suite plus
+  five real regression check groups against this codebase's own live
+  decision logic -- runner attribution, low-memory admission, prompt-cache
+  reuse/refusal, calibration identity-exact restore, and smallest-capable-
+  tier/Minimal-profile model routing -- plus real per-run metrics (TTFT,
+  peak resident memory, generation throughput, a real queue-wait
+  measurement from an actual `RequestScheduler` admission, real storage
+  bytes read from the process's own disk-read counter, and a CPU sample).
+  A run is only ever compared against the previous *accepted* run sharing
+  its exact fingerprint (model/backend/hardware/settings/prompt-suite/
+  cache-state/profile), so mismatched environments are never presented as
+  a direct comparison; administrator-configurable thresholds gate
+  acceptance, and a rejected run is still persisted. Administrator/
+  developer routes: `GET`/`POST /api/v1/performance/certification`,
+  `GET`/`POST /api/v1/performance/certification/thresholds`, rendered on
+  the new "Benchmarks & Regression" page (`/app/performance/benchmarks`).
+  What remains outside this control plane's reach: the plan's full
+  physical matrix (multiple storage media, multiple machines, GPU-
+  offloaded hardware) requires an administrator to actually run this page
+  on each real target host -- no software on one machine can manufacture a
+  second physical drive or GPU.
 - Phase 32 (evidence-pending): speculative decoding. `check_draft_target_
   compatibility()`, `SpeculativeDecodingStats`, and
   `decide_speculative_decoding_for_request()`
@@ -508,11 +531,11 @@ Status below reflects the evidence recorded in
 | 30 | Memory deduplication and immutable shared-data architecture | Implemented at a scoped-down level |
 | 30A | CPU-only and GPU-disabled low-memory operation | Implemented; matched real-model benchmark matrix pending |
 | 31 | Storage tiering, virtual drives, and scratch-volume management | Implemented, including Priority B tier-migration tooling |
-| 32 | Speculative decoding and draft-model acceleration | Planned |
-| 33 | Distributed local runners and multi-device orchestration | Planned |
-| 34 | Adaptive performance controller | Planned |
-| 35 | Performance administration interfaces | Planned |
-| 36 | Full performance certification and regression gates | Planned |
+| 32 | Speculative decoding and draft-model acceleration | Implemented; real dual-model launch path added, real-hardware throughput evidence pending |
+| 33 | Distributed local runners and multi-device orchestration | Implemented; local runner pool and intranet mTLS worker protocol |
+| 34 | Adaptive performance controller | Implemented at a scoped-down level |
+| 35 | Performance administration interfaces | Implemented at a scoped-down level; one consolidated Performance page |
+| 36 | Full performance certification and regression gates | Implemented at a scoped-down level; real quality-plus-five-regression-check-group certification with threshold-gated build comparison, physical cross-device matrix remains an administrator-run exercise |
 | 37 | Machine Learning module foundation | Implemented at a scoped-down level |
 | 38 | Machine Learning projects | Implemented at a scoped-down level |
 | 39 | ML model registry and dataset manager | Implemented at a scoped-down level |
@@ -1096,8 +1119,15 @@ The native service provides browser workflows for:
 - First-administrator setup and login
 - Project and auto-titled chat management, with each workspace section
   (`/app/chat`, `/app/projects`, `/app/models/inventory`,
-  `/app/models/download`, `/app/models/benchmarks`, `/app/admin/create`,
-  `/app/admin/users`) served at its own URL and gated by role
+  `/app/models/download`, `/app/models/benchmarks`,
+  `/app/settings/api-reference`, `/app/admin/create`, `/app/admin/users`)
+  served at its own URL and gated by role
+- An "API Reference" settings page (`/app/settings/api-reference`)
+  documenting every HTTP/MCP endpoint an external system can call against
+  this instance -- chat/completions, models/system information, and MCP
+  inbound/outbound integration -- including how a system with no
+  interactive login authenticates (a `POST /api/v1/tokens` Bearer API
+  token, scoped independently of any person's own password)
 - Ready-model selection and loading, with best-effort background model
   pre-warming triggered the moment a chat is opened, created, or its model
   is switched — instead of only starting the cold load once the first
@@ -1546,17 +1576,17 @@ Near-term work is:
    `io_uring`, unadapted retrieval strategies, live backend batching,
    backend-actionable pre-touch, validated KV compression/prefix sharing,
    measured worker affinity, live cascade routing, and broader zero-copy use.
-7. Implement the still-planned Phase 36 full performance benchmark matrix
-   and regression gates (Phase 31 storage tiering, Phase 33 local and
-   intranet-worker distributed runners, Phase 34 adaptive performance
-   controller, and Phase 35 performance administration are all now
-   implemented; Phase 32 speculative decoding has real, tested decision
-   logic but is not wired to a live generation path -- see docs/PLAN.md).
-   Wire `IntranetWorkerPool` into the live chat-generation dispatch path
-   the way `LocalRunnerPool` already is, and extend the Phase 35
-   administration page toward the plan's remaining named pages (Query
-   Traces, Runner Configuration, Model Comparison, Calibration, Advanced
-   Optimizations, Benchmarks, Regression History, Recommendations).
+7. Phases 31-36 (storage tiering, speculative decoding, distributed local
+   and intranet-worker runners, the adaptive performance controller,
+   performance administration, and the full benchmark matrix/regression
+   gate) are all now implemented -- Phase 32's dual-model launch path is
+   still unvalidated on real hardware, and Phase 36's cross-device physical
+   matrix still needs an administrator to run it on each real target host
+   (see docs/PLAN.md). Remaining forward work: wire `IntranetWorkerPool`
+   into the live chat-generation dispatch path the way `LocalRunnerPool`
+   already is, and extend the Phase 35 administration page toward the
+   plan's remaining named pages (Query Traces, Runner Configuration, Model
+   Comparison).
 8. Extend the Phase 61 Machine Learning executors with governed LLM
    fine-tuning, generated-answer RAG
    evaluation, and the remaining planned job executors without allowing

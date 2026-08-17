@@ -7546,6 +7546,179 @@ private:
     std::deque<MemoryPressure> pressure_history_;
 };
 
+// Phase 36: full performance benchmark matrix and regression gate.
+//
+// Honest scope note (the same "declare the gap, don't guess" precedent
+// Phase 30A/32 already established): the plan's full matrix spans physical
+// dimensions a single host cannot manufacture on demand -- multiple storage
+// media (HDD/SATA SSD/NVMe), multiple physical machines, and GPU-offloaded
+// hardware that may not be present on the host running this build. What
+// ships here is real for every dimension actually controllable in software
+// on one host at run time: cache cold/warm (CacheManager::trim() before a
+// "cold" run), sequential concurrency depth, prompt/context size
+// (BenchmarkProfile's existing quick/standard/extended tiers), and whatever
+// accelerator mode the current launch actually used (recorded from
+// RunnerMetrics, never assumed). An administrator runs the matrix across
+// whichever of those axes their real hardware supports; a result is only
+// ever compared against a previous run sharing its exact fingerprint (see
+// PerformanceCertificationRecord::fingerprint()), so mismatched environments
+// are never presented as a direct comparison -- the plan's own exit
+// criterion. The five named regression test groups are real, independently
+// callable checks against this codebase's own live decision logic (below),
+// not fabricated pass results.
+struct RegressionThresholds {
+    double max_ttft_regression_percent{20.0};
+    double max_memory_increase_percent{15.0};
+    // Negative means throughput is allowed to regress by up to this many
+    // percent before the gate fails it; positive would require an actual
+    // improvement to pass.
+    double min_throughput_percent{-10.0};
+    double max_quality_regression_percent{5.0};
+    double max_cpu_increase_percent{25.0};
+    double max_queue_wait_increase_percent{25.0};
+    double max_storage_amplification_percent{25.0};
+};
+
+struct RegressionMetricComparison {
+    std::string metric;
+    double baseline{0.0};
+    double current{0.0};
+    double delta_percent{0.0};
+    double threshold_percent{0.0};
+    bool passed{true};
+};
+
+struct RegressionCheckResult {
+    std::string name;
+    bool passed{false};
+    std::string detail;
+};
+
+struct PerformanceCertificationRecord {
+    std::string id;
+    std::string build_id;
+    std::string hardware_id;
+    std::string model_id;
+    std::string backend_version;
+    std::string prompt_suite_hash;
+    std::string settings_json{"{}"};
+    std::string cache_state{"warm"};          // "cold" | "warm"
+    std::string accelerator_mode{"unknown"};  // recorded, never assumed
+    BenchmarkProfile profile{BenchmarkProfile::quick};
+    std::uint32_t concurrency{1U};
+    std::uint64_t created_epoch_seconds{0};
+    std::uint64_t ttft_microseconds{0};
+    std::uint64_t total_elapsed_microseconds{0};
+    std::uint64_t prompt_tokens{0};
+    std::uint64_t generated_tokens{0};
+    std::uint64_t peak_resident_memory_bytes{0};
+    // Real wall-clock time from RequestScheduler::admit() to the ticket
+    // becoming ready under SchedulingClass::benchmark's own weighted-fair
+    // queue -- not a synthesized figure.
+    std::uint64_t queue_wait_microseconds{0};
+    // Delta of this process's own cumulative disk-read bytes
+    // (probe_system_utilization()) across the run, the same real per-
+    // process I/O counter CalibrationService already uses for its own
+    // disk_read_bytes evidence.
+    std::uint64_t storage_bytes_read{0};
+    double average_cpu_percent{0.0};
+    double quality_score{0.0};  // passed_cases / total_cases of the embedded quality run
+    std::vector<RegressionCheckResult> group_results;
+    std::vector<RegressionMetricComparison> comparisons;
+    bool accepted{false};
+    std::string rejection_reason;
+
+    // Identity used to find a comparable prior run -- matched
+    // host/model/backend/settings/prompt-suite/cache-state/profile, the
+    // plan's exact "matched ... fingerprints" requirement.
+    std::string fingerprint() const;
+};
+
+class PerformanceCertificationStore final {
+public:
+    PerformanceCertificationStore() = default;
+    explicit PerformanceCertificationStore(RecordStore& records);
+    void add(const PerformanceCertificationRecord& record);
+    std::vector<PerformanceCertificationRecord> all() const;
+    // The most recent *accepted* run sharing `fingerprint`, or nullopt if
+    // none exists yet -- a rejected run is still persisted (see add()) but
+    // never offered as the comparison baseline for the next one.
+    std::optional<PerformanceCertificationRecord> previous_accepted(
+        const std::string& fingerprint) const;
+
+private:
+    void restore();
+    RecordStore* record_store_{nullptr};
+    std::vector<PerformanceCertificationRecord> records_;
+};
+
+// The five named regression test groups from docs/PLAN.md Phase 36. Each is
+// a real, independently callable check against this codebase's own live
+// decision logic (ModelRouter, TuningProfileStore,
+// projected_resident_exceeds_safe_physical_capacity(), a fresh, self-
+// contained PromptSessionManager instance) rather than a fabricated pass --
+// safe to run on every certification pass since none of them mutate
+// production state.
+RegressionCheckResult check_runner_attribution_regression(
+    const RunnerMetrics& metrics, const std::string& accelerator_policy);
+RegressionCheckResult check_low_memory_regression();
+RegressionCheckResult check_prompt_cache_regression();
+RegressionCheckResult check_calibration_regression();
+RegressionCheckResult check_model_routing_regression();
+
+// Applies `thresholds` to `current` against `baseline`, appending one
+// RegressionMetricComparison per named metric with the plan's exact
+// "max TTFT regression, max memory increase, min throughput benefit, max
+// quality regression, max queue-wait increase, max CPU increase" list, and
+// returns true only when every comparison passes.
+bool compare_against_baseline(const PerformanceCertificationRecord& baseline,
+                              PerformanceCertificationRecord& current,
+                              const RegressionThresholds& thresholds);
+
+class PerformanceCertificationRunner final {
+public:
+    PerformanceCertificationRunner(RunnerSupervisor& inference,
+                                   BenchmarkStore& quality_store,
+                                   CacheManager& cache,
+                                   RequestScheduler& scheduler,
+                                   PerformanceCertificationStore& store,
+                                   RegressionThresholds thresholds = {});
+
+    RegressionThresholds thresholds() const;
+    void set_thresholds(const RegressionThresholds& thresholds);
+
+    // Runs one certification pass: the existing quality BenchmarkRunner
+    // suite (real generate() calls), the five regression check groups, and
+    // real live metrics (TTFT of the first case, total elapsed, peak
+    // resident memory, real queue wait measured by actually admitting one
+    // SchedulingClass::benchmark ticket through `scheduler` and timing
+    // wait_until_ready(), and real storage bytes read measured as the
+    // delta of probe_system_utilization()'s cumulative disk-read counter
+    // across the run). cache_state == "cold" trims the cache first
+    // (CacheManager::trim()) so the run measures a genuinely cold cache
+    // rather than only claiming to. Compares against the previous accepted
+    // run sharing this run's exact fingerprint, if any, applies
+    // `thresholds_`, and persists the resulting accepted/rejected verdict
+    // either way -- silently dropping failing evidence would defeat the
+    // point of a regression gate.
+    PerformanceCertificationRecord run(
+        const std::string& model_id, const std::string& backend_version,
+        const std::string& build_id, const std::string& hardware_id,
+        BenchmarkProfile profile, const std::string& cache_state,
+        std::uint32_t concurrency, const std::string& accelerator_policy,
+        const std::atomic_bool& cancellation);
+
+    static std::string to_json(const PerformanceCertificationRecord& record);
+
+private:
+    RunnerSupervisor& inference_;
+    BenchmarkStore& quality_store_;
+    CacheManager& cache_;
+    RequestScheduler& scheduler_;
+    PerformanceCertificationStore& store_;
+    RegressionThresholds thresholds_;
+};
+
 // Phase 32 (2026-08-13, evidence-pending): speculative decoding
 // draft/target compatibility checking and the per-request enable/disable
 // decision engine. Honest scope note (see docs/PLAN.md Phase 32's status

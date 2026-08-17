@@ -67,6 +67,7 @@ add_library(masterai_core STATIC
     ../src/intranet_worker.cpp
     ../src/adaptive_controller.cpp
     ../src/speculative_decoding.cpp
+    ../src/regression_gate.cpp
 )
 
 target_include_directories(masterai_core PUBLIC ../src)

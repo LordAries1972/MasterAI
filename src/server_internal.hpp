@@ -103,7 +103,9 @@ public:
                            DownloadManager* downloads,
                            BenchmarkStore& benchmarks,
                            ProjectIndexService& indexes, AuditLog& audit,
-                           CacheManager& cache);
+                           CacheManager& cache,
+                           RequestScheduler& scheduler,
+                           PerformanceCertificationStore& certifications);
     ~WorkloadHttpController();
 
     WorkloadHttpController(const WorkloadHttpController&) = delete;
@@ -137,6 +139,14 @@ public:
     std::string list_benchmarks() const;
     std::string recommend_benchmark(Request& request) const;
     std::string run_benchmark(Request& request, const UserRecord& user);
+    // Phase 36: the full performance benchmark matrix and regression gate.
+    // See PerformanceCertificationRunner's class comment (masterai.hpp) for
+    // the honest scope this operates under.
+    std::string list_certifications() const;
+    std::string run_certification(Request& request, const UserRecord& user);
+    std::string get_certification_thresholds() const;
+    std::string set_certification_thresholds(Request& request,
+                                             const UserRecord& user);
 
 private:
     struct State;

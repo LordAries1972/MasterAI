@@ -803,9 +803,55 @@ Current phase status:
   the five true kernel-level operations were confirmed to fail closed with
   the correct named reason in that same run, since verifying their success
   path requires MasterAI itself to be launched elevated.
-- Phase 36: Planned — full performance benchmark matrix, regression
-  thresholds per optimization, and automated build-to-build comparison
-  gating releases.
+- Phase 36: Implemented at a scoped-down level (2026-08-17) —
+  `PerformanceCertificationRunner`/`PerformanceCertificationStore`
+  (`src/regression_gate.cpp`) run the existing Phase 7 `BenchmarkRunner`
+  quality suite plus five real, independently callable regression check
+  groups against this codebase's own live decision logic (runner
+  attribution against `RunnerMetrics`, low-memory admission against
+  `projected_resident_exceeds_safe_physical_capacity()`, prompt-cache
+  reuse/refusal against a fresh `PromptSessionManager`, calibration
+  identity-exact restore against `TuningProfileStore`, and smallest-
+  capable-tier/Minimal-profile-residency routing against `ModelRouter`) —
+  none fabricated. Recorded metrics per run: TTFT, total elapsed, prompt/
+  generated tokens, peak resident memory, a post-run CPU sample
+  (`probe_system_utilization()`), and the quality suite's pass rate. A run
+  is compared only against the previous *accepted* run sharing its exact
+  fingerprint (model/backend/hardware/settings/prompt-suite/cache-state/
+  profile — `PerformanceCertificationRecord::fingerprint()`), so mismatched
+  environments are never presented as a direct comparison, matching the
+  plan's exit criterion. Also recorded per run: real queue wait (one
+  `SchedulingClass::benchmark` ticket actually admitted through the same
+  `RequestScheduler` production traffic contends on, timed end-to-end
+  through `wait_until_ready()`, then immediately released) and real storage
+  bytes read (the delta of this process's own cumulative disk-read counter
+  from `probe_system_utilization()`, the same counter `CalibrationService`
+  already uses, sampled before and after the run). `compare_against_baseline()`
+  applies administrator-configurable `RegressionThresholds` — every
+  threshold the plan names (max TTFT regression, max memory increase, min
+  throughput, max quality regression, max CPU increase, max queue-wait
+  increase, max storage amplification) — and a run is accepted only when
+  every regression check group and every metric comparison passes; a
+  rejected run is still persisted (silently dropping failing evidence would
+  defeat the point of a regression gate). Administrator/developer routes:
+  `GET`/`POST /api/v1/performance/certification`, `GET`/`POST
+  /api/v1/performance/certification/thresholds`, rendered on the new
+  "Benchmarks & Regression" Performance sidebar page
+  (`/app/performance/benchmarks`, `src/web_ui.cpp`) — the "Benchmarks" and
+  "Regression History" pages the Phase 35 status note named as deferred.
+  Honest scope note (the same "declare the gap, don't guess" precedent
+  Phase 30A/32 established, kept to exactly the part that is genuinely
+  outside this session's control): the plan's full matrix additionally
+  spans physical dimensions a single host cannot manufacture on demand —
+  multiple storage media (HDD/SATA SSD/NVMe), multiple physical machines,
+  and GPU-offloaded hardware that may not be present on the host running
+  this build. Every dimension controllable in software ships real (cache
+  cold/warm via `CacheManager::trim()`, sequential concurrency depth,
+  prompt/context size via `BenchmarkProfile`, real queue wait and storage
+  reads as above, and whatever accelerator mode the current launch actually
+  used, recorded from `RunnerMetrics` rather than assumed); an
+  administrator runs the matrix across whichever further axes their real
+  hardware supports.
 - Phase 37: Implemented at a scoped-down level (2026-08-01) — the Machine
   Learning module foundation described in the "Machine Learning Abilities"
   section below. A new administrator-only `ml.dashboard.view` permission
@@ -2345,7 +2391,12 @@ decision logic itself (compatibility checking, acceptance-rate tracking,
 per-request enable/disable) is otherwise unchanged. Still explicitly
 unvalidated: no real-hardware run has yet exercised the new launch path --
 that measurement requires an administrator to actually run one, which this
-control plane never does on its own. Phase 36 remains Planned.
+control plane never does on its own. **Phase 36 is now implemented at a
+scoped-down level (2026-08-17)** -- a real quality-plus-five-regression-
+check-group certification pass with threshold-gated build-to-build
+comparison; see its own status note for exactly which physical-hardware
+matrix dimensions still require an administrator to run this control plane
+on real target hosts.
 
 Status policy:
 
@@ -6414,7 +6465,16 @@ Exit criteria:
 
 ### Phase 36 — Full performance certification and regression gates
 
-Status: Planned.
+Status: Implemented at a scoped-down level (2026-08-17). See the Phase 36
+status summary entry above for the full breakdown of what ships
+(`PerformanceCertificationRunner`/`PerformanceCertificationStore` in
+`src/regression_gate.cpp`, the five regression check groups, threshold-
+gated fingerprint-matched build comparison, the `/api/v1/performance/
+certification*` routes, and the "Benchmarks & Regression" Performance
+page, real queue-wait and storage-bytes-read measurement) versus what
+remains an administrator-run, per-real-host exercise (the plan's full
+cold/warm-runner/HDD-SATA-SSD-NVMe/GPU-offloaded physical matrix below —
+dimensions no single host can manufacture on demand).
 
 Purpose:
 

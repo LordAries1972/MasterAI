@@ -2468,6 +2468,208 @@ void test_phase_nineteen_calibration() {
     require(unknown_rejected, "an unknown calibration profile name was accepted");
 }
 
+// Phase 36: full performance benchmark matrix and regression gate. Exercises
+// the five regression check groups directly (pure functions), the metric
+// comparison/threshold gate, fingerprint-based baseline lookup, and a full
+// end-to-end PerformanceCertificationRunner::run() against a real (fake)
+// loaded runner, cache, and scheduler.
+void test_phase_thirtysix_regression_gate() {
+    // Each regression check group passes against this codebase's own real
+    // decision logic -- these are not stubs, so a genuine regression in any
+    // of the five decision functions they wrap would fail this test.
+    masterai::RunnerMetrics cpu_only_metrics;
+    cpu_only_metrics.requested_gpu_layers = 0U;
+    cpu_only_metrics.accelerator_policy = "cpu_only";
+    require(masterai::check_runner_attribution_regression(cpu_only_metrics,
+                                                           "cpu_only")
+                .passed,
+            "runner-attribution check failed on a consistent cpu_only launch");
+    masterai::RunnerMetrics inconsistent_metrics;
+    inconsistent_metrics.requested_gpu_layers = 10U;
+    inconsistent_metrics.accelerator_policy = "cpu_only";
+    require(!masterai::check_runner_attribution_regression(inconsistent_metrics,
+                                                            "cpu_only")
+                 .passed,
+            "runner-attribution check did not catch a cpu_only launch that "
+            "requested GPU layers");
+    require(masterai::check_low_memory_regression().passed,
+            "low-memory regression check failed");
+    require(masterai::check_prompt_cache_regression().passed,
+            "prompt-cache regression check failed");
+    require(masterai::check_calibration_regression().passed,
+            "calibration regression check failed");
+    require(masterai::check_model_routing_regression().passed,
+            "model-routing regression check failed");
+
+    // compare_against_baseline(): a current run within every default
+    // threshold passes; a current run that regresses TTFT well past the
+    // default 20% threshold fails, and the offending metric is reported.
+    masterai::RegressionThresholds thresholds;
+    masterai::PerformanceCertificationRecord baseline;
+    baseline.ttft_microseconds = 1000U;
+    baseline.peak_resident_memory_bytes = 1000U;
+    baseline.total_elapsed_microseconds = 1000U;
+    baseline.generated_tokens = 100U;
+    baseline.quality_score = 1.0;
+    baseline.average_cpu_percent = 10.0;
+    baseline.queue_wait_microseconds = 100U;
+    baseline.storage_bytes_read = 1000U;
+
+    auto within_bounds = baseline;
+    within_bounds.ttft_microseconds = 1050U;  // +5%, under the 20% threshold
+    require(masterai::compare_against_baseline(baseline, within_bounds, thresholds),
+            "a within-threshold current run was incorrectly rejected");
+
+    auto regressed = baseline;
+    regressed.ttft_microseconds = 2000U;  // +100%, over the 20% threshold
+    require(!masterai::compare_against_baseline(baseline, regressed, thresholds),
+            "a TTFT regression past its threshold was incorrectly accepted");
+    const auto found = std::find_if(
+        regressed.comparisons.begin(), regressed.comparisons.end(),
+        [](const masterai::RegressionMetricComparison& comparison) {
+            return comparison.metric == "ttft_microseconds";
+        });
+    require(found != regressed.comparisons.end() && !found->passed,
+            "the regressed TTFT metric was not reported as failed");
+
+    // PerformanceCertificationRecord::fingerprint() changes on any identity
+    // field, matching the plan's "matched ... fingerprints" requirement.
+    masterai::PerformanceCertificationRecord fingerprint_a;
+    fingerprint_a.model_id = "model-a";
+    fingerprint_a.backend_version = "backend-1";
+    fingerprint_a.hardware_id = "host-1";
+    fingerprint_a.settings_json = "{}";
+    fingerprint_a.prompt_suite_hash = std::string(64U, 'a');
+    fingerprint_a.cache_state = "warm";
+    auto fingerprint_b = fingerprint_a;
+    fingerprint_b.cache_state = "cold";
+    require(fingerprint_a.fingerprint() != fingerprint_b.fingerprint(),
+            "cache state was not part of the certification fingerprint");
+
+    // PerformanceCertificationStore.previous_accepted() only ever offers an
+    // *accepted* run sharing the exact fingerprint, and a rejected run is
+    // still persisted (never silently dropped).
+    masterai::PerformanceCertificationStore memory_store;
+    auto accepted_record = fingerprint_a;
+    accepted_record.id = "accepted-1";
+    accepted_record.build_id = "build-1";
+    accepted_record.hardware_id = "host-1";
+    accepted_record.model_id = "model-a";
+    accepted_record.accepted = true;
+    accepted_record.created_epoch_seconds = 100U;
+    memory_store.add(accepted_record);
+    auto rejected_record = fingerprint_a;
+    rejected_record.id = "rejected-1";
+    rejected_record.build_id = "build-1";
+    rejected_record.hardware_id = "host-1";
+    rejected_record.model_id = "model-a";
+    rejected_record.accepted = false;
+    rejected_record.created_epoch_seconds = 200U;
+    memory_store.add(rejected_record);
+    require(memory_store.all().size() == 2U,
+            "a rejected certification run was not persisted alongside the "
+            "accepted one");
+    const auto previous = memory_store.previous_accepted(fingerprint_a.fingerprint());
+    require(previous.has_value() && previous->id == "accepted-1",
+            "previous_accepted() did not return the accepted run sharing "
+            "the exact fingerprint");
+    require(!memory_store.previous_accepted(fingerprint_b.fingerprint()).has_value(),
+            "previous_accepted() matched across a different cache-state "
+            "fingerprint");
+
+    // End-to-end: a real PerformanceCertificationRunner::run() against a
+    // real (fake) loaded runner, cache, and scheduler.
+    TemporaryDirectory temporary;
+    const auto model_directory = temporary.path() / "model";
+    const auto model_file = model_directory / "model.gguf";
+    write_text(model_file, "GGUF-phase36-fixture");
+    masterai::ModelRecord model;
+    model.directory = model_directory;
+    model.state = masterai::ModelState::ready;
+    model.manifest.id = "phase36-fixture";
+    model.manifest.model_file = "model.gguf";
+    model.manifest.model_size_bytes = std::filesystem::file_size(model_file);
+    model.manifest.model_sha256 = masterai::sha256_file_hex(model_file);
+
+    const auto backend = fake_llama_executable();
+    require(std::filesystem::is_regular_file(backend),
+            "fake llama runner fixture is unavailable");
+    masterai::RunnerSupervisor supervisor(backend, temporary.path() / "runtime");
+    supervisor.load(model, 4096U, 18220U, 5U);
+
+    masterai::BenchmarkStore quality_store;
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware, 512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager runner_memory(policy, hardware);
+    masterai::CachePolicy cache_policy;
+    cache_policy.maximum_bytes_per_category = 1024ULL * 1024ULL;
+    masterai::CacheManager cache(temporary.path() / "cache", runner_memory,
+                                 cache_policy);
+    masterai::RequestScheduler scheduler;
+    masterai::PerformanceCertificationStore store;
+    masterai::PerformanceCertificationRunner runner(supervisor, quality_store,
+                                                     cache, scheduler, store);
+    std::atomic_bool cancellation{false};
+    const auto record = runner.run("phase36-fixture", "backend-test",
+                                   "build-test", "host-test",
+                                   masterai::BenchmarkProfile::quick, "warm",
+                                   1U, "cpu_only", cancellation);
+    require(record.group_results.size() == 5U,
+            "a certification run did not execute all five regression check "
+            "groups");
+    require(record.generated_tokens > 0U && record.prompt_tokens > 0U,
+            "a certification run recorded no real generation activity");
+    require(record.accepted,
+            "a first-ever certification run (no baseline to compare "
+            "against) was rejected instead of accepted on passing "
+            "regression checks alone");
+    require(store.all().size() == 1U,
+            "a certification run was not persisted");
+
+    // A second run sharing the exact same fingerprint is compared against
+    // the first as its baseline and, since nothing regressed, is accepted.
+    const auto second =
+        runner.run("phase36-fixture", "backend-test", "build-test",
+                   "host-test", masterai::BenchmarkProfile::quick, "warm", 1U,
+                   "cpu_only", cancellation);
+    require(!second.comparisons.empty(),
+            "a second run sharing its fingerprint with an accepted baseline "
+            "was not compared against it");
+    require(second.accepted,
+            "a second run with no real regression was incorrectly rejected");
+
+    // A strict threshold that no real run could ever satisfy forces a
+    // rejection, and the rejected record is still persisted (never
+    // silently dropped) with its comparisons intact.
+    masterai::RegressionThresholds impossible;
+    impossible.max_ttft_regression_percent = -100.0;
+    runner.set_thresholds(impossible);
+    const auto third =
+        runner.run("phase36-fixture", "backend-test", "build-test",
+                   "host-test", masterai::BenchmarkProfile::quick, "warm", 1U,
+                   "cpu_only", cancellation);
+    require(!third.accepted && !third.rejection_reason.empty(),
+            "an impossible regression threshold did not reject the run with "
+            "a stated reason");
+    require(store.all().size() == 3U,
+            "a rejected certification run was not persisted");
+
+    // The JSON round-trip through PerformanceCertificationStore's own
+    // to_json()/restore() survives a simulated restart.
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::PerformanceCertificationStore durable(records);
+    durable.add(record);
+    masterai::PerformanceCertificationStore restored(records);
+    require(restored.all().size() == 1U &&
+                restored.all().front().model_id == record.model_id &&
+                restored.all().front().group_results.size() == 5U,
+            "certification record persistence did not survive a simulated "
+            "restart");
+}
+
 // Phase 30A: hardware.acceleratorPolicy round-trips through save/load,
 // rejects an unknown value, forces CalibrationService::resolve()/calibrate()
 // to recommend zero GPU layers under cpu_only even with a capable GPU
@@ -8357,6 +8559,8 @@ int main() {
         run("prompt-prefix session reuse",
             test_phase_eighteen_prompt_session_reuse);
         run("adaptive calibration", test_phase_nineteen_calibration);
+        run("full performance benchmark matrix and regression gate",
+            test_phase_thirtysix_regression_gate);
         run("cpu_only accelerator policy fail-closed launch",
             test_phase_thirty_a_cpu_only_accelerator_policy);
         run("runner_weights pre-load admission",

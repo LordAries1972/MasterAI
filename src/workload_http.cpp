@@ -200,11 +200,13 @@ struct WorkloadHttpController::State final {
           RunnerSupervisor* inference_service,
           DownloadManager* download_service, BenchmarkStore& benchmark_store,
           ProjectIndexService& index_service, AuditLog& audit_log,
-          CacheManager& cache_manager)
+          CacheManager& cache_manager, RequestScheduler& request_scheduler,
+          PerformanceCertificationStore& certification_store)
         : configuration(app_configuration), projects(project_catalog),
           attachments(attachment_store), inference(inference_service),
           downloads(download_service), benchmarks(benchmark_store),
-          indexes(index_service), audit(audit_log), cache(cache_manager) {}
+          indexes(index_service), audit(audit_log), cache(cache_manager),
+          scheduler(request_scheduler), certifications(certification_store) {}
 
     const AppConfig& configuration;
     ProjectCatalog& projects;
@@ -215,6 +217,14 @@ struct WorkloadHttpController::State final {
     ProjectIndexService& indexes;
     AuditLog& audit;
     CacheManager& cache;
+    RequestScheduler& scheduler;
+    PerformanceCertificationStore& certifications;
+    // Phase 36: administrator-configured regression thresholds, held here
+    // (not persisted -- restarts revert to the documented defaults, the
+    // same convention AdaptiveController's in-memory ceilings already use)
+    // so every certification run in this process's lifetime is judged
+    // consistently.
+    RegressionThresholds certification_thresholds;
 
     // Probes hardware once and applies the existing model registry policy.
     std::vector<ModelRecord> scan_models() const {
@@ -230,10 +240,11 @@ WorkloadHttpController::WorkloadHttpController(
     const AppConfig& configuration, ProjectCatalog& projects,
     AttachmentStore& attachments, RunnerSupervisor* inference,
     DownloadManager* downloads, BenchmarkStore& benchmarks,
-    ProjectIndexService& indexes, AuditLog& audit, CacheManager& cache)
+    ProjectIndexService& indexes, AuditLog& audit, CacheManager& cache,
+    RequestScheduler& scheduler, PerformanceCertificationStore& certifications)
     : state_(std::make_unique<State>(
           configuration, projects, attachments, inference, downloads,
-          benchmarks, indexes, audit, cache)) {}
+          benchmarks, indexes, audit, cache, scheduler, certifications)) {}
 
 WorkloadHttpController::~WorkloadHttpController() = default;
 
@@ -891,6 +902,143 @@ std::string WorkloadHttpController::run_benchmark(
                             std::to_string(record.passed_cases) + "}");
     } catch (const std::exception&) {
         return response(409, "Conflict", "{\"error\":\"benchmark_failed\"}");
+    }
+}
+
+// Phase 36: lists every persisted certification run, most recent first,
+// each already serialized by PerformanceCertificationRunner::to_json().
+std::string WorkloadHttpController::list_certifications() const {
+    auto records = state_->certifications.all();
+    std::sort(records.begin(), records.end(),
+             [](const PerformanceCertificationRecord& left,
+                const PerformanceCertificationRecord& right) {
+                 return left.created_epoch_seconds > right.created_epoch_seconds;
+             });
+    std::string body{"{\"certifications\":["};
+    bool first = true;
+    for (const auto& record : records) {
+        if (!first) body += ",";
+        first = false;
+        body += PerformanceCertificationRunner::to_json(record);
+    }
+    return response(200, "OK", body + "]}");
+}
+
+// Runs one Phase 36 certification pass: the real quality-benchmark suite,
+// the five regression check groups, and (when a prior accepted run shares
+// this run's exact fingerprint) a threshold-gated comparison against it.
+std::string WorkloadHttpController::run_certification(Request& request,
+                                                       const UserRecord& user) {
+    if (state_->inference == nullptr ||
+        !role_allows(user.role, "benchmarks.run")) {
+        return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+    }
+    try {
+        const auto root = parse_json(request.body);
+        const auto cache_state = root.optional("cacheState")
+                                     ? root.required("cacheState").as_string()
+                                     : std::string{"warm"};
+        if (cache_state != "cold" && cache_state != "warm") {
+            throw std::runtime_error("cacheState must be cold or warm");
+        }
+        const auto concurrency =
+            root.optional("concurrency")
+                ? static_cast<std::uint32_t>(
+                      root.required("concurrency").as_integer())
+                : 1U;
+        const auto accelerator_policy =
+            root.optional("acceleratorPolicy")
+                ? root.required("acceleratorPolicy").as_string()
+                : state_->inference->metrics().accelerator_policy;
+        PerformanceCertificationRunner runner(*state_->inference,
+                                              state_->benchmarks, state_->cache,
+                                              state_->scheduler,
+                                              state_->certifications,
+                                              state_->certification_thresholds);
+        std::atomic_bool cancellation{false};
+        const auto record = runner.run(
+            root.required("modelId").as_string(),
+            root.required("backendVersion").as_string(),
+            root.required("buildId").as_string(),
+            root.required("hardwareId").as_string(),
+            parse_benchmark_profile(root.required("profile").as_string()),
+            cache_state, concurrency, accelerator_policy, cancellation);
+        state_->audit.append("performance.certification.run", user.id,
+                             record.accepted ? "success" : "rejected",
+                             record.model_id);
+        return response(201, "Created",
+                        PerformanceCertificationRunner::to_json(record));
+    } catch (const std::exception&) {
+        return response(409, "Conflict", "{\"error\":\"certification_failed\"}");
+    }
+}
+
+// The administrator-configured regression thresholds currently in effect.
+std::string WorkloadHttpController::get_certification_thresholds() const {
+    const auto& thresholds = state_->certification_thresholds;
+    return response(
+        200, "OK",
+        "{\"maxTtftRegressionPercent\":" +
+            std::to_string(thresholds.max_ttft_regression_percent) +
+            ",\"maxMemoryIncreasePercent\":" +
+            std::to_string(thresholds.max_memory_increase_percent) +
+            ",\"minThroughputPercent\":" +
+            std::to_string(thresholds.min_throughput_percent) +
+            ",\"maxQualityRegressionPercent\":" +
+            std::to_string(thresholds.max_quality_regression_percent) +
+            ",\"maxCpuIncreasePercent\":" +
+            std::to_string(thresholds.max_cpu_increase_percent) +
+            ",\"maxQueueWaitIncreasePercent\":" +
+            std::to_string(thresholds.max_queue_wait_increase_percent) +
+            ",\"maxStorageAmplificationPercent\":" +
+            std::to_string(thresholds.max_storage_amplification_percent) + "}");
+}
+
+// Every field is optional; an omitted field keeps its current value rather
+// than resetting to RegressionThresholds' struct default, matching the
+// Phase 34 /api/v1/performance/adaptive/ceilings convention.
+std::string WorkloadHttpController::set_certification_thresholds(
+    Request& request, const UserRecord& user) {
+    if (!role_allows(user.role, "settings.manage")) {
+        return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
+    }
+    try {
+        const auto root = parse_json(request.body);
+        auto thresholds = state_->certification_thresholds;
+        if (root.optional("maxTtftRegressionPercent")) {
+            thresholds.max_ttft_regression_percent =
+                root.required("maxTtftRegressionPercent").as_double();
+        }
+        if (root.optional("maxMemoryIncreasePercent")) {
+            thresholds.max_memory_increase_percent =
+                root.required("maxMemoryIncreasePercent").as_double();
+        }
+        if (root.optional("minThroughputPercent")) {
+            thresholds.min_throughput_percent =
+                root.required("minThroughputPercent").as_double();
+        }
+        if (root.optional("maxQualityRegressionPercent")) {
+            thresholds.max_quality_regression_percent =
+                root.required("maxQualityRegressionPercent").as_double();
+        }
+        if (root.optional("maxCpuIncreasePercent")) {
+            thresholds.max_cpu_increase_percent =
+                root.required("maxCpuIncreasePercent").as_double();
+        }
+        if (root.optional("maxQueueWaitIncreasePercent")) {
+            thresholds.max_queue_wait_increase_percent =
+                root.required("maxQueueWaitIncreasePercent").as_double();
+        }
+        if (root.optional("maxStorageAmplificationPercent")) {
+            thresholds.max_storage_amplification_percent =
+                root.required("maxStorageAmplificationPercent").as_double();
+        }
+        state_->certification_thresholds = thresholds;
+        state_->audit.append("performance.certification.thresholds", user.id,
+                             "success", "");
+        return response(200, "OK", "{\"updated\":true}");
+    } catch (const std::exception&) {
+        return response(400, "Bad Request", "{\"error\":\"invalid_thresholds\"}");
     }
 }
 
