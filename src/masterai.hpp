@@ -875,17 +875,64 @@ std::string scratch_volume_manager_status_json(const ScratchVolumeManager& manag
 // scratch-to-durable placement decision made at creation time; this handles
 // the follow-up case the plan calls out explicitly -- an administrator
 // moving an already-placed file (e.g. a GGUF model) from one storage tier to
-// another after the fact. There is no central manifest in this codebase
-// mapping a durable path back to the record that owns it, so this function
-// only performs the verified, atomic file relocation itself; updating
-// whatever record references the old path remains the caller's
-// responsibility (the admin-facing endpoint surfaces this honestly rather
-// than silently rewriting record stores it does not own).
+// another after the fact.
 struct StorageMigrationResult {
     std::filesystem::path destination_path;
     std::uint64_t bytes_migrated{0};
     std::string sha256_hex;
 };
+
+// Closes the "no central manifest" gap the earlier Phase 31 pass left open:
+// a single durable, journaled record of every migration migrate_durable_file()
+// performs, so a record store holding a path captured before a migration
+// (a Model Registry entry's model directory, an index generation's storage
+// path, ...) can still find the file's current location without every store
+// independently tracking its own migration history. Persisted through the
+// same RecordStore/journal mechanism every other durable store in this
+// codebase uses -- see DurableFileManifest's .cpp for the packed record
+// format.
+class DurableFileManifest final {
+public:
+    struct Entry {
+        std::string source_path;
+        std::string destination_path;
+        std::string sha256_hex;
+        std::string data_class;
+        std::uint64_t migrated_at_epoch_seconds{0};
+    };
+
+    DurableFileManifest() = default;
+    explicit DurableFileManifest(RecordStore& records);
+
+    // Records that `source_path` was migrated to `destination_path`. Any
+    // existing entry whose current resolved location equals `source_path`
+    // is chained forward to `destination_path` too, so a file migrated more
+    // than once still resolves correctly from every path it has ever lived
+    // at.
+    void record(const std::filesystem::path& source_path,
+                const std::filesystem::path& destination_path,
+                const std::string& sha256_hex, DurableDataClass data_class);
+
+    // Returns `original_path` unchanged if it still exists on disk (the
+    // common case -- nothing was ever migrated) or has no recorded
+    // migration; otherwise follows the migration chain (bounded to guard
+    // against a corrupted manifest) and returns the final, current location.
+    std::filesystem::path resolve(
+        const std::filesystem::path& original_path) const;
+
+    // Every recorded migration, for administrator visibility
+    // (GET /api/v1/system/storage/manifest).
+    std::vector<Entry> entries() const;
+
+private:
+    RecordStore* records_{nullptr};
+    // canonical(as-migrated-from path) -> canonical(current path). Rebuilt
+    // from records_ at construction time.
+    std::map<std::string, std::string> current_location_;
+    mutable std::mutex mutex_;
+};
+
+std::string durable_file_manifest_json(const DurableFileManifest& manifest);
 
 // Copies `source_path` into `destination_directory` (created if absent),
 // verifies a SHA-256 digest match between source and staged copy, atomically
@@ -899,11 +946,27 @@ struct StorageMigrationResult {
 // exactly the kind of operation that could otherwise "silently downgrade" a
 // durable file onto ephemeral storage); throws std::runtime_error if the
 // staging copy or checksum verification fails. In every throwing case the
-// original file at `source_path` is left completely untouched.
+// original file at `source_path` is left completely untouched. On success,
+// records the move in `manifest` before returning.
 StorageMigrationResult migrate_durable_file(
     const std::filesystem::path& source_path,
     const std::filesystem::path& destination_directory,
-    DurableDataClass data_class);
+    DurableDataClass data_class, DurableFileManifest& manifest);
+
+// Installs the process-wide manifest resolve_durable_path() consults. Called
+// once at startup (server.cpp) after the manifest itself is constructed;
+// every launch-path/index-path reader that might hold a since-migrated path
+// goes through resolve_durable_path() rather than threading a
+// DurableFileManifest reference through every call site between server.cpp
+// and the point of use.
+void install_global_durable_file_manifest(DurableFileManifest& manifest);
+
+// Resolves a possibly-stale durable path to its current location. Returns
+// `original_path` unchanged when no manifest is installed (e.g. in unit
+// tests that construct components directly), when the path still exists on
+// disk, or when it was never migrated.
+std::filesystem::path resolve_durable_path(
+    const std::filesystem::path& original_path);
 
 // Result of one async read. `buffer` is only meaningful when `succeeded` is
 // true -- a cancelled or failed request always leaves it empty so no
@@ -3947,13 +4010,20 @@ std::string evaluation_runs_json(const std::vector<EvaluationRun>& runs);
 // a project to organize it or a model it concerns means nothing; dataset_id
 // is optional the same way TrainingJob's model_id is, since not every
 // experiment (e.g. a pure hyperparameter sweep note) is tied to one
-// dataset. Scoped down from the section's full surface (source-code/
-// configuration/container version, hyperparameters, random seed, hardware,
-// runtime, training/validation/evaluation metrics, checkpoints, logs,
-// artifacts, tags, and side-by-side comparison) to identity, the project/
-// model/dataset it relates to, and a lifecycle status -- none of the
-// deferred fields mean anything before an actual training/evaluation
-// executor exists to produce them.
+// dataset.
+//
+// Phase 80: this is now a REAL executor phase, not a scoped-down roster
+// record -- the same arc Phase 56/57/70 already gave Training Jobs,
+// Evaluation Lab, Model Comparison, and Fine-Tuning. The struct now carries
+// every section-25 definition-time field (hyperparameters, random seed,
+// source-code/configuration/container version, tags, notes) plus the
+// start/completion timestamps and failure reason a real run produces.
+// Metrics/hardware/runtime/checkpoints/logs/artifacts are run *output*,
+// not definition, so they live in ExperimentResultStore below (the same
+// identity/content split DatasetStore/DatasetContentStore and
+// ModelComparison/ComparisonResultStore already use) rather than bloating
+// this struct's pack/unpack record with fields that don't exist until
+// POST .../run has actually executed.
 enum class ExperimentStatus { queued, running, completed, failed, canceled };
 
 std::string experiment_status_name(ExperimentStatus status);
@@ -3968,6 +4038,16 @@ struct Experiment {
     std::string description;
     std::string owner_id;
     ExperimentStatus status{ExperimentStatus::queued};
+    std::string hyperparameters_json;    // free-form JSON text
+    std::uint32_t random_seed{0};        // 0 = "use the run's own default"
+    std::string source_code_version;
+    std::string configuration_version;
+    std::string container_version;
+    std::string tags;                    // comma-joined free text
+    std::string notes;
+    std::uint64_t started_at_epoch_seconds{0};
+    std::uint64_t completed_at_epoch_seconds{0};
+    std::string failure_reason;
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -3981,10 +4061,34 @@ public:
                       const std::string& model_id,
                       const std::string& dataset_id,
                       const std::string& name,
-                      const std::string& description);
+                      const std::string& description,
+                      const std::string& hyperparameters_json = {},
+                      std::uint32_t random_seed = 0,
+                      const std::string& source_code_version = {},
+                      const std::string& configuration_version = {},
+                      const std::string& container_version = {},
+                      const std::string& tags = {},
+                      const std::string& notes = {});
     std::optional<Experiment> find(const std::string& id) const;
     std::vector<Experiment> list() const;
     bool set_status(const std::string& id, ExperimentStatus status);
+    // Marks a run's real start/end -- distinct from updated_at, which
+    // every mutation touches; these two only move when POST .../run
+    // genuinely begins/finishes executing.
+    bool mark_started(const std::string& id);
+    bool mark_completed(const std::string& id, ExperimentStatus status,
+                        const std::string& failure_reason);
+    // Post-creation edits to the definition-time fields that legitimately
+    // evolve after an experiment exists -- notes/tags accrue over an
+    // experiment's life, and hyperparameters/version strings may be
+    // refined before the next run.
+    bool update_metadata(const std::string& id,
+                         const std::string& hyperparameters_json,
+                         std::uint32_t random_seed,
+                         const std::string& source_code_version,
+                         const std::string& configuration_version,
+                         const std::string& container_version,
+                         const std::string& tags, const std::string& notes);
     bool remove(const std::string& id);
 
 private:
@@ -3997,6 +4101,28 @@ private:
 
 std::string experiment_json(const Experiment& experiment);
 std::string experiments_json(const std::vector<Experiment>& experiments);
+
+// Stored results of executed experiment runs, keyed by Experiment id -- the
+// same opaque-JSON-blob pattern EvaluationResultStore/ComparisonResultStore
+// already use for output that only means something once a real run has
+// produced it (training/validation/evaluation metrics, hardware, runtime,
+// checkpoint ids, logs, artifact references).
+class ExperimentResultStore final {
+public:
+    ExperimentResultStore() = default;
+    explicit ExperimentResultStore(RecordStore& records);
+    void put(const std::string& experiment_id, const std::string& result_json);
+    std::optional<std::string> find(const std::string& experiment_id) const;
+    bool remove(const std::string& experiment_id);
+
+private:
+    RecordStore* records_{nullptr};
+};
+
+// experiment_result_json()/experiments_comparison_json() are declared
+// further below (alongside ComparisonResultStore), once TabularTrainingReport/
+// TabularEvaluationMetrics/HardwareInfo exist -- they need those complete
+// types, which this header only defines later.
 
 // Phase 45: docs/PLAN.md "Machine Learning Abilities" section 18
 // (Fine-Tuning Interface). Fine-tuning always starts from an existing base
@@ -4336,6 +4462,88 @@ private:
 std::string instruction_example_json(const InstructionExample& example);
 std::string instruction_examples_json(
     const std::vector<InstructionExample>& examples);
+
+// Phase 81: the real content record Phase 47's class comment above deferred
+// -- section 19's full instruction-record body. Kept as a separate store
+// keyed by InstructionExample id rather than folded into the struct above,
+// the same identity/content split DatasetStore/DatasetContentStore already
+// use: the small fixed-shape metadata record stays cheap to list, and the
+// free-form example body (which can legitimately be large -- a full
+// system/user/context/expected/rejected/tool-call/tool-result bundle) lives
+// as its own opaque-by-id record. tool_calls_json/tool_results_json are
+// free-form JSON text rather than a typed structure, matching
+// hyperparameters_json's precedent on Experiment (Phase 80) above --
+// section 19 doesn't fix a schema for tool calls, so this doesn't invent
+// one either.
+struct InstructionExampleContent {
+    std::string system_instruction;
+    std::string user_instruction;
+    std::string context;
+    std::string expected_response;
+    std::string rejected_response;
+    std::string tool_calls_json;
+    std::string tool_results_json;
+    std::string required_output_format;
+    std::string difficulty;
+    std::string safety_classification;
+};
+
+class InstructionExampleContentStore final {
+public:
+    InstructionExampleContentStore() = default;
+    explicit InstructionExampleContentStore(RecordStore& records);
+    void put(const std::string& example_id,
+            const InstructionExampleContent& content);
+    std::optional<InstructionExampleContent> find(
+        const std::string& example_id) const;
+    bool remove(const std::string& example_id);
+
+private:
+    RecordStore* records_{nullptr};
+};
+
+std::string instruction_example_content_json(
+    const InstructionExampleContent& content);
+
+// True whether `required_output_format` names JSON (case-insensitive
+// "json" appearing anywhere in the field, e.g. "json", "structured json")
+// and `expected_response` fails to parse as JSON; `error_detail` is set to
+// the parser's message in that case. A format that doesn't name JSON has no
+// checkable grammar in this codebase today and always reports valid=true,
+// noted honestly rather than fabricating a pass/fail for a format nothing
+// here can actually validate.
+bool validate_structured_output(const InstructionExampleContent& content,
+                                std::string& error_detail);
+
+// A heuristic, not semantic similarity: normalizes (lowercase, collapse
+// whitespace) system_instruction+user_instruction+context for both records
+// and compares by Jaccard token overlap against a fixed threshold. Two
+// examples that read the same to a human but are phrased very differently
+// will not be flagged -- this codebase has no embedding-based similarity
+// wired into this module, so it does not claim one.
+bool instruction_examples_are_near_duplicate(
+    const InstructionExampleContent& a, const InstructionExampleContent& b);
+
+// Pairs of example ids within the same set whose content (looked up via
+// `find_content`) is near-duplicate per the heuristic above. Examples with
+// no content yet are skipped, not falsely flagged.
+std::vector<std::pair<std::string, std::string>>
+detect_duplicate_instruction_examples(
+    const std::vector<InstructionExample>& examples,
+    const std::function<std::optional<InstructionExampleContent>(
+        const std::string&)>& find_content);
+
+// Pairs of example ids that are near-duplicate on instruction text (per the
+// same heuristic) but disagree on required_output_format, or where one's
+// expected_response equals another's rejected_response -- a direct,
+// explicit contradiction. A heuristic, documented the same way the
+// duplicate detector above is: it catches the contradictions this simple
+// text comparison can actually see, not every semantic contradiction.
+std::vector<std::pair<std::string, std::string>>
+detect_contradictory_instruction_examples(
+    const std::vector<InstructionExample>& examples,
+    const std::function<std::optional<InstructionExampleContent>(
+        const std::string&)>& find_content);
 
 // Phase 48: docs/PLAN.md "Machine Learning Abilities" section 20 (Synthetic
 // Data Generation). Every synthetic record targets one dataset already
@@ -4767,6 +4975,14 @@ struct TrainingCheckpoint {
     std::string capture_reason;
     std::string owner_id;
     TrainingCheckpointStatus status{TrainingCheckpointStatus::active};
+    // Phase 79: the real step/epoch half of section 33's deferred record.
+    // `epoch` is the training epoch this checkpoint was captured at (0 for a
+    // manually-created checkpoint, which has no training run behind it);
+    // `has_snapshot` is true only when a real learned-weight snapshot for
+    // this checkpoint id exists in CheckpointModelStore below -- a manual
+    // note never sets it, since there is no weight state to attach it to.
+    std::uint32_t epoch{0};
+    bool has_snapshot{false};
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -4779,7 +4995,9 @@ public:
                               const std::string& training_job_id,
                               const std::string& name,
                               const std::string& description,
-                              const std::string& capture_reason);
+                              const std::string& capture_reason,
+                              std::uint32_t epoch = 0,
+                              bool has_snapshot = false);
     std::optional<TrainingCheckpoint> find(const std::string& id) const;
     std::vector<TrainingCheckpoint> list() const;
     bool set_status(const std::string& id, TrainingCheckpointStatus status);
@@ -4991,12 +5209,19 @@ struct TabularTrainingReport {
 // post-hoc report could ever be sampled mid-run. server.cpp wires this to
 // TrainingProgressTracker::update() so a concurrent GET request on another
 // connection thread can observe genuinely in-flight epoch/loss values while
-// this run is still executing, not just the finished report.
+// this run is still executing, not just the finished report. Phase 79 widens
+// the callback with a third argument, `model` itself, at that exact epoch --
+// its weights are already updated and its feature/target/class schema is
+// already fixed for the whole run, so this is precisely the state a real
+// checkpoint snapshot needs. server.cpp uses it to persist genuine learned
+// weights mid-training instead of the previous post-hoc, loss-text-only
+// checkpoint record.
 TabularTrainingReport train_tabular_model(
     const TabularDataset& data, const TabularTrainingOptions& options,
     TrainedTabularModel& model,
     const TrainedTabularModel* warm_start = nullptr,
-    const std::function<void(std::uint32_t, double)>& on_epoch = {});
+    const std::function<void(std::uint32_t, double, const TrainedTabularModel&)>&
+        on_epoch = {});
 
 // Phase 78 (this pass): in-process, deliberately non-persisted live
 // training-progress state -- the concrete mechanism behind "live per-step
@@ -5138,6 +5363,26 @@ private:
     RecordStore* records_{nullptr};
 };
 
+// Phase 79: real checkpoint weight snapshots, keyed by TrainingCheckpoint id
+// (not by model id -- a training job can produce many checkpoints for one
+// eventual model). Same flat pack/unpack shape as TrainedModelStore above;
+// the snapshot's own `model_id` field is repurposed to hold the checkpoint
+// id it belongs to, and `training_job_id` still names the real training job
+// that produced it, so a checkpoint's snapshot is genuinely resumable via
+// train_tabular_model's warm_start parameter without any new serialization
+// format.
+class CheckpointModelStore final {
+public:
+    CheckpointModelStore() = default;
+    explicit CheckpointModelStore(RecordStore& records);
+    void put(const TrainedTabularModel& model);
+    std::optional<TrainedTabularModel> find(const std::string& checkpoint_id) const;
+    bool remove(const std::string& checkpoint_id);
+
+private:
+    RecordStore* records_{nullptr};
+};
+
 // Stored results of executed evaluation runs, keyed by EvaluationRun id --
 // the "actual numeric score" Evaluation Lab was scoped down without.
 class EvaluationResultStore final {
@@ -5245,6 +5490,35 @@ std::string tabular_model_comparison_json(
     const TabularEvaluationMetrics& baseline_metrics,
     const TrainedTabularModel& candidate,
     const TabularEvaluationMetrics& candidate_metrics);
+
+// Phase 80: builds one experiment run's real result JSON: the loss-history-
+// derived training metrics, the held-out validation metrics
+// train_tabular_model already computed, an independent full-dataset
+// evaluation pass, real probed hardware, measured runtime, and the
+// checkpoint/artifact ids the run actually produced.
+std::string experiment_result_json(
+    const TabularTrainingReport& report,
+    const TabularEvaluationMetrics& evaluation_metrics,
+    const HardwareInfo& hardware, std::uint64_t runtime_milliseconds,
+    const std::vector<std::string>& checkpoint_ids,
+    const std::string& log_text, const std::string& artifact_model_id);
+
+// Phase 80: builds the side-by-side comparison of two or more already-
+// created experiments (POST /api/v1/ml/experiments/compare): each
+// experiment's identity/hyperparameters/dataset plus, relative to the
+// first id (baseline), the parameter/dataset/metric/runtime/hardware
+// diffs and a regression flag section 25 asks for. Every experiment id
+// must exist and resolve via the two lookup callbacks; throws
+// std::invalid_argument otherwise. Safety differences are honestly
+// reported as not applicable -- this tabular engine has no safety-scoring
+// executor -- rather than fabricated, the same honesty convention
+// tabular_model_comparison_json already sets.
+std::string experiments_comparison_json(
+    const std::vector<std::string>& experiment_ids,
+    const std::function<std::optional<Experiment>(const std::string&)>&
+        find_experiment,
+    const std::function<std::optional<std::string>(const std::string&)>&
+        find_result_json);
 
 // Phases 58-61: real local knowledge ingestion, authored or learned vector
 // indexing, and RAG retrieval. Documents are uploaded as bounded text through
@@ -7075,7 +7349,21 @@ struct SpeculativeDecodingRequestContext {
     std::uint64_t available_memory_bytes{0};
     std::uint32_t requested_max_tokens{0};
     bool draft_runner_queued{false};
-    bool sampling_is_greedy_or_deterministic{true};
+    // llama.cpp's own server speculative-decoding implementation runs the
+    // general rejection-sampling algorithm (Leviathan et al.), which is
+    // mathematically valid for any temperature/top-p/top-k/repeat-penalty
+    // sampling, not only exactly-greedy decoding -- it does NOT need this
+    // control plane to replicate any accept/reject math itself, since
+    // llama-server does that internally once launched with
+    // --model-draft. What it does NOT support is grammar-constrained or
+    // logit-bias-modified decoding, where the verification step would be
+    // comparing against a distribution the draft model never actually
+    // sampled from. This field is true whenever the request's sampling
+    // uses none of those unsupported features -- GenerationOptions (see
+    // this header) exposes no grammar/logit-bias/json-schema field at all,
+    // so every live chat request through this control plane already
+    // qualifies today.
+    bool sampling_supported_by_speculative_verification{true};
     // Disclosed only: no per-runner thermal probe feeds this in this pass
     // (see RunnerSelectionSignals::thermal_headroom_percent's identical
     // honest gap).

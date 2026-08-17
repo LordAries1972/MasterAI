@@ -7,9 +7,13 @@
 // full backing service yet -- see MachineLearningRegistry's class comment
 // in masterai.hpp for why this stays honest rather than fabricating data.
 #include "masterai.hpp"
+#include "json.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 
 namespace masterai {
@@ -1446,7 +1450,7 @@ ExperimentStore::ExperimentStore(RecordStore& records) : records_(&records) {
 void ExperimentStore::restore() {
     for (const auto& item : records_->list("ml_experiments")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 7U) {
+        if (fields.size() != 19U) {
             throw std::runtime_error(
                 "persisted experiment record field count is wrong");
         }
@@ -1459,6 +1463,23 @@ void ExperimentStore::restore() {
         experiment.description = fields[4];
         experiment.owner_id = fields[5];
         experiment.status = parse_experiment_status(fields[6]);
+        experiment.hyperparameters_json = fields[7];
+        experiment.random_seed =
+            static_cast<std::uint32_t>(std::stoull(fields[8]));
+        experiment.source_code_version = fields[9];
+        experiment.configuration_version = fields[10];
+        experiment.container_version = fields[11];
+        experiment.tags = fields[12];
+        experiment.notes = fields[13];
+        experiment.started_at_epoch_seconds =
+            std::stoull(fields[14].empty() ? "0" : fields[14]);
+        experiment.completed_at_epoch_seconds =
+            std::stoull(fields[15].empty() ? "0" : fields[15]);
+        experiment.failure_reason = fields[16];
+        experiment.created_at_epoch_seconds =
+            std::stoull(fields[17].empty() ? "0" : fields[17]);
+        experiment.updated_at_epoch_seconds =
+            std::stoull(fields[18].empty() ? "0" : fields[18]);
         experiments_[experiment.id] = experiment;
     }
 }
@@ -1468,14 +1489,28 @@ void ExperimentStore::persist(const Experiment& experiment) {
         "ml_experiments", experiment.id,
         pack({experiment.project_id, experiment.model_id,
              experiment.dataset_id, experiment.name, experiment.description,
-             experiment.owner_id,
-             experiment_status_name(experiment.status)}));
+             experiment.owner_id, experiment_status_name(experiment.status),
+             experiment.hyperparameters_json,
+             std::to_string(experiment.random_seed),
+             experiment.source_code_version,
+             experiment.configuration_version, experiment.container_version,
+             experiment.tags, experiment.notes,
+             std::to_string(experiment.started_at_epoch_seconds),
+             std::to_string(experiment.completed_at_epoch_seconds),
+             experiment.failure_reason,
+             std::to_string(experiment.created_at_epoch_seconds),
+             std::to_string(experiment.updated_at_epoch_seconds)}));
 }
 
 Experiment ExperimentStore::create(
     const std::string& owner_id, const std::string& project_id,
     const std::string& model_id, const std::string& dataset_id,
-    const std::string& name, const std::string& description) {
+    const std::string& name, const std::string& description,
+    const std::string& hyperparameters_json, std::uint32_t random_seed,
+    const std::string& source_code_version,
+    const std::string& configuration_version,
+    const std::string& container_version, const std::string& tags,
+    const std::string& notes) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("experiment name is invalid");
     }
@@ -1495,6 +1530,13 @@ Experiment ExperimentStore::create(
     experiment.description = description;
     experiment.owner_id = owner_id;
     experiment.status = ExperimentStatus::queued;
+    experiment.hyperparameters_json = hyperparameters_json;
+    experiment.random_seed = random_seed;
+    experiment.source_code_version = source_code_version;
+    experiment.configuration_version = configuration_version;
+    experiment.container_version = container_version;
+    experiment.tags = tags;
+    experiment.notes = notes;
     experiment.created_at_epoch_seconds = epoch_seconds();
     experiment.updated_at_epoch_seconds = experiment.created_at_epoch_seconds;
     experiments_[experiment.id] = experiment;
@@ -1528,6 +1570,53 @@ bool ExperimentStore::set_status(const std::string& id,
     return true;
 }
 
+bool ExperimentStore::mark_started(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = experiments_.find(id);
+    if (found == experiments_.end()) return false;
+    found->second.status = ExperimentStatus::running;
+    found->second.started_at_epoch_seconds = epoch_seconds();
+    found->second.failure_reason.clear();
+    found->second.updated_at_epoch_seconds = found->second.started_at_epoch_seconds;
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool ExperimentStore::mark_completed(const std::string& id,
+                                     const ExperimentStatus status,
+                                     const std::string& failure_reason) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = experiments_.find(id);
+    if (found == experiments_.end()) return false;
+    found->second.status = status;
+    found->second.failure_reason = failure_reason;
+    found->second.completed_at_epoch_seconds = epoch_seconds();
+    found->second.updated_at_epoch_seconds = found->second.completed_at_epoch_seconds;
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool ExperimentStore::update_metadata(
+    const std::string& id, const std::string& hyperparameters_json,
+    std::uint32_t random_seed, const std::string& source_code_version,
+    const std::string& configuration_version,
+    const std::string& container_version, const std::string& tags,
+    const std::string& notes) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = experiments_.find(id);
+    if (found == experiments_.end()) return false;
+    found->second.hyperparameters_json = hyperparameters_json;
+    found->second.random_seed = random_seed;
+    found->second.source_code_version = source_code_version;
+    found->second.configuration_version = configuration_version;
+    found->second.container_version = container_version;
+    found->second.tags = tags;
+    found->second.notes = notes;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
 bool ExperimentStore::remove(const std::string& id) {
     const std::lock_guard<std::mutex> lock(mutex_);
     const auto found = experiments_.find(id);
@@ -1546,6 +1635,22 @@ std::string experiment_json(const Experiment& experiment) {
            json_escape(experiment.description) + "\",\"ownerId\":\"" +
            json_escape(experiment.owner_id) + "\",\"status\":\"" +
            experiment_status_name(experiment.status) +
+           "\",\"hyperparametersJson\":\"" +
+           json_escape(experiment.hyperparameters_json) +
+           "\",\"randomSeed\":" + std::to_string(experiment.random_seed) +
+           ",\"sourceCodeVersion\":\"" +
+           json_escape(experiment.source_code_version) +
+           "\",\"configurationVersion\":\"" +
+           json_escape(experiment.configuration_version) +
+           "\",\"containerVersion\":\"" +
+           json_escape(experiment.container_version) + "\",\"tags\":\"" +
+           json_escape(experiment.tags) + "\",\"notes\":\"" +
+           json_escape(experiment.notes) +
+           "\",\"startedAtEpochSeconds\":" +
+           std::to_string(experiment.started_at_epoch_seconds) +
+           ",\"completedAtEpochSeconds\":" +
+           std::to_string(experiment.completed_at_epoch_seconds) +
+           ",\"failureReason\":\"" + json_escape(experiment.failure_reason) +
            "\",\"createdAtEpochSeconds\":" +
            std::to_string(experiment.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
@@ -2137,6 +2242,199 @@ std::string instruction_examples_json(
         body += instruction_example_json(example);
     }
     return body + "]";
+}
+
+InstructionExampleContentStore::InstructionExampleContentStore(
+    RecordStore& records)
+    : records_(&records) {}
+
+void InstructionExampleContentStore::put(
+    const std::string& example_id, const InstructionExampleContent& content) {
+    records_->put(
+        "ml_instruction_example_content", example_id,
+        pack({content.system_instruction, content.user_instruction,
+             content.context, content.expected_response,
+             content.rejected_response, content.tool_calls_json,
+             content.tool_results_json, content.required_output_format,
+             content.difficulty, content.safety_classification}));
+}
+
+std::optional<InstructionExampleContent> InstructionExampleContentStore::find(
+    const std::string& example_id) const {
+    const auto stored = records_->get("ml_instruction_example_content", example_id);
+    if (!stored) return std::nullopt;
+    const auto fields = unpack(*stored);
+    if (fields.size() != 10U) {
+        throw std::runtime_error(
+            "persisted instruction example content field count is wrong");
+    }
+    InstructionExampleContent content;
+    content.system_instruction = fields[0];
+    content.user_instruction = fields[1];
+    content.context = fields[2];
+    content.expected_response = fields[3];
+    content.rejected_response = fields[4];
+    content.tool_calls_json = fields[5];
+    content.tool_results_json = fields[6];
+    content.required_output_format = fields[7];
+    content.difficulty = fields[8];
+    content.safety_classification = fields[9];
+    return content;
+}
+
+bool InstructionExampleContentStore::remove(const std::string& example_id) {
+    if (!records_->get("ml_instruction_example_content", example_id)) {
+        return false;
+    }
+    records_->erase("ml_instruction_example_content", example_id);
+    return true;
+}
+
+std::string instruction_example_content_json(
+    const InstructionExampleContent& content) {
+    return "{\"systemInstruction\":\"" +
+           json_escape(content.system_instruction) +
+           "\",\"userInstruction\":\"" +
+           json_escape(content.user_instruction) + "\",\"context\":\"" +
+           json_escape(content.context) + "\",\"expectedResponse\":\"" +
+           json_escape(content.expected_response) +
+           "\",\"rejectedResponse\":\"" +
+           json_escape(content.rejected_response) + "\",\"toolCallsJson\":\"" +
+           json_escape(content.tool_calls_json) + "\",\"toolResultsJson\":\"" +
+           json_escape(content.tool_results_json) +
+           "\",\"requiredOutputFormat\":\"" +
+           json_escape(content.required_output_format) +
+           "\",\"difficulty\":\"" + json_escape(content.difficulty) +
+           "\",\"safetyClassification\":\"" +
+           json_escape(content.safety_classification) + "\"}";
+}
+
+bool validate_structured_output(const InstructionExampleContent& content,
+                                std::string& error_detail) {
+    std::string format_lower = content.required_output_format;
+    std::transform(format_lower.begin(), format_lower.end(),
+                   format_lower.begin(),
+                   [](const unsigned char c) { return std::tolower(c); });
+    if (format_lower.find("json") == std::string::npos) {
+        error_detail.clear();
+        return true;
+    }
+    try {
+        parse_json(content.expected_response);
+        error_detail.clear();
+        return true;
+    } catch (const std::exception& error) {
+        error_detail = error.what();
+        return false;
+    }
+}
+
+namespace {
+
+// Lowercases and collapses runs of whitespace so two instructions that
+// differ only in casing/spacing still compare as the same text.
+std::string normalize_instruction_text(const std::string& text) {
+    std::string result;
+    result.reserve(text.size());
+    bool last_was_space = false;
+    for (const unsigned char character : text) {
+        if (std::isspace(character)) {
+            if (!last_was_space && !result.empty()) result += ' ';
+            last_was_space = true;
+        } else {
+            result += static_cast<char>(std::tolower(character));
+            last_was_space = false;
+        }
+    }
+    while (!result.empty() && result.back() == ' ') result.pop_back();
+    return result;
+}
+
+std::set<std::string> tokenize(const std::string& normalized_text) {
+    std::set<std::string> tokens;
+    std::istringstream stream(normalized_text);
+    std::string token;
+    while (stream >> token) tokens.insert(token);
+    return tokens;
+}
+
+std::string instruction_text(const InstructionExampleContent& content) {
+    return content.system_instruction + " " + content.user_instruction +
+           " " + content.context;
+}
+
+}  // namespace
+
+bool instruction_examples_are_near_duplicate(
+    const InstructionExampleContent& a, const InstructionExampleContent& b) {
+    const auto tokens_a = tokenize(normalize_instruction_text(instruction_text(a)));
+    const auto tokens_b = tokenize(normalize_instruction_text(instruction_text(b)));
+    if (tokens_a.empty() || tokens_b.empty()) return false;
+    std::size_t intersection_size = 0U;
+    for (const auto& token : tokens_a) {
+        if (tokens_b.count(token) != 0U) ++intersection_size;
+    }
+    std::set<std::string> union_tokens = tokens_a;
+    union_tokens.insert(tokens_b.begin(), tokens_b.end());
+    const double jaccard = union_tokens.empty()
+                               ? 0.0
+                               : static_cast<double>(intersection_size) /
+                                     static_cast<double>(union_tokens.size());
+    return jaccard >= 0.85;
+}
+
+std::vector<std::pair<std::string, std::string>>
+detect_duplicate_instruction_examples(
+    const std::vector<InstructionExample>& examples,
+    const std::function<std::optional<InstructionExampleContent>(
+        const std::string&)>& find_content) {
+    std::vector<std::pair<std::string, std::string>> pairs;
+    for (std::size_t i = 0; i < examples.size(); ++i) {
+        const auto content_i = find_content(examples[i].id);
+        if (!content_i) continue;
+        for (std::size_t j = i + 1U; j < examples.size(); ++j) {
+            const auto content_j = find_content(examples[j].id);
+            if (!content_j) continue;
+            if (instruction_examples_are_near_duplicate(*content_i, *content_j)) {
+                pairs.emplace_back(examples[i].id, examples[j].id);
+            }
+        }
+    }
+    return pairs;
+}
+
+std::vector<std::pair<std::string, std::string>>
+detect_contradictory_instruction_examples(
+    const std::vector<InstructionExample>& examples,
+    const std::function<std::optional<InstructionExampleContent>(
+        const std::string&)>& find_content) {
+    std::vector<std::pair<std::string, std::string>> pairs;
+    for (std::size_t i = 0; i < examples.size(); ++i) {
+        const auto content_i = find_content(examples[i].id);
+        if (!content_i) continue;
+        for (std::size_t j = i + 1U; j < examples.size(); ++j) {
+            const auto content_j = find_content(examples[j].id);
+            if (!content_j) continue;
+            const bool same_instruction =
+                instruction_examples_are_near_duplicate(*content_i, *content_j);
+            const bool format_disagrees =
+                same_instruction &&
+                content_i->required_output_format !=
+                    content_j->required_output_format &&
+                !content_i->required_output_format.empty() &&
+                !content_j->required_output_format.empty();
+            const bool direct_contradiction =
+                (!content_i->expected_response.empty() &&
+                 content_i->expected_response ==
+                     content_j->rejected_response) ||
+                (!content_j->expected_response.empty() &&
+                 content_j->expected_response == content_i->rejected_response);
+            if (format_disagrees || direct_contradiction) {
+                pairs.emplace_back(examples[i].id, examples[j].id);
+            }
+        }
+    }
+    return pairs;
 }
 
 // Phase 48: docs/PLAN.md "Machine Learning Abilities" section 20 (Synthetic
@@ -3052,7 +3350,7 @@ TrainingCheckpointStore::TrainingCheckpointStore(RecordStore& records)
 void TrainingCheckpointStore::restore() {
     for (const auto& item : records_->list("ml_training_checkpoints")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 6U) {
+        if (fields.size() != 8U) {
             throw std::runtime_error(
                 "persisted training checkpoint record field count is wrong");
         }
@@ -3064,6 +3362,8 @@ void TrainingCheckpointStore::restore() {
         checkpoint.capture_reason = fields[3];
         checkpoint.owner_id = fields[4];
         checkpoint.status = parse_training_checkpoint_status(fields[5]);
+        checkpoint.epoch = static_cast<std::uint32_t>(std::stoul(fields[6]));
+        checkpoint.has_snapshot = fields[7] == "1";
         checkpoints_[checkpoint.id] = checkpoint;
     }
 }
@@ -3074,13 +3374,16 @@ void TrainingCheckpointStore::persist(const TrainingCheckpoint& checkpoint) {
         pack({checkpoint.training_job_id, checkpoint.name,
              checkpoint.description, checkpoint.capture_reason,
              checkpoint.owner_id,
-             training_checkpoint_status_name(checkpoint.status)}));
+             training_checkpoint_status_name(checkpoint.status),
+             std::to_string(checkpoint.epoch),
+             checkpoint.has_snapshot ? "1" : "0"}));
 }
 
 TrainingCheckpoint TrainingCheckpointStore::create(
     const std::string& owner_id, const std::string& training_job_id,
     const std::string& name, const std::string& description,
-    const std::string& capture_reason) {
+    const std::string& capture_reason, const std::uint32_t epoch,
+    const bool has_snapshot) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("training checkpoint name is invalid");
     }
@@ -3097,6 +3400,8 @@ TrainingCheckpoint TrainingCheckpointStore::create(
     checkpoint.capture_reason = capture_reason;
     checkpoint.owner_id = owner_id;
     checkpoint.status = TrainingCheckpointStatus::active;
+    checkpoint.epoch = epoch;
+    checkpoint.has_snapshot = has_snapshot;
     checkpoint.created_at_epoch_seconds = epoch_seconds();
     checkpoint.updated_at_epoch_seconds = checkpoint.created_at_epoch_seconds;
     checkpoints_[checkpoint.id] = checkpoint;
@@ -3150,7 +3455,10 @@ std::string training_checkpoint_json(const TrainingCheckpoint& checkpoint) {
            json_escape(checkpoint.capture_reason) + "\",\"ownerId\":\"" +
            json_escape(checkpoint.owner_id) + "\",\"status\":\"" +
            training_checkpoint_status_name(checkpoint.status) +
-           "\",\"createdAtEpochSeconds\":" +
+           "\",\"epoch\":" + std::to_string(checkpoint.epoch) +
+           ",\"hasSnapshot\":" +
+           (checkpoint.has_snapshot ? "true" : "false") +
+           ",\"createdAtEpochSeconds\":" +
            std::to_string(checkpoint.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
            std::to_string(checkpoint.updated_at_epoch_seconds) + "}";

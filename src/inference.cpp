@@ -825,7 +825,7 @@ void RunnerSupervisor::load(const ModelRecord& model,
             tuning.pre_touch == PreTouchLevel::layer_window) {
             std::atomic_bool not_cancelled{false};
             static_cast<void>(pre_touch_model_file(
-                model.directory / model.manifest.model_file,
+                resolve_durable_path(model.directory / model.manifest.model_file),
                 tuning.pre_touch, not_cancelled));
         }
         // Phase 26: MappingWeights -- the backend process is about to start

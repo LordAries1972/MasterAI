@@ -8,6 +8,7 @@
 // is computed from real data and every loss value comes from a real
 // optimization step.
 #include "masterai.hpp"
+#include "json.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -745,7 +746,8 @@ std::string tabular_dataset_profile_json(const std::string& dataset_id,
 TabularTrainingReport train_tabular_model(
     const TabularDataset& data, const TabularTrainingOptions& options,
     TrainedTabularModel& model, const TrainedTabularModel* warm_start,
-    const std::function<void(std::uint32_t, double)>& on_epoch) {
+    const std::function<void(std::uint32_t, double, const TrainedTabularModel&)>&
+        on_epoch) {
     if (data.features.size() < 2U) {
         throw std::runtime_error("dataset has fewer than two rows");
     }
@@ -897,7 +899,7 @@ TabularTrainingReport train_tabular_model(
                 "training diverged (non-finite loss); lower the learning rate");
         }
         report.loss_history.push_back(loss);
-        if (on_epoch) on_epoch(epoch, loss);
+        if (on_epoch) on_epoch(epoch, loss, model);
     }
     report.final_loss = report.loss_history.back();
     report.evaluated_on_test = test_count > 0U;
@@ -1052,6 +1054,89 @@ bool TrainedModelStore::remove(const std::string& model_id) {
     return true;
 }
 
+// Phase 79: identical flat-field pack/unpack shape to TrainedModelStore
+// above, on its own table and keyed by checkpoint id instead of model id --
+// see the class comment in masterai.hpp for why the snapshot's own
+// `model_id` field is repurposed to carry the checkpoint id.
+CheckpointModelStore::CheckpointModelStore(RecordStore& records)
+    : records_(&records) {}
+
+void CheckpointModelStore::put(const TrainedTabularModel& model) {
+    std::vector<std::string> fields{
+        model.model_id,
+        model.training_job_id,
+        model.method,
+        model.classification ? "1" : "0",
+        model.target_name,
+        std::to_string(model.trained_at_epoch_seconds),
+        std::to_string(model.feature_names.size()),
+        std::to_string(model.class_labels.size()),
+        std::to_string(model.weights.size())};
+    for (const auto& name : model.feature_names) fields.push_back(name);
+    for (const auto& label : model.class_labels) fields.push_back(label);
+    for (const auto mean : model.feature_means) fields.push_back(number_field(mean));
+    for (const auto stddev : model.feature_stddevs) {
+        fields.push_back(number_field(stddev));
+    }
+    for (const auto& row : model.weights) {
+        for (const auto weight : row) fields.push_back(number_field(weight));
+    }
+    records_->put("ml_checkpoint_models", model.model_id, pack(fields));
+}
+
+std::optional<TrainedTabularModel> CheckpointModelStore::find(
+    const std::string& checkpoint_id) const {
+    const auto value = records_->get("ml_checkpoint_models", checkpoint_id);
+    if (!value) return std::nullopt;
+    const auto fields = unpack(*value);
+    if (fields.size() < 9U) {
+        throw std::runtime_error("persisted checkpoint model is malformed");
+    }
+    TrainedTabularModel model;
+    model.model_id = fields[0];
+    model.training_job_id = fields[1];
+    model.method = fields[2];
+    model.classification = fields[3] == "1";
+    model.target_name = fields[4];
+    model.trained_at_epoch_seconds = std::stoull(fields[5]);
+    const auto feature_count = static_cast<std::size_t>(std::stoull(fields[6]));
+    const auto class_count = static_cast<std::size_t>(std::stoull(fields[7]));
+    const auto output_count = static_cast<std::size_t>(std::stoull(fields[8]));
+    const std::size_t expected = 9U + feature_count + class_count +
+                                 2U * feature_count +
+                                 output_count * (feature_count + 1U);
+    if (fields.size() != expected) {
+        throw std::runtime_error("persisted checkpoint model is truncated");
+    }
+    std::size_t cursor = 9U;
+    for (std::size_t index = 0; index < feature_count; ++index) {
+        model.feature_names.push_back(fields[cursor++]);
+    }
+    for (std::size_t index = 0; index < class_count; ++index) {
+        model.class_labels.push_back(fields[cursor++]);
+    }
+    for (std::size_t index = 0; index < feature_count; ++index) {
+        model.feature_means.push_back(parse_number_field(fields[cursor++]));
+    }
+    for (std::size_t index = 0; index < feature_count; ++index) {
+        model.feature_stddevs.push_back(parse_number_field(fields[cursor++]));
+    }
+    for (std::size_t output = 0; output < output_count; ++output) {
+        std::vector<double> row;
+        for (std::size_t column = 0; column <= feature_count; ++column) {
+            row.push_back(parse_number_field(fields[cursor++]));
+        }
+        model.weights.push_back(std::move(row));
+    }
+    return model;
+}
+
+bool CheckpointModelStore::remove(const std::string& checkpoint_id) {
+    if (!records_->get("ml_checkpoint_models", checkpoint_id)) return false;
+    records_->erase("ml_checkpoint_models", checkpoint_id);
+    return true;
+}
+
 EvaluationResultStore::EvaluationResultStore(RecordStore& records)
     : records_(&records) {}
 
@@ -1201,6 +1286,237 @@ std::string tabular_model_comparison_json(
            ",\"candidateValue\":" + json_number(candidate_primary) +
            ",\"delta\":" + json_number(delta) + ",\"winner\":\"" + winner +
            "\"}";
+}
+
+ExperimentResultStore::ExperimentResultStore(RecordStore& records)
+    : records_(&records) {}
+
+void ExperimentResultStore::put(const std::string& experiment_id,
+                                const std::string& result_json) {
+    records_->put("ml_experiment_results", experiment_id, result_json);
+}
+
+std::optional<std::string> ExperimentResultStore::find(
+    const std::string& experiment_id) const {
+    return records_->get("ml_experiment_results", experiment_id);
+}
+
+bool ExperimentResultStore::remove(const std::string& experiment_id) {
+    if (!records_->get("ml_experiment_results", experiment_id)) return false;
+    records_->erase("ml_experiment_results", experiment_id);
+    return true;
+}
+
+std::string experiment_result_json(
+    const TabularTrainingReport& report,
+    const TabularEvaluationMetrics& evaluation_metrics,
+    const HardwareInfo& hardware, const std::uint64_t runtime_milliseconds,
+    const std::vector<std::string>& checkpoint_ids,
+    const std::string& log_text, const std::string& artifact_model_id) {
+    // Training metrics come straight from the real gradient-descent loss
+    // curve; validation metrics are the held-out split train_tabular_model
+    // computed as part of the same run; evaluation metrics are an
+    // independent evaluate_tabular_model pass against the full dataset --
+    // three genuinely distinct numbers, matching section 25's three
+    // separate metric fields.
+    const std::string training_metrics =
+        "{\"epochs\":" + std::to_string(report.loss_history.size()) +
+        ",\"finalLoss\":" + json_number(report.final_loss) + "}";
+    return "{\"trainingMetrics\":" + training_metrics +
+           ",\"validationMetrics\":" +
+           tabular_evaluation_metrics_json(report.metrics) +
+           ",\"evaluationMetrics\":" +
+           tabular_evaluation_metrics_json(evaluation_metrics) +
+           ",\"hardware\":" + hardware_info_json(hardware) +
+           ",\"runtimeMilliseconds\":" +
+           std::to_string(runtime_milliseconds) +
+           ",\"checkpointIds\":" + string_array_json(checkpoint_ids) +
+           ",\"logs\":\"" + json_escape(log_text) +
+           "\",\"artifacts\":{\"trainedModelId\":\"" +
+           json_escape(artifact_model_id) + "\"}}";
+}
+
+namespace {
+
+// Pulls the primary-metric name/value and runtime out of one experiment's
+// already-built result_json (produced by experiment_result_json above),
+// following tabular_model_comparison_json's own primary-metric choice:
+// macro F1 for classification, MSE for regression. Returns nullopt if the
+// experiment has no result yet or its result has no evaluation metrics.
+struct ExperimentResultSummary {
+    std::string primary_metric_name;
+    double primary_metric_value{0.0};
+    std::uint64_t runtime_milliseconds{0};
+    std::string storage_class;
+    unsigned int logical_cpu_count{0};
+    std::uint64_t gpu_memory_mib{0};
+};
+
+std::optional<ExperimentResultSummary> summarize_experiment_result(
+    const std::string& result_json) {
+    if (result_json.empty()) return std::nullopt;
+    try {
+        const auto root = parse_json(result_json, 4U * 1024U * 1024U);
+        const auto& metrics = root.required("evaluationMetrics");
+        const bool classification =
+            metrics.required("task").as_string() == "classification";
+        ExperimentResultSummary summary;
+        summary.primary_metric_name = classification ? "macroF1" : "mse";
+        summary.primary_metric_value =
+            classification ? metrics.required("macroF1").as_double()
+                           : metrics.required("mse").as_double();
+        summary.runtime_milliseconds = static_cast<std::uint64_t>(
+            root.required("runtimeMilliseconds").as_integer());
+        const auto& hardware = root.required("hardware");
+        summary.storage_class = hardware.required("storageClass").as_string();
+        summary.logical_cpu_count = static_cast<unsigned int>(
+            hardware.required("logicalCpus").as_integer());
+        summary.gpu_memory_mib = static_cast<std::uint64_t>(
+            hardware.required("gpuMemoryMiB").as_integer());
+        return summary;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::string experiment_compare_block_json(
+    const Experiment& experiment,
+    const std::optional<ExperimentResultSummary>& summary) {
+    std::string block =
+        "{\"id\":\"" + json_escape(experiment.id) + "\",\"name\":\"" +
+        json_escape(experiment.name) + "\",\"datasetId\":\"" +
+        json_escape(experiment.dataset_id) + "\",\"hyperparametersJson\":\"" +
+        json_escape(experiment.hyperparameters_json) +
+        "\",\"randomSeed\":" + std::to_string(experiment.random_seed) +
+        ",\"sourceCodeVersion\":\"" +
+        json_escape(experiment.source_code_version) +
+        "\",\"configurationVersion\":\"" +
+        json_escape(experiment.configuration_version) +
+        "\",\"containerVersion\":\"" +
+        json_escape(experiment.container_version) + "\",\"status\":\"" +
+        experiment_status_name(experiment.status) + "\",\"hasResult\":" +
+        (summary ? "true" : "false");
+    if (summary) {
+        block += ",\"primaryMetric\":\"" + summary->primary_metric_name +
+                 "\",\"primaryValue\":" +
+                 json_number(summary->primary_metric_value) +
+                 ",\"runtimeMilliseconds\":" +
+                 std::to_string(summary->runtime_milliseconds) +
+                 ",\"storageClass\":\"" +
+                 json_escape(summary->storage_class) +
+                 "\",\"logicalCpuCount\":" +
+                 std::to_string(summary->logical_cpu_count) +
+                 ",\"gpuMemoryMib\":" +
+                 std::to_string(summary->gpu_memory_mib);
+    }
+    return block + "}";
+}
+
+}  // namespace
+
+std::string experiments_comparison_json(
+    const std::vector<std::string>& experiment_ids,
+    const std::function<std::optional<Experiment>(const std::string&)>&
+        find_experiment,
+    const std::function<std::optional<std::string>(const std::string&)>&
+        find_result_json) {
+    if (experiment_ids.size() < 2U) {
+        throw std::invalid_argument(
+            "comparing experiments requires at least two ids");
+    }
+    std::vector<Experiment> experiments;
+    std::vector<std::optional<ExperimentResultSummary>> summaries;
+    experiments.reserve(experiment_ids.size());
+    summaries.reserve(experiment_ids.size());
+    for (const auto& id : experiment_ids) {
+        const auto experiment = find_experiment(id);
+        if (!experiment) {
+            throw std::invalid_argument("experiment \"" + id + "\" was not found");
+        }
+        experiments.push_back(*experiment);
+        const auto result_json = find_result_json(id);
+        summaries.push_back(result_json ? summarize_experiment_result(*result_json)
+                                        : std::nullopt);
+    }
+    std::string blocks = "[";
+    for (std::size_t index = 0; index < experiments.size(); ++index) {
+        if (index != 0U) blocks += ",";
+        blocks += experiment_compare_block_json(experiments[index],
+                                                 summaries[index]);
+    }
+    blocks += "]";
+    // Diffs are relative to the first id, the same "baseline" convention
+    // tabular_model_comparison_json uses for two-model comparisons, widened
+    // here to however many experiments were passed.
+    const auto& baseline = experiments.front();
+    const auto& baseline_summary = summaries.front();
+    std::string diffs = "[";
+    for (std::size_t index = 1U; index < experiments.size(); ++index) {
+        if (index != 1U) diffs += ",";
+        const auto& candidate = experiments[index];
+        const auto& candidate_summary = summaries[index];
+        diffs += "{\"experimentId\":\"" + json_escape(candidate.id) +
+                 "\",\"datasetDiffers\":" +
+                 (candidate.dataset_id != baseline.dataset_id ? "true"
+                                                              : "false") +
+                 ",\"hyperparametersDiffer\":" +
+                 (candidate.hyperparameters_json !=
+                          baseline.hyperparameters_json
+                      ? "true"
+                      : "false") +
+                 ",\"seedDiffers\":" +
+                 (candidate.random_seed != baseline.random_seed ? "true"
+                                                                 : "false");
+        if (baseline_summary && candidate_summary &&
+            baseline_summary->primary_metric_name ==
+                candidate_summary->primary_metric_name) {
+            const double delta = candidate_summary->primary_metric_value -
+                                 baseline_summary->primary_metric_value;
+            // Matches tabular_model_comparison_json's winner convention:
+            // higher macro F1 wins, lower MSE wins; a regression is the
+            // candidate losing on that same primary metric.
+            const bool is_f1 =
+                candidate_summary->primary_metric_name == "macroF1";
+            const bool regression =
+                delta != 0.0 &&
+                (is_f1 ? delta < 0.0 : delta > 0.0);
+            diffs += ",\"primaryMetric\":\"" +
+                     candidate_summary->primary_metric_name +
+                     "\",\"baselineValue\":" +
+                     json_number(baseline_summary->primary_metric_value) +
+                     ",\"candidateValue\":" +
+                     json_number(candidate_summary->primary_metric_value) +
+                     ",\"metricDelta\":" + json_number(delta) +
+                     ",\"regression\":" + (regression ? "true" : "false") +
+                     ",\"runtimeDeltaMilliseconds\":" +
+                     std::to_string(
+                         candidate_summary->runtime_milliseconds >=
+                                 baseline_summary->runtime_milliseconds
+                             ? candidate_summary->runtime_milliseconds -
+                                   baseline_summary->runtime_milliseconds
+                             : 0ULL) +
+                     ",\"hardwareDiffers\":" +
+                     (candidate_summary->storage_class !=
+                              baseline_summary->storage_class ||
+                      candidate_summary->logical_cpu_count !=
+                              baseline_summary->logical_cpu_count ||
+                      candidate_summary->gpu_memory_mib !=
+                              baseline_summary->gpu_memory_mib
+                          ? "true"
+                          : "false");
+        } else {
+            diffs += ",\"metricComparison\":\"unavailable -- one or both "
+                     "experiments have not been run yet, or used "
+                     "incompatible tasks\"";
+        }
+        // No safety-scoring executor exists for this tabular engine yet --
+        // reported honestly rather than fabricated, the same convention
+        // ModelComparison's class comment already sets.
+        diffs += ",\"safetyChanges\":null}";
+    }
+    diffs += "]";
+    return "{\"experiments\":" + blocks + ",\"baselineId\":\"" +
+           json_escape(baseline.id) + "\",\"comparisons\":" + diffs + "}";
 }
 
 std::string tabular_prediction_json(const TabularPrediction& prediction,

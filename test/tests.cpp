@@ -5641,15 +5641,28 @@ void test_machine_learning_experiment_tracking_lifecycle() {
     masterai::ExperimentStore experiments(records);
     const auto experiment = experiments.create(
         "administrator-1", "project-1", "model-1", "dataset-1",
-        "lora-rank-sweep", "Compare LoRA rank 8 vs 16 on the fine-tune.");
+        "lora-rank-sweep", "Compare LoRA rank 8 vs 16 on the fine-tune.",
+        "{\"epochs\":200}", 42U, "abc1234", "config-v3", "container-v1",
+        "sweep,lora", "initial notes");
     require(!experiment.id.empty() &&
                 experiment.project_id == "project-1" &&
                 experiment.model_id == "model-1" &&
                 experiment.dataset_id == "dataset-1" &&
                 experiment.status == masterai::ExperimentStatus::queued &&
-                experiment.owner_id == "administrator-1",
+                experiment.owner_id == "administrator-1" &&
+                experiment.hyperparameters_json == "{\"epochs\":200}" &&
+                experiment.random_seed == 42U &&
+                experiment.source_code_version == "abc1234" &&
+                experiment.configuration_version == "config-v3" &&
+                experiment.container_version == "container-v1" &&
+                experiment.tags == "sweep,lora" &&
+                experiment.notes == "initial notes" &&
+                experiment.started_at_epoch_seconds == 0U &&
+                experiment.completed_at_epoch_seconds == 0U &&
+                experiment.failure_reason.empty(),
             "a newly created experiment must start queued against its "
-            "project and model with its owner recorded");
+            "project and model with every section-25 definition-time field "
+            "recorded and no run yet");
     require(experiments.list().size() == 1U,
             "the created experiment was not visible in list()");
 
@@ -5690,14 +5703,67 @@ void test_machine_learning_experiment_tracking_lifecycle() {
             "set_status() must no-op for an unknown experiment id, not "
             "throw");
 
+    // Phase 80: mark_started()/mark_completed() are what the real .../run
+    // executor calls -- distinct from set_status() above, they also stamp
+    // genuine start/completion timestamps and (on failure) a real reason.
+    require(experiments.mark_started(experiment.id),
+            "mark_started() rejected a known experiment id");
+    const auto started = experiments.find(experiment.id);
+    require(started.has_value() &&
+                started->status == masterai::ExperimentStatus::running &&
+                started->started_at_epoch_seconds > 0U,
+            "mark_started() must move the experiment to running and stamp "
+            "a real start time");
+    require(experiments.mark_completed(experiment.id,
+                                       masterai::ExperimentStatus::failed,
+                                       "dataset had no numeric columns"),
+            "mark_completed() rejected a known experiment id");
+    const auto failed = experiments.find(experiment.id);
+    require(failed.has_value() &&
+                failed->status == masterai::ExperimentStatus::failed &&
+                failed->completed_at_epoch_seconds > 0U &&
+                failed->failure_reason == "dataset had no numeric columns",
+            "mark_completed() must record the real failure status, "
+            "completion time, and reason");
+    require(!experiments.mark_started("nonexistent-experiment") &&
+                !experiments.mark_completed(
+                    "nonexistent-experiment",
+                    masterai::ExperimentStatus::completed, ""),
+            "mark_started()/mark_completed() must no-op for an unknown "
+            "experiment id, not throw");
+
+    require(experiments.update_metadata(
+                experiment.id, "{\"epochs\":400}", 7U, "def5678",
+                "config-v4", "container-v2", "sweep,lora,revised",
+                "updated notes"),
+            "update_metadata() rejected a known experiment id");
+    const auto updated = experiments.find(experiment.id);
+    require(updated.has_value() &&
+                updated->hyperparameters_json == "{\"epochs\":400}" &&
+                updated->random_seed == 7U &&
+                updated->notes == "updated notes",
+            "update_metadata() must persist the revised definition-time "
+            "fields");
+
     masterai::ExperimentStore reloaded(records);
     const auto reloaded_experiment = reloaded.find(experiment.id);
     require(reloaded_experiment.has_value() &&
                 reloaded_experiment->name == "lora-rank-sweep" &&
                 reloaded_experiment->status ==
-                    masterai::ExperimentStatus::running,
-            "ExperimentStore did not restore a persisted experiment after "
-            "reload");
+                    masterai::ExperimentStatus::failed &&
+                reloaded_experiment->hyperparameters_json ==
+                    "{\"epochs\":400}" &&
+                reloaded_experiment->random_seed == 7U &&
+                reloaded_experiment->tags == "sweep,lora,revised" &&
+                reloaded_experiment->started_at_epoch_seconds > 0U &&
+                reloaded_experiment->completed_at_epoch_seconds > 0U &&
+                reloaded_experiment->failure_reason ==
+                    "dataset had no numeric columns" &&
+                reloaded_experiment->created_at_epoch_seconds > 0U &&
+                reloaded_experiment->updated_at_epoch_seconds > 0U,
+            "ExperimentStore did not restore every persisted field -- "
+            "including created/updated timestamps, which a prior version "
+            "of restore() silently dropped -- after reload");
 
     require(experiments.remove(experiment.id),
             "remove() rejected a known experiment id");
@@ -5709,8 +5775,139 @@ void test_machine_learning_experiment_tracking_lifecycle() {
 
     const auto json = masterai::experiment_json(no_dataset);
     require(json.find("\"name\":\"no dataset needed\"") != std::string::npos &&
-                json.find("\"datasetId\":\"\"") != std::string::npos,
+                json.find("\"datasetId\":\"\"") != std::string::npos &&
+                json.find("\"randomSeed\":0") != std::string::npos,
             "experiment_json did not report the experiment's own fields");
+
+    // Phase 80: real execution -- experiment_result_json bundles genuinely
+    // distinct training/validation/evaluation metrics, real hardware, and
+    // real runtime, the same way tabular_training_report_json does for
+    // Training Jobs. Reuses the same label-flipped-vs-correct dataset
+    // pattern test_machine_learning_model_comparison_lifecycle_and_execution
+    // uses below to guarantee a measurably worse model on failure paths.
+    std::string csv = "x1,x2,label\n";
+    for (int index = 0; index < 20; ++index) {
+        const std::string low_row = std::to_string(0.1 * index) + "," +
+                                    std::to_string(1.0 + 0.05 * index);
+        const std::string high_row = std::to_string(4.0 + 0.1 * index) + "," +
+                                     std::to_string(3.0 + 0.05 * index);
+        csv += low_row + ",low\n" + high_row + ",high\n";
+    }
+    const auto data = masterai::parse_tabular_csv(csv, "label");
+    masterai::TabularTrainingOptions options;
+    options.epochs = 100U;
+    options.learning_rate = 0.5;
+    options.test_fraction = 0.2;
+    masterai::TrainedTabularModel model;
+    const auto report = masterai::train_tabular_model(data, options, model);
+    const auto evaluation_metrics =
+        masterai::evaluate_tabular_model(model, data);
+    masterai::HardwareInfo hardware;
+    hardware.logical_cpu_count = 8U;
+    hardware.storage_class = "ssd";
+    const auto result_json = masterai::experiment_result_json(
+        report, evaluation_metrics, hardware, 1234ULL,
+        {"checkpoint-1", "checkpoint-2"}, "trained ok", "trained-model-1");
+    require(result_json.find("\"trainingMetrics\":") != std::string::npos &&
+                result_json.find("\"validationMetrics\":") != std::string::npos &&
+                result_json.find("\"evaluationMetrics\":") != std::string::npos &&
+                result_json.find("\"runtimeMilliseconds\":1234") !=
+                    std::string::npos &&
+                result_json.find("checkpoint-1") != std::string::npos &&
+                result_json.find("\"trainedModelId\":\"trained-model-1\"") !=
+                    std::string::npos,
+            "experiment_result_json must report distinct training/"
+            "validation/evaluation metrics plus real hardware/runtime/"
+            "checkpoint/artifact fields");
+
+    masterai::ExperimentResultStore results(records);
+    results.put("experiment-with-result", result_json);
+    const auto stored = results.find("experiment-with-result");
+    require(stored.has_value() && *stored == result_json,
+            "ExperimentResultStore did not round-trip a stored result");
+    require(results.remove("experiment-with-result") &&
+                !results.find("experiment-with-result"),
+            "ExperimentResultStore did not remove a stored result");
+    require(!results.remove("experiment-with-result"),
+            "ExperimentResultStore::remove() must no-op for an "
+            "already-removed id, not throw");
+
+    // Phase 80: comparison -- a strong and a weak experiment, both with a
+    // real stored result, must report the strong one winning with no
+    // regression, and the same pair reversed must flip the verdict.
+    masterai::ExperimentStore compare_experiments(records);
+    const auto strong_experiment = compare_experiments.create(
+        "administrator-1", "project-1", "model-1", "dataset-1",
+        "strong-run", "");
+    const auto weak_experiment = compare_experiments.create(
+        "administrator-1", "project-1", "model-1", "dataset-1", "weak-run",
+        "");
+    masterai::TrainedTabularModel weak_model;
+    std::string flipped_csv = "x1,x2,label\n";
+    for (int index = 0; index < 20; ++index) {
+        const std::string low_row = std::to_string(0.1 * index) + "," +
+                                    std::to_string(1.0 + 0.05 * index);
+        const std::string high_row = std::to_string(4.0 + 0.1 * index) + "," +
+                                     std::to_string(3.0 + 0.05 * index);
+        flipped_csv += low_row + ",high\n" + high_row + ",low\n";
+    }
+    const auto flipped_data = masterai::parse_tabular_csv(flipped_csv, "label");
+    const auto weak_report =
+        masterai::train_tabular_model(flipped_data, options, weak_model);
+    const auto weak_metrics =
+        masterai::evaluate_tabular_model(weak_model, data);
+    require(evaluation_metrics.macro_f1 > weak_metrics.macro_f1,
+            "the correctly trained model must outscore the label-flipped "
+            "one, or the comparison test proves nothing");
+    masterai::ExperimentResultStore compare_results(records);
+    compare_results.put(
+        strong_experiment.id,
+        masterai::experiment_result_json(report, evaluation_metrics,
+                                         hardware, 1000ULL, {}, "", ""));
+    compare_results.put(
+        weak_experiment.id,
+        masterai::experiment_result_json(weak_report, weak_metrics, hardware,
+                                         2000ULL, {}, "", ""));
+    const auto find_experiment =
+        [&compare_experiments](const std::string& id) {
+            return compare_experiments.find(id);
+        };
+    const auto find_result = [&compare_results](const std::string& id) {
+        return compare_results.find(id);
+    };
+    const auto comparison_json = masterai::experiments_comparison_json(
+        {strong_experiment.id, weak_experiment.id}, find_experiment,
+        find_result);
+    require(comparison_json.find("\"regression\":true") != std::string::npos,
+            "comparing a strong baseline against a weaker candidate must "
+            "flag a regression");
+    const auto reversed_comparison_json = masterai::experiments_comparison_json(
+        {weak_experiment.id, strong_experiment.id}, find_experiment,
+        find_result);
+    require(reversed_comparison_json.find("\"regression\":false") !=
+                std::string::npos,
+            "swapping baseline and candidate must flip the regression "
+            "verdict");
+    bool rejected_single_id = false;
+    try {
+        masterai::experiments_comparison_json({strong_experiment.id},
+                                              find_experiment, find_result);
+    } catch (const std::invalid_argument&) {
+        rejected_single_id = true;
+    }
+    require(rejected_single_id,
+            "experiments_comparison_json must reject fewer than two ids");
+    bool rejected_unknown_id = false;
+    try {
+        masterai::experiments_comparison_json(
+            {strong_experiment.id, "nonexistent-experiment"}, find_experiment,
+            find_result);
+    } catch (const std::invalid_argument&) {
+        rejected_unknown_id = true;
+    }
+    require(rejected_unknown_id,
+            "experiments_comparison_json must reject an unknown experiment "
+            "id rather than silently skipping it");
 }
 
 void test_machine_learning_fine_tuning_lifecycle() {
@@ -6107,6 +6304,156 @@ void test_machine_learning_instruction_training_lifecycle() {
                     std::string::npos,
             "instruction_example_json did not report the instruction "
             "example's own fields");
+
+    // Phase 81: the real content record.
+    masterai::InstructionExampleContentStore content_store(records);
+    require(!content_store.find("no-such-example").has_value(),
+            "find() must return nullopt for an example with no content yet");
+    masterai::InstructionExampleContent content;
+    content.system_instruction = "You are a careful C++ reviewer.";
+    content.user_instruction = "Review this diff for undefined behavior.";
+    content.context = "diff --git a/x.cpp b/x.cpp";
+    content.expected_response = "The pointer is dereferenced after free.";
+    content.rejected_response = "Looks fine to me.";
+    content.tool_calls_json = "[{\"name\":\"lint\"}]";
+    content.tool_results_json = "[{\"ok\":true}]";
+    content.required_output_format = "markdown";
+    content.difficulty = "medium";
+    content.safety_classification = "none";
+    content_store.put("example-1", content);
+    const auto stored_content = content_store.find("example-1");
+    require(stored_content.has_value() &&
+                stored_content->system_instruction ==
+                    content.system_instruction &&
+                stored_content->expected_response == content.expected_response &&
+                stored_content->required_output_format == "markdown",
+            "InstructionExampleContentStore did not round-trip a stored "
+            "content record");
+    masterai::InstructionExampleContentStore reloaded_content_store(records);
+    require(reloaded_content_store.find("example-1").has_value(),
+            "InstructionExampleContentStore did not restore a persisted "
+            "content record after reload");
+    require(content_store.remove("example-1") &&
+                !content_store.find("example-1") &&
+                !content_store.remove("example-1"),
+            "InstructionExampleContentStore::remove() must delete a known "
+            "content record and no-op afterwards");
+
+    const auto content_json = masterai::instruction_example_content_json(content);
+    require(content_json.find("\"requiredOutputFormat\":\"markdown\"") !=
+                    std::string::npos &&
+                content_json.find(
+                    "\"expectedResponse\":\"The pointer is dereferenced "
+                    "after free.\"") != std::string::npos,
+            "instruction_example_content_json did not report the content's "
+            "own fields");
+
+    // Phase 81: structured-output validation is real for JSON, a pass-
+    // through for everything else this codebase has no grammar for.
+    masterai::InstructionExampleContent json_content;
+    json_content.required_output_format = "json";
+    json_content.expected_response = "{\"label\":\"low\"}";
+    std::string error_detail;
+    require(masterai::validate_structured_output(json_content, error_detail) &&
+                error_detail.empty(),
+            "valid JSON expected_response must pass validation");
+    masterai::InstructionExampleContent malformed_json_content;
+    malformed_json_content.required_output_format = "json";
+    malformed_json_content.expected_response = "{not valid json";
+    require(!masterai::validate_structured_output(malformed_json_content,
+                                                   error_detail) &&
+                !error_detail.empty(),
+            "malformed JSON expected_response must fail validation with a "
+            "real detail message");
+    masterai::InstructionExampleContent markdown_content;
+    markdown_content.required_output_format = "markdown";
+    markdown_content.expected_response = "not json at all, and that's fine";
+    require(masterai::validate_structured_output(markdown_content, error_detail),
+            "a non-JSON required_output_format has no checkable grammar "
+            "here and must pass through rather than being rejected");
+
+    // Phase 81: duplicate detection is a real (if heuristic) token-overlap
+    // comparison, not a placeholder that always reports nothing.
+    masterai::InstructionExampleContent near_duplicate_a;
+    near_duplicate_a.system_instruction = "You are a careful C++ reviewer.";
+    near_duplicate_a.user_instruction = "Review this diff for bugs.";
+    masterai::InstructionExampleContent near_duplicate_b;
+    near_duplicate_b.system_instruction = "You are a careful C++ reviewer.";
+    near_duplicate_b.user_instruction = "Review this diff for bugs";
+    require(masterai::instruction_examples_are_near_duplicate(
+                near_duplicate_a, near_duplicate_b),
+            "two instructions differing only by trailing punctuation must "
+            "be flagged near-duplicate");
+    masterai::InstructionExampleContent unrelated;
+    unrelated.system_instruction = "You are a helpful travel agent.";
+    unrelated.user_instruction = "Suggest a weekend trip to Kyoto.";
+    require(!masterai::instruction_examples_are_near_duplicate(
+                near_duplicate_a, unrelated),
+            "two unrelated instructions must not be flagged near-duplicate");
+
+    const auto example_a = examples.create("administrator-1", "dataset-2",
+                                            "dup-a", "", "");
+    const auto example_b = examples.create("administrator-1", "dataset-2",
+                                            "dup-b", "", "");
+    const auto example_c = examples.create("administrator-1", "dataset-2",
+                                            "dup-c", "", "");
+    content_store.put(example_a.id, near_duplicate_a);
+    content_store.put(example_b.id, near_duplicate_b);
+    content_store.put(example_c.id, unrelated);
+    const auto find_content = [&content_store](const std::string& id) {
+        return content_store.find(id);
+    };
+    const auto duplicate_pairs = masterai::detect_duplicate_instruction_examples(
+        {example_a, example_b, example_c}, find_content);
+    require(duplicate_pairs.size() == 1U &&
+                duplicate_pairs.front().first == example_a.id &&
+                duplicate_pairs.front().second == example_b.id,
+            "detect_duplicate_instruction_examples must flag exactly the "
+            "near-duplicate pair and skip the unrelated example");
+
+    // Phase 81: contradiction detection -- same instruction, disagreeing
+    // output format, and a direct expected/rejected-response collision.
+    masterai::InstructionExampleContent format_a = near_duplicate_a;
+    format_a.required_output_format = "json";
+    masterai::InstructionExampleContent format_b = near_duplicate_b;
+    format_b.required_output_format = "markdown";
+    const auto example_d = examples.create("administrator-1", "dataset-3",
+                                           "format-a", "", "");
+    const auto example_e = examples.create("administrator-1", "dataset-3",
+                                           "format-b", "", "");
+    content_store.put(example_d.id, format_a);
+    content_store.put(example_e.id, format_b);
+    const auto format_contradictions =
+        masterai::detect_contradictory_instruction_examples(
+            {example_d, example_e}, find_content);
+    require(format_contradictions.size() == 1U,
+            "detect_contradictory_instruction_examples must flag two "
+            "near-duplicate instructions that disagree on required output "
+            "format");
+
+    masterai::InstructionExampleContent expected_content;
+    expected_content.expected_response = "The answer is 42.";
+    masterai::InstructionExampleContent rejected_content;
+    rejected_content.rejected_response = "The answer is 42.";
+    const auto example_f = examples.create("administrator-1", "dataset-4",
+                                           "expects-42", "", "");
+    const auto example_g = examples.create("administrator-1", "dataset-4",
+                                           "rejects-42", "", "");
+    content_store.put(example_f.id, expected_content);
+    content_store.put(example_g.id, rejected_content);
+    const auto direct_contradictions =
+        masterai::detect_contradictory_instruction_examples(
+            {example_f, example_g}, find_content);
+    require(direct_contradictions.size() == 1U,
+            "detect_contradictory_instruction_examples must flag one "
+            "example's expected_response matching another's "
+            "rejected_response");
+    require(masterai::detect_contradictory_instruction_examples(
+                {example_a, example_c}, find_content)
+                .empty(),
+            "detect_contradictory_instruction_examples must not flag "
+            "unrelated examples with no format disagreement or direct "
+            "response collision");
 }
 
 // Phase 48: docs/PLAN.md "Machine Learning Abilities" section 20 (Synthetic
@@ -6632,9 +6979,25 @@ void test_machine_learning_checkpoint_lifecycle() {
                 checkpoint.capture_reason == "best_metric" &&
                 checkpoint.status ==
                     masterai::TrainingCheckpointStatus::active &&
-                checkpoint.owner_id == "administrator-1",
+                checkpoint.owner_id == "administrator-1" &&
+                checkpoint.epoch == 0U && !checkpoint.has_snapshot,
             "a newly created checkpoint must start active with its owner "
-            "recorded");
+            "recorded, and a manually-created checkpoint (no epoch/"
+            "has_snapshot arguments given) must default to epoch 0 with no "
+            "snapshot");
+
+    // Phase 79: a real captured checkpoint (the shape execute_training_job/
+    // execute_fine_tuning_job now create) carries a real epoch number and
+    // marks itself as having a weight snapshot attached.
+    const auto captured = checkpoints.create(
+        "administrator-1", "training-job-1", "epoch-50-real", "",
+        "epoch 50, training loss 0.1234", 50U, true);
+    require(captured.epoch == 50U && captured.has_snapshot,
+            "create() did not store the real epoch/has_snapshot arguments "
+            "for a genuinely captured checkpoint");
+    require(checkpoints.remove(captured.id),
+            "remove() rejected the just-created captured checkpoint");
+
     require(checkpoints.list().size() == 1U,
             "the created checkpoint was not visible in list()");
 
@@ -6691,9 +7054,100 @@ void test_machine_learning_checkpoint_lifecycle() {
                 json.find("\"trainingJobId\":\"training-job-1\"") !=
                     std::string::npos &&
                 json.find("\"captureReason\":\"best_metric\"") !=
-                    std::string::npos,
+                    std::string::npos &&
+                json.find("\"epoch\":0") != std::string::npos &&
+                json.find("\"hasSnapshot\":false") != std::string::npos,
             "training_checkpoint_json did not report the checkpoint's own "
             "fields");
+}
+
+// Phase 79: docs/PLAN.md "Machine Learning Abilities" section 33
+// (Checkpoint Management) real weight capture and resume -- closes the
+// "step/epoch/hash/resume record a real training executor will attach" gap
+// Phase 54's own class comment named. Drives the real mechanism end to end
+// without any server.cpp route plumbing: train once with an on_epoch hook
+// that snapshots the model exactly the way execute_training_job now does,
+// persist that snapshot through CheckpointModelStore, then resume training
+// from it via warm_start and confirm the run genuinely continues (loss
+// starts low, not back at a fresh model's initial loss) rather than
+// silently restarting from zero-initialized weights.
+void test_machine_learning_checkpoint_real_capture_and_resume() {
+    masterai::TabularDataset data;
+    data.feature_names = {"x"};
+    data.target_name = "y";
+    data.classification = false;
+    // y = 2x, a trivial deterministic linear relationship a handful of
+    // gradient-descent epochs can only partially fit -- enough headroom
+    // for a resumed run's loss to measurably improve further.
+    for (int i = 1; i <= 20; ++i) {
+        data.features.push_back({static_cast<double>(i)});
+        data.targets.push_back(static_cast<double>(2 * i));
+    }
+
+    TemporaryDirectory temporary;
+    masterai::RecordStore records(temporary.path() / "database");
+    records.open();
+    masterai::TrainingCheckpointStore checkpoints(records);
+    masterai::CheckpointModelStore checkpoint_models(records);
+
+    masterai::TabularTrainingOptions first_options;
+    first_options.epochs = 10U;
+    first_options.learning_rate = 0.01;
+    first_options.test_fraction = 0.0;
+    masterai::TrainedTabularModel first_model;
+    std::string captured_checkpoint_id;
+    const auto first_report = masterai::train_tabular_model(
+        data, first_options, first_model, nullptr,
+        [&](const std::uint32_t epoch, const double loss,
+            const masterai::TrainedTabularModel& live_model) {
+            if (epoch + 1U == first_options.epochs) {
+                const auto checkpoint = checkpoints.create(
+                    "administrator-1", "training-job-1",
+                    "epoch-10-snapshot", "", "epoch 10", epoch + 1U, true);
+                captured_checkpoint_id = checkpoint.id;
+                masterai::TrainedTabularModel snapshot = live_model;
+                snapshot.model_id = checkpoint.id;
+                snapshot.training_job_id = "training-job-1";
+                checkpoint_models.put(snapshot);
+                (void)loss;
+            }
+        });
+    require(!captured_checkpoint_id.empty() &&
+                first_report.loss_history.size() == 10U,
+            "the first run did not capture a checkpoint at its final epoch");
+
+    const auto reloaded_checkpoint = checkpoints.find(captured_checkpoint_id);
+    require(reloaded_checkpoint.has_value() && reloaded_checkpoint->epoch == 10U &&
+                reloaded_checkpoint->has_snapshot,
+            "the captured checkpoint's real epoch/has_snapshot fields were "
+            "not persisted");
+
+    const auto snapshot = checkpoint_models.find(captured_checkpoint_id);
+    require(snapshot.has_value() && snapshot->weights == first_model.weights,
+            "CheckpointModelStore did not return the exact weights captured "
+            "mid-training");
+
+    // Resume: continue gradient descent from the captured snapshot for ten
+    // more epochs. A cold run over the same 10 epochs from zero-initialized
+    // weights is the honest baseline for "did this genuinely continue" --
+    // the resumed run must finish with strictly lower loss than that cold
+    // run, since it starts from ten epochs' worth of already-learned
+    // progress instead of from scratch.
+    masterai::TabularTrainingOptions resume_options;
+    resume_options.epochs = 10U;
+    resume_options.learning_rate = 0.01;
+    resume_options.test_fraction = 0.0;
+    masterai::TrainedTabularModel resumed_model;
+    const auto resumed_report = masterai::train_tabular_model(
+        data, resume_options, resumed_model, &(*snapshot));
+
+    masterai::TrainedTabularModel cold_model;
+    const auto cold_report =
+        masterai::train_tabular_model(data, resume_options, cold_model);
+
+    require(resumed_report.final_loss < cold_report.final_loss,
+            "resuming from a real checkpoint snapshot did not measurably "
+            "outperform training the same number of epochs from scratch");
 }
 
 // Phase 55: docs/PLAN.md "Machine Learning Abilities" section 34
@@ -7704,6 +8158,8 @@ int main() {
             test_machine_learning_model_optimization_lifecycle);
         run("Machine Learning checkpoint lifecycle",
             test_machine_learning_checkpoint_lifecycle);
+        run("Machine Learning checkpoint real capture and resume",
+            test_machine_learning_checkpoint_real_capture_and_resume);
         run("Machine Learning deployment lifecycle",
             test_machine_learning_deployment_lifecycle);
         run("Machine Learning automation pipeline progress lifecycle",

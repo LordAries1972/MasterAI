@@ -534,14 +534,26 @@ Current phase status:
   measures as Tier R (RAM-backed) storage for anything but
   `reconstructable_scratch` -- the same hard prohibition every other Phase
   31 entry point enforces. Exposed administrator-only via `POST
-  /api/v1/system/storage/migrate`. Honest scope note: this codebase has no
-  central manifest mapping a durable path back to the record that
-  references it (a Model Registry entry, an index generation, etc.), so the
-  endpoint performs the verified file relocation itself and reports
-  `callerMustUpdateReferencingRecord: true` rather than silently rewriting
-  record stores it does not own -- closing the Priority B gap at the file-
-  operation level this note used to describe as missing entirely. Priority
-  A/B.
+  /api/v1/system/storage/migrate`. **The central migration manifest is now
+  also implemented (2026-08-13, this pass)**, closing the last Priority B
+  gap: `DurableFileManifest` (`src/masterai.hpp`/`src/scratch_storage.cpp`)
+  is a durable, `RecordStore`-journaled log of every `migrate_durable_file()`
+  move (source path, destination path, SHA-256, data class, timestamp),
+  chained so a file migrated more than once still resolves from any of its
+  former paths. `migrate_durable_file()` now records every move into it,
+  installed process-wide via `install_global_durable_file_manifest()` so
+  `resolve_durable_path()` transparently finds the current location for any
+  caller still holding a pre-migration path -- wired into the one concrete
+  consumer the plan names: `LlamaCppAdapter::build_launch_spec()`
+  (`src/models.cpp`) resolves a Model Registry entry's model file through it
+  before launch (falling back to the unmigrated path's existing directory-
+  containment check when nothing was ever migrated, and to the re-verified
+  SHA-256 digest -- independent of location -- as the real security
+  property once it has been), and `RunnerSupervisor::load()`'s pre-touch
+  path (`src/inference.cpp`) does the same. Administrator-visible via `GET
+  /api/v1/system/storage/manifest`. The migrate endpoint's response field
+  changed from `callerMustUpdateReferencingRecord: true` to
+  `recordedInManifest: true` to match. Priority A/B, both now closed.
 - Phase 32: Implemented, real dual-model launch path added, evidence-pending
   (2026-08-13) — `check_draft_target_compatibility()`, `SpeculativeDecodingStats`
   (rolling acceptance-rate tracking), and `decide_speculative_decoding_for_request()`
@@ -575,21 +587,30 @@ Current phase status:
   draft model's weights too, so the combined-memory-fit check is a real
   `MemoryBudgetManager` reservation, not a second parallel heuristic. New
   administrator-only `GET`/`POST /api/v1/performance/speculative-pairs`
-  routes record/list the per-pair evidence. Honest limitation carried
-  forward from this pass: `ensure_model_loaded()` evaluates
-  `sampling_is_greedy_or_deterministic` once at load time using this
-  codebase's own real sampling presets (`apply_sampling_preset()`'s lowest
-  preset is temperature 0.15, never exactly 0/greedy) rather than a
-  specific upcoming request's settings, since a chat runner is loaded once
-  per model switch, not re-launched per message -- this is the accurate
-  value for every live chat request today, not a placeholder, so
-  speculative decoding will not actually activate for live chat traffic
-  under this codebase's current sampling presets even once admitted, until
-  a future pass either exposes a deterministic-sampling deployment option
-  or threads real per-request sampling context through model loading.
-  Priority C. Exit criterion status: still explicitly unvalidated, not
-  claimed -- "generation throughput improves on representative prompts"
-  has a real execution path now but no measured run against it yet.
+  routes record/list the per-pair evidence. **The sampling-compatibility
+  gate is corrected (2026-08-13, this pass)**: the field previously named
+  `sampling_is_greedy_or_deterministic` and hard-failed every live chat
+  request (since this codebase's lowest sampling preset is temperature
+  0.15, never exactly greedy) has been replaced with
+  `sampling_supported_by_speculative_verification`. llama.cpp's own
+  speculative-decoding verification is the general rejection-sampling
+  algorithm (Leviathan et al.), mathematically valid for any temperature/
+  top-p/top-k/repeat-penalty sampling -- it does not require greedy
+  decoding, and this control plane's `GenerationOptions` (`masterai.hpp`)
+  exposes no grammar/logit-bias/json-schema field that could make a
+  request actually incompatible with it. `ensure_model_loaded()` now sets
+  this field `true`, so speculative decoding activates for live chat
+  traffic under this codebase's real sampling presets once an
+  administrator has admitted the feature and recorded a qualifying
+  measured acceptance rate for the resolved draft/target pair -- the
+  "current default chat sampling presets ... mean the gate will not
+  currently let it activate for live chat traffic" limitation this note
+  previously carried is closed. Priority C. Exit criterion status: still
+  explicitly unvalidated on real hardware, not claimed -- "generation
+  throughput improves on representative prompts" has a real, now-reachable
+  execution path but no measured run against it yet; that measurement
+  requires an administrator to actually run a calibration/benchmark pass
+  on real hardware, which this control plane never does on its own.
 - Phase 33: Implemented (2026-08-13) — both halves. The local-only
   multi-runner orchestration half (2026-08-13, earlier pass):
   `LocalRunnerConfig`/`LocalRunnerPool` (`src/runner_pool.cpp`) generalize
@@ -643,15 +664,30 @@ Current phase status:
   worker protocol (`GET /worker/status`, `POST /worker/generate`,
   `POST /worker/embed`), never the administrator HTTP/API surface, and
   refuses any connection whose client certificate is not on its approved
-  digest allowlist. Honest scope note: `IntranetWorkerPool` is not yet
-  wired into the live chat-generation dispatch path
-  (`select_and_warm_pool_runner()` in `server.cpp`) the way
-  `LocalRunnerPool` is -- administration visibility, PKI issuance, and the
-  transport/verification layer are all real and independently usable
-  (e.g. `GET /api/v1/worker/pool`), but a chat request does not yet
-  automatically fail over onto a remote worker the way it already does
-  onto a local pool runner; this mirrors Phase 29's own documented scope
-  cut for wiring tier selection into the live chat pipeline.
+  digest allowlist. **Automatic remote-worker failover is now wired into
+  the live chat-generation dispatch path (2026-08-13, this pass)**, closing
+  the gap this note used to describe as the phase's one remaining scope
+  cut: `server.cpp`'s chat handler gained a `try_remote_worker_failover()`
+  helper, tried whenever the default runner (`inference->generate`) or a
+  selected local pool runner (`LocalRunnerPool::generate`) throws, applying
+  the identical `retry_is_semantically_safe()` rule the existing local-pool
+  retry already used -- only when nothing from the failed attempt has
+  reached the client yet, since persistence only happens after `generate()`
+  returns successfully. It selects a healthy worker via
+  `IntranetWorkerPool::select_worker()` (already-verified model-digest
+  match, project authorization, capability, priority) and dispatches
+  through `IntranetWorkerPool::generate()`; on the local-pool path, remote
+  failover is tried before the existing default-local-runner fallback, not
+  instead of it, so a request still degrades to the same safe local retry
+  when no remote worker is available or the remote attempt itself fails.
+  The runner identity recorded on the query trace becomes
+  `"intranet-worker:<id>"` when a remote worker actually served the
+  request, keeping `QueryTrace::runner_id` honest about who generated the
+  reply. Honest scope note carried forward: this failover applies to the
+  chat-generation dispatch path specifically (the concrete case the
+  original gap named); the separate RAG one-shot generation path
+  (`execute_rag_generation()`) and inference-endpoint dispatch still use
+  only the default local runner.
 - Phase 34: Implemented at a scoped-down level (2026-08-13) — `AdaptiveController`
   (`src/adaptive_controller.cpp`) extends Phase 19 `CalibrationService`'s
   advisory profiles into a live, bounded controller. Every stability
@@ -683,25 +719,35 @@ Current phase status:
   already established (e.g. Phase 28's topology-aware thread-pinning
   primitive). Administrator-only routes: `GET /api/v1/performance/adaptive`,
   `POST .../mode`, `POST .../ceilings`, `POST .../rollback`.
-- Phase 35: Implemented at a scoped-down level (2026-08-13) — one
-  consolidated "Performance" administration page (`/app/performance`,
-  `src/web_ui.cpp`) rather than the plan's full thirteen-route
-  enumeration, condensed to Overview, Local Runner Pool, Intranet Worker
-  Pool, and the Adaptive Controller (mode selection, live
-  applied/recommended adjustments, rollback). Every figure it renders comes
-  directly from the real routes Phase 13/19/31/33/34 already expose (`GET
-  /api/v1/performance/adaptive`, `GET /api/v1/runner/pool`, `GET
-  /api/v1/worker/pool`) -- nothing on this page is a separately maintained
-  display-only value, and there is no single opaque "turbo" switch (mode
-  selection is one of eight named, disclosed modes, and every applied/
-  recommended adjustment is listed individually with its reason and
-  confidence). Deferred to a later pass: the plan's remaining named pages
-  (Live Requests, Models and Runners, Memory, Caches, Retrieval, Storage,
-  Worker Pools as a page distinct from the Overview's summary, Scheduling,
-  Calibration, Advanced Optimizations, Benchmarks, Regression History,
-  Recommendations, the Query Traces page, the Runner Configuration page,
-  and the Model Comparison page) -- this pass's honest priority was a real,
-  end-to-end working page over a wider set of placeholder ones.
+- Phase 35: Implemented at a scoped-down level (2026-08-13; extended
+  2026-08-13, this pass) — one consolidated "Performance" administration
+  page (`/app/performance`, `src/web_ui.cpp`) rather than the plan's full
+  thirteen-route enumeration, condensed to Overview/Adaptive Controller,
+  Local Runner Pool, Intranet Worker Pool, and now (this pass) real Memory,
+  Caches, Storage (including the Phase 31 tier-migration manifest),
+  Scheduling, Advanced Optimizations, and Calibration sections. Every
+  figure it renders comes directly from the real routes those phases
+  already expose (`GET /api/v1/performance/adaptive`, `GET
+  /api/v1/runner/pool`, `GET /api/v1/worker/pool`, `GET
+  /api/v1/system/memory`, `GET /api/v1/system/cache`, `GET
+  /api/v1/system/storage`, `GET /api/v1/system/scratch`, `GET
+  /api/v1/system/storage/manifest`, `GET /api/v1/system/scheduler`, `GET
+  /api/v1/performance/advanced-optimizations`, `GET
+  /api/v1/performance/recommendations`) -- nothing on this page is a
+  separately maintained display-only value, and there is no single opaque
+  "turbo" switch (mode selection is one of eight named, disclosed modes,
+  and every applied/recommended adjustment is listed individually with its
+  reason and confidence). Cache trim/clear and scratch-cleanup are wired as
+  real buttons against their existing administrator-only POST routes.
+  Deferred to a later pass: Live Requests and Models and Runners as pages
+  distinct from the Overview's own summary, Worker Pools as a page distinct
+  from this consolidated section, Benchmarks, Regression History, the
+  Query Traces page, the Runner Configuration page, and the Model
+  Comparison page -- none of those has a dedicated telemetry route to
+  render yet (Retrieval likewise: `RetrievalPlanner` exposes no status/
+  stats accessor in this codebase today), so this stays honest about what
+  is and is not real rather than fabricating a page with nothing behind
+  it.
 - Phase 36: Planned — full performance benchmark matrix, regression
   thresholds per optimization, and automated build-to-build comparison
   gating releases.
@@ -1858,6 +1904,173 @@ Current phase status:
   class comment: this counts session-level (whole-prompt-prefix) reuse
   decisions, not a finer-grained per-token cache-hit counter, since
   llama.cpp's own runner does not expose one to this adapter.
+- Phase 79: Implemented (2026-08-17) — real checkpoint weight capture and a
+  resume-training executor for Checkpoint Management (section 33, Phase
+  54), closing the "step/epoch/hash/resume record a real training executor
+  will attach" gap Phase 54's own class comment named and that no phase
+  through 78 ever revisited. `train_tabular_model`'s `on_epoch` callback
+  (`src/masterai.hpp`/`src/ml_engine.cpp`) is widened with a third
+  argument, the in-flight `TrainedTabularModel` itself — its weights are
+  already updated and its feature/target/class schema already fixed for
+  the whole run at that point, so it is exactly the state a real
+  checkpoint snapshot needs. `execute_training_job` and
+  `execute_fine_tuning_job` (`src/server.cpp`) now compute the checkpoint
+  epoch stride up front (capped at ten checkpoints, same cap the previous
+  post-hoc logic used) and, on `on_epoch`, create a `TrainingCheckpoint`
+  carrying its real `epoch` and `has_snapshot=true` (both new fields on
+  the struct) and persist the genuine weights through a new
+  `CheckpointModelStore` (`src/masterai.hpp`/`src/ml_engine.cpp`), keyed
+  by checkpoint id with the same flat pack/unpack shape `TrainedModelStore`
+  already uses — replacing the previous behavior, which only wrote the
+  epoch's loss into a free-text `capture_reason` string after training had
+  already finished, with nothing to resume from. A manually-created
+  checkpoint (the existing `POST /api/v1/ml/checkpoints` free-form path)
+  still defaults to `epoch=0`/`has_snapshot=false`, since there is no
+  weight state to attach to an administrator's own note. The new
+  `execute_checkpoint_resume` executor continues gradient descent from a
+  captured snapshot via `train_tabular_model`'s existing `warm_start`
+  parameter — the exact mechanism Phase 70's fine-tuning executor already
+  uses to adapt a base model — re-parsing the owning training job's
+  dataset CSV and registering the result as a new Model Registry entry in
+  the `evaluation` state (the checkpoint and the model it was captured
+  from are left untouched, mirroring Phase 70's own base-model-untouched
+  pattern). `POST /api/v1/ml/checkpoints/{id}/resume` (gated on
+  `ml.training.manage`, since it performs a real training operation)
+  exposes it, mirroring `POST .../training-jobs/{id}/run`'s request/
+  response shape and returning `409 ml_checkpoint_has_no_snapshot` for a
+  manually-created checkpoint with nothing to resume from. The web UI's
+  Checkpoint Management page gained "Epoch" and "Snapshot" columns and a
+  "Resume training" action next to each snapshot-bearing checkpoint,
+  showing the same real method/loss/metrics summary the training-jobs
+  "Train now" action shows. New `test_machine_learning_checkpoint_real_
+  capture_and_resume` (`test/tests.cpp`) drives the real path end to end
+  without any route plumbing: captures a snapshot mid-training via the
+  same `on_epoch` mechanism the executors use, reloads it through
+  `CheckpointModelStore`, resumes training from it, and asserts the
+  resumed run's final loss is strictly lower than an equivalent cold run
+  over the same epoch count from zero-initialized weights — the concrete,
+  measured evidence that resuming genuinely continues a previous run
+  rather than silently restarting it.
+- Phase 80: Fully implemented (2026-08-17) — Experiment Tracking (section
+  25 below) becomes a real executor phase like Phase 56/57/70 before it,
+  closing the "version/hyperparameter/metric/artifact/comparison fields
+  deferred to the phase that actually executes and records a run" gap
+  Phase 44's own class comment named. `Experiment` (`src/masterai.hpp`)
+  gained every section-25 definition-time field (`hyperparameters_json`,
+  `random_seed`, `source_code_version`, `configuration_version`,
+  `container_version`, `tags`, `notes`, `started_at_epoch_seconds`,
+  `completed_at_epoch_seconds`, `failure_reason`), plus a fix to
+  `ExperimentStore::restore()`, which previously never restored
+  `created_at`/`updated_at_epoch_seconds` from the persisted record at all
+  — both now round-trip correctly. `POST /api/v1/ml/experiments/{id}/run`
+  (`ml.experiments.manage`) is the real executor
+  (`execute_experiment_run`, `src/server.cpp`): trains the experiment's
+  dataset content via `train_tabular_model` exactly like
+  `execute_training_job` (same stride-capped-at-ten checkpoint capture
+  through `TrainingCheckpointStore`/`CheckpointModelStore`, same trained-
+  model registration into `ModelRegistryState::evaluation`), then runs an
+  *independent* `evaluate_tabular_model` pass against the full dataset for
+  "evaluation metrics" distinct from the held-out "validation metrics"
+  `train_tabular_model` already computed — three genuinely different
+  numbers for section 25's three separate metric fields, plus real probed
+  hardware (`probe_hardware`) and measured wall-clock runtime, bundled by
+  the new `experiment_result_json()` (`src/ml_engine.cpp`) and stored in a
+  new `ExperimentResultStore` (the same opaque-JSON-blob pattern
+  `EvaluationResultStore`/`ComparisonResultStore` already use), recalled
+  via `GET .../result` and cascade-removed on `.../delete`.
+  `ExperimentStore` gained `mark_started()`/`mark_completed()` (real
+  start/completion timestamps and failure reason, distinct from
+  `set_status()`'s generic `updated_at` touch) and `update_metadata()` for
+  post-creation edits to notes/tags/hyperparameters/version strings. New
+  `POST /api/v1/ml/experiments/compare` (`ml.experiments.view`) builds a
+  genuine side-by-side diff of two or more already-run experiments
+  (`experiments_comparison_json()`, `src/ml_engine.cpp`): parameter/
+  dataset/seed/version differences, the same primary-metric choice
+  `tabular_model_comparison_json` already uses (macro F1 for
+  classification, MSE for regression), a metric delta, a regression flag,
+  runtime delta, and a hardware-differs flag, relative to the first id as
+  baseline — safety differences are reported as `null` with an explicit
+  "no safety-scoring executor exists yet" note rather than fabricated,
+  the same honesty convention `ModelComparison`'s class comment already
+  sets. The web UI's Experiment Tracking page gained the new definition-
+  time fields on its create form, a "Run now" action showing the real
+  training/validation/evaluation metrics (mirroring Training Jobs' "Train
+  now" panel), and a "Compare experiments" control. Extended
+  `test_machine_learning_experiment_tracking_lifecycle`
+  (`test/tests.cpp`) covers every new field's create/reload round trip
+  (including the created/updated-at reload fix),
+  `mark_started`/`mark_completed`/`update_metadata`, a real
+  `experiment_result_json` built from an actually-trained model's genuine
+  metrics, `ExperimentResultStore` round-tripping, and
+  `experiments_comparison_json` correctly flagging a regression when a
+  weaker (label-flipped-data) model is compared against a stronger one,
+  flipping the verdict when baseline/candidate swap, and rejecting fewer
+  than two ids or an unknown id.
+- Phase 81: Fully implemented (2026-08-17) — Prompt and Instruction
+  Training (section 19 below) gains the real content record and admin
+  operations Phase 47's class comment deferred: "generate draft examples,"
+  "test instructions against multiple models," "detect contradictory
+  instructions," "detect duplicated examples," and "validate structured
+  outputs." `InstructionExampleStore` itself is unchanged (still the
+  identity/dataset/subject/lifecycle record); a new
+  `InstructionExampleContentStore` (`src/masterai.hpp`/`src/ml.cpp`) holds
+  the full section-19 record body (system instruction, user instruction,
+  context, expected response, rejected response, tool calls, tool
+  results, required output format, difficulty, safety classification)
+  keyed by example id, the same identity/content split
+  `DatasetStore`/`DatasetContentStore` already use. `POST
+  /api/v1/ml/instruction-examples/{id}/content` (`ml.instructions.manage`)
+  upserts it and `GET .../content` (`ml.instructions.view`) reads it back.
+  `POST .../generate` composes a prompt from the given system/user
+  instruction and context and calls `Server::execute_rag_generation`
+  (Phase 76's RAG-answer helper, reused as-is -- it already handles model
+  loading, chat templating, and scheduler admission) to produce a real
+  draft example with genuine generated text as `expected_response`,
+  starting `draft` like every manually-created example. `POST
+  .../{id}/test` loads an example's stored content and loops
+  `execute_rag_generation` once per administrator-selected model id,
+  returning each model's real response and elapsed time -- a fan-out
+  probe, not new persisted content. `POST .../import` bulk-creates
+  examples (with optional content) from one request body, reporting each
+  entry's own success/failure rather than an all-or-nothing result. `POST
+  .../{id}/validate` runs the new `validate_structured_output()`
+  (`src/masterai.hpp`/`src/ml.cpp`): when `required_output_format` names
+  JSON, it real-parses `expected_response` via the existing `parse_json`
+  and reports the parser's own error on failure; any other format has no
+  checkable grammar in this codebase and passes through, noted honestly
+  rather than fabricating a verdict. `POST .../duplicates` and `POST
+  .../contradictions` (body-based, matching
+  `/api/v1/ml/experiments/compare`'s own precedent -- this codebase has no
+  query-string parsing utility anywhere else) run the new
+  `detect_duplicate_instruction_examples()`/
+  `detect_contradictory_instruction_examples()`: a documented heuristic
+  (Jaccard token overlap on normalized instruction text, threshold 0.85)
+  flags near-duplicate pairs, and pairs that are near-duplicate on
+  instruction text but disagree on `required_output_format`, or where one
+  example's `expected_response` equals another's `rejected_response`, are
+  flagged as contradictions -- explicitly not a claim of semantic
+  understanding, the same honesty convention the rest of this module
+  uses. Section 19's "generated training examples must require approval
+  before entering an approved dataset" is now concretely enforced: the
+  `.../status` handler refuses a transition to `approved`
+  (`400 ml_instruction_example_not_reviewable`) unless a content record
+  already exists. `.../delete` cascades to remove the content record.
+  The web UI's Instruction Training page gained a content edit form (all
+  ten fields, pre-filled by a new "Configure" action per row), a
+  "Generate draft" form, a "Test against models" form, "Check
+  duplicates"/"Check contradictions" controls, and a "Validate" action
+  per row. Extended `test_machine_learning_instruction_training_lifecycle`
+  (`test/tests.cpp`) covers `InstructionExampleContentStore` round-
+  tripping and reload, `validate_structured_output` on valid/malformed
+  JSON and a pass-through format, `instruction_examples_are_near_duplicate`
+  and `detect_duplicate_instruction_examples` correctly flagging a near-
+  identical pair and skipping an unrelated one, and
+  `detect_contradictory_instruction_examples` flagging a disagreeing-
+  output-format pair and a direct expected/rejected-response collision
+  while leaving unrelated examples unflagged. `.../generate` and
+  `.../test`, like every other `execute_rag_generation`-dependent path in
+  this codebase, need a loaded model and are exercised the same way those
+  are (manual/integration testing), not a new inference stub.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -1874,40 +2087,50 @@ telemetry is also now wired into `CalibrationService` with real measured
 evidence (2026-08-13, see the Phase 19 status entry), closing that phase's
 last outstanding deliverable too. **Phase 31 storage tiering is implemented
 (2026-08-13)**, closing the Priority A/B `ScratchVolumeManager`/storage-aware
-placement gap; **its Priority B tier-migration workflow is also now
-implemented (2026-08-13, this pass)** — see its own status note for
-`migrate_durable_file()` and the honest scope limit that remains (no
-central manifest of which record references a migrated path). **Phase 33 is now fully implemented (2026-08-13)** -- both the earlier
-local multi-runner orchestration half and, this pass, the intranet/mTLS
-worker protocol half (private PKI, mutual TLS, model-digest verification,
-`WorkerListener`/`IntranetWorkerPool`); see its own status note for the
-honest scope note that remains (chat-generation dispatch does not yet
-automatically fail over onto a remote worker). **Phase 34 is now
-implemented at a scoped-down level (2026-08-13)** -- a real, bounded,
-hysteresis-guarded `AdaptiveController` with every stability control the
-plan requires, applying live to the one genuinely mutable target
+placement gap; **its Priority B tier-migration workflow, including the
+central migration manifest, is also now fully implemented (2026-08-13, this
+pass)** — see its own status note for `migrate_durable_file()`,
+`DurableFileManifest`, and `resolve_durable_path()`; both Priority B gaps
+(the file operation itself and the "no central manifest" follow-up) are now
+closed. **Phase 33 is now fully implemented (2026-08-13)** -- both the
+earlier local multi-runner orchestration half and, that same pass, the
+intranet/mTLS worker protocol half (private PKI, mutual TLS, model-digest
+verification, `WorkerListener`/`IntranetWorkerPool`); **automatic
+remote-worker failover on the live chat-generation dispatch path is also now
+wired in (2026-08-13, this pass)**, closing the one honest scope note that
+remained -- see its own status note for `try_remote_worker_failover()`.
+**Phase 34 is now implemented at a scoped-down level (2026-08-13)** -- a
+real, bounded, hysteresis-guarded `AdaptiveController` with every stability
+control the plan requires, applying live to the one genuinely mutable target
 (`MemoryBudgetManager::set_policy()`) and disclosing every other knob as a
 recommendation; see its own status note. **Phase 35 is now implemented at a
-scoped-down level (2026-08-13)** -- one consolidated, fully real
-Performance administration page rather than the plan's full route
-enumeration; see its own status note for exactly which named pages remain
-deferred. **Speculative decoding (Phase 32) now has a real dual-model
-launch path (2026-08-13)** -- `LlamaCppAdapter::build_launch_spec` emits
-llama.cpp's documented `--model-draft` flags, `select_speculative_draft_
-candidate()` picks a compatible draft from the verified registry, a new
-`SpeculativeDecodingPairEvidenceStore` holds administrator-submitted
-per-pair measured acceptance rates, and `server.cpp`'s
-`ensure_model_loaded()` wires all of it together behind the same
-`AdvancedOptimizationRegistry` evidence/admission gate `continuous_batching`
-already uses -- closing the "no dual-model launch path yet" gap the
-original pass named. The decision logic itself (compatibility checking,
-acceptance-rate tracking, per-request enable/disable) is unchanged. Still
-explicitly unvalidated: no real-hardware run has yet exercised the new
-launch path, and this codebase's own default chat sampling presets
-(lowest temperature 0.15, never exactly greedy) mean the per-request
-sampling-compatibility gate will not currently let it activate for live
-chat traffic even once admitted -- see its own status note for the exact
-remaining gap. Phase 36 remains Planned.
+scoped-down level (2026-08-13; extended 2026-08-13, this pass)** -- one
+consolidated, fully real Performance administration page, now covering
+Memory, Caches, Storage (including the Phase 31 migration manifest),
+Scheduling, Advanced Optimizations, and Calibration in addition to the
+original Overview/Adaptive Controller and runner-pool sections; see its own
+status note for exactly which named pages still have no telemetry route to
+render and therefore remain deferred. **Speculative decoding (Phase 32) now
+has a real dual-model launch path (2026-08-13)** -- `LlamaCppAdapter::
+build_launch_spec` emits llama.cpp's documented `--model-draft` flags,
+`select_speculative_draft_candidate()` picks a compatible draft from the
+verified registry, a new `SpeculativeDecodingPairEvidenceStore` holds
+administrator-submitted per-pair measured acceptance rates, and
+`server.cpp`'s `ensure_model_loaded()` wires all of it together behind the
+same `AdvancedOptimizationRegistry` evidence/admission gate
+`continuous_batching` already uses -- closing the "no dual-model launch path
+yet" gap the original pass named. **The sampling-compatibility gate is now
+corrected (2026-08-13, this pass)**: `sampling_supported_by_speculative_
+verification` (renamed from the overly strict `sampling_is_greedy_or_
+deterministic`) correctly reflects that llama.cpp's rejection-sampling
+verification algorithm supports any temperature/top-p/top-k/repeat-penalty
+sampling, not only greedy decoding, so speculative decoding now activates
+for live chat traffic once admitted and evidenced, closing that gap. The
+decision logic itself (compatibility checking, acceptance-rate tracking,
+per-request enable/disable) is otherwise unchanged. Still explicitly
+unvalidated: no real-hardware run has yet exercised the new launch path --
+that measurement requires an administrator to actually run one, which this
+control plane never does on its own. Phase 36 remains Planned.
 
 Status policy:
 
@@ -5608,17 +5831,21 @@ Exit criteria:
 
 ### Phase 31 — Storage tiering, virtual drives, and scratch-volume management
 
-Status: Implemented (2026-08-13). Priority A/B — the `ScratchVolumeManager`
-and storage-aware placement recommendations (Priority A) are real, and
-(2026-08-13, this pass) tier *migration* tooling (relocating already-placed
-durable data between tiers after the fact, e.g. an administrator-initiated
-"move this model from Tier C to Tier A") is now also real:
-`migrate_durable_file()` (`src/scratch_storage.cpp`) plus `POST
+Status: Implemented (2026-08-13; manifest closure 2026-08-13, this pass).
+Priority A/B — the `ScratchVolumeManager` and storage-aware placement
+recommendations (Priority A) are real, and tier *migration* tooling
+(relocating already-placed durable data between tiers after the fact, e.g.
+an administrator-initiated "move this model from Tier C to Tier A") is also
+real: `migrate_durable_file()` (`src/scratch_storage.cpp`) plus `POST
 /api/v1/system/storage/migrate`, verified by a SHA-256 digest match before
 the atomic rename and enforcing the same hard RAM-tier prohibition every
-other entry point in this file does. See the deliverables note below for
-the honest scope limit (no central manifest of which record references a
-migrated path).
+other entry point in this file does. **The central migration manifest is
+now also real (this pass)**: `DurableFileManifest` records every migration
+in a durable, `RecordStore`-journaled log and `resolve_durable_path()`
+transparently follows it, wired into `LlamaCppAdapter::build_launch_spec()`
+and `RunnerSupervisor::load()`'s pre-touch path so a Model Registry entry's
+model file is found at its current location even after being migrated.
+Administrator-visible via `GET /api/v1/system/storage/manifest`.
 
 Purpose:
 
@@ -5710,20 +5937,26 @@ Exit criteria:
   scratch-to-durable path, and (2026-08-13, this pass)
   `migrate_durable_file()`'s SHA-256-verified stage-then-atomic-rename for
   the already-durable tier-to-tier path, exposed via `POST
-  /api/v1/system/storage/migrate`. Honest scope note: this codebase has no
-  central manifest mapping a durable path back to whichever record
-  references it, so the endpoint performs and verifies the file relocation
-  itself and reports `callerMustUpdateReferencingRecord: true` rather than
-  guessing at which Model Registry/index/etc. record to rewrite.
+  /api/v1/system/storage/migrate`. **(2026-08-13, this pass)** the same
+  call now also records the move in `DurableFileManifest`, so a Model
+  Registry entry or other record that referenced the pre-migration path is
+  never left silently stale: `resolve_durable_path()` transparently follows
+  the manifest to the file's current location.
 
 ### Phase 32 — Speculative decoding and draft-model acceleration
 
-Status: **Implemented at a scoped-down level, evidence-pending (2026-08-13)**
-— see the Phase 32 entry in the status summary above for the full
-breakdown. Priority C — the decision logic (compatibility checks,
-acceptance-rate tracking, per-request enable/disable) is real and tested,
-but deliberately not wired to any live generation call site: this codebase
-has no dual-model (draft+target concurrently resident) launch path yet.
+Status: **Implemented, evidence-pending (2026-08-13; sampling-gate correction
+2026-08-13, this pass)** — see the Phase 32 entry in the status summary
+above for the full breakdown. Priority C — the decision logic (compatibility
+checks, acceptance-rate tracking, per-request enable/disable) is real and
+tested, wired to a real dual-model (draft+target concurrently resident)
+launch path (`LlamaCppAdapter::build_launch_spec`'s `--model-draft` flags),
+and the sampling-compatibility gate now correctly reflects that llama.cpp's
+speculative verification supports this codebase's real (non-greedy) chat
+sampling presets, so the feature activates for live chat traffic once an
+administrator admits it and records a qualifying measured acceptance rate.
+Still explicitly unvalidated on real hardware -- no measured throughput run
+has exercised the launch path yet.
 
 Purpose:
 
@@ -5758,12 +5991,12 @@ Exit criteria:
 
 ### Phase 33 — Distributed local runners and multi-device orchestration
 
-Status: **Implemented (2026-08-13)** — both halves. The local multi-runner
-orchestration half (earlier pass) and the intranet/mTLS worker protocol
-half (this pass, private PKI/mutual TLS/model-digest verification) are both
-implemented; see the Phase 33 entry in the status summary above for the
-full breakdown, including the honest scope note that remote workers are
-not yet wired into the live chat-generation dispatch path. Priority C
+Status: **Fully implemented (2026-08-13; failover wiring 2026-08-13, this
+pass)** — both halves. The local multi-runner orchestration half (earlier
+pass), the intranet/mTLS worker protocol half (private PKI/mutual TLS/
+model-digest verification), and now automatic remote-worker failover on the
+live chat-generation dispatch path are all implemented; see the Phase 33
+entry in the status summary above for the full breakdown. Priority C
 overall — this phase stayed deliberately deferred behind the Priority A/B
 work above until the local-only slice was explicitly authorized and pulled
 forward, then the intranet-worker slice was separately authorized and
@@ -5899,10 +6132,13 @@ Exit criteria:
 
 ### Phase 35 — Performance administration interfaces
 
-Status: **Implemented at a scoped-down level (2026-08-13)** — see the
-Phase 35 entry in the status summary above for exactly which named pages
-this condenses to (one consolidated, fully real Overview page) versus
-which remain deferred.
+Status: **Implemented at a scoped-down level (2026-08-13; extended
+2026-08-13, this pass)** — see the Phase 35 entry in the status summary
+above for exactly which named pages this condenses to (one consolidated,
+fully real page now covering Overview/Adaptive Controller, Local Runner
+Pool, Intranet Worker Pool, Memory, Caches, Storage/migration manifest,
+Scheduling, Advanced Optimizations, and Calibration) versus which remain
+deferred for lack of a dedicated telemetry route.
 
 Purpose:
 
@@ -6183,10 +6419,24 @@ Phases 58-60 add bounded knowledge-file ingestion, persisted authored
 hashing-vector indexes, and approved RAG retrieval/context execution. Phase 61
 adds a real process-isolated llama.cpp learned-embedding adapter with durable
 model/dimension provenance and changes durable user-memory recall from every
-turn to one persisted snapshot per conversation. LLM fine-tuning, RAG answer
-generation, Inference Endpoints, and every other executor not named above
-remain `Planned`: a metadata record or lifecycle transition is not execution
-proof.
+turn to one persisted snapshot per conversation. LLM fine-tuning (Phase 73),
+RAG answer generation (Phase 76), and Inference Endpoints (Phase 62/77) are
+now real executors too — see their own phase entries above; every other
+executor not named above remains `Planned`: a metadata record or lifecycle
+transition is not execution proof. Checkpoint Management (section 33) was
+the last-scoped-down interface never revisited with a real executor until
+Phase 79, which now captures genuine mid-training weight snapshots and
+supports resuming gradient descent from one, closing that gap. Experiment
+Tracking (section 25) got the same treatment in Phase 80: `POST
+.../experiments/{id}/run` genuinely trains the experiment's dataset content,
+computes real training/validation/evaluation metrics and captures real
+checkpoints, and `POST .../experiments/compare` builds a genuine side-by-side
+diff of two or more already-run experiments — see the Phase 80 entry above
+for the full surface and its honest boundary (no safety-scoring executor
+exists yet, reported as such rather than fabricated). Prompt and Instruction
+Training (section 19) got the same treatment in Phase 81 — see its own entry
+above for what "generate," "test against models," "detect duplicates/
+contradictions," and "validate structured output" now genuinely do.
 
 This section extends the plan with an administrator-only Machine Learning
 administration and model-development module, covering the full lifecycle

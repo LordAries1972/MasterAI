@@ -152,9 +152,10 @@ SpeculativeDecodingDecision decide_speculative_decoding_for_request(
         return {false, "the draft runner is already busy with another "
                        "request"};
     }
-    if (!context.sampling_is_greedy_or_deterministic) {
-        return {false, "requested sampling settings are not compatible with "
-                       "speculative decoding's verification step"};
+    if (!context.sampling_supported_by_speculative_verification) {
+        return {false, "requested sampling uses a feature (grammar/logit-bias "
+                       "constrained decoding) llama.cpp's speculative "
+                       "rejection-sampling verification does not support"};
     }
     if (context.thermal_headroom_percent.has_value() &&
         *context.thermal_headroom_percent < 10.0) {

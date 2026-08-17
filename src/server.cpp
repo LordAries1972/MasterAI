@@ -384,9 +384,14 @@ public:
         ml_training_jobs = std::make_unique<TrainingJobStore>(records);
         ml_evaluation_runs = std::make_unique<EvaluationRunStore>(records);
         ml_experiments = std::make_unique<ExperimentStore>(records);
+        // Phase 80: real experiment-run results (see ml_engine.cpp).
+        ml_experiment_results = std::make_unique<ExperimentResultStore>(records);
         ml_fine_tuning_jobs = std::make_unique<FineTuningJobStore>(records);
         ml_model_builder_configs = std::make_unique<ModelBuilderConfigStore>(records);
         ml_instruction_examples = std::make_unique<InstructionExampleStore>(records);
+        // Phase 81: the real instruction-record content store.
+        ml_instruction_example_content =
+            std::make_unique<InstructionExampleContentStore>(records);
         ml_synthetic_records = std::make_unique<SyntheticRecordStore>(records);
         ml_vector_stores = std::make_unique<VectorStoreStore>(records);
         ml_rag_configs = std::make_unique<RagConfigStore>(records);
@@ -396,6 +401,8 @@ public:
         ml_model_optimizations = std::make_unique<ModelOptimizationStore>(records);
         ml_training_checkpoints =
             std::make_unique<TrainingCheckpointStore>(records);
+        // Phase 79: real checkpoint weight snapshots (see ml_engine.cpp).
+        ml_checkpoint_models = std::make_unique<CheckpointModelStore>(records);
         ml_deployments = std::make_unique<DeploymentStore>(records);
         // Phase 56: real ML execution stores (see ml_engine.cpp).
         ml_dataset_content = std::make_unique<DatasetContentStore>(records);
@@ -443,6 +450,14 @@ public:
                 classify_storage_tier(scratch_latency));
             scratch_volumes->recover_orphans();
         }
+        // Phase 31 (Priority B, manifest closure): installed globally so
+        // every resolve_durable_path() call site -- in particular
+        // LlamaCppAdapter::build_launch_spec's model-file resolution --
+        // transparently follows a since-migrated path without this
+        // constructor threading a reference through the adapter/runner
+        // layers, which have no other reason to know about it.
+        durable_file_manifest = std::make_unique<DurableFileManifest>(records);
+        install_global_durable_file_manifest(*durable_file_manifest);
         if (!value.llama_server_executable.empty()) {
             inference = std::make_unique<RunnerSupervisor>(
                 value.llama_server_executable, value.runtime_root);
@@ -1711,13 +1726,20 @@ public:
         // already-published durable file (e.g. a GGUF model sitting on Tier
         // C) to a different tier's directory, verified byte-for-byte via
         // migrate_durable_file()'s SHA-256 check before the original is ever
-        // removed. There is no central manifest in this codebase mapping a
-        // durable path back to whichever record references it (Model
-        // Registry entry, index generation, etc.), so this endpoint reports
-        // the new path and leaves updating that record to the caller --
-        // surfaced honestly via the "callerMustUpdateReferencingRecord" flag
-        // below rather than silently pretending to be a full migration
-        // workflow.
+        // removed, and recorded in durable_file_manifest so any reader still
+        // holding the old path (LlamaCppAdapter::build_launch_spec resolving
+        // a Model Registry entry's model file, in particular) transparently
+        // finds it at its new location via resolve_durable_path() -- closing
+        // the earlier "no central manifest" gap.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/system/storage/manifest") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            return response(200, "OK",
+                            durable_file_manifest_json(*durable_file_manifest));
+        }
         if (request.method == "POST" &&
             request.target == "/api/v1/system/storage/migrate") {
             if (user->role != UserRole::administrator) {
@@ -1756,7 +1778,8 @@ public:
                                     "{\"error\":\"invalid_data_class\"}");
                 }
                 const auto result = migrate_durable_file(
-                    source_path_text, destination_directory_text, data_class);
+                    source_path_text, destination_directory_text, data_class,
+                    *durable_file_manifest);
                 audit.append("system.storage.migrate", user->id, "success",
                              source_path_text + " -> " + result.destination_path.string());
                 return response(
@@ -1765,7 +1788,7 @@ public:
                         json_string(result.destination_path.string()) +
                         ",\"bytesMigrated\":" + std::to_string(result.bytes_migrated) +
                         ",\"sha256\":" + json_string(result.sha256_hex) +
-                        ",\"callerMustUpdateReferencingRecord\":true}");
+                        ",\"recordedInManifest\":true}");
             } catch (const std::exception& error) {
                 audit.append("system.storage.migrate", user->id, "denied", error.what());
                 return response(400, "Bad Request",
@@ -2664,12 +2687,15 @@ public:
                             "{\"runId\":\"" + json_escape(id) +
                                 "\",\"metrics\":" + *metrics_json + "}");
         }
-        // Phase 44: Experiment Tracking (docs/PLAN.md "Machine Learning
-        // Abilities" section 25), scoped to identity/target-project/target-
-        // model/target-dataset/status fields -- see ExperimentStore's class
-        // comment in masterai.hpp for the version/hyperparameter/metric/
-        // artifact/comparison fields deferred to the phase that actually
-        // executes and records a training or evaluation run.
+        // Phase 44/80: Experiment Tracking (docs/PLAN.md "Machine Learning
+        // Abilities" section 25). Phase 80 made this a REAL executor phase
+        // like Phase 56/57/70 before it -- POST .../run genuinely trains
+        // the experiment's dataset content, computes real training/
+        // validation/evaluation metrics and captures real checkpoints (see
+        // execute_experiment_run() above), GET .../result recalls them,
+        // and POST .../compare builds a genuine side-by-side diff of two
+        // or more experiments (see experiments_comparison_json() in
+        // ml_engine.cpp).
         if (request.method == "GET" &&
             request.target == "/api/v1/ml/experiments") {
             if (auto denied = forbidden_unless(user->role, "ml.experiments.view")) return *denied;
@@ -2690,9 +2716,19 @@ public:
                     const auto* value = root.optional(field);
                     return value ? value->as_string() : std::string{};
                 };
+                const auto seed_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? static_cast<std::uint32_t>(value->as_integer())
+                                 : std::uint32_t{0};
+                };
                 const auto experiment = ml_experiments->create(
                     user->id, project_id, model_id, text_field("datasetId"),
-                    name, text_field("description"));
+                    name, text_field("description"),
+                    text_field("hyperparametersJson"),
+                    seed_field("randomSeed"), text_field("sourceCodeVersion"),
+                    text_field("configurationVersion"),
+                    text_field("containerVersion"), text_field("tags"),
+                    text_field("notes"));
                 audit.append("ml.experiment.create", user->id, "success",
                              experiment.id);
                 return response(201, "Created", experiment_json(experiment));
@@ -2730,6 +2766,165 @@ public:
         }
         if (request.method == "POST" &&
             request.target.rfind("/api/v1/ml/experiments/", 0U) == 0U &&
+            request.target.size() > 6U &&
+            request.target.compare(request.target.size() - 6U, 6U,
+                                   "/notes") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.experiments.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 6U);
+            try {
+                auto root = parse_json(request.body);
+                const auto existing = ml_experiments->find(id);
+                if (!existing) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_experiment_not_found\"}");
+                }
+                const auto text_field = [&root](const char* field,
+                                                const std::string& fallback) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : fallback;
+                };
+                const auto* seed_value = root.optional("randomSeed");
+                const auto seed = seed_value
+                                      ? static_cast<std::uint32_t>(
+                                            seed_value->as_integer())
+                                      : existing->random_seed;
+                ml_experiments->update_metadata(
+                    id, text_field("hyperparametersJson",
+                                  existing->hyperparameters_json),
+                    seed,
+                    text_field("sourceCodeVersion",
+                              existing->source_code_version),
+                    text_field("configurationVersion",
+                              existing->configuration_version),
+                    text_field("containerVersion", existing->container_version),
+                    text_field("tags", existing->tags),
+                    text_field("notes", existing->notes));
+                audit.append("ml.experiment.notes", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_experiment_notes\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        // Phase 80: the real executor. Runs synchronously, same latency
+        // profile as Training Jobs' own .../run -- the accepted dataset
+        // sizes train in well under a request timeout.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/experiments/", 0U) == 0U &&
+            request.target.size() > 4U &&
+            request.target.compare(request.target.size() - 4U, 4U,
+                                   "/run") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.experiments.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 4U);
+            const auto experiment = ml_experiments->find(id);
+            if (!experiment) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_experiment_not_found\"}");
+            }
+            const auto content = ml_dataset_content->find(experiment->dataset_id);
+            if (!content) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_dataset_has_no_content\",\"detail\":"
+                    "\"upload CSV content to the experiment's dataset first\"}");
+            }
+            TabularTrainingOptions options;
+            if (experiment->random_seed != 0U) {
+                options.seed = experiment->random_seed;
+            }
+            try {
+                if (!request.body.empty()) {
+                    auto root = parse_json(request.body);
+                    const auto integer_field = [&root](const char* field,
+                                                       const std::uint32_t fallback) {
+                        const auto* value = root.optional(field);
+                        return value ? static_cast<std::uint32_t>(value->as_integer())
+                                     : fallback;
+                    };
+                    options.epochs = integer_field("epochs", options.epochs);
+                    options.seed = integer_field("seed", options.seed);
+                    options.checkpoint_interval = integer_field(
+                        "checkpointInterval", options.checkpoint_interval);
+                    if (const auto* rate = root.optional("learningRate")) {
+                        options.learning_rate = rate->as_double();
+                    }
+                    if (const auto* fraction = root.optional("testFraction")) {
+                        options.test_fraction = fraction->as_double();
+                    }
+                }
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_experiment_options\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+            try {
+                execute_experiment_run(*experiment, *content, options, user->id);
+                audit.append("ml.experiment.run", user->id, "success", id);
+                const auto result_json = ml_experiment_results->find(id);
+                return response(200, "OK",
+                                "{\"experimentId\":\"" + json_escape(id) +
+                                    "\",\"result\":" +
+                                    (result_json ? *result_json : "null") +
+                                    "}");
+            } catch (const std::exception& error) {
+                audit.append("ml.experiment.run", user->id, "failure", id);
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_experiment_run_failed\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/experiments/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/result") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.experiments.view")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            const auto result_json = ml_experiment_results->find(id);
+            if (!result_json) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_experiment_no_result\"}");
+            }
+            return response(200, "OK",
+                            "{\"experimentId\":\"" + json_escape(id) +
+                                "\",\"result\":" + *result_json + "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/experiments/compare") {
+            if (auto denied = forbidden_unless(user->role, "ml.experiments.view")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                std::vector<std::string> ids;
+                for (const auto& value : root.required("experimentIds").as_array()) {
+                    ids.push_back(value.as_string());
+                }
+                const auto result = experiments_comparison_json(
+                    ids,
+                    [this](const std::string& experiment_id) {
+                        return ml_experiments->find(experiment_id);
+                    },
+                    [this](const std::string& experiment_id) {
+                        return ml_experiment_results->find(experiment_id);
+                    });
+                audit.append("ml.experiment.compare", user->id, "success",
+                             std::to_string(ids.size()) + " experiments");
+                return response(200, "OK", result);
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_experiment_compare\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/experiments/", 0U) == 0U &&
             request.target.size() > 7U &&
             request.target.compare(request.target.size() - 7U, 7U,
                                    "/delete") == 0) {
@@ -2740,6 +2935,7 @@ public:
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_experiment_not_found\"}");
             }
+            ml_experiment_results->remove(id);
             audit.append("ml.experiment.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
         }
@@ -3173,13 +3369,17 @@ public:
             audit.append("ml.model_builder_config.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
         }
-        // Phase 47: Prompt and Instruction Training (docs/PLAN.md "Machine
-        // Learning Abilities" section 19), scoped to identity/target-
-        // dataset/subject-classification/status fields -- see
-        // InstructionExampleStore's class comment in masterai.hpp for the
-        // system-instruction/user-instruction/context/expected-response/
-        // rejected-response/tool-call/output-format fields deferred to the
-        // phase that actually creates example records.
+        // Phase 47/81: Prompt and Instruction Training (docs/PLAN.md
+        // "Machine Learning Abilities" section 19). Phase 81 made this a
+        // real content phase: InstructionExampleContentStore now holds the
+        // full instruction record (system/user instruction, context,
+        // expected/rejected response, tool calls/results, output format,
+        // difficulty, safety classification) InstructionExampleStore's own
+        // class comment deferred, .../generate and .../test genuinely
+        // invoke a model via execute_rag_generation, and .../duplicates,
+        // .../contradictions, and .../validate run real (if heuristic --
+        // see their own doc comments in masterai.hpp) detection/validation
+        // logic instead of leaving those admin operations unimplemented.
         if (request.method == "GET" &&
             request.target == "/api/v1/ml/instruction-examples") {
             if (auto denied = forbidden_unless(user->role, "ml.instructions.view")) return *denied;
@@ -3214,6 +3414,139 @@ public:
                         json_escape(error.what()) + "\"}");
             }
         }
+        // Phase 81: bulk create -- one InstructionExample + content record
+        // per entry. All-or-nothing is not required (a large import batch
+        // should not lose every good entry over one bad one), so each
+        // entry reports its own success/failure rather than the endpoint
+        // fabricating a false all-succeeded result.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/instruction-examples/import") {
+            if (auto denied = forbidden_unless(user->role, "ml.instructions.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto dataset_id = root.required("datasetId").as_string();
+                std::string results = "[";
+                bool first_result = true;
+                for (const auto& entry : root.required("examples").as_array()) {
+                    if (!first_result) results += ",";
+                    first_result = false;
+                    try {
+                        const auto text_field = [&entry](const char* field) {
+                            const auto* value = entry.optional(field);
+                            return value ? value->as_string() : std::string{};
+                        };
+                        const auto example = ml_instruction_examples->create(
+                            user->id, dataset_id,
+                            entry.required("name").as_string(),
+                            text_field("description"),
+                            text_field("subjectClassification"));
+                        if (const auto* content_value = entry.optional("content")) {
+                            const auto& content_field =
+                                [content_value](const char* field) {
+                                    const auto* value =
+                                        content_value->optional(field);
+                                    return value ? value->as_string()
+                                                 : std::string{};
+                                };
+                            InstructionExampleContent content;
+                            content.system_instruction =
+                                content_field("systemInstruction");
+                            content.user_instruction =
+                                content_field("userInstruction");
+                            content.context = content_field("context");
+                            content.expected_response =
+                                content_field("expectedResponse");
+                            content.rejected_response =
+                                content_field("rejectedResponse");
+                            content.tool_calls_json =
+                                content_field("toolCallsJson");
+                            content.tool_results_json =
+                                content_field("toolResultsJson");
+                            content.required_output_format =
+                                content_field("requiredOutputFormat");
+                            content.difficulty = content_field("difficulty");
+                            content.safety_classification =
+                                content_field("safetyClassification");
+                            ml_instruction_example_content->put(example.id,
+                                                                content);
+                        }
+                        audit.append("ml.instruction_example.import", user->id,
+                                     "success", example.id);
+                        results += "{\"success\":true,\"id\":\"" +
+                                   json_escape(example.id) + "\"}";
+                    } catch (const std::exception& entry_error) {
+                        results += "{\"success\":false,\"error\":\"" +
+                                   json_escape(entry_error.what()) + "\"}";
+                    }
+                }
+                results += "]";
+                return response(200, "OK", "{\"results\":" + results + "}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_instruction_example_import\","
+                    "\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        // Phase 81: generates a real draft example. Composes a prompt from
+        // the given system/user instruction and context, invokes the model
+        // via execute_rag_generation, and creates a new example (status
+        // draft) with the real generated text as expected_response --
+        // section 19's "generated training examples must require approval
+        // before entering an approved dataset" is enforced by the
+        // .../status handler below refusing "approved" without content
+        // (which every generated example already has) and by draft simply
+        // starting there like every manually-created example does.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/instruction-examples/generate") {
+            if (auto denied = forbidden_unless(user->role, "ml.instructions.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto dataset_id = root.required("datasetId").as_string();
+                const auto model_id = root.required("modelId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto system_instruction = text_field("systemInstruction");
+                const auto user_instruction = text_field("userInstruction");
+                const auto context = text_field("context");
+                std::string prompt;
+                if (!system_instruction.empty()) prompt += system_instruction + "\n\n";
+                if (!context.empty()) prompt += "Context: " + context + "\n\n";
+                prompt += user_instruction;
+                const auto generated = execute_rag_generation(model_id, prompt);
+                auto example_name = text_field("name");
+                if (example_name.empty()) example_name = "generated-example";
+                const auto example = ml_instruction_examples->create(
+                    user->id, dataset_id, example_name,
+                    text_field("description"),
+                    text_field("subjectClassification"));
+                InstructionExampleContent content;
+                content.system_instruction = system_instruction;
+                content.user_instruction = user_instruction;
+                content.context = context;
+                content.expected_response = generated.text;
+                content.required_output_format = text_field("requiredOutputFormat");
+                content.difficulty = text_field("difficulty");
+                content.safety_classification = text_field("safetyClassification");
+                ml_instruction_example_content->put(example.id, content);
+                audit.append("ml.instruction_example.generate", user->id,
+                             "success", example.id);
+                return response(
+                    201, "Created",
+                    "{\"example\":" + instruction_example_json(example) +
+                        ",\"content\":" +
+                        instruction_example_content_json(content) + "}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_instruction_example_generate\","
+                    "\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
         if (request.method == "POST" &&
             request.target.rfind("/api/v1/ml/instruction-examples/", 0U) ==
                 0U &&
@@ -3227,6 +3560,19 @@ public:
                 auto root = parse_json(request.body);
                 const auto status = parse_instruction_example_status(
                     root.required("status").as_string());
+                // Phase 81: enforces section 19's "generated training
+                // examples must require approval before entering an
+                // approved dataset" -- concretely, no example (generated
+                // or manual) can reach `approved` without a real content
+                // record for a reviewer to have actually approved.
+                if (status == InstructionExampleStatus::approved &&
+                    !ml_instruction_example_content->find(id)) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"ml_instruction_example_not_reviewable\","
+                        "\"detail\":\"an example needs content before it can "
+                        "be approved\"}");
+                }
                 if (!ml_instruction_examples->set_status(id, status)) {
                     return response(
                         404, "Not Found",
@@ -3245,6 +3591,230 @@ public:
         if (request.method == "POST" &&
             request.target.rfind("/api/v1/ml/instruction-examples/", 0U) ==
                 0U &&
+            request.target.size() > 8U &&
+            request.target.compare(request.target.size() - 8U, 8U,
+                                   "/content") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.instructions.manage")) return *denied;
+            const auto id = request.target.substr(
+                33U, request.target.size() - 33U - 8U);
+            if (!ml_instruction_examples->find(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_instruction_example_not_found\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                InstructionExampleContent content;
+                content.system_instruction = text_field("systemInstruction");
+                content.user_instruction = text_field("userInstruction");
+                content.context = text_field("context");
+                content.expected_response = text_field("expectedResponse");
+                content.rejected_response = text_field("rejectedResponse");
+                content.tool_calls_json = text_field("toolCallsJson");
+                content.tool_results_json = text_field("toolResultsJson");
+                content.required_output_format =
+                    text_field("requiredOutputFormat");
+                content.difficulty = text_field("difficulty");
+                content.safety_classification =
+                    text_field("safetyClassification");
+                ml_instruction_example_content->put(id, content);
+                audit.append("ml.instruction_example.content", user->id,
+                             "success", id);
+                return response(200, "OK",
+                                instruction_example_content_json(content));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_instruction_example_content\","
+                    "\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/instruction-examples/", 0U) ==
+                0U &&
+            request.target.size() > 8U &&
+            request.target.compare(request.target.size() - 8U, 8U,
+                                   "/content") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.instructions.view")) return *denied;
+            const auto id = request.target.substr(
+                33U, request.target.size() - 33U - 8U);
+            const auto content = ml_instruction_example_content->find(id);
+            if (!content) {
+                return response(
+                    404, "Not Found",
+                    "{\"error\":\"ml_instruction_example_no_content\"}");
+            }
+            return response(200, "OK", instruction_example_content_json(*content));
+        }
+        // Phase 81: real fan-out probe -- not persisted, since it is a
+        // test of the existing content against other models, not new
+        // content of its own.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/instruction-examples/", 0U) ==
+                0U &&
+            request.target.size() > 5U &&
+            request.target.compare(request.target.size() - 5U, 5U,
+                                   "/test") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.instructions.manage")) return *denied;
+            const auto id = request.target.substr(
+                33U, request.target.size() - 33U - 5U);
+            const auto content = ml_instruction_example_content->find(id);
+            if (!content) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_instruction_example_no_content\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                std::string prompt;
+                if (!content->system_instruction.empty()) {
+                    prompt += content->system_instruction + "\n\n";
+                }
+                if (!content->context.empty()) {
+                    prompt += "Context: " + content->context + "\n\n";
+                }
+                prompt += content->user_instruction;
+                std::string results = "[";
+                bool first_result = true;
+                for (const auto& value : root.required("modelIds").as_array()) {
+                    if (!first_result) results += ",";
+                    first_result = false;
+                    const auto model_id = value.as_string();
+                    try {
+                        const auto started = std::chrono::steady_clock::now();
+                        const auto generated =
+                            execute_rag_generation(model_id, prompt);
+                        const auto elapsed =
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - started);
+                        results += "{\"modelId\":\"" + json_escape(model_id) +
+                                   "\",\"response\":\"" +
+                                   json_escape(generated.text) +
+                                   "\",\"elapsedMicroseconds\":" +
+                                   std::to_string(elapsed.count()) + "}";
+                    } catch (const std::exception& model_error) {
+                        results += "{\"modelId\":\"" + json_escape(model_id) +
+                                   "\",\"error\":\"" +
+                                   json_escape(model_error.what()) + "\"}";
+                    }
+                }
+                results += "]";
+                audit.append("ml.instruction_example.test", user->id,
+                             "success", id);
+                return response(200, "OK", "{\"results\":" + results + "}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_instruction_example_test\","
+                    "\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/instruction-examples/", 0U) ==
+                0U &&
+            request.target.size() > 9U &&
+            request.target.compare(request.target.size() - 9U, 9U,
+                                   "/validate") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.instructions.view")) return *denied;
+            const auto id = request.target.substr(
+                33U, request.target.size() - 33U - 9U);
+            const auto content = ml_instruction_example_content->find(id);
+            if (!content) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_instruction_example_no_content\"}");
+            }
+            std::string error_detail;
+            const bool valid = validate_structured_output(*content, error_detail);
+            audit.append("ml.instruction_example.validate", user->id,
+                         valid ? "success" : "failure", id);
+            return response(200, "OK",
+                            "{\"valid\":" + std::string(valid ? "true" : "false") +
+                                ",\"detail\":\"" + json_escape(error_detail) +
+                                "\"}");
+        }
+        // Phase 81: "detect duplicated examples"/"detect contradictory
+        // instructions" -- both take a POST body rather than a query
+        // string, matching /api/v1/ml/experiments/compare's own precedent
+        // (this codebase has no query-string parsing utility anywhere
+        // else, so this doesn't invent one for two endpoints).
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/instruction-examples/duplicates") {
+            if (auto denied = forbidden_unless(user->role, "ml.instructions.view")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto dataset_id = root.required("datasetId").as_string();
+                std::vector<InstructionExample> in_dataset;
+                for (const auto& example : ml_instruction_examples->list()) {
+                    if (example.dataset_id == dataset_id) {
+                        in_dataset.push_back(example);
+                    }
+                }
+                const auto pairs = detect_duplicate_instruction_examples(
+                    in_dataset, [this](const std::string& example_id) {
+                        return ml_instruction_example_content->find(example_id);
+                    });
+                std::string body = "[";
+                bool first_pair = true;
+                for (const auto& pair : pairs) {
+                    if (!first_pair) body += ",";
+                    first_pair = false;
+                    body += "{\"firstId\":\"" + json_escape(pair.first) +
+                            "\",\"secondId\":\"" + json_escape(pair.second) + "\"}";
+                }
+                body += "]";
+                return response(200, "OK", "{\"duplicates\":" + body + "}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_instruction_example_duplicates\","
+                    "\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target ==
+                "/api/v1/ml/instruction-examples/contradictions") {
+            if (auto denied = forbidden_unless(user->role, "ml.instructions.view")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto dataset_id = root.required("datasetId").as_string();
+                std::vector<InstructionExample> in_dataset;
+                for (const auto& example : ml_instruction_examples->list()) {
+                    if (example.dataset_id == dataset_id) {
+                        in_dataset.push_back(example);
+                    }
+                }
+                const auto pairs = detect_contradictory_instruction_examples(
+                    in_dataset, [this](const std::string& example_id) {
+                        return ml_instruction_example_content->find(example_id);
+                    });
+                std::string body = "[";
+                bool first_pair = true;
+                for (const auto& pair : pairs) {
+                    if (!first_pair) body += ",";
+                    first_pair = false;
+                    body += "{\"firstId\":\"" + json_escape(pair.first) +
+                            "\",\"secondId\":\"" + json_escape(pair.second) + "\"}";
+                }
+                body += "]";
+                return response(200, "OK", "{\"contradictions\":" + body + "}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_instruction_example_contradictions\","
+                    "\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/instruction-examples/", 0U) ==
+                0U &&
             request.target.size() > 7U &&
             request.target.compare(request.target.size() - 7U, 7U,
                                    "/delete") == 0) {
@@ -3255,6 +3825,7 @@ public:
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_instruction_example_not_found\"}");
             }
+            ml_instruction_example_content->remove(id);
             audit.append("ml.instruction_example.delete", user->id, "success",
                          id);
             return response(200, "OK", "{\"deleted\":true}");
@@ -3994,10 +4565,11 @@ public:
         }
         // Phase 54: Checkpoint Management (docs/PLAN.md "Machine Learning
         // Abilities" section 33), scoped to identity/training-job-reference/
-        // capture-reason/retention-status fields -- see
-        // TrainingCheckpointStore's class comment in masterai.hpp for the
-        // step/epoch/hash/resume fields deferred to the phase that actually
-        // captures checkpoints.
+        // capture-reason/retention-status fields. Phase 79 closed the
+        // remaining step/epoch/resume gap: execute_training_job and
+        // execute_fine_tuning_job now capture a real weight snapshot at each
+        // checkpoint (see checkpoint_snapshot()/CheckpointModelStore), and
+        // the POST .../resume route below continues training from one.
         if (request.method == "GET" &&
             request.target == "/api/v1/ml/checkpoints") {
             if (auto denied = forbidden_unless(user->role, "ml.checkpoints.view")) return *denied;
@@ -4072,6 +4644,85 @@ public:
             }
             audit.append("ml.checkpoint.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 79: resumes real gradient descent from a genuinely captured
+        // checkpoint snapshot -- mirrors the training-jobs .../run route's
+        // request/response shape, gated on the same ml.training.manage
+        // permission since this performs a real training operation.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/checkpoints/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/resume") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.training.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            const auto checkpoint = ml_training_checkpoints->find(id);
+            if (!checkpoint) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_checkpoint_not_found\"}");
+            }
+            if (!checkpoint->has_snapshot) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_checkpoint_has_no_snapshot\",\"detail\":"
+                    "\"this checkpoint has no captured weight snapshot to "
+                    "resume from\"}");
+            }
+            const auto job = ml_training_jobs->find(checkpoint->training_job_id);
+            if (!job) {
+                return response(
+                    404, "Not Found",
+                    "{\"error\":\"ml_checkpoint_training_job_not_found\"}");
+            }
+            const auto content = ml_dataset_content->find(job->dataset_id);
+            if (!content) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_dataset_has_no_content\",\"detail\":"
+                    "\"upload CSV content to the job's dataset first\"}");
+            }
+            TabularTrainingOptions options;
+            try {
+                if (!request.body.empty()) {
+                    auto root = parse_json(request.body);
+                    const auto integer_field = [&root](const char* field,
+                                                       const std::uint32_t fallback) {
+                        const auto* value = root.optional(field);
+                        return value ? static_cast<std::uint32_t>(value->as_integer())
+                                     : fallback;
+                    };
+                    options.epochs = integer_field("epochs", options.epochs);
+                    options.seed = integer_field("seed", options.seed);
+                    options.checkpoint_interval = integer_field(
+                        "checkpointInterval", options.checkpoint_interval);
+                    if (const auto* rate = root.optional("learningRate")) {
+                        options.learning_rate = rate->as_double();
+                    }
+                    if (const auto* fraction = root.optional("testFraction")) {
+                        options.test_fraction = fraction->as_double();
+                    }
+                }
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_training_options\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+            try {
+                const auto result = execute_checkpoint_resume(
+                    *checkpoint, *job, *content, options, user->id);
+                audit.append("ml.checkpoint.resume", user->id, "success", id);
+                return response(200, "OK",
+                                tabular_training_report_json(result.report,
+                                                             result.model));
+            } catch (const std::exception& error) {
+                audit.append("ml.checkpoint.resume", user->id, "failure", id);
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_resume_failed\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
         }
         // Phase 55: Deployment Manager (docs/PLAN.md "Machine Learning
         // Abilities" section 34), scoped to identity/model-reference/
@@ -5290,13 +5941,17 @@ public:
                            : response(302, "Found", "", {"Location: /app"});
             }
             // Phase 35: Performance administration sidebar -- one
-            // consolidated page (Overview, Local Runner Pool, Intranet
-            // Worker Pool, Adaptive Controller) rather than the plan's full
-            // thirteen-route enumeration; see the Phase 35 status note in
-            // docs/PLAN.md for the honest scope this condenses. Every
-            // figure it renders comes from the same GET routes already
-            // exposed by Phase 13/19/31/33/34, not a separately maintained
-            // display-only value.
+            // consolidated page (Overview/Adaptive Controller, Local Runner
+            // Pool, Intranet Worker Pool, Memory, Caches, Storage, tier-
+            // migration manifest, Scheduling, Advanced Optimizations,
+            // Calibration) rather than the plan's full thirteen-route
+            // enumeration; see the Phase 35 status note in docs/PLAN.md for
+            // the honest scope this condenses (Query Traces, Runner
+            // Configuration, Model Comparison, Benchmarks, and Regression
+            // History remain deferred -- no dedicated telemetry route
+            // exists for those yet). Every figure it renders comes from the
+            // same GET routes already exposed by Phase 13/14/17/19/20/31/
+            // 33/34, not a separately maintained display-only value.
             if (target == "/app/performance") {
                 return is_administrator
                            ? application_page(*user, "performance")
@@ -5552,6 +6207,22 @@ private:
         return response(403, "Forbidden", "{\"error\":\"permission_denied\"}");
     }
 
+    // Phase 79: builds the TrainedTabularModel that gets persisted for a
+    // real mid-training checkpoint snapshot -- `live_model` already carries
+    // this epoch's genuine weights plus the fixed feature/target/class
+    // schema for the run, so this only needs to attach the two identity
+    // fields CheckpointModelStore's key/lookup convention requires (see its
+    // class comment in masterai.hpp): `model_id` repurposed to the owning
+    // checkpoint id, `training_job_id` left as the real training job id.
+    static TrainedTabularModel checkpoint_snapshot(
+        const std::string& checkpoint_id, const std::string& training_job_id,
+        const TrainedTabularModel& live_model) {
+        TrainedTabularModel snapshot = live_model;
+        snapshot.model_id = checkpoint_id;
+        snapshot.training_job_id = training_job_id;
+        return snapshot;
+    }
+
     // Phase 56/69: the real training executor's core, factored out so both
     // the single-job POST .../training-jobs/{id}/run handler and the
     // automation-pipelines "Train model" stage (Phase 69) run the exact
@@ -5590,10 +6261,39 @@ private:
                 const std::string& job_id;
                 ~ProgressGuard() { tracker.end(job_id); }
             } progress_guard{ml_training_progress, job.id};
+            // Phase 79: the checkpoint epoch stride is computed up front
+            // (options.epochs is already known) instead of after the run,
+            // so on_epoch can capture a real weight snapshot the instant
+            // training crosses each stride boundary -- capped at ten
+            // checkpoints so a 10000-epoch run doesn't flood the checkpoint
+            // list, same cap the old post-hoc logic used.
+            std::size_t checkpoint_stride = options.checkpoint_interval;
+            if (checkpoint_stride > 0U && options.epochs > 0U) {
+                if (options.epochs / checkpoint_stride > 10U) {
+                    checkpoint_stride = options.epochs / 10U;
+                }
+            }
             report = train_tabular_model(
                 data, options, model, nullptr,
-                [this, &job](const std::uint32_t epoch, const double loss) {
+                [this, &job, &user_id, checkpoint_stride](
+                    const std::uint32_t epoch, const double loss,
+                    const TrainedTabularModel& live_model) {
                     ml_training_progress.update(job.id, epoch, loss);
+                    const std::uint32_t epoch_number = epoch + 1U;
+                    if (checkpoint_stride > 0U &&
+                        epoch_number % checkpoint_stride == 0U) {
+                        char loss_text[32];
+                        std::snprintf(loss_text, sizeof(loss_text), "%.6g", loss);
+                        const auto checkpoint = ml_training_checkpoints->create(
+                            user_id, job.id,
+                            job.name + " epoch " + std::to_string(epoch_number),
+                            "captured by the Phase 79 training executor",
+                            "epoch " + std::to_string(epoch_number) +
+                                ", training loss " + loss_text,
+                            epoch_number, /*has_snapshot=*/true);
+                        ml_checkpoint_models->put(
+                            checkpoint_snapshot(checkpoint.id, job.id, live_model));
+                    }
                 });
         } catch (const std::exception&) {
             ml_training_jobs->set_status(job.id, TrainingJobStatus::failed);
@@ -5614,28 +6314,102 @@ private:
         // Trained models wait for Evaluation Lab review before approval,
         // matching the dashboard's models-awaiting-evaluation count.
         ml_models->set_state(model_id, ModelRegistryState::evaluation);
-        // Checkpoint records carry genuinely measured losses from the
-        // finished run, capped at ten so a 10000-epoch run doesn't flood
-        // the checkpoint list.
-        if (options.checkpoint_interval > 0U && !report.loss_history.empty()) {
-            std::size_t stride = options.checkpoint_interval;
-            const std::size_t epochs = report.loss_history.size();
-            if (epochs / stride > 10U) stride = epochs / 10U;
-            for (std::size_t epoch = stride; epoch <= epochs; epoch += stride) {
-                char loss_text[32];
-                std::snprintf(loss_text, sizeof(loss_text), "%.6g",
-                              report.loss_history[epoch - 1U]);
-                ml_training_checkpoints->create(
-                    user_id, job.id,
-                    job.name + " epoch " + std::to_string(epoch),
-                    "captured by the Phase 56 training executor",
-                    "epoch " + std::to_string(epoch) + ", training loss " +
-                        loss_text);
-            }
-        }
         ml_training_jobs->set_status(job.id,
                                      TrainingJobStatus::awaiting_evaluation);
         return {std::move(report), std::move(model), model_id};
+    }
+
+    // Phase 80: the real Experiment Tracking executor -- section 25's
+    // "training/validation/evaluation metrics, checkpoints, hardware,
+    // runtime" become genuine numbers instead of deferred fields. Trains
+    // the experiment's dataset content exactly like execute_training_job
+    // above (checkpoints captured the same stride-capped-at-10 way, via
+    // the same TrainingCheckpointStore/CheckpointModelStore pair -- the
+    // checkpoint's "training_job_id" field holds this experiment's id
+    // here, the same field reused across a conceptually different run
+    // kind FineTuningJob already reuses TrainingJob's status enum for),
+    // then runs an *independent* evaluate_tabular_model pass against the
+    // full dataset for "evaluation metrics" distinct from the held-out
+    // "validation metrics" train_tabular_model already computed. Moves the
+    // experiment through running -> completed/failed for real, with
+    // genuine started/completed timestamps and (on failure) a real
+    // exception message as the failure reason -- never a queued/never-run
+    // experiment silently reporting success.
+    void execute_experiment_run(const Experiment& experiment,
+                                const DatasetContentStore::Content& content,
+                                const TabularTrainingOptions& options,
+                                const std::string& user_id) {
+        ml_experiments->mark_started(experiment.id);
+        const auto run_started = std::chrono::steady_clock::now();
+        TrainedTabularModel model;
+        TabularTrainingReport report;
+        std::vector<std::string> checkpoint_ids;
+        try {
+            const auto data =
+                parse_tabular_csv(content.csv, content.target_column);
+            std::size_t checkpoint_stride = options.checkpoint_interval;
+            if (checkpoint_stride > 0U && options.epochs > 0U) {
+                if (options.epochs / checkpoint_stride > 10U) {
+                    checkpoint_stride = options.epochs / 10U;
+                }
+            }
+            report = train_tabular_model(
+                data, options, model, nullptr,
+                [this, &experiment, &user_id, checkpoint_stride,
+                 &checkpoint_ids](const std::uint32_t epoch, const double loss,
+                                  const TrainedTabularModel& live_model) {
+                    (void)loss;
+                    const std::uint32_t epoch_number = epoch + 1U;
+                    if (checkpoint_stride > 0U &&
+                        epoch_number % checkpoint_stride == 0U) {
+                        char loss_text[32];
+                        std::snprintf(loss_text, sizeof(loss_text), "%.6g", loss);
+                        const auto checkpoint = ml_training_checkpoints->create(
+                            user_id, experiment.id,
+                            experiment.name + " epoch " +
+                                std::to_string(epoch_number),
+                            "captured by the Phase 80 experiment executor",
+                            "epoch " + std::to_string(epoch_number) +
+                                ", training loss " + loss_text,
+                            epoch_number, /*has_snapshot=*/true);
+                        ml_checkpoint_models->put(checkpoint_snapshot(
+                            checkpoint.id, experiment.id, live_model));
+                        checkpoint_ids.push_back(checkpoint.id);
+                    }
+                });
+            const auto evaluation_metrics = evaluate_tabular_model(model, data);
+            const auto hardware = probe_hardware(configuration.models_root);
+            const auto runtime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - run_started);
+            std::string model_id = experiment.model_id;
+            if (model_id.empty() || !ml_models->find(model_id)) {
+                const auto entry = ml_models->create(
+                    user_id, experiment.name + "-model",
+                    experiment.name + " (trained)", "1", "masterai-tabular",
+                    model.classification ? "classification" : "regression",
+                    "masterai-tabular-v1", "experiment:" + experiment.id, "");
+                model_id = entry.id;
+            }
+            model.model_id = model_id;
+            model.training_job_id = experiment.id;
+            ml_trained_models->put(model);
+            ml_models->set_state(model_id, ModelRegistryState::evaluation);
+            const auto result_json = experiment_result_json(
+                report, evaluation_metrics, hardware,
+                static_cast<std::uint64_t>(runtime.count()), checkpoint_ids,
+                "trained " + std::to_string(report.loss_history.size()) +
+                    " epochs, final loss " +
+                    std::to_string(report.final_loss),
+                model_id);
+            ml_experiment_results->put(experiment.id, result_json);
+            ml_experiments->mark_completed(experiment.id,
+                                           ExperimentStatus::completed, "");
+        } catch (const std::exception& error) {
+            ml_experiments->mark_completed(experiment.id,
+                                           ExperimentStatus::failed,
+                                           error.what());
+            throw;
+        }
     }
 
     // Phase 70: the real fine-tuning executor. Unlike execute_training_job
@@ -5663,7 +6437,36 @@ private:
             const auto data =
                 parse_tabular_csv(content.csv, content.target_column);
             ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::running);
-            report = train_tabular_model(data, options, model, &base_model);
+            // Phase 79: same up-front stride + real weight-snapshot capture
+            // execute_training_job uses above -- see its comment for why the
+            // stride is computed before the run instead of after.
+            std::size_t checkpoint_stride = options.checkpoint_interval;
+            if (checkpoint_stride > 0U && options.epochs > 0U) {
+                if (options.epochs / checkpoint_stride > 10U) {
+                    checkpoint_stride = options.epochs / 10U;
+                }
+            }
+            report = train_tabular_model(
+                data, options, model, &base_model,
+                [this, &job, &user_id, checkpoint_stride](
+                    const std::uint32_t epoch, const double loss,
+                    const TrainedTabularModel& live_model) {
+                    const std::uint32_t epoch_number = epoch + 1U;
+                    if (checkpoint_stride > 0U &&
+                        epoch_number % checkpoint_stride == 0U) {
+                        char loss_text[32];
+                        std::snprintf(loss_text, sizeof(loss_text), "%.6g", loss);
+                        const auto checkpoint = ml_training_checkpoints->create(
+                            user_id, job.id,
+                            job.name + " epoch " + std::to_string(epoch_number),
+                            "captured by the Phase 79 fine-tuning executor",
+                            "epoch " + std::to_string(epoch_number) +
+                                ", training loss " + loss_text,
+                            epoch_number, /*has_snapshot=*/true);
+                        ml_checkpoint_models->put(
+                            checkpoint_snapshot(checkpoint.id, job.id, live_model));
+                    }
+                });
         } catch (const std::exception&) {
             ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::failed);
             throw;
@@ -5679,24 +6482,71 @@ private:
         model.training_job_id = job.id;
         ml_trained_models->put(model);
         ml_models->set_state(model_id, ModelRegistryState::evaluation);
-        if (options.checkpoint_interval > 0U && !report.loss_history.empty()) {
-            std::size_t stride = options.checkpoint_interval;
-            const std::size_t epochs = report.loss_history.size();
-            if (epochs / stride > 10U) stride = epochs / 10U;
-            for (std::size_t epoch = stride; epoch <= epochs; epoch += stride) {
-                char loss_text[32];
-                std::snprintf(loss_text, sizeof(loss_text), "%.6g",
-                              report.loss_history[epoch - 1U]);
-                ml_training_checkpoints->create(
-                    user_id, job.id,
-                    job.name + " epoch " + std::to_string(epoch),
-                    "captured by the Phase 70 fine-tuning executor",
-                    "epoch " + std::to_string(epoch) + ", training loss " +
-                        loss_text);
-            }
-        }
         ml_fine_tuning_jobs->set_status(job.id,
                                         FineTuningJobStatus::awaiting_evaluation);
+        return {std::move(report), std::move(model), model_id};
+    }
+
+    // Phase 79: the real checkpoint-resume executor, closing Checkpoint
+    // Management's (section 33, Phase 54) last deferred gap -- "the resume
+    // ... operation" its own class comment named as future work. Continues
+    // gradient descent from a genuinely captured checkpoint snapshot via
+    // the same warm_start mechanism Phase 70's fine-tuning executor above
+    // uses to adapt a base model, on the same dataset the owning training
+    // job trained on. Like fine-tuning, the result is registered as a new
+    // Model Registry entry (the checkpoint and the model it was captured
+    // from are left untouched) and lands in the evaluation state. Throws
+    // std::runtime_error if the checkpoint has no real snapshot, its
+    // owning training job can no longer be found, or the optimizer itself
+    // fails.
+    TrainingExecution execute_checkpoint_resume(
+        const TrainingCheckpoint& checkpoint, const TrainingJob& job,
+        const DatasetContentStore::Content& content,
+        const TabularTrainingOptions& options, const std::string& user_id) {
+        const auto snapshot = ml_checkpoint_models->find(checkpoint.id);
+        if (!snapshot) {
+            throw std::runtime_error(
+                "checkpoint has no captured weight snapshot to resume from");
+        }
+        const auto data = parse_tabular_csv(content.csv, content.target_column);
+        TrainedTabularModel model;
+        std::size_t checkpoint_stride = options.checkpoint_interval;
+        if (checkpoint_stride > 0U && options.epochs > 0U) {
+            if (options.epochs / checkpoint_stride > 10U) {
+                checkpoint_stride = options.epochs / 10U;
+            }
+        }
+        const auto report = train_tabular_model(
+            data, options, model, &(*snapshot),
+            [this, &job, &user_id, checkpoint_stride](
+                const std::uint32_t epoch, const double loss,
+                const TrainedTabularModel& live_model) {
+                const std::uint32_t epoch_number = epoch + 1U;
+                if (checkpoint_stride > 0U &&
+                    epoch_number % checkpoint_stride == 0U) {
+                    char loss_text[32];
+                    std::snprintf(loss_text, sizeof(loss_text), "%.6g", loss);
+                    const auto resumed_checkpoint = ml_training_checkpoints->create(
+                        user_id, job.id,
+                        job.name + " resumed epoch " + std::to_string(epoch_number),
+                        "captured by the Phase 79 checkpoint-resume executor",
+                        "epoch " + std::to_string(epoch_number) +
+                            ", training loss " + loss_text,
+                        epoch_number, /*has_snapshot=*/true);
+                    ml_checkpoint_models->put(checkpoint_snapshot(
+                        resumed_checkpoint.id, job.id, live_model));
+                }
+            });
+        const auto entry = ml_models->create(
+            user_id, job.name + "-model-resumed", job.name + " (resumed)",
+            "1", "masterai-tabular",
+            model.classification ? "classification" : "regression",
+            "masterai-tabular-v1", "checkpoint:" + checkpoint.id, "");
+        const std::string model_id = entry.id;
+        model.model_id = model_id;
+        model.training_job_id = job.id;
+        ml_trained_models->put(model);
+        ml_models->set_state(model_id, ModelRegistryState::evaluation);
         return {std::move(report), std::move(model), model_id};
     }
 
@@ -7374,17 +8224,21 @@ private:
                     // re-launched per message -- see LaunchTuning::
                     // speculative_draft_model_file's class comment).
                     // configuration.chat_max_reply_tokens stands in for "a
-                    // normal-length reply". sampling_is_greedy_or_
-                    // deterministic is accurately false, not a placeholder:
-                    // this codebase's own apply_sampling_preset() never
-                    // produces an exactly-zero temperature for a live chat
-                    // reply (its lowest preset is 0.15), so no live chat
-                    // request through this control plane is ever actually
-                    // greedy/deterministic today.
+                    // normal-length reply". sampling_supported_by_
+                    // speculative_verification is accurately true, not a
+                    // placeholder: llama.cpp's own speculative-decoding
+                    // verification is the general rejection-sampling
+                    // algorithm, valid for any temperature/top-p/top-k/
+                    // repeat-penalty sampling (every live chat request's
+                    // actual settings), and GenerationOptions (masterai.hpp)
+                    // exposes no grammar/logit-bias field that could make a
+                    // request incompatible -- see that field's own class
+                    // comment for why this is not restricted to greedy
+                    // decoding.
                     context.requested_max_tokens =
                         configuration.chat_max_reply_tokens;
                     context.draft_runner_queued = false;
-                    context.sampling_is_greedy_or_deterministic = false;
+                    context.sampling_supported_by_speculative_verification = true;
                     if (!decide_speculative_decoding_for_request(context)
                              .enabled) {
                         speculative_draft.reset();
@@ -8531,10 +9385,55 @@ private:
                     }
                 };
             GenerationResult generated;
+            // Phase 33 (intranet-worker slice, this pass): a healthy remote
+            // worker verified to hold the requested model is tried before
+            // falling back further to the default local runner, closing the
+            // "chat-generation dispatch does not yet automatically fail over
+            // onto a remote worker" gap the original pass left open. Applies
+            // the identical retry_is_semantically_safe() rule the local-pool
+            // fallback below already uses: only when nothing from this
+            // attempt has reached the client yet, since persistence only
+            // happens after generate() returns successfully, further below.
+            // A remote-worker failure itself (already recorded against that
+            // worker's own health tracking by IntranetWorkerPool::generate)
+            // is swallowed here rather than failing the whole request --
+            // the caller's next fallback still gets a chance.
+            const auto try_remote_worker_failover =
+                [&](const bool any_bytes_emitted)
+                    -> std::optional<GenerationResult> {
+                if (intranet_worker_pool == nullptr) return std::nullopt;
+                if (!retry_is_semantically_safe(any_bytes_emitted, false)) {
+                    return std::nullopt;
+                }
+                RunnerSelectionSignals signals;
+                signals.model_id = chat->model_id;
+                signals.required_capability = "generation";
+                const auto worker_id = intranet_worker_pool->select_worker(signals);
+                if (!worker_id.has_value()) return std::nullopt;
+                try {
+                    auto result = intranet_worker_pool->generate(
+                        *worker_id, generation_prompt, options, on_chunk,
+                        cancellation, configuration.runner_stall_timeout_seconds);
+                    active_runner_id.clear();
+                    queries.record_runner(query_id, "intranet-worker:" + *worker_id);
+                    return result;
+                } catch (const std::exception&) {
+                    return std::nullopt;
+                }
+            };
             if (active_runner_id.empty()) {
-                generated = inference->generate(
-                    generation_prompt, options, on_chunk, cancellation,
-                    configuration.runner_stall_timeout_seconds);
+                try {
+                    generated = inference->generate(
+                        generation_prompt, options, on_chunk, cancellation,
+                        configuration.runner_stall_timeout_seconds);
+                } catch (const std::exception&) {
+                    if (auto remote =
+                            try_remote_worker_failover(!streamed_text.empty())) {
+                        generated = std::move(*remote);
+                    } else {
+                        throw;
+                    }
+                }
             } else {
                 try {
                     generated = runner_pool->generate(
@@ -8553,15 +9452,21 @@ private:
                                                     false)) {
                         throw;
                     }
-                    ensure_model_loaded(chat->model_id);
-                    generated = inference->generate(
-                        generation_prompt, options, on_chunk, cancellation,
-                        configuration.runner_stall_timeout_seconds);
-                    // The default runner ended up serving this request, not
-                    // the pool runner originally selected -- keep the trace
-                    // identity honest about who actually generated the reply.
-                    active_runner_id.clear();
-                    queries.record_runner(query_id, "inference");
+                    if (auto remote = try_remote_worker_failover(
+                            failure.any_bytes_emitted)) {
+                        generated = std::move(*remote);
+                    } else {
+                        ensure_model_loaded(chat->model_id);
+                        generated = inference->generate(
+                            generation_prompt, options, on_chunk, cancellation,
+                            configuration.runner_stall_timeout_seconds);
+                        // The default runner ended up serving this request,
+                        // not the pool runner originally selected -- keep
+                        // the trace identity honest about who actually
+                        // generated the reply.
+                        active_runner_id.clear();
+                        queries.record_runner(query_id, "inference");
+                    }
                 }
             }
             if (first_token) {
@@ -8788,9 +9693,11 @@ private:
     std::unique_ptr<TrainingJobStore> ml_training_jobs;
     std::unique_ptr<EvaluationRunStore> ml_evaluation_runs;
     std::unique_ptr<ExperimentStore> ml_experiments;
+    std::unique_ptr<ExperimentResultStore> ml_experiment_results;
     std::unique_ptr<FineTuningJobStore> ml_fine_tuning_jobs;
     std::unique_ptr<ModelBuilderConfigStore> ml_model_builder_configs;
     std::unique_ptr<InstructionExampleStore> ml_instruction_examples;
+    std::unique_ptr<InstructionExampleContentStore> ml_instruction_example_content;
     std::unique_ptr<SyntheticRecordStore> ml_synthetic_records;
     std::unique_ptr<VectorStoreStore> ml_vector_stores;
     std::unique_ptr<RagConfigStore> ml_rag_configs;
@@ -8798,6 +9705,7 @@ private:
     std::unique_ptr<HyperparameterSearchStore> ml_hyperparameter_searches;
     std::unique_ptr<ModelOptimizationStore> ml_model_optimizations;
     std::unique_ptr<TrainingCheckpointStore> ml_training_checkpoints;
+    std::unique_ptr<CheckpointModelStore> ml_checkpoint_models;
     std::unique_ptr<DeploymentStore> ml_deployments;
     // Phase 56: the real ML execution layer's stores -- uploaded dataset
     // content, learned weight artifacts, and executed evaluation results.
@@ -8883,6 +9791,14 @@ private:
     // destructor calls shutdown_cleanup(), so no explicit call is needed in
     // ~State() above; ordinary member-destruction order handles it.
     std::unique_ptr<ScratchVolumeManager> scratch_volumes;
+    // Phase 31 (Priority B, manifest closure): durable, journaled record of
+    // every migrate_durable_file() move, installed process-wide via
+    // install_global_durable_file_manifest() immediately after construction
+    // so resolve_durable_path() call sites (LlamaCppAdapter::build_launch_spec,
+    // pre-touch, ...) work without threading a reference through every layer
+    // between here and there. Declared after records (which it wraps) and
+    // before scratch_volumes' users that might resolve through it.
+    std::unique_ptr<DurableFileManifest> durable_file_manifest;
     // Phase 20: durable, administrator-controlled evidence/admission state.
     // Declared after records, which outlives it; constructed after open().
     std::unique_ptr<AdvancedOptimizationRegistry> advanced_optimizations;

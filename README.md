@@ -285,10 +285,11 @@ The current source includes native implementations for:
   is also implemented: `migrate_durable_file()` verifies a SHA-256 digest
   match between source and staged copy before an atomic rename, enforces
   the same RAM-tier prohibition, and is exposed administrator-only via
-  `POST /api/v1/system/storage/migrate` (this codebase has no central
-  manifest of which record references a migrated path, so the endpoint
-  performs and verifies the relocation and reports
-  `callerMustUpdateReferencingRecord: true` rather than guessing).
+  `POST /api/v1/system/storage/migrate`. Every migration is recorded in a
+  durable, journaled `DurableFileManifest`, and `resolve_durable_path()`
+  transparently follows it -- wired into the model-launch path so a Model
+  Registry entry's model file is still found after being migrated, and
+  visible administrator-only at `GET /api/v1/system/storage/manifest`.
 - Phase 33: distributed runners, both halves. Local multi-runner
   orchestration: `LocalRunnerPool` generalizes the existing single-runner
   `RunnerSupervisor` supervision pattern to N concurrent local runner
@@ -320,10 +321,11 @@ The current source includes native implementations for:
   `WorkerListener` (`AppConfig::workerMode`, disabled by default) is this
   codebase's one deliberate exception to the administrator HTTP server's
   loopback-only constraint, speaking only the narrow authenticated worker
-  protocol, never the administrator surface. Not yet wired into the live
-  chat-generation dispatch path -- a chat request does not automatically
-  fail over onto a remote worker the way it already does onto a local pool
-  runner.
+  protocol, never the administrator surface. Wired into the live
+  chat-generation dispatch path: a chat request automatically fails over
+  onto a healthy, verified remote worker (before falling back further to
+  the default local runner) whenever the local runner it tried fails and
+  nothing from that attempt has already reached the caller.
 - Phase 34: adaptive performance controller. `AdaptiveController`
   (`src/adaptive_controller.cpp`) extends Phase 19 calibration into a live,
   bounded controller with real minimum-dwell-time, cooldown, bounded-step-
@@ -341,19 +343,27 @@ The current source includes native implementations for:
   `POST .../mode`, `POST .../ceilings`, `POST .../rollback`.
 - Phase 35: a "Performance" administration page (`/app/performance`)
   consolidating live visibility into the local runner pool, the intranet
-  worker pool, and the adaptive controller (mode selection, applied/
-  recommended adjustments with reasons and confidence, rollback), backed
+  worker pool, the adaptive controller (mode selection, applied/
+  recommended adjustments with reasons and confidence, rollback), memory,
+  caches, storage tiers and the tier-migration manifest, the request
+  scheduler, advanced optimizations, and calibration profiles, backed
   entirely by the real routes above -- condensed from the plan's full
   named-page enumeration into one working page rather than many
   placeholders.
-- Phase 32 (evidence-pending): speculative decoding decision logic.
-  `check_draft_target_compatibility()`, `SpeculativeDecodingStats`, and
+- Phase 32 (evidence-pending): speculative decoding. `check_draft_target_
+  compatibility()`, `SpeculativeDecodingStats`, and
   `decide_speculative_decoding_for_request()`
   (`src/speculative_decoding.cpp`) implement exact draft/target
-  compatibility checking, rolling acceptance-rate tracking, and the
-  bounded per-request enable/disable rule the plan describes, but are
-  deliberately not wired to any live generation call site -- this codebase
-  has no dual-model (draft+target concurrently resident) launch path yet.
+  compatibility checking, rolling acceptance-rate tracking, and the bounded
+  per-request enable/disable rule the plan describes, wired to a real
+  dual-model (draft+target concurrently resident) launch path
+  (`LlamaCppAdapter::build_launch_spec`'s `--model-draft` flags) and gated
+  behind the same evidence/admission registry `continuous_batching` uses.
+  The sampling-compatibility gate correctly reflects that llama.cpp's
+  rejection-sampling verification supports this codebase's real (non-greedy)
+  chat sampling presets, so the feature activates for live chat traffic once
+  admitted and evidenced. Still unvalidated on real hardware -- no measured
+  throughput run has exercised the launch path yet.
 - A native asynchronous storage and prefetch engine (`IAsyncFileReader`):
   IOCP-backed overlapped reads on Windows and a bounded worker-pool `pread`
   fallback on POSIX, adjacent-request read coalescing, an adaptive
@@ -494,17 +504,17 @@ Status below reflects the evidence recorded in
 | 41 | Data labeling and preparation | Implemented at a scoped-down level |
 | 42 | Training Jobs | Implemented; real tabular training executor (Phase 56) |
 | 43 | Evaluation Lab | Implemented; real tabular scoring harness (Phase 56) |
-| 44 | Experiment Tracking | Implemented at a scoped-down level |
+| 44 | Experiment Tracking | Implemented at a scoped-down level initially; Phase 80 adds a real training/evaluation executor and side-by-side comparison |
 | 45 | Fine-Tuning Interface | Implemented at a scoped-down level; no fine-tuning executor |
 | 46 | Model Builder | Fully implemented (full section 9 design sheet, basic/advanced modes); no construction executor |
-| 47 | Prompt and Instruction Training | Implemented at a scoped-down metadata level |
+| 47 | Prompt and Instruction Training | Implemented at a scoped-down metadata level initially; Phase 81 adds the real content record, generation, multi-model testing, duplicate/contradiction detection, and structured-output validation |
 | 48 | Synthetic Data Generation | Implemented at a scoped-down metadata level; no generator |
 | 49 | Embeddings and Vector Stores | Registry implemented; real local hashing-vector index added in Phase 59 |
 | 50 | Retrieval-Augmented Generation | Configuration implemented; real retrieval/context executor added in Phase 60 |
 | 51 | Subject Examination System | Implemented at a scoped-down record level; no exam administration |
 | 52 | Hyperparameter Optimization | Implemented at a scoped-down record level; no search executor |
 | 53 | Model Optimization | Implemented at a scoped-down record level; no optimizer executor |
-| 54 | Checkpoint Management | Implemented at a scoped-down retention-record level; no checkpoint capture |
+| 54 | Checkpoint Management | Implemented at a scoped-down retention-record level initially; Phase 79 adds real mid-training weight-snapshot capture and a resume-training executor |
 | 55 | Deployment Manager | Implemented at a scoped-down approval-record level; no deployment executor |
 | 56 | Real ML execution engine (tabular training, evaluation, prediction) | Implemented |
 | 57 | Model Comparison (real baseline-vs-candidate benchmark executor) | Implemented |
@@ -529,6 +539,9 @@ Status below reflects the evidence recorded in
 | 76 | RAG real answer generation | Implemented; the RAG query route's optional `"generate":true` mode produces a real generated answer grounded in the same retrieved context |
 | 77 | Inference Endpoints real listener | Implemented; an `active` endpoint opens a real listener enforcing authentication, rate limiting, and a real per-endpoint safety policy (scan on/off, block-on-finding, attached `SafetyPolicy`, opt-in Phase 74 model classifier), re-read live on every request |
 | 78 | Monitoring real per-request telemetry | Implemented; real latency percentiles, queue depth, requests/minute, live per-step tabular-training progress, and KV-session cache-hit rate |
+| 79 | Checkpoint Management real capture and resume | Implemented; training/fine-tuning runs capture a genuine weight snapshot at each checkpoint epoch, and "Resume training" continues gradient descent from one, registering the result as a new model |
+| 80 | Experiment Tracking real executor | Implemented; "Run now" genuinely trains and evaluates the experiment's dataset (real training/validation/evaluation metrics, checkpoints, hardware, runtime), and "Compare" builds a genuine side-by-side diff of two or more already-run experiments |
+| 81 | Prompt and Instruction Training real content and operations | Implemented; a real content record (system/user instruction, context, expected/rejected response, tool calls/results, output format, difficulty, safety classification), real draft generation and multi-model testing via `execute_rag_generation`, heuristic duplicate/contradiction detection, real JSON structured-output validation, and enforced approval-requires-content |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04

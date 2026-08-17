@@ -664,8 +664,24 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
     if (parallel_slots < 1U || parallel_slots > 64U) {
         throw std::invalid_argument("parallel slot count is outside policy");
     }
-    const auto model_file = model.directory / model.manifest.model_file;
-    if (!is_path_within(model.directory, model_file)) {
+    // Phase 31 (Priority B, manifest closure): the Model Registry entry
+    // (model.directory) is only where the file lived when it was verified,
+    // not necessarily where it lives now -- an administrator may have since
+    // moved it to a different storage tier via
+    // POST /api/v1/system/storage/migrate. resolve_durable_path() is a
+    // no-op (returns its argument unchanged) whenever the file is still at
+    // its original location, so this changes nothing for the common,
+    // never-migrated case.
+    const auto configured_model_file = model.directory / model.manifest.model_file;
+    const auto model_file = resolve_durable_path(configured_model_file);
+    if (model_file == configured_model_file &&
+        !is_path_within(model.directory, model_file)) {
+        // The directory-containment check only applies to an unmigrated
+        // file: once migrate_durable_file() has relocated it, living
+        // outside model.directory is expected, not a path-escape attempt.
+        // The SHA-256/size check right below -- re-verified against the
+        // Model Registry's own originally-approved digest, independent of
+        // location -- is the actual security property being enforced here.
         throw std::runtime_error("model path escaped its approved directory");
     }
     if (std::filesystem::file_size(model_file) !=

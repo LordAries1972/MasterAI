@@ -10,7 +10,9 @@
 #include "json.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
+#include <mutex>
 #include <stdexcept>
 
 #if defined(_WIN32)
@@ -32,6 +34,68 @@ bool safe_job_id(const std::string& value) {
     }
     return true;
 }
+
+// DurableFileManifest's own copies of this codebase's standard packed-record
+// helpers (ml.cpp, downloads.cpp, ... each keep a local copy rather than
+// sharing one across translation units -- see masterai.hpp).
+std::uint64_t epoch_seconds() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+}
+
+std::string random_id() {
+    const auto random = secure_random(16U);
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string id(random.size() * 2U, '0');
+    for (std::size_t index = 0; index < random.size(); ++index) {
+        id[index * 2U] = digits[(random[index] >> 4U) & 0x0fU];
+        id[index * 2U + 1U] = digits[random[index] & 0x0fU];
+    }
+    return id;
+}
+
+std::string pack(const std::vector<std::string>& fields) {
+    std::string result;
+    for (const auto& field : fields) {
+        result += std::to_string(field.size()) + ":" + field;
+    }
+    return result;
+}
+
+std::vector<std::string> unpack(const std::string& value) {
+    std::vector<std::string> fields;
+    std::size_t position = 0U;
+    while (position < value.size()) {
+        const auto colon = value.find(':', position);
+        if (colon == std::string::npos || colon == position) {
+            throw std::runtime_error("persisted storage migration record is malformed");
+        }
+        const auto size = std::stoull(value.substr(position, colon - position));
+        position = colon + 1U;
+        if (size > value.size() - position) {
+            throw std::runtime_error("persisted storage migration record is truncated");
+        }
+        fields.push_back(value.substr(position, static_cast<std::size_t>(size)));
+        position += static_cast<std::size_t>(size);
+    }
+    return fields;
+}
+
+// Canonical form used as the manifest's map key so the same file referenced
+// via two different-but-equivalent path spellings still resolves as one
+// entry. Falls back to the raw string (rather than throwing) for a path that
+// does not currently exist -- e.g. resolving an already-migrated original
+// path, which by definition no longer exists at its old location.
+std::string canonical_key(const std::filesystem::path& path) {
+    std::error_code error;
+    const auto canonical = std::filesystem::weakly_canonical(path, error);
+    return error ? path.string() : canonical.string();
+}
+
+std::mutex g_durable_manifest_mutex;
+DurableFileManifest* g_durable_manifest = nullptr;
 
 }  // namespace
 
@@ -429,14 +493,121 @@ std::string scratch_volume_manager_status_json(const ScratchVolumeManager& manag
           ",\"activeJobs\":" + jobs_json + "}";
 }
 
+DurableFileManifest::DurableFileManifest(RecordStore& records) : records_(&records) {
+    // Rebuild current_location_ from the persisted, append-only migration
+    // log. Entries are stored in the order they were recorded, so replaying
+    // them in that order naturally reproduces the same chained
+    // (source -> latest destination) state record() maintains live.
+    for (const auto& item : records_->list("storage_migrations")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 5U) {
+            throw std::runtime_error(
+                "persisted storage migration record field count is wrong");
+        }
+        const auto& source_key = fields[0];
+        const auto& destination_key = fields[1];
+        for (auto& [key, value] : current_location_) {
+            if (value == source_key) value = destination_key;
+        }
+        current_location_[source_key] = destination_key;
+    }
+}
+
+void DurableFileManifest::record(const std::filesystem::path& source_path,
+                                  const std::filesystem::path& destination_path,
+                                  const std::string& sha256_hex,
+                                  const DurableDataClass data_class) {
+    const auto source_key = canonical_key(source_path);
+    const auto destination_key = canonical_key(destination_path);
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (records_ != nullptr) {
+        records_->put(
+            "storage_migrations", random_id(),
+            pack({source_key, destination_key, sha256_hex,
+                 to_string(data_class), std::to_string(epoch_seconds())}));
+    }
+    for (auto& [key, value] : current_location_) {
+        if (value == source_key) value = destination_key;
+    }
+    current_location_[source_key] = destination_key;
+}
+
+std::filesystem::path DurableFileManifest::resolve(
+    const std::filesystem::path& original_path) const {
+    if (std::filesystem::exists(original_path)) return original_path;
+    auto key = canonical_key(original_path);
+    const std::lock_guard<std::mutex> lock(mutex_);
+    // Bounded rather than following current_location_ until it stabilises:
+    // a manifest corrupted into a cycle must fail safe (return the last
+    // hop actually reached) rather than hang.
+    for (int hop = 0; hop < 32; ++hop) {
+        const auto found = current_location_.find(key);
+        if (found == current_location_.end()) break;
+        key = found->second;
+    }
+    return std::filesystem::path(key);
+}
+
+std::vector<DurableFileManifest::Entry> DurableFileManifest::entries() const {
+    std::vector<Entry> result;
+    if (records_ == nullptr) return result;
+    for (const auto& item : records_->list("storage_migrations")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 5U) continue;
+        Entry entry;
+        entry.source_path = fields[0];
+        entry.destination_path = fields[1];
+        entry.sha256_hex = fields[2];
+        entry.data_class = fields[3];
+        entry.migrated_at_epoch_seconds = std::stoull(fields[4]);
+        result.push_back(std::move(entry));
+    }
+    return result;
+}
+
+std::string durable_file_manifest_json(const DurableFileManifest& manifest) {
+    std::string entries_json = "[";
+    bool first = true;
+    for (const auto& entry : manifest.entries()) {
+        if (!first) entries_json += ",";
+        first = false;
+        entries_json += "{\"sourcePath\":" + json_string(entry.source_path) +
+                        ",\"destinationPath\":" + json_string(entry.destination_path) +
+                        ",\"sha256\":" + json_string(entry.sha256_hex) +
+                        ",\"dataClass\":" + json_string(entry.data_class) +
+                        ",\"migratedAtEpochSeconds\":" +
+                        std::to_string(entry.migrated_at_epoch_seconds) + "}";
+    }
+    entries_json += "]";
+    return "{\"migrations\":" + entries_json + "}";
+}
+
+void install_global_durable_file_manifest(DurableFileManifest& manifest) {
+    const std::lock_guard<std::mutex> lock(g_durable_manifest_mutex);
+    g_durable_manifest = &manifest;
+}
+
+std::filesystem::path resolve_durable_path(const std::filesystem::path& original_path) {
+    DurableFileManifest* manifest = nullptr;
+    {
+        const std::lock_guard<std::mutex> lock(g_durable_manifest_mutex);
+        manifest = g_durable_manifest;
+    }
+    if (manifest == nullptr) return original_path;
+    return manifest->resolve(original_path);
+}
+
 // Phase 31 (Priority B): tier-migration tooling. Unlike publish() above,
 // this operates on data that is already durable and already placed, so
 // there is no ScratchVolumeManager job/quota involved at all -- it is a
-// standalone, verified relocate-in-place operation.
+// standalone, verified relocate-in-place operation. Records the move in
+// `manifest` (closing the earlier "no central manifest" gap) so any reader
+// still holding `source_path` can find the file again via
+// resolve_durable_path().
 StorageMigrationResult migrate_durable_file(
     const std::filesystem::path& source_path,
     const std::filesystem::path& destination_directory,
-    const DurableDataClass data_class) {
+    const DurableDataClass data_class, DurableFileManifest& manifest) {
     if (!std::filesystem::is_regular_file(source_path)) {
         throw std::invalid_argument(
             "migrate_durable_file source is not a readable regular file");
@@ -506,6 +677,7 @@ StorageMigrationResult migrate_durable_file(
     // scratch, and recover_orphans() deliberately does not touch it.
     std::error_code remove_error;
     std::filesystem::remove(source_path, remove_error);
+    manifest.record(source_path, destination_path, staged_digest, data_class);
     return StorageMigrationResult{destination_path, bytes_migrated, staged_digest};
 }
 
