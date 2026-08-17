@@ -2071,6 +2071,102 @@ Current phase status:
   `.../test`, like every other `execute_rag_generation`-dependent path in
   this codebase, need a loaded model and are exercised the same way those
   are (manual/integration testing), not a new inference stub.
+- Phase 82: Fully implemented (2026-08-17) — Deployment Manager, Inference
+  Endpoints, and Synthetic Data (sections 34, 35, 20) all move from
+  `"planned"` to `"available"` in `MachineLearningRegistry`'s roster
+  (`src/ml.cpp`).
+  **Synthetic Data** (section 20) gains the real generation executor Phase
+  48's class comment deferred: a new `SyntheticRecordContentStore`
+  (`src/masterai.hpp`/`src/ml.cpp`), the same identity/content split Phase
+  81 gave Prompt and Instruction Training, holds generator model, generator
+  version (resolved from `ModelRegistryStore` when available), the composed
+  prompt, generation settings (the technique string), the real generated
+  text, a documented heuristic confidence score (1.0 if generation
+  completed uncancelled with non-empty text, 0.0 otherwise -- this codebase
+  has no per-token logprob to compute a real probability from), and
+  optional source-record linkage. `POST /api/v1/ml/synthetic-records/
+  generate` (`ml.syntheticdata.manage`) composes a technique-specific
+  prompt from a fixed lookup table covering all thirteen of section 20's
+  named operations (falling back to a generic template for any other
+  free-text technique, keeping the field as open-ended as Phase 48 left
+  it), calls `Server::execute_rag_generation`, creates the `SyntheticRecord`
+  (still starting `draft`), and stores the result. `GET .../{id}/content`
+  reads it back; `.../delete` cascades to remove it. The web UI's Synthetic
+  Data page gained a "Generate synthetic record" form (dataset, model,
+  technique dropdown, source text).
+  **Deployment Manager** (section 34) gains its own real deploy/health/
+  rollback action instead of relying solely on Automation Pipelines' stage
+  executor. `Deployment` gained `health_status`, `deployed_at_epoch_
+  seconds`, and `previous_deployment_id` fields. `DeploymentStore::deploy()`
+  requires the caller (server.cpp) to have already confirmed an approved
+  `ModelCard` exists for the deployment's model -- the exact same gate
+  `AutomationPipeline`'s "Request approval"/"Deploy" stages already
+  enforce (`run_safety_tests_stage`), so approving through this module's
+  own API is held to the identical bar as approving through a pipeline
+  run -- and computes a real (not fabricated) health signal from whether
+  `TrainedModelStore` holds trained weights for the model (`"trained_
+  weights_present"` or the honest `"unverified"`, since an LLM-backed
+  model reached only through `execute_rag_generation` has no tabular
+  artifact to check). Deploying supersedes (rejects) any other deployment
+  already `approved` for the same environment and records its id as
+  `previous_deployment_id`; `DeploymentStore::rollback()` reverses that:
+  rejects the current deployment and re-approves the one it superseded.
+  `POST /api/v1/ml/deployments/{id}/deploy` and `.../rollback`
+  (`ml.deployments.manage`) expose these. The web UI's Deployment Manager
+  page gained "Deploy now"/"Rollback" row actions and Health/Deployed-at
+  columns.
+  **Inference Endpoints** (section 35) needed no new execution: Phase 77
+  had already given it a real socket listener (`run_inference_endpoint`),
+  real Bearer auth, a real per-minute rate limiter, and live per-request
+  safety-policy enforcement -- the roster comment simply hadn't been
+  updated to say so and was still claiming "no live network listener...
+  yet." The web UI's create form gained the `authToken` field the API
+  already accepted but the form never exposed, and a new policy-editing
+  form exposes the previously API-only `POST .../{id}/policy` route
+  (content scan enabled, block-on-finding for prompt/answer, safety
+  policy id, model classifier enabled/confidence floor).
+  Extended `test_machine_learning_synthetic_data_lifecycle` and
+  `test_machine_learning_deployment_lifecycle` (`test/tests.cpp`) cover
+  `SyntheticRecordContentStore` round-tripping and reload, and
+  `DeploymentStore::deploy()`/`rollback()`'s refusal-without-an-approved-
+  card, real health-status computation, supersede-on-redeploy, and
+  rollback-restores-the-previous-deployment behavior, at the store level
+  the same way Phase 55's own test does. No new HTTP-layer test was added
+  for `run_inference_endpoint` (`POST /v1/completions` auth/rate-limit
+  enforcement): this test suite has no existing precedent for a test that
+  opens a real listening socket, and inventing one was out of scope for
+  this pass -- that surface remains covered by manual/integration testing
+  only, the same honestly-stated gap Phase 81 left for its own
+  `execute_rag_generation`-dependent routes.
+- Phase 83: Fully implemented (2026-08-17) — Safety and Governance (section
+  2 item 22, section 40) moves from `"planned"` to `"available"` in
+  `MachineLearningRegistry`'s roster (`src/ml.cpp`). No new executor was
+  needed: Phase 65 already gave it real policy/model-card approval CRUD,
+  Phase 74 already gave it real heuristic content scanning
+  (`scan_content_for_risks`) and a real LLM-as-judge classifier
+  (`scan_content_with_model_classifier`) for bias/hallucination/harmful
+  content, and Phase 82 already made `DeploymentStore::deploy()` genuinely
+  refuse to deploy without an approved `ModelCard` and made
+  `run_inference_endpoint` genuinely enforce a policy's content-scan/
+  block-on-finding settings on every real request — the roster entry
+  simply hadn't been updated to say so, the same stale-tag gap Phase 82
+  found and fixed for Inference Endpoints. Added
+  `test_machine_learning_safety_governance_lifecycle` (`test/tests.cpp`),
+  the store-level test this module was missing: `SafetyGovernanceStore`
+  policy/model-card create/find/list/status/remove and reload-survival, and
+  `scan_content_for_risks()`'s four real behaviors (clean text stays clean,
+  an AWS-shaped secret token is caught unconditionally, prompt-injection
+  phrasing is caught unconditionally, and a restricted-data-category term
+  is only matched when a `SafetyPolicy` is supplied). Honest remaining gap,
+  stated directly in the roster comment: this governs content this
+  codebase's own inference paths generate, not dataset ingestion sources,
+  PII/copyright/data-poisoning detectors, or retention/export/network
+  policy enforcement from section 40's full list — none of those have an
+  executor in this codebase. Also fixed an unrelated web UI layout bug on
+  the same page: the Inference Endpoints policy form's four checkbox
+  labels were missing the `checkboxLabel` CSS class every other checkbox
+  label in this codebase uses, so the checkbox and its text wrapped onto
+  separate lines instead of sitting on one line (`src/web_ui.cpp`).
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -6421,8 +6517,11 @@ adds a real process-isolated llama.cpp learned-embedding adapter with durable
 model/dimension provenance and changes durable user-memory recall from every
 turn to one persisted snapshot per conversation. LLM fine-tuning (Phase 73),
 RAG answer generation (Phase 76), and Inference Endpoints (Phase 62/77) are
-now real executors too — see their own phase entries above; every other
-executor not named above remains `Planned`: a metadata record or lifecycle
+real executors too, and Phase 82 gives Deployment Manager and Synthetic
+Data their own real executors as well, flipping all three of that pass's
+named interfaces from `planned` to `available` — see their own phase
+entries above; every other executor not named above remains `Planned`: a
+metadata record or lifecycle
 transition is not execution proof. Checkpoint Management (section 33) was
 the last-scoped-down interface never revisited with a real executor until
 Phase 79, which now captures genuine mid-training weight snapshots and
@@ -6436,7 +6535,12 @@ for the full surface and its honest boundary (no safety-scoring executor
 exists yet, reported as such rather than fabricated). Prompt and Instruction
 Training (section 19) got the same treatment in Phase 81 — see its own entry
 above for what "generate," "test against models," "detect duplicates/
-contradictions," and "validate structured output" now genuinely do.
+contradictions," and "validate structured output" now genuinely do. Safety
+and Governance (section 40) is the last of these stale-roster-tag fixes:
+Phase 83 flips it from `planned` to `available`, since its real content-
+scanning executors (Phase 74) and real approval-gated deployment/inference
+enforcement (Phase 82) already met the bar every other `available` entry
+here does.
 
 This section extends the plan with an administrator-only Machine Learning
 administration and model-development module, covering the full lifecycle

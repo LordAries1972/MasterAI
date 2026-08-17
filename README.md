@@ -508,21 +508,21 @@ Status below reflects the evidence recorded in
 | 45 | Fine-Tuning Interface | Implemented at a scoped-down level; no fine-tuning executor |
 | 46 | Model Builder | Fully implemented (full section 9 design sheet, basic/advanced modes); no construction executor |
 | 47 | Prompt and Instruction Training | Implemented at a scoped-down metadata level initially; Phase 81 adds the real content record, generation, multi-model testing, duplicate/contradiction detection, and structured-output validation |
-| 48 | Synthetic Data Generation | Implemented at a scoped-down metadata level; no generator |
+| 48 | Synthetic Data Generation | Implemented at a scoped-down metadata level initially; Phase 82 adds a real generation executor |
 | 49 | Embeddings and Vector Stores | Registry implemented; real local hashing-vector index added in Phase 59 |
 | 50 | Retrieval-Augmented Generation | Configuration implemented; real retrieval/context executor added in Phase 60 |
 | 51 | Subject Examination System | Implemented at a scoped-down record level; no exam administration |
 | 52 | Hyperparameter Optimization | Implemented at a scoped-down record level; no search executor |
 | 53 | Model Optimization | Implemented at a scoped-down record level; no optimizer executor |
 | 54 | Checkpoint Management | Implemented at a scoped-down retention-record level initially; Phase 79 adds real mid-training weight-snapshot capture and a resume-training executor |
-| 55 | Deployment Manager | Implemented at a scoped-down approval-record level; no deployment executor |
+| 55 | Deployment Manager | Implemented at a scoped-down approval-record level initially; Phase 82 adds a real deploy/health/rollback executor |
 | 56 | Real ML execution engine (tabular training, evaluation, prediction) | Implemented |
 | 57 | Model Comparison (real baseline-vs-candidate benchmark executor) | Implemented |
 | 58 | Knowledge-file ingestion | Implemented; bounded text upload, SHA-256 provenance, durable chunk records |
 | 59 | Local embedding and vector indexing | Implemented; authored 128-dimensional hashing vectors and index profiles |
 | 60 | RAG retrieval and grounded context assembly | Implemented; approved-config query execution with ranked chunks and citations |
 | 61 | Learned embeddings and once-per-chat memory recall | Implemented; isolated llama.cpp embedding adapter, durable vector provenance, and retained chat memory snapshots |
-| 62 | Inference Endpoints | Implemented at a scoped-down record level initially; Phase 77 adds a real network listener |
+| 62 | Inference Endpoints | Implemented at a scoped-down record level initially; Phase 77 adds a real network listener; Phase 82 completes the auth-token/policy UI and the roster entry |
 | 63 | Hardware and Compute | Implemented at a scoped-down record level initially; Phase 67/75 add real local and remote telemetry |
 | 64 | Automation Pipelines | Implemented at a scoped-down record level initially; Phase 69/71/72 add real stage execution |
 | 65 | Safety and Governance | Implemented at a scoped-down policy/model-card approval level initially; Phase 74 adds real heuristic content scanning |
@@ -542,6 +542,8 @@ Status below reflects the evidence recorded in
 | 79 | Checkpoint Management real capture and resume | Implemented; training/fine-tuning runs capture a genuine weight snapshot at each checkpoint epoch, and "Resume training" continues gradient descent from one, registering the result as a new model |
 | 80 | Experiment Tracking real executor | Implemented; "Run now" genuinely trains and evaluates the experiment's dataset (real training/validation/evaluation metrics, checkpoints, hardware, runtime), and "Compare" builds a genuine side-by-side diff of two or more already-run experiments |
 | 81 | Prompt and Instruction Training real content and operations | Implemented; a real content record (system/user instruction, context, expected/rejected response, tool calls/results, output format, difficulty, safety classification), real draft generation and multi-model testing via `execute_rag_generation`, heuristic duplicate/contradiction detection, real JSON structured-output validation, and enforced approval-requires-content |
+| 82 | Deployment Manager, Inference Endpoints, and Synthetic Data completion | Implemented; Synthetic Data gets a real generation executor (technique-specific prompts via `execute_rag_generation`); Deployment Manager gets its own real deploy/health/rollback action (approved-Model-Card gate, trained-weights health signal, supersede/rollback tracking); Inference Endpoints' already-real Phase 77 listener gets its missing auth-token/policy UI. All three roster entries move from `planned` to `available` |
+| 83 | Safety and Governance roster completion | Implemented; no new executor needed — Phase 74's real content scanning and Phase 82's approval-gated deployment/inference enforcement already met the bar, so the roster entry moves from `planned` to `available`; added the missing `SafetyGovernanceStore`/`scan_content_for_risks` store-level test |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04

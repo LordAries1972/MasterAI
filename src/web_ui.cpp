@@ -314,9 +314,9 @@ std::string application_script() {
         "deployedModels:0,failedTrainingJobs:0,interfaces:[]}),"
         "fetchFor('#mlProjectsList,#mlTrainingJobProjectId,#mlExperimentProjectId,#mlFineTuningJobProjectId,#mlModelBuilderConfigProjectId',"
         "'/api/v1/ml/projects',{projects:[]}),"
-        "fetchFor('#mlModelsList,#mlPredictModelId,#mlTrainingJobModelId,#mlEvaluationRunModelId,#mlExperimentModelId,#mlFineTuningJobModelId,#mlModelBuilderConfigBaseModelId,#mlModelOptimizationModelId,#mlDeploymentModelId,#mlModelComparisonBaselineModelId,#mlModelComparisonCandidateModelId,#mlPipelineModelId,#mlInstructionExampleGenerateModelId',"
+        "fetchFor('#mlModelsList,#mlPredictModelId,#mlTrainingJobModelId,#mlEvaluationRunModelId,#mlExperimentModelId,#mlFineTuningJobModelId,#mlModelBuilderConfigBaseModelId,#mlModelOptimizationModelId,#mlDeploymentModelId,#mlModelComparisonBaselineModelId,#mlModelComparisonCandidateModelId,#mlPipelineModelId,#mlInstructionExampleGenerateModelId,#mlSyntheticRecordGenerateModelId',"
         "'/api/v1/ml/models',{models:[]}),"
-        "fetchFor('#mlDatasetsList,#mlDatasetContentId,#mlLabelTaskDatasetId,#mlPrepJobDatasetId,#mlTrainingJobDatasetId,#mlEvaluationRunDatasetId,#mlExperimentDatasetId,#mlFineTuningJobDatasetId,#mlInstructionExampleDatasetId,#mlInstructionExampleGenerateDatasetId,#mlSyntheticRecordDatasetId,#mlModelComparisonDatasetId,#mlPipelineDatasetId',"
+        "fetchFor('#mlDatasetsList,#mlDatasetContentId,#mlLabelTaskDatasetId,#mlPrepJobDatasetId,#mlTrainingJobDatasetId,#mlEvaluationRunDatasetId,#mlExperimentDatasetId,#mlFineTuningJobDatasetId,#mlInstructionExampleDatasetId,#mlInstructionExampleGenerateDatasetId,#mlSyntheticRecordDatasetId,#mlSyntheticRecordGenerateDatasetId,#mlModelComparisonDatasetId,#mlPipelineDatasetId',"
         "'/api/v1/ml/datasets',{datasets:[]}),"
         "fetchFor('#mlSubjectsList,#mlKnowledgeSubjectId,#mlSubjectExamSubjectId',"
         "'/api/v1/ml/subjects',{subjects:[]}),"
@@ -436,13 +436,14 @@ std::string application_script() {
         "'#mlDeploymentModelId','#mlModelComparisonBaselineModelId',"
         "'#mlModelComparisonCandidateModelId','#mlEndpointModelId',"
         "'#mlModelCardModelId','#mlPipelineModelId',"
-        "'#mlInstructionExampleGenerateModelId'])fillMlSelect(id,mlm.models,"
+        "'#mlInstructionExampleGenerateModelId',"
+        "'#mlSyntheticRecordGenerateModelId'])fillMlSelect(id,mlm.models,"
         "'None / choose a model',x=>x.displayName||x.name);"
         "for(const id of ['#mlDatasetContentId','#mlLabelTaskDatasetId',"
         "'#mlPrepJobDatasetId','#mlTrainingJobDatasetId','#mlEvaluationRunDatasetId',"
         "'#mlExperimentDatasetId','#mlFineTuningJobDatasetId',"
         "'#mlInstructionExampleDatasetId','#mlInstructionExampleGenerateDatasetId',"
-        "'#mlSyntheticRecordDatasetId',"
+        "'#mlSyntheticRecordDatasetId','#mlSyntheticRecordGenerateDatasetId',"
         "'#mlModelComparisonDatasetId','#mlPipelineDatasetId'])fillMlSelect(id,mld.datasets,"
         "'None / choose a dataset',x=>x.name);"
         "fillMlSelect('#mlHyperparameterSearchTrainingJobId',mltj.trainingJobs,"
@@ -2112,22 +2113,34 @@ std::string application_script() {
         // section 34): a deployment is a standalone registered resource
         // awaiting authorization, so it reuses the same three-state
         // pending/approved/rejected approval workflow as Vector Stores.
+        // The Deployment Manager/Inference Endpoints/Synthetic Data
+        // completion phase adds real "Deploy now"/"Rollback" actions
+        // (POST .../deploy, .../rollback) alongside the manual status
+        // dropdown -- "Deploy now" gates on an approved ModelCard and
+        // reports a real health signal; "Rollback" only appears once a
+        // deployment has superseded a prior one for the same environment.
         "const DEPLOYMENT_STATUSES=['pending','approved','rejected'];"
         "function renderMlDeployments(deployments){"
         "const el=q('#mlDeploymentsList');if(!el)return;"
         "if(!deployments.length){el.innerHTML='<p>No deployments recorded "
         "yet.</p>';return;}"
         "el.innerHTML=table(['Name','Model ID','Environment','Strategy',"
-        "'Status','Set status'],"
+        "'Status','Health','Deployed at','Set status'],"
         "deployments.map(x=>[esc(x.name),escTrim(x.modelId,16),"
         "esc(x.environment),esc(x.strategy),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
         "esc(x.status)+'</span>',"
+        "esc(x.healthStatus||'unchecked'),"
+        "x.deployedAtEpochSeconds?"
+        "new Date(x.deployedAtEpochSeconds*1000).toLocaleString():'Never',"
         "toolbar('<select data-deployment-status-for=\"'+x.id+'\">'+"
         "DEPLOYMENT_STATUSES.map(s=>"
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
         "applyBtn('apply-deployment-status',x.id),"
+        "runBtn('deploy-ml-deployment',x.id,'Deploy now'),"
+        "x.previousDeploymentId?"
+        "runBtn('rollback-ml-deployment',x.id,'Rollback'):'',"
         "deleteBtn('delete-ml-deployment',x.id))]));"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-deployment-status]')){"
@@ -2139,6 +2152,20 @@ std::string application_script() {
         "encodeURIComponent(id)+'/status','POST',{status});await load();}"
         "catch(x){showSystemError('Update deployment status failed: '+"
         "x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-deploy-ml-deployment]')){"
+        "btn.addEventListener('click',async()=>{"
+        "try{await api('/api/v1/ml/deployments/'+"
+        "encodeURIComponent(btn.dataset.deployMlDeployment)+"
+        "'/deploy','POST',{});await load();}"
+        "catch(x){showSystemError('Deploy failed: '+x.message);}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-rollback-ml-deployment]')){"
+        "btn.addEventListener('click',async()=>{"
+        "try{await api('/api/v1/ml/deployments/'+"
+        "encodeURIComponent(btn.dataset.rollbackMlDeployment)+"
+        "'/rollback','POST',{});await load();}"
+        "catch(x){showSystemError('Rollback failed: '+x.message);}});}"
         "for(const btn of el.querySelectorAll("
         "'[data-delete-ml-deployment]')){"
         "btn.addEventListener('click',async()=>{"
@@ -3698,6 +3725,30 @@ std::string application_script() {
         "description:q('#mlSyntheticRecordDescription').value,"
         "generationTechnique:"
         "q('#mlSyntheticRecordGenerationTechnique').value})));"
+        // Deployment Manager/Inference Endpoints/Synthetic Data completion
+        // phase: generate -- calls execute_rag_generation for real via
+        // POST .../synthetic-records/generate and reloads the list so the
+        // new draft record appears.
+        "if(q('#mlSyntheticRecordGenerateForm'))"
+        "q('#mlSyntheticRecordGenerateForm').addEventListener("
+        "'submit',async e=>{e.preventDefault();"
+        "const status=q('#mlSyntheticRecordGenerateStatus');"
+        "if(status)status.textContent='Generating...';"
+        "try{const r=await api('/api/v1/ml/synthetic-records/generate',"
+        "'POST',{datasetId:q('#mlSyntheticRecordGenerateDatasetId').value,"
+        "modelId:q('#mlSyntheticRecordGenerateModelId').value,"
+        "name:q('#mlSyntheticRecordGenerateName').value,"
+        "description:q('#mlSyntheticRecordGenerateDescription').value,"
+        "generationTechnique:"
+        "q('#mlSyntheticRecordGenerateTechnique').value,"
+        "sourceText:q('#mlSyntheticRecordGenerateSourceText').value});"
+        "if(status)status.textContent='Generated \"'+r.record.name+"
+        "'\" (status: draft, needs review before approval). Output: '+"
+        "r.content.generatedText;"
+        "await load();}"
+        "catch(x){if(status)status.textContent='';"
+        "showSystemError('Generate synthetic record failed: '+"
+        "x.message);}});"
         "if(q('#newMlVectorStore'))"
         "q('#newMlVectorStore').addEventListener("
         "'submit',e=>submit(e,'/api/v1/ml/vector-stores',"
@@ -3778,7 +3829,32 @@ std::string application_script() {
         "port:Number(q('#mlEndpointPort').value)||0,"
         "protocol:q('#mlEndpointProtocol').value,"
         "authenticationMethod:q('#mlEndpointAuthenticationMethod').value,"
+        "authToken:q('#mlEndpointAuthToken').value,"
         "rateLimitPerMinute:Number(q('#mlEndpointRateLimit').value)||0})));"
+        // Deployment Manager/Inference Endpoints/Synthetic Data completion
+        // phase: exposes the previously API-only POST .../{id}/policy
+        // route in the UI.
+        "if(q('#mlEndpointPolicyForm'))"
+        "q('#mlEndpointPolicyForm').addEventListener("
+        "'submit',async e=>{e.preventDefault();"
+        "const status=q('#mlEndpointPolicyStatus');"
+        "if(status)status.textContent='Saving...';"
+        "try{await api('/api/v1/ml/inference-endpoints/'+"
+        "encodeURIComponent(q('#mlEndpointPolicyId').value)+'/policy',"
+        "'POST',{contentScanEnabled:"
+        "q('#mlEndpointPolicyContentScanEnabled').checked,"
+        "blockOnScanFinding:q('#mlEndpointPolicyBlockOnScanFinding').checked,"
+        "blockAnswerOnScanFinding:"
+        "q('#mlEndpointPolicyBlockAnswerOnScanFinding').checked,"
+        "safetyPolicyId:q('#mlEndpointPolicySafetyPolicyId').value,"
+        "modelClassifierEnabled:"
+        "q('#mlEndpointPolicyModelClassifierEnabled').checked,"
+        "modelClassifierConfidenceFloor:"
+        "Number(q('#mlEndpointPolicyConfidenceFloor').value)||0.5});"
+        "if(status)status.textContent='Policy saved. Takes effect on the "
+        "endpoint\\'s next request, no restart required.';}"
+        "catch(x){if(status)status.textContent='';"
+        "showSystemError('Save endpoint policy failed: '+x.message);}});"
         "if(q('#newMlComputeNode'))"
         "q('#newMlComputeNode').addEventListener("
         "'submit',e=>submit(e,'/api/v1/ml/compute-nodes',"
@@ -4699,15 +4775,15 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</div></section>";
     } else if (section == "ml-synthetic-records") {
         // Phase 48 (docs/PLAN.md "Machine Learning Abilities" section 20):
-        // create and list synthetic records generated against a registered
-        // dataset, and move them through the same reviewer-approval
-        // lifecycle status Prompt and Instruction Training uses. Only the
-        // identity/target-dataset/generation-technique/status fields
-        // SyntheticRecordStore actually persists are collected here -- see
-        // that class's comment in masterai.hpp for the generator-model/
-        // generator-version/prompt/generation-settings/confidence-score/
-        // original-source-linkage fields deferred to the phase that
-        // actually creates generated records.
+        // create and list synthetic records, and move them through the
+        // same reviewer-approval lifecycle status Prompt and Instruction
+        // Training uses. The Deployment Manager/Inference Endpoints/
+        // Synthetic Data completion phase adds the "Generate" form below,
+        // a real generation executor (POST .../synthetic-records/generate)
+        // that invokes a model and stores generator model/version/prompt/
+        // settings/generated text/confidence score via
+        // SyntheticRecordContentStore -- see that class's comment in
+        // masterai.hpp.
         body =
             "<section id=\"panel-ml-synthetic-records\" class=\"panel\">"
             "<div>"
@@ -4725,6 +4801,42 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "placeholder=\"e.g. paraphrase, edge_case, counterexample\">"
             "</label>"
             "<button title=\"Create synthetic record\">" ICON_PLUS_SVG " Create synthetic record</button></form>"
+            "</div><div>"
+            "<h2>Generate synthetic record</h2>"
+            "<form id=\"mlSyntheticRecordGenerateForm\">"
+            "<label>Dataset<select id=\"mlSyntheticRecordGenerateDatasetId\" "
+            "required><option value=\"\">Choose a dataset</option></select>"
+            "</label>"
+            "<label>Model<select id=\"mlSyntheticRecordGenerateModelId\" "
+            "required><option value=\"\">Choose a model</option></select>"
+            "</label>"
+            "<label>Name (optional)<input "
+            "id=\"mlSyntheticRecordGenerateName\" maxlength=\"160\"></label>"
+            "<label>Description<textarea "
+            "id=\"mlSyntheticRecordGenerateDescription\" rows=\"2\">"
+            "</textarea></label>"
+            "<label>Generation technique<select "
+            "id=\"mlSyntheticRecordGenerateTechnique\">"
+            "<option value=\"alternative_questions\">Alternative questions</option>"
+            "<option value=\"paraphrase\">Paraphrase</option>"
+            "<option value=\"example\">Example</option>"
+            "<option value=\"counterexample\">Counterexample</option>"
+            "<option value=\"difficult_case\">Difficult case</option>"
+            "<option value=\"malformed_input\">Malformed input</option>"
+            "<option value=\"edge_case\">Edge case</option>"
+            "<option value=\"balanced_class_sample\">Balanced-class sample</option>"
+            "<option value=\"code_sample\">Code sample</option>"
+            "<option value=\"unit_test_case\">Unit-test case</option>"
+            "<option value=\"simulated_conversation\">Simulated conversation</option>"
+            "<option value=\"image_variation\">Image variation</option>"
+            "<option value=\"tabular_record\">Tabular record</option>"
+            "</select></label>"
+            "<label>Source text<textarea "
+            "id=\"mlSyntheticRecordGenerateSourceText\" rows=\"3\">"
+            "</textarea></label>"
+            "<button title=\"Generate synthetic record\">" ICON_PLUS_SVG " Generate</button></form>"
+            "<p id=\"mlSyntheticRecordGenerateStatus\">Generated records "
+            "start as \"draft\" and need review before approval.</p>"
             "</div><div>"
             "<h2>Synthetic records</h2>"
             "<div id=\"mlSyntheticRecordsList\">Loading...</div>"
@@ -4934,11 +5046,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // record and list deployments and move them through the same
         // three-state pending/approved/rejected approval workflow Vector
         // Stores use, since section 34 explicitly names approval as part of
-        // the deployment record. Only the identity/model-reference/
-        // environment/strategy/status fields DeploymentStore actually
-        // persists are collected here -- see that class's comment in
-        // masterai.hpp for the health/rollback fields deferred to the phase
-        // that actually promotes models.
+        // the deployment record. The Deployment Manager/Inference
+        // Endpoints/Synthetic Data completion phase adds the real "Deploy
+        // now"/"Rollback" row actions (gated on an approved ModelCard, with
+        // a real health signal and supersede/rollback tracking) -- see
+        // DeploymentStore's class comment in masterai.hpp and
+        // renderMlDeployments above.
         body =
             "<section id=\"panel-ml-deployments\" class=\"panel\">"
             "<div>"
@@ -4957,6 +5070,10 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<button title=\"Create deployment\">" ICON_PLUS_SVG " Create deployment</button></form>"
             "</div><div>"
             "<h2>Deployments</h2>"
+            "<p>\"Deploy now\" requires an approved model card for the "
+            "deployment's model (Safety and Governance). \"Rollback\" "
+            "appears once a deployment has superseded an earlier one for "
+            "the same environment.</p>"
             "<div id=\"mlDeploymentsList\">Loading...</div>"
             "</div></section>";
     } else if (section == "ml-model-comparisons") {
@@ -4994,10 +5111,15 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "both been trained.</p>"
             "</div></section>";
     } else if (section == "ml-inference-endpoints") {
-        // Phase 62 (docs/PLAN.md "Machine Learning Abilities" section 35):
-        // records an administrator's intent to expose a model behind a
-        // controlled endpoint -- see InferenceEndpoint's class comment in
-        // masterai.hpp for why this does not open a real network listener.
+        // Phase 62/77 (docs/PLAN.md "Machine Learning Abilities" section
+        // 35): a real network listener opens while an endpoint is `active`
+        // (run_inference_endpoint in server.cpp), enforcing real Bearer
+        // auth, a real per-minute rate limit, and live per-request safety
+        // policy -- see InferenceEndpoint's class comment in masterai.hpp.
+        // The Deployment Manager/Inference Endpoints/Synthetic Data
+        // completion phase adds the "Bearer token" field below (the API
+        // already accepted authToken; the form was simply missing it) and
+        // the policy-editing form, both previously API-only.
         body =
             "<section id=\"panel-ml-inference-endpoints\" class=\"panel\">"
             "<div>"
@@ -5018,12 +5140,42 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Authentication method<input "
             "id=\"mlEndpointAuthenticationMethod\" "
             "placeholder=\"e.g. api_token\"></label>"
+            "<label>Bearer token (required unless authentication method is "
+            "blank or \"none\")<input id=\"mlEndpointAuthToken\" "
+            "type=\"password\" autocomplete=\"new-password\"></label>"
             "<label>Rate limit, requests per minute<input "
             "id=\"mlEndpointRateLimit\" type=\"number\" min=\"0\"></label>"
             "<button title=\"Create inference endpoint\">" ICON_PLUS_SVG " Create inference endpoint</button></form>"
             "</div><div>"
             "<h2>Inference endpoints</h2>"
+            "<p>Only an <code>active</code> endpoint's listener is running. "
+            "Requests are served at <code>POST /v1/completions</code> "
+            "against the endpoint's host/port.</p>"
             "<div id=\"mlInferenceEndpointsList\">Loading...</div>"
+            "</div><div>"
+            "<h2>Endpoint policy</h2>"
+            "<form id=\"mlEndpointPolicyForm\">"
+            "<label>Endpoint ID<input id=\"mlEndpointPolicyId\" required>"
+            "</label>"
+            "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+            "id=\"mlEndpointPolicyContentScanEnabled\" "
+            "checked> Content scan enabled</label>"
+            "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+            "id=\"mlEndpointPolicyBlockOnScanFinding\" checked> Block request "
+            "on scan finding</label>"
+            "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+            "id=\"mlEndpointPolicyBlockAnswerOnScanFinding\"> Block answer on "
+            "scan finding</label>"
+            "<label>Safety policy ID (optional)<input "
+            "id=\"mlEndpointPolicySafetyPolicyId\"></label>"
+            "<label class=\"checkboxLabel\"><input type=\"checkbox\" "
+            "id=\"mlEndpointPolicyModelClassifierEnabled\"> Model classifier "
+            "enabled</label>"
+            "<label>Model classifier confidence floor<input "
+            "id=\"mlEndpointPolicyConfidenceFloor\" type=\"number\" min=\"0\" "
+            "max=\"1\" step=\"0.05\" value=\"0.5\"></label>"
+            "<button title=\"Save policy\">Save policy</button></form>"
+            "<p id=\"mlEndpointPolicyStatus\"></p>"
             "</div></section>";
     } else if (section == "ml-compute-nodes") {
         // Phase 63 (docs/PLAN.md "Machine Learning Abilities" section 30):

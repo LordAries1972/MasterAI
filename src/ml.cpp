@@ -119,24 +119,46 @@ MachineLearningRegistry::MachineLearningRegistry() {
         // execute_fine_tuning_job's comment in server.cpp.
         {"fine-tuning", "Fine-Tuning", "available"},
         {"evaluation-lab", "Evaluation Lab", "available"},
-        {"experiment-tracking", "Experiment Tracking", "planned"},
+        // Phase 80: POST .../run genuinely trains and evaluates the
+        // experiment's dataset via the same real tabular engine Training
+        // Jobs/Evaluation Lab use, and POST .../compare builds a genuine
+        // side-by-side diff -- see execute_experiment_run's comment in
+        // server.cpp.
+        {"experiment-tracking", "Experiment Tracking", "available"},
+        // Phase 81: POST .../generate and .../{id}/test genuinely invoke a
+        // model via Server::execute_rag_generation, and the duplicate/
+        // contradiction detectors and structured-output validator run real
+        // (if heuristic) logic -- see InstructionExampleContentStore's
+        // class comment in masterai.hpp.
         {"prompt-instruction-training", "Prompt and Instruction Training",
-         "planned"},
+         "available"},
         {"embeddings-vector-stores", "Embeddings and Vector Stores",
          "available"},
         {"retrieval-augmented-generation", "Retrieval-Augmented Generation",
          "available"},
-        {"synthetic-data", "Synthetic Data", "planned"},
+        // Synthetic Data completion phase: POST .../synthetic-records/
+        // generate genuinely invokes a model via execute_rag_generation and
+        // stores the real result via SyntheticRecordContentStore -- see
+        // SyntheticRecord's class comment in masterai.hpp. "available" here
+        // means a real executor exists, not merely a list/create/status/
+        // delete UI, the same bar Automation Pipelines (Phase 69) and
+        // Prompt and Instruction Training (Phase 81) met before this.
+        {"synthetic-data", "Synthetic Data", "available"},
         {"model-comparison", "Model Comparison", "available"},
-        {"deployment-manager", "Deployment Manager", "planned"},
-        // Phases 62, 65: identity/lifecycle registries only (no live
-        // network listener or content scanner behind them yet), so these
-        // stay "planned" like Experiment Tracking/Deployment Manager above
-        // -- "available" here means a real executor exists,
-        // not merely a list/create/status/delete UI. Automation Pipelines
-        // (Phase 64) left this set in Phase 69 once its "Train model"/
-        // "Evaluate model" stages gained a real executor -- see below.
-        {"inference-endpoints", "Inference Endpoints", "planned"},
+        // Deployment Manager completion phase: POST .../deployments/{id}/
+        // deploy and .../rollback genuinely gate on an approved ModelCard
+        // (the same check AutomationPipeline's "Request approval"/"Deploy"
+        // stages already used) and compute a real health signal from
+        // TrainedModelStore, with real supersede/rollback state tracked on
+        // the Deployment record -- see Deployment's class comment in
+        // masterai.hpp.
+        {"deployment-manager", "Deployment Manager", "available"},
+        // Phase 77 already gave this a real network listener
+        // (run_inference_endpoint in server.cpp), real Bearer auth, a real
+        // per-minute rate limiter, and live per-request safety-policy
+        // enforcement -- this roster entry simply hadn't been updated to
+        // say so. See InferenceEndpoint's class comment in masterai.hpp.
+        {"inference-endpoints", "Inference Endpoints", "available"},
         // Phase 67: a node flagged `is_local` now reports genuinely live
         // CPU/RAM/GPU capacity via probe_hardware() on every telemetry
         // request rather than a static description -- see ComputeNode's
@@ -151,7 +173,23 @@ MachineLearningRegistry::MachineLearningRegistry() {
         // executor for it exists in this codebase -- see AutomationPipeline
         // and execute_training_job/execute_evaluation_run's comments.
         {"automation-pipelines", "Automation Pipelines", "available"},
-        {"safety-governance", "Safety and Governance", "planned"},
+        // Safety and Governance completion phase (docs/PLAN.md "Machine
+        // Learning Abilities" section 40): this roster entry had not been
+        // updated since Phase 65's scoped-down approval-only CRUD, even
+        // though Phase 74 already closed the "no content-scanning executor"
+        // gap that phase's own class comment named -- scan_content_for_risks
+        // (real secret/prompt-injection/restricted-term pattern matching)
+        // and scan_content_with_model_classifier (a real LLM-as-judge for
+        // bias/hallucination/harmful content) are both wired live into
+        // run_inference_endpoint's per-request enforcement (server.cpp) and
+        // AutomationPipeline's "Safety tests" stage, and DeploymentStore::
+        // deploy() genuinely refuses to deploy without an approved
+        // ModelCard. Honest remaining gap, matching every real-executor
+        // entry's own caveat: this governs content this codebase's own
+        // inference paths generate, not dataset ingestion sources, PII/
+        // copyright/data-poisoning detectors, or retention/export/network
+        // policy enforcement -- those still have no executor here.
+        {"safety-governance", "Safety and Governance", "available"},
         // Phase 68: GET /api/v1/ml/monitoring is a real read-only
         // aggregation over other phases' already-real data -- live local-
         // host telemetry (Phase 67's probe_hardware()), real training-job
@@ -1450,7 +1488,14 @@ ExperimentStore::ExperimentStore(RecordStore& records) : records_(&records) {
 void ExperimentStore::restore() {
     for (const auto& item : records_->list("ml_experiments")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 19U) {
+        // Phase 80 widened this record from 7 fields (Phase 44's scoped-
+        // down identity/lifecycle shape) to 19. A 7-field record is a
+        // pre-Phase-80 experiment persisted before this pass -- read it
+        // with every new field defaulted rather than throwing and refusing
+        // to start, which would silently discard an administrator's
+        // existing experiments over a schema widening rather than content
+        // loss. Any other field count is genuinely malformed.
+        if (fields.size() != 19U && fields.size() != 7U) {
             throw std::runtime_error(
                 "persisted experiment record field count is wrong");
         }
@@ -1463,23 +1508,25 @@ void ExperimentStore::restore() {
         experiment.description = fields[4];
         experiment.owner_id = fields[5];
         experiment.status = parse_experiment_status(fields[6]);
-        experiment.hyperparameters_json = fields[7];
-        experiment.random_seed =
-            static_cast<std::uint32_t>(std::stoull(fields[8]));
-        experiment.source_code_version = fields[9];
-        experiment.configuration_version = fields[10];
-        experiment.container_version = fields[11];
-        experiment.tags = fields[12];
-        experiment.notes = fields[13];
-        experiment.started_at_epoch_seconds =
-            std::stoull(fields[14].empty() ? "0" : fields[14]);
-        experiment.completed_at_epoch_seconds =
-            std::stoull(fields[15].empty() ? "0" : fields[15]);
-        experiment.failure_reason = fields[16];
-        experiment.created_at_epoch_seconds =
-            std::stoull(fields[17].empty() ? "0" : fields[17]);
-        experiment.updated_at_epoch_seconds =
-            std::stoull(fields[18].empty() ? "0" : fields[18]);
+        if (fields.size() == 19U) {
+            experiment.hyperparameters_json = fields[7];
+            experiment.random_seed =
+                static_cast<std::uint32_t>(std::stoull(fields[8]));
+            experiment.source_code_version = fields[9];
+            experiment.configuration_version = fields[10];
+            experiment.container_version = fields[11];
+            experiment.tags = fields[12];
+            experiment.notes = fields[13];
+            experiment.started_at_epoch_seconds =
+                std::stoull(fields[14].empty() ? "0" : fields[14]);
+            experiment.completed_at_epoch_seconds =
+                std::stoull(fields[15].empty() ? "0" : fields[15]);
+            experiment.failure_reason = fields[16];
+            experiment.created_at_epoch_seconds =
+                std::stoull(fields[17].empty() ? "0" : fields[17]);
+            experiment.updated_at_epoch_seconds =
+                std::stoull(fields[18].empty() ? "0" : fields[18]);
+        }
         experiments_[experiment.id] = experiment;
     }
 }
@@ -2584,6 +2631,62 @@ std::string synthetic_records_json(
     return body + "]";
 }
 
+SyntheticRecordContentStore::SyntheticRecordContentStore(RecordStore& records)
+    : records_(&records) {}
+
+void SyntheticRecordContentStore::put(
+    const std::string& record_id, const SyntheticRecordContent& content) {
+    records_->put(
+        "ml_synthetic_record_content", record_id,
+        pack({content.generator_model, content.generator_version,
+             content.prompt, content.generation_settings,
+             content.generated_text,
+             std::to_string(content.confidence_score),
+             content.source_record_id}));
+}
+
+std::optional<SyntheticRecordContent> SyntheticRecordContentStore::find(
+    const std::string& record_id) const {
+    const auto stored = records_->get("ml_synthetic_record_content", record_id);
+    if (!stored) return std::nullopt;
+    const auto fields = unpack(*stored);
+    if (fields.size() != 7U) {
+        throw std::runtime_error(
+            "persisted synthetic record content field count is wrong");
+    }
+    SyntheticRecordContent content;
+    content.generator_model = fields[0];
+    content.generator_version = fields[1];
+    content.prompt = fields[2];
+    content.generation_settings = fields[3];
+    content.generated_text = fields[4];
+    content.confidence_score = std::stod(fields[5]);
+    content.source_record_id = fields[6];
+    return content;
+}
+
+bool SyntheticRecordContentStore::remove(const std::string& record_id) {
+    if (!records_->get("ml_synthetic_record_content", record_id)) {
+        return false;
+    }
+    records_->erase("ml_synthetic_record_content", record_id);
+    return true;
+}
+
+std::string synthetic_record_content_json(
+    const SyntheticRecordContent& content) {
+    return "{\"generatorModel\":\"" + json_escape(content.generator_model) +
+           "\",\"generatorVersion\":\"" +
+           json_escape(content.generator_version) + "\",\"prompt\":\"" +
+           json_escape(content.prompt) + "\",\"generationSettings\":\"" +
+           json_escape(content.generation_settings) +
+           "\",\"generatedText\":\"" + json_escape(content.generated_text) +
+           "\",\"confidenceScore\":" +
+           std::to_string(content.confidence_score) +
+           ",\"sourceRecordId\":\"" +
+           json_escape(content.source_record_id) + "\"}";
+}
+
 // Phase 49: docs/PLAN.md "Machine Learning Abilities" section 21
 // (Embeddings and Vector Stores) -- see VectorStoreStore's class comment in
 // masterai.hpp for the scoped-down field set and the rationale for reusing
@@ -3503,7 +3606,7 @@ DeploymentStore::DeploymentStore(RecordStore& records) : records_(&records) {
 void DeploymentStore::restore() {
     for (const auto& item : records_->list("ml_deployments")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 7U) {
+        if (fields.size() != 10U) {
             throw std::runtime_error(
                 "persisted deployment record field count is wrong");
         }
@@ -3516,6 +3619,9 @@ void DeploymentStore::restore() {
         deployment.strategy = fields[4];
         deployment.owner_id = fields[5];
         deployment.status = parse_deployment_status(fields[6]);
+        deployment.health_status = fields[7];
+        deployment.deployed_at_epoch_seconds = std::stoull(fields[8]);
+        deployment.previous_deployment_id = fields[9];
         deployments_[deployment.id] = deployment;
     }
 }
@@ -3526,7 +3632,10 @@ void DeploymentStore::persist(const Deployment& deployment) {
         pack({deployment.model_id, deployment.name, deployment.description,
              deployment.environment, deployment.strategy,
              deployment.owner_id,
-             deployment_status_name(deployment.status)}));
+             deployment_status_name(deployment.status),
+             deployment.health_status,
+             std::to_string(deployment.deployed_at_epoch_seconds),
+             deployment.previous_deployment_id}));
 }
 
 Deployment DeploymentStore::create(const std::string& owner_id,
@@ -3585,6 +3694,53 @@ bool DeploymentStore::set_status(const std::string& id,
     return true;
 }
 
+bool DeploymentStore::deploy(const std::string& id,
+                             const bool has_approved_model_card,
+                             const bool trained_weights_present) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = deployments_.find(id);
+    if (found == deployments_.end() || !has_approved_model_card) return false;
+    const auto now = epoch_seconds();
+    for (auto& item : deployments_) {
+        if (item.first == id) continue;
+        if (item.second.environment == found->second.environment &&
+            item.second.status == DeploymentStatus::approved) {
+            item.second.status = DeploymentStatus::rejected;
+            item.second.updated_at_epoch_seconds = now;
+            if (records_) persist(item.second);
+            found->second.previous_deployment_id = item.first;
+        }
+    }
+    found->second.status = DeploymentStatus::approved;
+    found->second.health_status = trained_weights_present
+                                       ? "trained_weights_present"
+                                       : "unverified";
+    found->second.deployed_at_epoch_seconds = now;
+    found->second.updated_at_epoch_seconds = now;
+    if (records_) persist(found->second);
+    return true;
+}
+
+std::string DeploymentStore::rollback(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = deployments_.find(id);
+    if (found == deployments_.end() ||
+        found->second.previous_deployment_id.empty()) {
+        return {};
+    }
+    const auto previous = deployments_.find(found->second.previous_deployment_id);
+    if (previous == deployments_.end()) return {};
+    const auto now = epoch_seconds();
+    found->second.status = DeploymentStatus::rejected;
+    found->second.updated_at_epoch_seconds = now;
+    if (records_) persist(found->second);
+    previous->second.status = DeploymentStatus::approved;
+    previous->second.deployed_at_epoch_seconds = now;
+    previous->second.updated_at_epoch_seconds = now;
+    if (records_) persist(previous->second);
+    return previous->first;
+}
+
 bool DeploymentStore::remove(const std::string& id) {
     const std::lock_guard<std::mutex> lock(mutex_);
     const auto found = deployments_.find(id);
@@ -3603,6 +3759,12 @@ std::string deployment_json(const Deployment& deployment) {
            json_escape(deployment.strategy) + "\",\"ownerId\":\"" +
            json_escape(deployment.owner_id) + "\",\"status\":\"" +
            deployment_status_name(deployment.status) +
+           "\",\"healthStatus\":\"" +
+           json_escape(deployment.health_status) +
+           "\",\"deployedAtEpochSeconds\":" +
+           std::to_string(deployment.deployed_at_epoch_seconds) +
+           ",\"previousDeploymentId\":\"" +
+           json_escape(deployment.previous_deployment_id) +
            "\",\"createdAtEpochSeconds\":" +
            std::to_string(deployment.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +

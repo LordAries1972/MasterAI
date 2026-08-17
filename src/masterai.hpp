@@ -4559,18 +4559,24 @@ detect_contradictory_instruction_examples(
 // classification precedent InstructionExample's subject_classification and
 // DataPreparationJob's source-type field set, since section 20's list of
 // techniques is open-ended and new ones can appear without a code change.
-// The deferred fields -- generator model, generator version, prompt,
-// generation settings, confidence score, and original source linkage -- only
-// mean something once a real generation executor exists to produce them,
-// exactly as Phase 47 deferred its own content fields until an example-
-// generation executor exists. The status enum reuses the same five-state
-// reviewer workflow InstructionExampleStatus defined above: section 20
-// requires that generated records carry a "human-review status" and "remain
-// distinguishable from human-created and real-world data" until reviewed,
-// the same rationale, so a synthetic record moves from draft through review
-// to an approved or rejected outcome, or an archived discard -- it never
-// queues, runs, or pauses the way TrainingJob/FineTuningJob's eleven-state
-// job lifecycle would imply.
+// The status enum reuses the same five-state reviewer workflow
+// InstructionExampleStatus defined above: section 20 requires that generated
+// records carry a "human-review status" and "remain distinguishable from
+// human-created and real-world data" until reviewed, the same rationale, so
+// a synthetic record moves from draft through review to an approved or
+// rejected outcome, or an archived discard -- it never queues, runs, or
+// pauses the way TrainingJob/FineTuningJob's eleven-state job lifecycle
+// would imply.
+//
+// This pass (docs/PLAN.md's Deployment Manager/Inference Endpoints/Synthetic
+// Data completion phase) adds the real generation executor: POST
+// .../synthetic-records/generate in server.cpp composes a technique-specific
+// prompt and invokes execute_rag_generation exactly as Phase 81's
+// instruction-example generator does, then stores the result via
+// SyntheticRecordContentStore below -- the same identity/content split
+// InstructionExample/InstructionExampleContent use, since the generated body
+// (generator model/version, prompt, settings, generated text, confidence,
+// source linkage) is free-form and can legitimately be large.
 enum class SyntheticRecordStatus {
     draft,
     in_review,
@@ -4618,6 +4624,39 @@ private:
 
 std::string synthetic_record_json(const SyntheticRecord& record);
 std::string synthetic_records_json(const std::vector<SyntheticRecord>& records);
+
+// The real generated body a SyntheticRecord's generate route produces --
+// see the class comment above. confidence_score is a documented heuristic
+// (1.0 if the generation completed without cancellation and produced
+// non-empty text, 0.0 otherwise), not a model-reported probability: this
+// codebase has no per-token logprob surfaced through execute_rag_generation
+// to compute a real one from, so it is not fabricated as one.
+struct SyntheticRecordContent {
+    std::string generator_model;
+    std::string generator_version;
+    std::string prompt;
+    std::string generation_settings;
+    std::string generated_text;
+    double confidence_score{0.0};
+    std::string source_record_id;
+};
+
+class SyntheticRecordContentStore final {
+public:
+    SyntheticRecordContentStore() = default;
+    explicit SyntheticRecordContentStore(RecordStore& records);
+    void put(const std::string& record_id,
+            const SyntheticRecordContent& content);
+    std::optional<SyntheticRecordContent> find(
+        const std::string& record_id) const;
+    bool remove(const std::string& record_id);
+
+private:
+    RecordStore* records_{nullptr};
+};
+
+std::string synthetic_record_content_json(
+    const SyntheticRecordContent& content);
 
 // Phase 49: docs/PLAN.md "Machine Learning Abilities" section 21
 // (Embeddings and Vector Stores). Scoped down from the section's full field
@@ -5028,8 +5067,30 @@ std::string training_checkpoints_json(
 // rejected approval workflow VectorStore and RagConfig use -- section 34
 // explicitly names approval as part of the deployment record, and a
 // deployment is a standalone registered resource awaiting authorization,
-// not reviewer-workflow content -- not the health/rollback machinery a
-// real deployment executor will attach once it exists.
+// not reviewer-workflow content.
+//
+// This pass (docs/PLAN.md's Deployment Manager/Inference Endpoints/
+// Synthetic Data completion phase) adds the health/rollback machinery this
+// comment used to say only a real deployment executor would attach --
+// Deployment Manager now has its own real deploy/rollback action
+// (DeploymentStore::deploy/rollback below, driven by POST .../{id}/deploy
+// and .../{id}/rollback in server.cpp), reusing exactly the same
+// approved-ModelCard gate AutomationPipeline's "Request approval"/"Deploy"
+// stages already enforce (see run_safety_tests_stage's comment in
+// server.cpp) so a deployment approved through this module's own API is
+// held to the identical bar as one approved through a pipeline run.
+// health_status is a real, cheap, honest signal -- whether
+// TrainedModelStore holds trained weights for model_id -- not a live
+// serving health check (this codebase's live "is this model actually
+// answering requests" surface is Inference Endpoints' listener, a
+// different resource); a model with no trained tabular artifact (e.g. an
+// LLM-backed model reached only through execute_rag_generation) still
+// deploys, just with health_status "unverified" rather than a fabricated
+// "healthy". Rollback is real state, not merely a status flip: deploying a
+// new approved deployment for the same environment supersedes (rejects)
+// whichever deployment was previously approved for it and records that
+// prior deployment's id as previous_deployment_id, so .../rollback can
+// restore it and reject the one being replaced.
 enum class DeploymentStatus { pending, approved, rejected };
 
 std::string deployment_status_name(DeploymentStatus status);
@@ -5044,6 +5105,9 @@ struct Deployment {
     std::string strategy;
     std::string owner_id;
     DeploymentStatus status{DeploymentStatus::pending};
+    std::string health_status;
+    std::uint64_t deployed_at_epoch_seconds{0};
+    std::string previous_deployment_id;
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -5060,6 +5124,25 @@ public:
     std::optional<Deployment> find(const std::string& id) const;
     std::vector<Deployment> list() const;
     bool set_status(const std::string& id, DeploymentStatus status);
+    // Real deploy action: caller (server.cpp) has already verified
+    // `has_approved_model_card` (an approved ModelCard exists for this
+    // deployment's model_id) and computed `trained_weights_present` (a
+    // TrainedModelStore lookup). Returns false if `id` does not exist or
+    // `has_approved_model_card` is false (deploy refused). On success, any
+    // other deployment currently `approved` for the same environment is
+    // superseded (set to `rejected`, its id recorded on this deployment's
+    // previous_deployment_id), then this deployment is set `approved` with
+    // health_status set from trained_weights_present and
+    // deployed_at_epoch_seconds set to now.
+    bool deploy(const std::string& id, bool has_approved_model_card,
+               bool trained_weights_present);
+    // Requires this deployment to have a non-empty previous_deployment_id
+    // (set by a prior deploy() that superseded it). Rejects this
+    // deployment and re-approves the previous one (refreshing its
+    // deployed_at_epoch_seconds). Returns the id of the deployment that is
+    // now active, or an empty string if `id` does not exist or has no
+    // previous_deployment_id to roll back to.
+    std::string rollback(const std::string& id);
     bool remove(const std::string& id);
 
 private:

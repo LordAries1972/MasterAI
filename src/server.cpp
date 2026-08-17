@@ -393,6 +393,8 @@ public:
         ml_instruction_example_content =
             std::make_unique<InstructionExampleContentStore>(records);
         ml_synthetic_records = std::make_unique<SyntheticRecordStore>(records);
+        ml_synthetic_record_content =
+            std::make_unique<SyntheticRecordContentStore>(records);
         ml_vector_stores = std::make_unique<VectorStoreStore>(records);
         ml_rag_configs = std::make_unique<RagConfigStore>(records);
         ml_subject_exams = std::make_unique<SubjectExamStore>(records);
@@ -3911,9 +3913,132 @@ public:
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_synthetic_record_not_found\"}");
             }
+            ml_synthetic_record_content->remove(id);
             audit.append("ml.synthetic_record.delete", user->id, "success",
                          id);
             return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Deployment Manager/Inference Endpoints/Synthetic Data completion
+        // phase: the real generation executor the class comment above used
+        // to defer. Composes a technique-specific prompt (falling back to a
+        // generic template for any technique not in this fixed list, since
+        // section 20's operations are open-ended) and invokes the same
+        // execute_rag_generation path the instruction-example generator
+        // above uses, then stores the real result via
+        // SyntheticRecordContentStore.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/synthetic-records/generate") {
+            if (auto denied = forbidden_unless(user->role, "ml.syntheticdata.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto dataset_id = root.required("datasetId").as_string();
+                const auto model_id = root.required("modelId").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto technique = text_field("generationTechnique");
+                const auto source_text = text_field("sourceText");
+                static const std::map<std::string, std::string> technique_templates = {
+                    {"alternative_questions",
+                     "Generate three alternative phrasings of the following "
+                     "question, one per line, preserving its exact meaning:\n"},
+                    {"paraphrase",
+                     "Rewrite the following text with the same meaning but "
+                     "different wording:\n"},
+                    {"example",
+                     "Write a new, realistic example consistent with the "
+                     "following:\n"},
+                    {"counterexample",
+                     "Write a counterexample that contradicts or breaks the "
+                     "following:\n"},
+                    {"difficult_case",
+                     "Write an unusually difficult or ambiguous case similar "
+                     "to the following:\n"},
+                    {"malformed_input",
+                     "Write a malformed or invalid variant of the following "
+                     "input, the kind a robust system must reject cleanly:\n"},
+                    {"edge_case",
+                     "Write an edge case (a boundary or unusual condition) "
+                     "related to the following:\n"},
+                    {"balanced_class_sample",
+                     "Write a new sample belonging to the minority class "
+                     "implied by the following, to help balance a dataset:\n"},
+                    {"code_sample",
+                     "Write a short code sample consistent with the "
+                     "following description:\n"},
+                    {"unit_test_case",
+                     "Write a unit test case (input and expected output) for "
+                     "the following:\n"},
+                    {"simulated_conversation",
+                     "Write a short simulated multi-turn conversation "
+                     "consistent with the following:\n"},
+                    {"image_variation",
+                     "Write a text description of a plausible visual "
+                     "variation of the following:\n"},
+                    {"tabular_record",
+                     "Write one new tabular data record (as comma-separated "
+                     "values) consistent with the following schema/example:\n"},
+                };
+                std::string prompt;
+                const auto template_it = technique_templates.find(technique);
+                if (template_it != technique_templates.end()) {
+                    prompt = template_it->second + source_text;
+                } else {
+                    prompt = "Generate a " +
+                             (technique.empty() ? std::string("synthetic record")
+                                                 : technique) +
+                             " based on the following:\n" + source_text;
+                }
+                const auto generated = execute_rag_generation(model_id, prompt);
+                auto name = text_field("name");
+                if (name.empty()) name = "generated-" + (technique.empty() ? "synthetic-record" : technique);
+                const auto record = ml_synthetic_records->create(
+                    user->id, dataset_id, name, text_field("description"),
+                    technique);
+                SyntheticRecordContent content;
+                content.generator_model = model_id;
+                if (const auto entry = ml_models->find(model_id)) {
+                    content.generator_version = entry->version;
+                }
+                content.prompt = prompt;
+                content.generation_settings = technique;
+                content.generated_text = generated.text;
+                content.confidence_score =
+                    (!generated.cancelled && !generated.text.empty()) ? 1.0 : 0.0;
+                content.source_record_id = text_field("sourceRecordId");
+                ml_synthetic_record_content->put(record.id, content);
+                audit.append("ml.synthetic_record.generate", user->id,
+                             "success", record.id);
+                return response(
+                    201, "Created",
+                    "{\"record\":" + synthetic_record_json(record) +
+                        ",\"content\":" +
+                        synthetic_record_content_json(content) + "}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_synthetic_record_generate\","
+                    "\"detail\":\"" + json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/synthetic-records/", 0U) ==
+                0U &&
+            request.target.size() > 8U &&
+            request.target.compare(request.target.size() - 8U, 8U,
+                                   "/content") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.syntheticdata.view")) return *denied;
+            const auto id = request.target.substr(
+                30U, request.target.size() - 30U - 8U);
+            const auto content = ml_synthetic_record_content->find(id);
+            if (!content) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_synthetic_record_content_not_found\"}");
+            }
+            return response(200, "OK",
+                            "{\"content\":" +
+                                synthetic_record_content_json(*content) + "}");
         }
         // Phase 49: Embeddings and Vector Stores (docs/PLAN.md "Machine
         // Learning Abilities" section 21), scoped to identity/embedding-
@@ -4727,8 +4852,11 @@ public:
         // Phase 55: Deployment Manager (docs/PLAN.md "Machine Learning
         // Abilities" section 34), scoped to identity/model-reference/
         // environment/strategy/status fields -- see DeploymentStore's class
-        // comment in masterai.hpp for the health/rollback fields deferred
-        // to the phase that actually promotes models.
+        // comment in masterai.hpp. The Deployment Manager/Inference
+        // Endpoints/Synthetic Data completion phase adds the real .../deploy
+        // and .../rollback actions below, giving this module its own
+        // deploy/health/rollback path instead of relying solely on
+        // Automation Pipelines' stage executor.
         if (request.method == "GET" &&
             request.target == "/api/v1/ml/deployments") {
             if (auto denied = forbidden_unless(user->role, "ml.deployments.view")) return *denied;
@@ -4785,6 +4913,75 @@ public:
                     "{\"error\":\"invalid_ml_deployment_status\",\"detail\":\"" +
                         json_escape(error.what()) + "\"}");
             }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/deployments/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/deploy") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.deployments.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 7U);
+            const auto deployment = ml_deployments->find(id);
+            if (!deployment) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_deployment_not_found\"}");
+            }
+            // Same approved-ModelCard gate AutomationPipeline's
+            // run_safety_tests_stage enforces below, so a deployment
+            // approved through this module's own API is held to the
+            // identical bar as one approved through a pipeline run.
+            bool has_approved_card = false;
+            for (const auto& card : ml_safety_governance->list_model_cards()) {
+                if (card.model_id == deployment->model_id &&
+                    card.status == SafetyPolicyStatus::approved) {
+                    has_approved_card = true;
+                    break;
+                }
+            }
+            if (!has_approved_card) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_deployment_no_approved_model_card\","
+                    "\"detail\":\"no approved model card exists for model " +
+                        json_escape(deployment->model_id) +
+                        " (create and approve one in Safety and "
+                        "Governance)\"}");
+            }
+            const bool trained_weights_present =
+                static_cast<bool>(ml_trained_models->find(deployment->model_id));
+            if (!ml_deployments->deploy(id, true, trained_weights_present)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_deployment_not_found\"}");
+            }
+            audit.append("ml.deployment.deploy", user->id, "success", id);
+            return response(200, "OK",
+                            "{\"deployment\":" +
+                                deployment_json(*ml_deployments->find(id)) +
+                                "}");
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/deployments/", 0U) == 0U &&
+            request.target.size() > 9U &&
+            request.target.compare(request.target.size() - 9U, 9U,
+                                   "/rollback") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.deployments.manage")) return *denied;
+            const auto id = request.target.substr(
+                23U, request.target.size() - 23U - 9U);
+            const auto restored_id = ml_deployments->rollback(id);
+            if (restored_id.empty()) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"ml_deployment_rollback_unavailable\","
+                    "\"detail\":\"deployment " + json_escape(id) +
+                        " does not exist or has no previous deployment to "
+                        "roll back to\"}");
+            }
+            audit.append("ml.deployment.rollback", user->id, "success", id);
+            return response(
+                200, "OK",
+                "{\"activeDeploymentId\":\"" + json_escape(restored_id) +
+                    "\"}");
         }
         if (request.method == "POST" &&
             request.target.rfind("/api/v1/ml/deployments/", 0U) == 0U &&
@@ -9699,6 +9896,7 @@ private:
     std::unique_ptr<InstructionExampleStore> ml_instruction_examples;
     std::unique_ptr<InstructionExampleContentStore> ml_instruction_example_content;
     std::unique_ptr<SyntheticRecordStore> ml_synthetic_records;
+    std::unique_ptr<SyntheticRecordContentStore> ml_synthetic_record_content;
     std::unique_ptr<VectorStoreStore> ml_vector_stores;
     std::unique_ptr<RagConfigStore> ml_rag_configs;
     std::unique_ptr<SubjectExamStore> ml_subject_exams;
