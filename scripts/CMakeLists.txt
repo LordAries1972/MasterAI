@@ -39,6 +39,9 @@ add_library(masterai_core STATIC
     ../src/indexing.cpp
     ../src/project_watcher.cpp
     ../src/retrieval.cpp
+    ../src/git_retrieval.cpp
+    ../src/mcp_retrieval.cpp
+    ../src/semantic_retrieval.cpp
     ../src/cache.cpp
     ../src/session_cache.cpp
     ../src/prompt_assembly.cpp
@@ -46,6 +49,7 @@ add_library(masterai_core STATIC
     ../src/optimization_registry.cpp
     ../src/scheduler.cpp
     ../src/kv_cache.cpp
+    ../src/kv_quality.cpp
     ../src/topology.cpp
     ../src/model_routing.cpp
     ../src/scratch_storage.cpp

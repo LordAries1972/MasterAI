@@ -38,6 +38,14 @@ Testing/
 /config/
 /runtime/
 
+# Locally generated certificate/key material (TLS certs, SSH host keys).
+# Already covered by /config/ above, but listed explicitly so these can
+# never be pushed to GitHub even if regenerated somewhere else.
+/config/certificates/
+*.pem
+*.key
+*_host_key*
+
 # Large downloaded payloads, archives, and interrupted transfers
 *.7z
 *.bin

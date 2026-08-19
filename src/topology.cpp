@@ -168,6 +168,15 @@ bool apply_current_thread_to_numa_node(unsigned int numa_node_id) {
     return SetThreadGroupAffinity(GetCurrentThread(), &affinity, nullptr) != 0;
 }
 
+bool probe_on_battery_power() {
+    SYSTEM_POWER_STATUS status{};
+    if (GetSystemPowerStatus(&status) == 0) {
+        return false;
+    }
+    // ACLineStatus: 0 = offline (on battery), 1 = online, 255 = unknown.
+    return status.ACLineStatus == 0;
+}
+
 #else  // !_WIN32
 
 // Linux topology probing is intentionally minimal: only the Windows target
@@ -201,6 +210,8 @@ HardwareTopology probe_hardware_topology() {
 }
 
 bool apply_current_thread_to_numa_node(unsigned int) { return false; }
+
+bool probe_on_battery_power() { return false; }
 
 #endif
 

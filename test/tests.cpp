@@ -417,6 +417,18 @@ void test_phase_five_chat_and_projects() {
                 "other-model",
             "set_model did not persist the new model in memory");
 
+    // Phase 27 (2026-08-19): shared-template marking is owner-scoped like
+    // set_model() above, defaults false, and survives the 9-field split
+    // header persistence format across service reconstruction.
+    require(!chats.find_for_owner(chat.id, "operator")->is_shared_template,
+            "a newly created chat must not default to a shared template");
+    require(!chats.set_shared_template(chat.id, "another-user", true),
+            "set_shared_template bypassed the chat ownership boundary");
+    require(chats.set_shared_template(chat.id, "operator", true),
+            "set_shared_template failed for the chat's own owner");
+    require(chats.find_for_owner(chat.id, "operator")->is_shared_template,
+            "set_shared_template did not persist the flag in memory");
+
     masterai::AttachmentStore attachments(temporary.path() / "attachments",
                                           records);
     const auto attachment = attachments.add_text(
@@ -439,9 +451,11 @@ void test_phase_five_chat_and_projects() {
                 restored_chat->messages[0].content == "Review this function." &&
                 restored_chat->messages[1].content ==
                     "Line one.\nLine two.\n\tIndented." &&
-                restored_chat->model_id == "other-model",
-            "chat messages/model did not survive the split header/message "
-            "persistence scheme across service reconstruction");
+                restored_chat->model_id == "other-model" &&
+                restored_chat->is_shared_template,
+            "chat messages/model/shared-template flag did not survive the "
+            "split header/message persistence scheme across service "
+            "reconstruction");
 }
 
 // Chat memory is deterministic server-side behavior rather than a model
@@ -1872,6 +1886,262 @@ void test_phase_sixteen_deadline_bound_retrieval() {
     require(masterai::QueryCoordinator::to_json(*trace).find(
                 "\"retrievalDisclosure\":{") != std::string::npos,
             "query trace JSON omitted the retrieval disclosure");
+}
+
+// Phase 24 (this pass): the seven previously declared-but-disabled
+// strategies now have real adapters. call_graph/type_reference/
+// dependency_neighbour are unit-tested directly against
+// ProjectIndexService (mirroring how test_phase_sixteen checks
+// search_symbol/search_text directly) since they're pure, deterministic
+// heuristic scans; conversation_memory/semantic_embedding/git_diff are
+// exercised through a fully-wired RetrievalPlanner since their behavior
+// depends on the optional constructor dependencies this phase added.
+void test_phase_twentyfour_extended_retrieval_strategies() {
+    require(masterai::retrieval_strategy_has_adapter(
+                masterai::RetrievalStrategy::semantic_embedding) &&
+                masterai::retrieval_strategy_has_adapter(
+                    masterai::RetrievalStrategy::mcp_resource) &&
+                masterai::retrieval_strategy_has_adapter(
+                    masterai::RetrievalStrategy::call_graph) &&
+                masterai::retrieval_strategy_has_adapter(
+                    masterai::RetrievalStrategy::type_reference) &&
+                masterai::retrieval_strategy_has_adapter(
+                    masterai::RetrievalStrategy::git_diff) &&
+                masterai::retrieval_strategy_has_adapter(
+                    masterai::RetrievalStrategy::dependency_neighbour) &&
+                masterai::retrieval_strategy_has_adapter(
+                    masterai::RetrievalStrategy::conversation_memory) &&
+                masterai::disabled_retrieval_strategy_reasons().empty(),
+            "every RetrievalStrategy should report a real build-level "
+            "adapter after this pass");
+
+    TemporaryDirectory temporary;
+    const auto project_root = temporary.path() / "extended-retrieval";
+    std::filesystem::create_directories(project_root / "src");
+    write_text(project_root / "src" / "target.hpp",
+               "class ExtendedTargetType {\n"
+               "public:\n"
+               "    void extended_target_function();\n"
+               "};\n");
+    write_text(project_root / "src" / "caller.cpp",
+               "#include \"target.hpp\"\n"
+               "void run_it() {\n"
+               "    auto* value = new ExtendedTargetType();\n"
+               "    value->extended_target_function();\n"
+               "}\n");
+    masterai::ProjectRecord project{"phase24-extended", "Phase 24 Extended",
+                                    project_root};
+
+    const auto hardware = masterai::probe_hardware(temporary.path());
+    auto policy = masterai::MemoryBudgetManager::policy_for(
+        masterai::ResourceProfile::minimal, hardware,
+        512ULL * 1024ULL * 1024ULL);
+    policy.minimum_os_reserve_bytes = 1U;
+    masterai::MemoryBudgetManager memory(policy, hardware);
+    masterai::ProjectIndexService service(
+        temporary.path() / "extended-retrieval-indexes", memory, 2U);
+    require(service.request_rebuild(project),
+            "extended retrieval fixture index rebuild was not admitted");
+    std::optional<masterai::IndexServiceStatus> status;
+    for (unsigned int attempt = 0U; attempt < 200U; ++attempt) {
+        status = service.status(project.id);
+        if (status && status->state == masterai::IndexJobState::ready) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    require(status && status->state == masterai::IndexJobState::ready,
+            "extended retrieval fixture index did not settle");
+
+    // call_graph: caller.cpp calls extended_target_function() -- a genuine
+    // call site, not just the symbol's own declaration line inside
+    // target.hpp (which also contains the bare identifier and would pass a
+    // weaker "any occurrence" check).
+    const auto calls = service.search_calls(
+        project.id, "extended_target_function", 8U);
+    require(calls.available && calls.chunks.size() == 1U &&
+                calls.chunks.front().relative_path == "src/caller.cpp",
+            "call_graph adapter did not find the real call site");
+
+    // type_reference: caller.cpp's "new ExtendedTargetType()" is a type
+    // position; target.hpp's own "class ExtendedTargetType {" is too (the
+    // preceding "class" keyword), so both chunks are expected here.
+    const auto type_refs =
+        service.search_type_usage(project.id, "ExtendedTargetType", 8U);
+    require(type_refs.available && type_refs.chunks.size() == 2U,
+            "type_reference adapter did not find both type positions");
+
+    // dependency_neighbour: caller.cpp #includes target.hpp, so each is the
+    // other's direct neighbour.
+    const auto neighbours_of_caller = service.search_dependency_neighbours(
+        project.id, "src/caller.cpp", 8U);
+    require(neighbours_of_caller.available &&
+                neighbours_of_caller.chunks.size() == 1U &&
+                neighbours_of_caller.chunks.front().relative_path ==
+                    "src/target.hpp",
+            "dependency_neighbour adapter did not resolve the #include edge");
+
+    // all_chunks: bounded full enumeration backing semantic_embedding.
+    const auto everything = service.all_chunks(project.id, 64U);
+    require(everything.available && everything.chunks.size() == 2U,
+            "all_chunks did not enumerate every published chunk");
+
+    // conversation_memory: wired through a live RetrievalPlanner instance.
+    masterai::RecordStore records(temporary.path() / "extended-database");
+    records.open();
+    masterai::UserMemoryStore user_memory(records);
+    user_memory.add("extended-user",
+                    "The user's extended retrieval marker preference is teal.",
+                    "manual");
+    {
+        masterai::RetrievalPlanner memory_planner(service, &memory,
+                                                  &user_memory);
+        masterai::RetrievalRequest memory_request;
+        memory_request.project = project;
+        memory_request.requester_id = "extended-user";
+        // A query with zero lexical/heuristic overlap with the project
+        // source forces every earlier stage to find nothing, so a hit here
+        // can only have come from conversation_memory.
+        memory_request.query_text =
+            "completely unrelated wording with no project overlap";
+        memory_request.deadline = std::chrono::milliseconds(2000);
+        const auto recalled = memory_planner.retrieve(memory_request);
+        require(recalled.strategy == "conversation_memory" &&
+                    recalled.context_text.find("extended retrieval marker "
+                                               "preference is teal") !=
+                        std::string::npos,
+                "conversation_memory adapter did not surface a recorded "
+                "user memory");
+    }
+    {
+        // No user_memory dependency configured: the same query must record
+        // a runtime "not configured" skip reason rather than silently
+        // succeeding or silently omitting the strategy.
+        masterai::RetrievalPlanner bare_planner(service, &memory);
+        masterai::RetrievalRequest bare_request;
+        bare_request.project = project;
+        bare_request.requester_id = "extended-user";
+        bare_request.query_text =
+            "completely unrelated wording with no project overlap";
+        bare_request.deadline = std::chrono::milliseconds(2000);
+        const auto bare_outcome = bare_planner.retrieve(bare_request);
+        const bool has_skip_reason = std::any_of(
+            bare_outcome.disabled_strategy_reasons.begin(),
+            bare_outcome.disabled_strategy_reasons.end(),
+            [](const std::string& reason) {
+                return reason.find("conversation_memory") != std::string::npos;
+            });
+        require(has_skip_reason,
+                "a planner instance without a user memory store did not "
+                "record a runtime skip reason for conversation_memory");
+    }
+
+    // semantic_embedding: exercised against the real POST /v1/embeddings
+    // call path (RunnerSupervisor -> masterai_fake_llama fixture), which
+    // returns a fixed non-unit vector for every input -- enough to prove
+    // the adapter really calls, caches, and ranks by cosine similarity end
+    // to end, even though this fixture can't demonstrate semantic
+    // discrimination (see docs/performance/phase-24-extended-retrieval-evaluation.md).
+    const auto backend = fake_llama_executable();
+    if (std::filesystem::is_regular_file(backend)) {
+        masterai::RunnerSupervisor embedding_runner(
+            backend, temporary.path() / "extended-runtime");
+        const auto model_directory = temporary.path() / "extended-model";
+        std::filesystem::create_directories(model_directory);
+        const auto model_file = model_directory / "model.gguf";
+        write_text(model_file, "GGUF-extended-fixture");
+        masterai::ModelRecord model;
+        model.directory = model_directory;
+        model.manifest.id = "extended-fixture";
+        model.manifest.model_file = "model.gguf";
+        model.manifest.model_size_bytes = std::filesystem::file_size(model_file);
+        model.manifest.model_sha256 = masterai::sha256_file_hex(model_file);
+        model.state = masterai::ModelState::ready;
+        embedding_runner.load(model, 4096U, 18191U, 5U);
+
+        masterai::CachePolicy cache_policy;
+        masterai::CacheManager embedding_cache(
+            temporary.path() / "extended-cache", memory, cache_policy);
+
+        masterai::RetrievalPlanner semantic_planner(
+            service, &memory, nullptr, &embedding_runner, &embedding_cache);
+        masterai::RetrievalRequest semantic_request;
+        semantic_request.project = project;
+        semantic_request.requester_id = "extended-user";
+        semantic_request.query_text =
+            "completely unrelated wording with no project overlap";
+        semantic_request.deadline = std::chrono::milliseconds(2000);
+        const auto semantic_outcome =
+            semantic_planner.retrieve(semantic_request);
+        require(semantic_outcome.strategy == "semantic_embedding" &&
+                    !semantic_outcome.disclosure.empty(),
+                "semantic_embedding adapter did not run the real embedding "
+                "backend call path");
+
+        // Cache reuse: a second identical call must not need to re-embed
+        // every chunk (the cache category has entries after the first call).
+        const masterai::CacheKey probe_key = [&]() {
+            masterai::CacheKey key;
+            key.project_id = project.id;
+            key.canonical_identity =
+                "semantic-embedding:" + everything.chunks.front().id;
+            key.content_digest = everything.chunks.front().digest;
+            key.version_tag = "phase24-embedding-v1";
+            return key;
+        }();
+        require(embedding_cache.get(masterai::CacheCategory::embedding, probe_key)
+                    .has_value(),
+                "semantic_embedding did not populate the embedding cache");
+    }
+
+    // git_diff: best-effort against the real system `git` binary. Skips its
+    // assertion (rather than failing the suite) when `git` isn't installed
+    // on the test host, matching git_diff_search's own "not a git repo / no
+    // git" silent-empty contract.
+    {
+        std::atomic_bool cancellation{false};
+        const std::filesystem::path git_executable{
+#if defined(_WIN32)
+            "git.exe"
+#else
+            "git"
+#endif
+        };
+        const auto probe = masterai::run_sandboxed_process(
+            git_executable, {"--version"}, project_root, 5U, 4096U,
+            cancellation);
+        if (probe.succeeded && probe.exit_code == 0) {
+            const auto init = masterai::run_sandboxed_process(
+                git_executable, {"init"}, project_root, 5U, 4096U,
+                cancellation);
+            require(init.succeeded && init.exit_code == 0,
+                    "git init failed for the git_diff fixture");
+            masterai::run_sandboxed_process(
+                git_executable, {"config", "user.email", "test@example.com"},
+                project_root, 5U, 4096U, cancellation);
+            masterai::run_sandboxed_process(
+                git_executable, {"config", "user.name", "Test"}, project_root,
+                5U, 4096U, cancellation);
+            masterai::run_sandboxed_process(
+                git_executable, {"add", "-A"}, project_root, 5U, 4096U,
+                cancellation);
+            masterai::run_sandboxed_process(
+                git_executable, {"commit", "-m", "extended fixture"},
+                project_root, 5U, 4096U, cancellation);
+            write_text(project_root / "src" / "caller.cpp",
+                      "#include \"target.hpp\"\n"
+                      "void run_it() {\n"
+                      "    auto* value = new ExtendedTargetType();\n"
+                      "    value->extended_target_function();\n"
+                      "    int git_diff_marker = 1;\n"
+                      "}\n");
+            const auto git_chunks =
+                masterai::git_diff_search(project_root, 8U);
+            require(!git_chunks.empty() &&
+                        git_chunks.front().relative_path == "src/caller.cpp" &&
+                        git_chunks.front().text.find("git_diff_marker") !=
+                            std::string::npos,
+                    "git_diff_search did not surface the uncommitted change");
+        }
+    }
 }
 
 void test_phase_seventeen_security_partitioned_cache() {
@@ -3932,6 +4202,207 @@ void test_phase_twentyseven_kv_cache_accounting_and_eviction() {
         kv.record_precision_evidence(evidence);
         require(!kv.precision_admitted(masterai::KvPrecision::half),
                 "recording evidence alone enabled a reduced-precision policy");
+        require(kv.precision_evidence().size() == 1U &&
+                    kv.precision_evidence().front().precision ==
+                        masterai::KvPrecision::half,
+                "recorded precision evidence was not retrievable");
+
+        // Explicit administrator admission (this pass): only this call, not
+        // the evidence recorded above, ever flips admission.
+        kv.admit_precision(masterai::KvPrecision::half);
+        require(kv.precision_admitted(masterai::KvPrecision::half) &&
+                    !kv.precision_admitted(masterai::KvPrecision::quantized_k),
+                "admit_precision() did not admit exactly the requested "
+                "precision");
+
+        // Cross-request prefix-tree sharing admission (this pass): same
+        // explicit-only discipline.
+        require(!kv.prefix_sharing_admitted(),
+                "prefix sharing was admitted without an explicit call");
+        kv.admit_prefix_sharing();
+        require(kv.prefix_sharing_admitted(),
+                "admit_prefix_sharing() did not flip the admission gate");
+    }
+
+    // Admission persistence (this pass): survives across a fresh
+    // KvCacheManager instance backed by the same RecordStore, exactly as
+    // AdvancedOptimizationRegistry's own durable admission already does --
+    // an administrator's decision must not silently reset on restart.
+    {
+        masterai::RecordStore records(temporary.path() / "kv-admission-database");
+        records.open();
+        {
+            masterai::KvCacheManager kv(memory, 1024ULL * 1024ULL, 4096ULL,
+                                        &records);
+            kv.admit_precision(masterai::KvPrecision::quantized_k);
+            kv.admit_prefix_sharing();
+        }
+        masterai::KvCacheManager restored(memory, 1024ULL * 1024ULL, 4096ULL,
+                                          &records);
+        require(restored.precision_admitted(masterai::KvPrecision::quantized_k) &&
+                    !restored.precision_admitted(masterai::KvPrecision::half) &&
+                    restored.prefix_sharing_admitted(),
+                "KV precision/prefix-sharing admission did not survive "
+                "reconstruction from the same durable RecordStore");
+    }
+
+    // Launch flags (this pass): --cache-type-k/v are emitted only for a
+    // non-full precision, and only for the K or V side that precision
+    // actually names.
+    {
+        const auto backend = test_executable();
+        masterai::LlamaCppAdapter adapter(backend);
+        TemporaryDirectory model_temp;
+        const auto model_directory = model_temp.path() / "kv-launch-model";
+        std::filesystem::create_directories(model_directory);
+        const auto model_file = model_directory / "model.gguf";
+        write_text(model_file, std::string(4096U, 'm'));
+        masterai::ModelRecord model;
+        model.directory = model_directory;
+        model.manifest.id = "kv-launch-fixture";
+        model.manifest.model_file = "model.gguf";
+        model.manifest.model_size_bytes = std::filesystem::file_size(model_file);
+        model.manifest.model_sha256 = masterai::sha256_file_hex(model_file);
+        model.state = masterai::ModelState::ready;
+
+        const auto contains_flag = [](const masterai::LaunchSpec& spec,
+                                      const std::string& flag) {
+            return std::find(spec.arguments.begin(), spec.arguments.end(),
+                             flag) != spec.arguments.end();
+        };
+
+        masterai::LaunchTuning full_tuning;
+        const auto full_spec =
+            adapter.build_launch_spec(model, 4096U, 18201U, 1U, full_tuning);
+        require(!contains_flag(full_spec, "--cache-type-k") &&
+                    !contains_flag(full_spec, "--cache-type-v"),
+                "KvPrecision::full emitted a --cache-type-k/v flag it should "
+                "not have");
+
+        masterai::LaunchTuning quantized_k_tuning;
+        quantized_k_tuning.kv_precision = masterai::KvPrecision::quantized_k;
+        const auto quantized_k_spec = adapter.build_launch_spec(
+            model, 4096U, 18202U, 1U, quantized_k_tuning);
+        require(contains_flag(quantized_k_spec, "--cache-type-k") &&
+                    !contains_flag(quantized_k_spec, "--cache-type-v"),
+                "KvPrecision::quantized_k did not emit exactly a K-side "
+                "cache-type flag");
+
+        masterai::LaunchTuning half_tuning;
+        half_tuning.kv_precision = masterai::KvPrecision::half;
+        const auto half_spec =
+            adapter.build_launch_spec(model, 4096U, 18203U, 1U, half_tuning);
+        require(contains_flag(half_spec, "--cache-type-k") &&
+                    contains_flag(half_spec, "--cache-type-v"),
+                "KvPrecision::half did not emit both K and V cache-type "
+                "flags");
+    }
+
+    // Quality-parity check (this pass): a real, honest comparison against
+    // the fixture backend -- run_kv_precision_quality_check() must actually
+    // launch both runners and compare generated text, not fabricate a
+    // pass/fail. The fixture backend's /completion response is deterministic
+    // for a given prompt (see fake_llama_server.cpp), so full precision and
+    // KvPrecision::half (which this codebase's launch flags alone cannot
+    // change the fixture's canned behavior for) are expected to compare
+    // byte-identical here -- proving the comparison mechanism runs for real,
+    // not that this fixture can validate genuine quality parity against a
+    // real model (see docs/performance/phase-27-kv-cache-evaluation.md).
+    {
+        const auto backend = fake_llama_executable();
+        if (std::filesystem::is_regular_file(backend)) {
+            TemporaryDirectory model_temp;
+            const auto model_directory = model_temp.path() / "kv-quality-model";
+            std::filesystem::create_directories(model_directory);
+            const auto model_file = model_directory / "model.gguf";
+            write_text(model_file, "GGUF-kv-quality-fixture");
+            masterai::ModelRecord model;
+            model.directory = model_directory;
+            model.manifest.id = "kv-quality-fixture";
+            model.manifest.model_file = "model.gguf";
+            model.manifest.model_size_bytes =
+                std::filesystem::file_size(model_file);
+            model.manifest.model_sha256 = masterai::sha256_file_hex(model_file);
+            model.state = masterai::ModelState::ready;
+
+            masterai::RunnerSupervisor full_runner(
+                backend, model_temp.path() / "kv-quality-full-runtime");
+            full_runner.load(model, 4096U, 18211U, 5U);
+            masterai::RunnerSupervisor candidate_runner(
+                backend, model_temp.path() / "kv-quality-candidate-runtime");
+            masterai::LaunchTuning candidate_tuning;
+            candidate_tuning.kv_precision = masterai::KvPrecision::half;
+            candidate_runner.load(model, 4096U, 18212U, 5U, 1U, candidate_tuning);
+
+            const auto evidence = masterai::run_kv_precision_quality_check(
+                full_runner, candidate_runner, masterai::KvPrecision::half,
+                {"return value", "return value"}, "fixture-backend-hash");
+            require(evidence.precision == masterai::KvPrecision::half &&
+                        evidence.backend_hash == "fixture-backend-hash" &&
+                        evidence.quality_parity_verified &&
+                        !evidence.quality_notes.empty(),
+                    "run_kv_precision_quality_check did not produce honest "
+                    "evidence from the real generation comparison");
+        }
+    }
+
+    // Cross-request prefix-tree sharing (this pass): refuses outright until
+    // explicitly admitted; once admitted, two different chats/users under
+    // the same SharedTemplateKey reuse the same slot for the byte-identical
+    // public prefix; a private per-chat try_reuse() lookup is never
+    // satisfied by a shared-template entry, and vice versa.
+    {
+        masterai::PromptSessionManager sessions(4U, 300U);
+        masterai::SharedTemplateKey key;
+        key.prefix_content_sha256 = "template-abc";
+        key.model_sha256 = "model-xyz";
+        key.policy_generation = 7U;
+        key.authorized_roles = {"member"};
+
+        const auto refused = sessions.try_reuse_shared_template(
+            key, "shared system prompt for the template", false);
+        require(!refused.reuse,
+                "a shared-template lookup succeeded before prefix sharing "
+                "was ever admitted");
+
+        const auto slot = sessions.record_shared_template(
+            key, "shared system prompt", std::nullopt, 10U);
+
+        const auto still_refused = sessions.try_reuse_shared_template(
+            key, "shared system prompt extended", false);
+        require(!still_refused.reuse,
+                "a shared-template lookup succeeded with "
+                "prefix_sharing_admitted passed as false");
+
+        const auto granted = sessions.try_reuse_shared_template(
+            key, "shared system prompt extended for a different user", true);
+        require(granted.reuse && granted.slot_id == slot,
+                "an admitted shared-template lookup did not grant reuse for "
+                "a byte-identical-prefix request from a different identity");
+
+        // Isolation: a private per-chat try_reuse() must never resolve to a
+        // shared-template entry, even with the identical prompt text.
+        masterai::SessionFingerprint fingerprint;
+        fingerprint.model_sha256 = key.model_sha256;
+        const auto private_lookup =
+            sessions.try_reuse("some-private-chat-id", fingerprint,
+                              "shared system prompt extended for a different "
+                              "user");
+        require(!private_lookup.reuse,
+                "a private per-chat lookup resolved to a cross-request "
+                "shared-template slot -- KV state crossed an identity "
+                "boundary");
+
+        // Different policy generation (a different admin-approved policy):
+        // must not share the same template slot even with identical prefix
+        // text and model.
+        masterai::SharedTemplateKey different_policy = key;
+        different_policy.policy_generation = 8U;
+        const auto different_policy_lookup = sessions.try_reuse_shared_template(
+            different_policy, "shared system prompt extended", true);
+        require(!different_policy_lookup.reuse,
+                "a shared-template lookup crossed a policy-generation "
+                "boundary");
     }
 }
 
@@ -4108,6 +4579,27 @@ void test_phase_twentynine_model_tiering_and_cascade() {
                 "balanced profile accepted two simultaneously resident "
                 "generation models");
     }
+
+    // 2026-08-19: parse_model_tier() is the inverse of to_string(ModelTier),
+    // used to validate/build AppConfig::model_tier_assignments -- every
+    // declared tier must round-trip, and an unknown spelling must throw
+    // rather than silently default to some tier.
+    for (const auto tier :
+         {masterai::ModelTier::deterministic_processing,
+          masterai::ModelTier::compact_router, masterai::ModelTier::small_fast,
+          masterai::ModelTier::medium_general,
+          masterai::ModelTier::large_specialist}) {
+        require(masterai::parse_model_tier(masterai::to_string(tier)) == tier,
+                "parse_model_tier(to_string(tier)) did not round-trip");
+    }
+    bool rejected_unknown_tier = false;
+    try {
+        masterai::parse_model_tier("not-a-real-tier");
+    } catch (const std::invalid_argument&) {
+        rejected_unknown_tier = true;
+    }
+    require(rejected_unknown_tier,
+            "parse_model_tier() must reject an unknown tier spelling");
 }
 
 // Phase 23: a repeated tokenize() call for identical text/model/policy must
@@ -6464,6 +6956,93 @@ void test_machine_learning_model_builder_lifecycle() {
                 json.find("\"earlyStopping\":false") != std::string::npos,
             "model_builder_config_json did not report the nested build "
             "settings");
+
+    // This pass (closing Phase 46's real-executor gap): create() now takes
+    // an optional dataset id -- the dataset run_model_builder_config()
+    // (server.cpp) will hand to TrainingJobStore::create() on submission --
+    // and ModelBuilderConfigStore gained set_dataset()/attach_training_job()
+    // plus the two new persisted fields both survive a reload.
+    {
+        masterai::ModelBuilderConfigStore hand_off_configs(records);
+        const auto with_dataset = hand_off_configs.create(
+            "administrator-1", "project-2", "", "hand-off-build",
+            "will be submitted for a real training job", "template",
+            "dataset-1");
+        require(with_dataset.dataset_id == "dataset-1",
+                "create() did not honour an explicit dataset id");
+        require(hand_off_configs.set_dataset(with_dataset.id, "dataset-2"),
+                "set_dataset() rejected a known model builder configuration "
+                "id");
+        require(hand_off_configs.find(with_dataset.id)->dataset_id ==
+                    "dataset-2",
+                "set_dataset() did not persist the new dataset id");
+        require(!hand_off_configs.set_dataset("nonexistent-model-builder-"
+                                              "config",
+                                              "dataset-3"),
+                "set_dataset() must no-op for an unknown model builder "
+                "configuration id, not throw");
+
+        require(hand_off_configs.attach_training_job(with_dataset.id,
+                                                      "job-1"),
+                "attach_training_job() rejected a known model builder "
+                "configuration id");
+        require(hand_off_configs.find(with_dataset.id)
+                        ->resulting_training_job_id == "job-1",
+                "attach_training_job() did not persist the resulting "
+                "training job id");
+        require(!hand_off_configs.attach_training_job(
+                    "nonexistent-model-builder-config", "job-2"),
+                "attach_training_job() must no-op for an unknown model "
+                "builder configuration id, not throw");
+
+        masterai::ModelBuilderConfigStore hand_off_reloaded(records);
+        const auto reloaded_hand_off = hand_off_reloaded.find(with_dataset.id);
+        require(reloaded_hand_off.has_value() &&
+                    reloaded_hand_off->dataset_id == "dataset-2" &&
+                    reloaded_hand_off->resulting_training_job_id == "job-1",
+                "ModelBuilderConfigStore did not restore dataset_id/"
+                "resulting_training_job_id after reload");
+
+        const auto hand_off_json =
+            masterai::model_builder_config_json(*reloaded_hand_off);
+        require(hand_off_json.find("\"datasetId\":\"dataset-2\"") !=
+                        std::string::npos &&
+                    hand_off_json.find(
+                        "\"resultingTrainingJobId\":\"job-1\"") !=
+                        std::string::npos,
+                "model_builder_config_json did not report datasetId/"
+                "resultingTrainingJobId");
+    }
+
+    // validate_model_builder_settings() is now declared in masterai.hpp
+    // (not file-local to ml.cpp) specifically so run_model_builder_config()
+    // (server.cpp) can reuse it at submission time -- exercise it directly
+    // the way that caller does.
+    {
+        masterai::ModelBuilderSettings valid_settings;
+        valid_settings.configuration_mode = "basic";
+        bool valid_accepted = true;
+        try {
+            masterai::validate_model_builder_settings(valid_settings);
+        } catch (const std::invalid_argument&) {
+            valid_accepted = false;
+        }
+        require(valid_accepted,
+                "validate_model_builder_settings() rejected a valid basic "
+                "configuration");
+
+        bool bad_mode_rejected = false;
+        try {
+            masterai::ModelBuilderSettings bad;
+            bad.configuration_mode = "expert";
+            masterai::validate_model_builder_settings(bad);
+        } catch (const std::invalid_argument&) {
+            bad_mode_rejected = true;
+        }
+        require(bad_mode_rejected,
+                "validate_model_builder_settings() must reject a "
+                "configuration mode other than basic or advanced");
+    }
 }
 
 void test_machine_learning_instruction_training_lifecycle() {
@@ -7055,6 +7634,164 @@ void test_machine_learning_subject_exam_lifecycle() {
                 json.find("\"questionFormat\":\"multiple_choice\"") !=
                     std::string::npos,
             "subject_exam_json did not report the exam's own fields");
+
+    // This pass (closing Phase 51's real-executor gap): SubjectExamStore
+    // gained set_questions() to attach a real question bank/passing
+    // threshold, subject_exam_answer_matches() is the plain text-overlap
+    // heuristic run_subject_exam() (server.cpp) scores answers with, and
+    // SubjectExamResultStore persists a real run's outcome.
+    {
+        masterai::SubjectExamStore graded(records);
+        const auto to_grade = graded.create(
+            "administrator-1", "subject-1", "graded-exam",
+            "exercises the new real question bank / scoring path",
+            "short_answer");
+        require(graded.set_questions(
+                    to_grade.id,
+                    "[{\"questionText\":\"What port does HTTPS use?\","
+                    "\"expectedAnswer\":\"443\"},"
+                    "{\"questionText\":\"Name the OSI transport layer "
+                    "protocol used by HTTP.\",\"expectedAnswer\":\"TCP\"}]",
+                    0.8),
+                "set_questions() rejected a well-formed question bank");
+        {
+            const auto with_questions = graded.find(to_grade.id);
+            require(with_questions.has_value() &&
+                        with_questions->passing_threshold == 0.8 &&
+                        with_questions->questions_json.find("443") !=
+                            std::string::npos,
+                    "set_questions() did not persist the question bank/"
+                    "passing threshold");
+        }
+
+        bool rejected_empty_bank = false;
+        try {
+            graded.set_questions(to_grade.id, "[]", 0.8);
+        } catch (const std::invalid_argument&) {
+            rejected_empty_bank = true;
+        }
+        require(rejected_empty_bank,
+                "set_questions() must reject an empty question bank");
+
+        bool rejected_bad_json = false;
+        try {
+            graded.set_questions(to_grade.id, "{not json", 0.8);
+        } catch (const std::invalid_argument&) {
+            rejected_bad_json = true;
+        }
+        require(rejected_bad_json,
+                "set_questions() must reject malformed JSON");
+
+        bool rejected_bad_threshold = false;
+        try {
+            graded.set_questions(
+                to_grade.id,
+                "[{\"questionText\":\"q\",\"expectedAnswer\":\"a\"}]", 1.5);
+        } catch (const std::invalid_argument&) {
+            rejected_bad_threshold = true;
+        }
+        require(rejected_bad_threshold,
+                "set_questions() must reject a passing threshold outside "
+                "0.0 to 1.0");
+
+        require(!graded.set_questions(
+                    "nonexistent-subject-exam",
+                    "[{\"questionText\":\"q\",\"expectedAnswer\":\"a\"}]",
+                    0.8),
+                "set_questions() must no-op for an unknown subject exam id, "
+                "not throw");
+
+        masterai::SubjectExamStore graded_reloaded(records);
+        const auto reloaded_graded = graded_reloaded.find(to_grade.id);
+        require(reloaded_graded.has_value() &&
+                    reloaded_graded->passing_threshold == 0.8 &&
+                    reloaded_graded->questions_json.find(
+                        "What port does HTTPS use?") != std::string::npos,
+                "SubjectExamStore did not restore the question bank/passing "
+                "threshold after reload");
+
+        const auto graded_json =
+            masterai::subject_exam_json(*reloaded_graded);
+        require(graded_json.find("\"passingThreshold\":0.8") !=
+                        std::string::npos &&
+                    graded_json.find("\"questions\":[{") != std::string::npos,
+                "subject_exam_json did not report the question bank/passing "
+                "threshold");
+    }
+
+    // subject_exam_answer_matches() is a plain, inspectable text-overlap
+    // heuristic, not "AI grading" -- exercise both the substring path and
+    // the short-answer whole-token path it documents.
+    require(masterai::subject_exam_answer_matches(
+                "The server listens on port 443 for HTTPS.", "443"),
+            "subject_exam_answer_matches() must match a substring "
+            "occurrence of a short expected answer");
+    require(masterai::subject_exam_answer_matches(
+                "TCP is the transport-layer protocol HTTP relies on.", "tcp"),
+            "subject_exam_answer_matches() must match case-insensitively");
+    require(!masterai::subject_exam_answer_matches(
+                "The server listens on port 8080.", "443"),
+            "subject_exam_answer_matches() must not match an absent "
+            "expected answer");
+    require(!masterai::subject_exam_answer_matches("anything", ""),
+            "subject_exam_answer_matches() must not match an empty "
+            "expected answer");
+
+    // SubjectExamResultStore: the real run-outcome store, latest-run-wins
+    // the same way ExperimentResultStore already behaves.
+    {
+        masterai::SubjectExamResultStore results(records);
+        require(!results.find("exam-without-a-run").has_value(),
+                "SubjectExamResultStore::find() must report no result for "
+                "an exam that has never been run");
+        results.put("exam-1", "{\"examId\":\"exam-1\",\"score\":0.5}");
+        {
+            const auto stored = results.find("exam-1");
+            require(stored.has_value() &&
+                        stored->find("\"score\":0.5") != std::string::npos,
+                    "SubjectExamResultStore did not persist a run result");
+        }
+        results.put("exam-1", "{\"examId\":\"exam-1\",\"score\":1.0}");
+        require(results.find("exam-1")->find("\"score\":1.0") !=
+                    std::string::npos,
+                "SubjectExamResultStore::put() must overwrite with the "
+                "latest run's result");
+        require(results.remove("exam-1"),
+                "SubjectExamResultStore::remove() rejected a known exam id");
+        require(!results.find("exam-1").has_value(),
+                "SubjectExamResultStore::remove() did not delete the result");
+        require(!results.remove("exam-1"),
+                "SubjectExamResultStore::remove() must no-op for an "
+                "already-removed exam id, not throw");
+    }
+
+    // Legacy scoped-down Phase 51 records persisted only six fields;
+    // restore() must accept them with an empty question bank and the
+    // in-struct-default 0.7 passing threshold so existing databases keep
+    // working without a migration step.
+    {
+        const auto legacy_pack = [](const std::vector<std::string>& fields) {
+            std::string result;
+            for (const auto& field : fields) {
+                result += std::to_string(field.size()) + ":" + field;
+            }
+            return result;
+        };
+        records.put("ml_subject_exams", "legacy-exam-1",
+                    legacy_pack({"subject-9", "legacy exam",
+                                 "created before the real executor",
+                                 "multiple_choice", "administrator-1",
+                                 "draft"}));
+        masterai::SubjectExamStore migrated(records);
+        const auto legacy = migrated.find("legacy-exam-1");
+        require(legacy.has_value() && legacy->name == "legacy exam" &&
+                    legacy->questions_json.empty() &&
+                    legacy->passing_threshold == 0.7,
+                "restore() must accept a legacy six-field subject exam "
+                "record with default question-bank/passing-threshold "
+                "fields");
+        records.erase("ml_subject_exams", "legacy-exam-1");
+    }
 }
 
 // Phase 52: docs/PLAN.md "Machine Learning Abilities" section 26
@@ -7151,6 +7888,121 @@ void test_machine_learning_hyperparameter_search_lifecycle() {
                 json.find("\"strategy\":\"bayesian\"") != std::string::npos,
             "hyperparameter_search_json did not report the search's own "
             "fields");
+
+    // This pass (closing Phase 52's real-executor gap): create() now takes
+    // an optional search-space JSON and a bounded trial budget, and
+    // HyperparameterSearchStore gained record_result() for the real
+    // executor (run_hyperparameter_search(), server.cpp) to persist real
+    // trial history and the best trial's real parameters/score.
+    {
+        masterai::HyperparameterSearchStore tunable(records);
+        const auto tuned = tunable.create(
+            "administrator-1", "training-job-2", "real-executor-search",
+            "exercises the new search-space/trial-budget inputs", "grid",
+            "{\"learningRate\":{\"min\":0.01,\"max\":0.1},"
+            "\"epochs\":{\"min\":10,\"max\":100}}",
+            5U);
+        require(tuned.search_space_json.find("\"learningRate\"") !=
+                        std::string::npos &&
+                    tuned.max_trials == 5U,
+                "create() did not honour an explicit search space / max "
+                "trials");
+
+        const auto default_budget = tunable.create(
+            "administrator-1", "training-job-2", "default-budget-search", "",
+            "grid");
+        require(default_budget.max_trials == 10U &&
+                    default_budget.search_space_json.empty(),
+                "create() must default max_trials to 10 and search_space_"
+                "json to empty when omitted");
+
+        bool rejected_bad_trials = false;
+        try {
+            tunable.create("administrator-1", "training-job-2",
+                           "too-many-trials", "", "grid", "", 21U);
+        } catch (const std::invalid_argument&) {
+            rejected_bad_trials = true;
+        }
+        require(rejected_bad_trials,
+                "create() must reject a max_trials above the hard cap of 20");
+
+        bool rejected_bad_space = false;
+        try {
+            tunable.create("administrator-1", "training-job-2",
+                           "malformed-space", "", "grid", "{not json", 5U);
+        } catch (const std::invalid_argument&) {
+            rejected_bad_space = true;
+        }
+        require(rejected_bad_space,
+                "create() must reject a malformed search_space_json");
+
+        require(tunable.record_result(tuned.id,
+                                      "[{\"learningRate\":0.05,\"epochs\":50,"
+                                      "\"score\":0.9}]",
+                                      0.05, 50U, 0.9, 3U),
+                "record_result() rejected a known hyperparameter search id");
+        {
+            const auto with_result = tunable.find(tuned.id);
+            require(with_result.has_value() &&
+                        with_result->best_learning_rate == 0.05 &&
+                        with_result->best_epochs == 50U &&
+                        with_result->best_score == 0.9 &&
+                        with_result->trials_run == 3U &&
+                        with_result->trials_json.find("\"score\":0.9") !=
+                            std::string::npos,
+                    "record_result() did not persist the real trial history/"
+                    "best trial");
+        }
+        require(!tunable.record_result("nonexistent-search", "[]", 0.0, 0U,
+                                       0.0, 0U),
+                "record_result() must no-op for an unknown hyperparameter "
+                "search id, not throw");
+
+        masterai::HyperparameterSearchStore tunable_reloaded(records);
+        const auto reloaded_tuned = tunable_reloaded.find(tuned.id);
+        require(reloaded_tuned.has_value() &&
+                    reloaded_tuned->max_trials == 5U &&
+                    reloaded_tuned->best_learning_rate == 0.05 &&
+                    reloaded_tuned->best_epochs == 50U &&
+                    reloaded_tuned->trials_run == 3U,
+                "HyperparameterSearchStore did not restore the search-space/"
+                "trial-budget/result fields after reload");
+
+        const auto tuned_json = masterai::hyperparameter_search_json(*reloaded_tuned);
+        require(tuned_json.find("\"maxTrials\":5") != std::string::npos &&
+                    tuned_json.find("\"trialsRun\":3") != std::string::npos &&
+                    tuned_json.find("\"bestEpochs\":50") != std::string::npos,
+                "hyperparameter_search_json did not report the search-space/"
+                "trial-budget/result fields");
+    }
+
+    // Legacy scoped-down Phase 52 records persisted only six fields;
+    // restore() must accept them with default (unset) search-space/
+    // trial-budget/result fields so existing databases keep working
+    // without a migration step.
+    {
+        const auto legacy_pack = [](const std::vector<std::string>& fields) {
+            std::string result;
+            for (const auto& field : fields) {
+                result += std::to_string(field.size()) + ":" + field;
+            }
+            return result;
+        };
+        records.put("ml_hyperparameter_searches", "legacy-search-1",
+                    legacy_pack({"training-job-9", "legacy search",
+                                 "created before the real executor", "random",
+                                 "administrator-1", "draft"}));
+        masterai::HyperparameterSearchStore migrated(records);
+        const auto legacy = migrated.find("legacy-search-1");
+        require(legacy.has_value() && legacy->name == "legacy search" &&
+                    legacy->max_trials == 10U &&
+                    legacy->search_space_json.empty() &&
+                    legacy->trials_run == 0U,
+                "restore() must accept a legacy six-field hyperparameter "
+                "search record with default (in-struct-default) search "
+                "fields");
+        records.erase("ml_hyperparameter_searches", "legacy-search-1");
+    }
 }
 
 // Phase 53: docs/PLAN.md "Machine Learning Abilities" section 28 (Model
@@ -7226,6 +8078,37 @@ void test_machine_learning_model_optimization_lifecycle() {
             "remove() rejected a known model optimization id");
     require(optimizations.list().size() == 0U,
             "remove() did not delete the model optimization");
+
+    // Phase 53 (2026-08-19): pruning_threshold defaults to 1e-3 for an
+    // existing caller that doesn't pass one, is honoured verbatim when a
+    // caller does, is validated into [0, 1], and survives a reload the same
+    // way every other field above already does.
+    const auto default_threshold_run = optimizations.create(
+        "administrator-1", "model-1", "default-threshold-pruning", "",
+        "pruning");
+    require(default_threshold_run.pruning_threshold == 1e-3,
+            "create() must default pruning_threshold to 1e-3 when omitted");
+    const auto custom_threshold_run = optimizations.create(
+        "administrator-1", "model-1", "custom-threshold-pruning", "",
+        "pruning", 0.05);
+    require(custom_threshold_run.pruning_threshold == 0.05,
+            "create() did not honour an explicit pruning_threshold");
+    bool rejected_bad_threshold = false;
+    try {
+        optimizations.create("administrator-1", "model-1", "bad-threshold",
+                             "", "pruning", -0.5);
+    } catch (const std::invalid_argument&) {
+        rejected_bad_threshold = true;
+    }
+    require(rejected_bad_threshold,
+            "create() must reject a pruning_threshold outside [0, 1]");
+    masterai::ModelOptimizationStore threshold_reloaded(records);
+    const auto reloaded_custom =
+        threshold_reloaded.find(custom_threshold_run.id);
+    require(reloaded_custom.has_value() &&
+                reloaded_custom->pruning_threshold == 0.05,
+            "ModelOptimizationStore did not restore pruning_threshold after "
+            "reload");
     require(!optimizations.remove(run.id),
             "remove() must no-op for an already-removed model optimization "
             "id, not throw");
@@ -8555,6 +9438,8 @@ int main() {
         run("disk-backed indexing", test_phase_fifteen_disk_backed_indexing);
         run("live project watcher", test_phase_fifteen_project_watcher);
         run("deadline-bound retrieval", test_phase_sixteen_deadline_bound_retrieval);
+        run("extended retrieval strategies",
+            test_phase_twentyfour_extended_retrieval_strategies);
         run("security-partitioned cache",
             test_phase_seventeen_security_partitioned_cache);
         run("hierarchical cache admission/eviction",

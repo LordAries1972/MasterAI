@@ -12,9 +12,11 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -337,6 +339,285 @@ std::vector<std::string> split_pipeline_stages(const std::string& stages) {
     return result;
 }
 
+// Phase 53/72 unification: the one real optimization executor
+// (prune_tabular_model, magnitude pruning) shared between the standalone
+// Model Optimization status handler and the Automation Pipeline's
+// "Optimize" stage, so both surfaces run the identical logic instead of the
+// pipeline stage being the only real path. `operation` values other than
+// "pruning" have no real executor yet and fail clearly rather than silently
+// completing.
+std::pair<std::string, std::string> run_model_optimization(
+    ModelOptimizationStore& optimizations, TrainedModelStore& trained_models,
+    AuditLog& audit, const std::string& acting_user_id,
+    const ModelOptimizationRun& run) {
+    auto model = trained_models.find(run.model_id);
+    if (!model) {
+        optimizations.set_status(run.id, ModelOptimizationStatus::failed);
+        audit.append("ml.model_optimization.run", acting_user_id, "failure",
+                     run.id);
+        return {"failed",
+                "model " + run.model_id + " has not been trained yet"};
+    }
+    if (run.operation != "pruning") {
+        optimizations.set_status(run.id, ModelOptimizationStatus::failed);
+        audit.append("ml.model_optimization.run", acting_user_id, "failure",
+                     run.id);
+        return {"failed", "operation '" + run.operation +
+                               "' has no real executor yet; only "
+                               "'pruning' is implemented"};
+    }
+    try {
+        const auto prune = prune_tabular_model(*model, run.pruning_threshold);
+        trained_models.put(*model);
+        optimizations.set_status(run.id, ModelOptimizationStatus::completed);
+        audit.append("ml.model_optimization.run", acting_user_id, "success",
+                     run.id);
+        return {"completed",
+                "optimization run " + run.id + " pruned " +
+                    std::to_string(prune.weights_pruned) + " of " +
+                    std::to_string(prune.weights_total) +
+                    " weight(s) below magnitude " +
+                    std::to_string(run.pruning_threshold)};
+    } catch (const std::exception& error) {
+        optimizations.set_status(run.id, ModelOptimizationStatus::failed);
+        audit.append("ml.model_optimization.run", acting_user_id, "failure",
+                     run.id);
+        return {"failed", error.what()};
+    }
+}
+
+// Phase 46: docs/PLAN.md "Machine Learning Abilities" section 9 (Model
+// Builder Interface). This codebase has no from-scratch, architecture-
+// configurable neural network trainer -- only the existing tabular
+// linear/logistic/softmax-regression trainer in ml_engine.cpp
+// (train_tabular_model) that TrainingJob already drives. Rather than
+// fabricate a fake deep-learning executor that pretends to honor
+// ModelBuilderSettings' architecture/hidden-dimension/attention/optimiser/
+// scheduler fields, submitting a configuration hands off to that same
+// real trainer via a genuine TrainingJob: this function re-validates the
+// settings (the same range checks configure() already applied at save
+// time -- see validate_model_builder_settings in masterai.hpp), requires
+// a dataset to actually train against, creates the job, and moves the
+// configuration to its terminal "submitted" status recording which job it
+// produced. ModelBuilderSettings' from-scratch-architecture fields stay
+// on the record for a human to read, but the resulting TrainingJob does
+// NOT consume them -- there is no executor in this codebase that
+// understands a custom architecture/hidden-dimension/attention
+// configuration yet. See ModelBuilderConfig's masterai.hpp class comment
+// for this honest, permanent scope limit. A validation or missing-dataset
+// failure leaves the configuration's status untouched (ModelBuilderConfig
+// Status has no "failed" state -- it is a design-time draft/review
+// lifecycle, not a job lifecycle) so an administrator can fix the problem
+// and resubmit.
+std::pair<std::string, std::string> run_model_builder_config(
+    ModelBuilderConfigStore& configs, TrainingJobStore& training_jobs,
+    AuditLog& audit, const std::string& acting_user_id,
+    const ModelBuilderConfig& config) {
+    if (config.dataset_id.empty()) {
+        audit.append("ml.model_builder_config.run", acting_user_id, "failure",
+                     config.id);
+        return {"failed",
+                "model builder config " + config.id +
+                    " has no dataset selected; a dataset id is required "
+                    "before it can hand off to a real training job"};
+    }
+    try {
+        validate_model_builder_settings(config.settings);
+    } catch (const std::exception& error) {
+        audit.append("ml.model_builder_config.run", acting_user_id, "failure",
+                     config.id);
+        return {"failed", error.what()};
+    }
+    try {
+        const auto job = training_jobs.create(
+            acting_user_id, config.project_id, config.base_model_id,
+            config.dataset_id, config.name,
+            config.description.empty()
+                ? "hand-off training job created by Model Builder "
+                  "configuration " +
+                      config.id
+                : config.description,
+            config.source_type);
+        configs.attach_training_job(config.id, job.id);
+        configs.set_status(config.id, ModelBuilderConfigStatus::submitted);
+        audit.append("ml.model_builder_config.run", acting_user_id, "success",
+                     config.id);
+        return {"submitted",
+                "model builder config " + config.id +
+                    " handed off to training job " + job.id +
+                    " (real tabular trainer; from-scratch architecture "
+                    "settings are recorded but not executed by it)"};
+    } catch (const std::exception& error) {
+        audit.append("ml.model_builder_config.run", acting_user_id, "failure",
+                     config.id);
+        return {"failed", error.what()};
+    }
+}
+
+// Phase 52: docs/PLAN.md "Machine Learning Abilities" section 26
+// (Hyperparameter Optimization). Hard cap on real trials regardless of a
+// search's requested max_trials (also range-checked at create() time in
+// ml.cpp), so a request can never trigger unbounded compute.
+constexpr std::uint32_t kMaxHyperparameterTrials = 20U;
+
+// Runs a small, bounded grid search over learning_rate and epochs -- the
+// only two TabularTrainingOptions fields (masterai.hpp) that genuinely
+// change what train_tabular_model() learns (test_fraction/seed change the
+// evaluation split, not the search). Every trial genuinely retrains a
+// fresh TrainedTabularModel via train_tabular_model() against the
+// referenced TrainingJob's real dataset content, scored by the real
+// evaluate_tabular_model() held-out metric (accuracy for classification,
+// R-squared for regression) -- never a fabricated or interpolated score.
+// Grid size is floor(sqrt(min(search.max_trials, kMaxHyperparameterTrials)))
+// per dimension, so the real trial count this function runs never exceeds
+// what was requested or the hard cap. Leaves the search's status untouched
+// on failure (HyperparameterSearchStatus's eleven-state job lifecycle does
+// have a `failed` state, and this function does use it, matching Training
+// Jobs' own convention) so a fixable problem (missing job, no dataset
+// content, malformed search space) is reported clearly.
+std::pair<std::string, std::string> run_hyperparameter_search(
+    HyperparameterSearchStore& searches, TrainingJobStore& training_jobs,
+    DatasetContentStore& dataset_content, AuditLog& audit,
+    const std::string& acting_user_id, const HyperparameterSearch& search) {
+    const auto job = training_jobs.find(search.training_job_id);
+    if (!job) {
+        searches.set_status(search.id, HyperparameterSearchStatus::failed);
+        audit.append("ml.hyperparameter_search.run", acting_user_id,
+                     "failure", search.id);
+        return {"failed", "training job " + search.training_job_id +
+                               " was not found"};
+    }
+    const auto content = dataset_content.find(job->dataset_id);
+    if (!content) {
+        searches.set_status(search.id, HyperparameterSearchStatus::failed);
+        audit.append("ml.hyperparameter_search.run", acting_user_id,
+                     "failure", search.id);
+        return {"failed", "dataset " + job->dataset_id +
+                               " has no uploaded content"};
+    }
+    double learning_rate_min = 0.01;
+    double learning_rate_max = 0.2;
+    std::uint32_t epoch_min = 50U;
+    std::uint32_t epoch_max = 200U;
+    if (!search.search_space_json.empty()) {
+        try {
+            const auto root = parse_json(search.search_space_json);
+            if (const auto* lr = root.optional("learningRate")) {
+                if (const auto* v = lr->optional("min")) {
+                    learning_rate_min = v->as_double();
+                }
+                if (const auto* v = lr->optional("max")) {
+                    learning_rate_max = v->as_double();
+                }
+            }
+            if (const auto* ep = root.optional("epochs")) {
+                if (const auto* v = ep->optional("min")) {
+                    epoch_min = static_cast<std::uint32_t>(v->as_integer());
+                }
+                if (const auto* v = ep->optional("max")) {
+                    epoch_max = static_cast<std::uint32_t>(v->as_integer());
+                }
+            }
+        } catch (const std::exception& error) {
+            searches.set_status(search.id, HyperparameterSearchStatus::failed);
+            audit.append("ml.hyperparameter_search.run", acting_user_id,
+                         "failure", search.id);
+            return {"failed",
+                    std::string("invalid search space: ") + error.what()};
+        }
+    }
+    if (!(learning_rate_min > 0.0) || learning_rate_max < learning_rate_min ||
+        epoch_min == 0U || epoch_max < epoch_min) {
+        searches.set_status(search.id, HyperparameterSearchStatus::failed);
+        audit.append("ml.hyperparameter_search.run", acting_user_id,
+                     "failure", search.id);
+        return {"failed", "search space is out of range"};
+    }
+    TabularDataset data;
+    try {
+        data = parse_tabular_csv(content->csv, content->target_column);
+    } catch (const std::exception& error) {
+        searches.set_status(search.id, HyperparameterSearchStatus::failed);
+        audit.append("ml.hyperparameter_search.run", acting_user_id,
+                     "failure", search.id);
+        return {"failed", error.what()};
+    }
+    const std::uint32_t requested_trials =
+        std::min(std::max<std::uint32_t>(search.max_trials, 1U),
+                 kMaxHyperparameterTrials);
+    std::uint32_t grid_side = static_cast<std::uint32_t>(
+        std::sqrt(static_cast<double>(requested_trials)));
+    if (grid_side < 1U) grid_side = 1U;
+    std::string trials_json = "[";
+    bool first_trial = true;
+    double best_score = -std::numeric_limits<double>::infinity();
+    double best_learning_rate = learning_rate_min;
+    std::uint32_t best_epochs = epoch_min;
+    std::uint32_t trials_run = 0U;
+    for (std::uint32_t i = 0U; i < grid_side; ++i) {
+        const double lr_fraction =
+            grid_side > 1U
+                ? static_cast<double>(i) / static_cast<double>(grid_side - 1U)
+                : 0.0;
+        const double trial_learning_rate =
+            learning_rate_min + (learning_rate_max - learning_rate_min) * lr_fraction;
+        for (std::uint32_t j = 0U; j < grid_side; ++j) {
+            const double epoch_fraction =
+                grid_side > 1U
+                    ? static_cast<double>(j) / static_cast<double>(grid_side - 1U)
+                    : 0.0;
+            const std::uint32_t trial_epochs = epoch_min +
+                static_cast<std::uint32_t>(
+                    static_cast<double>(epoch_max - epoch_min) * epoch_fraction);
+            TabularTrainingOptions options;
+            options.learning_rate = trial_learning_rate;
+            options.epochs = trial_epochs > 0U ? trial_epochs : 1U;
+            options.checkpoint_interval = 0U;
+            TrainedTabularModel model;
+            try {
+                const auto report = train_tabular_model(data, options, model);
+                const double score = report.metrics.classification
+                                          ? report.metrics.accuracy
+                                          : report.metrics.r_squared;
+                ++trials_run;
+                if (!first_trial) trials_json += ",";
+                first_trial = false;
+                trials_json += "{\"learningRate\":" +
+                    std::to_string(trial_learning_rate) + ",\"epochs\":" +
+                    std::to_string(options.epochs) + ",\"score\":" +
+                    std::to_string(score) + "}";
+                if (score > best_score) {
+                    best_score = score;
+                    best_learning_rate = trial_learning_rate;
+                    best_epochs = options.epochs;
+                }
+            } catch (const std::exception&) {
+                // A trial that fails to train (degenerate learning rate,
+                // etc.) is skipped, not counted as a fabricated zero score.
+                continue;
+            }
+        }
+    }
+    trials_json += "]";
+    if (trials_run == 0U) {
+        searches.set_status(search.id, HyperparameterSearchStatus::failed);
+        audit.append("ml.hyperparameter_search.run", acting_user_id,
+                     "failure", search.id);
+        return {"failed", "every trial failed to train"};
+    }
+    searches.record_result(search.id, trials_json, best_learning_rate,
+                           best_epochs, best_score, trials_run);
+    searches.set_status(search.id, HyperparameterSearchStatus::completed);
+    audit.append("ml.hyperparameter_search.run", acting_user_id, "success",
+                 search.id);
+    return {"completed",
+            "hyperparameter search " + search.id + " ran " +
+                std::to_string(trials_run) + " real trial(s); best score " +
+                std::to_string(best_score) + " at learning rate " +
+                std::to_string(best_learning_rate) + ", " +
+                std::to_string(best_epochs) + " epochs"};
+}
+
 std::string ascii_lower(const std::string& value) {
     std::string result = value;
     for (char& character : result) {
@@ -370,6 +651,14 @@ public:
         records.open();
         advanced_optimizations =
             std::make_unique<AdvancedOptimizationRegistry>(records);
+        hardware_topology = probe_hardware_topology();
+        {
+            std::map<ModelTier, std::vector<std::string>> tier_models;
+            for (const auto& entry : value.model_tier_assignments) {
+                tier_models[parse_model_tier(entry.first)] = entry.second;
+            }
+            model_router = std::make_unique<ModelRouter>(std::move(tier_models));
+        }
         speculative_pair_evidence =
             std::make_unique<SpeculativeDecodingPairEvidenceStore>(records);
         model_usage = std::make_unique<ModelUsagePredictor>();
@@ -457,6 +746,9 @@ public:
         ml_vector_stores = std::make_unique<VectorStoreStore>(records);
         ml_rag_configs = std::make_unique<RagConfigStore>(records);
         ml_subject_exams = std::make_unique<SubjectExamStore>(records);
+        // This pass (closing Phase 51's real-executor gap): real run
+        // outcomes -- see SubjectExamResultStore's masterai.hpp comment.
+        ml_subject_exam_results = std::make_unique<SubjectExamResultStore>(records);
         ml_hyperparameter_searches =
             std::make_unique<HyperparameterSearchStore>(records);
         ml_model_optimizations = std::make_unique<ModelOptimizationStore>(records);
@@ -567,14 +859,6 @@ public:
         }
         indexes = std::make_unique<ProjectIndexService>(
             value.runtime_root / "indexes", *memory);
-        // Phase 24: one long-lived planner rather than one per request --
-        // its in-flight join table (RetrievalPlanner::inflight_) can only
-        // ever join genuinely concurrent duplicate requests if the same
-        // instance sees both of them.
-        // Phase 30: pass the shared MemoryBudgetManager so the fusion-
-        // candidate pool's bytes_reserved() is registered live against
-        // MemoryCategory::retrieval_index_cache instead of being invisible.
-        retrieval_planner = std::make_unique<RetrievalPlanner>(*indexes, memory.get());
         if (value.watch_project_files) {
             watcher =
                 std::make_unique<ProjectWatcher>(*projects, *indexes);
@@ -584,6 +868,24 @@ public:
             value.cache_maximum_bytes_per_category;
         cache = std::make_unique<CacheManager>(
             resolve_page_file_root(value), *memory, cache_policy);
+        // Phase 24: one long-lived planner rather than one per request --
+        // its in-flight join table (RetrievalPlanner::inflight_) can only
+        // ever join genuinely concurrent duplicate requests if the same
+        // instance sees both of them.
+        // Phase 30: pass the shared MemoryBudgetManager so the fusion-
+        // candidate pool's bytes_reserved() is registered live against
+        // MemoryCategory::retrieval_index_cache instead of being invisible.
+        // Phase 24 (this pass): every optional adapter dependency this
+        // constructor now takes is already live by this point in startup --
+        // user_memories/mcp_outbound_registry/mcp_outbound_gateway are
+        // constructed above, inference (nullable -- only set when a default
+        // model is configured) and cache just above -- so every real
+        // strategy this build implements actually runs in production,
+        // not only in tests that pass fixtures directly.
+        retrieval_planner = std::make_unique<RetrievalPlanner>(
+            *indexes, memory.get(), user_memories.get(), inference.get(),
+            cache.get(), mcp_outbound_registry.get(),
+            mcp_outbound_gateway.get());
         // Phase 23: wire the tokenization cache into the runner supervisor
         // now that both exist. Safe even when caching is later disabled at
         // the request layer -- CacheManager's own configuration.cache_enabled
@@ -602,6 +904,17 @@ public:
         prompt_sessions = std::make_unique<PromptSessionManager>(
             value.session_reuse_max_slots,
             value.session_reuse_idle_retention_seconds);
+        // Phase 27 (this pass): always constructed, same rationale as
+        // prompt_sessions above -- send_chat_message()'s
+        // session_reuse_enabled gate below is the only thing deciding
+        // whether it ever gets a real reserve()/touch()/release() call.
+        // 512 MiB/slot hard ceiling, 16 MiB growth steps: generous relative
+        // to the 128 MiB-per-sequence estimate the request path's own
+        // MemoryBudgetManager admission already reasons about, so ordinary
+        // sessions never hit the ceiling in practice.
+        kv_cache = std::make_unique<KvCacheManager>(
+            *memory, 512ULL * 1024ULL * 1024ULL, 16ULL * 1024ULL * 1024ULL,
+            &records);
         // Phase 30A: same minimal/performance/balanced idle-unload seconds
         // CalibrationService::safe_default_profile() recommends per profile
         // (calibration.cpp) -- one background sweep applies it unattended
@@ -1397,6 +1710,91 @@ public:
                     "{\"error\":\"advanced_optimization_rejected\"}");
             }
         }
+        // Phase 27 (this pass): same evidence/admission shape as the
+        // advanced-optimizations route above, applied to KvCacheManager's
+        // reduced-precision and cross-request prefix-sharing gates. GET is
+        // read-only (slot status + recorded evidence + current admission
+        // state); POST records evidence or explicitly admits/revokes a
+        // precision or prefix-sharing gate -- never both recording and
+        // admitting in the same call, matching the honesty convention that
+        // evidence alone must never self-enable anything.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/performance/kv-cache") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            std::string body = "{\"slots\":";
+            body += KvCacheManager::to_json(kv_cache->status());
+            body += ",\"precisionAdmitted\":{";
+            body += "\"half\":" +
+                   std::string(kv_cache->precision_admitted(KvPrecision::half)
+                                   ? "true"
+                                   : "false") +
+                   ",\"quantizedK\":" +
+                   std::string(
+                       kv_cache->precision_admitted(KvPrecision::quantized_k)
+                           ? "true"
+                           : "false") +
+                   ",\"quantizedV\":" +
+                   std::string(
+                       kv_cache->precision_admitted(KvPrecision::quantized_v)
+                           ? "true"
+                           : "false");
+            body += "},\"prefixSharingAdmitted\":" +
+                   std::string(kv_cache->prefix_sharing_admitted() ? "true"
+                                                                    : "false") +
+                   "}";
+            return response(200, "OK", body);
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/performance/kv-cache") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                const auto root = parse_json(request.body);
+                const auto action = root.required("action").as_string();
+                const auto parse_precision = [](const std::string& text) {
+                    if (text == "half") return KvPrecision::half;
+                    if (text == "quantizedK") return KvPrecision::quantized_k;
+                    if (text == "quantizedV") return KvPrecision::quantized_v;
+                    throw std::invalid_argument("unknown precision");
+                };
+                if (action == "record-precision-evidence") {
+                    KvPrecisionEvidence evidence;
+                    evidence.precision =
+                        parse_precision(root.required("precision").as_string());
+                    evidence.backend_hash =
+                        root.required("backendHash").as_string();
+                    evidence.quality_notes =
+                        root.required("qualityNotes").as_string();
+                    evidence.quality_parity_verified =
+                        root.required("qualityParityVerified").as_boolean();
+                    kv_cache->record_precision_evidence(evidence);
+                } else if (action == "admit-precision") {
+                    kv_cache->admit_precision(
+                        parse_precision(root.required("precision").as_string()));
+                } else if (action == "admit-prefix-sharing") {
+                    kv_cache->admit_prefix_sharing();
+                } else {
+                    throw std::invalid_argument("unknown action");
+                }
+                audit.append("performance.kv-cache", user->id, "success", action);
+                return response(200, "OK",
+                                "{\"prefixSharingAdmitted\":" +
+                                    std::string(kv_cache->prefix_sharing_admitted()
+                                                    ? "true"
+                                                    : "false") +
+                                    "}");
+            } catch (const std::exception&) {
+                audit.append("performance.kv-cache", user->id, "denied",
+                             "invalid-request");
+                return response(400, "Bad Request",
+                                "{\"error\":\"kv_cache_request_rejected\"}");
+            }
+        }
         // Phase 32: durable, administrator-submitted measured acceptance
         // rate for one (target, draft) model pair -- separate from the
         // Phase 20 advanced-optimizations route above, which only ever
@@ -1673,6 +2071,7 @@ public:
             signals.memory = memory->sample();
             signals.scheduler = request_scheduler->status();
             signals.cache = cache->status();
+            signals.on_battery_power = probe_on_battery_power();
             const auto evaluate_now = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch())
@@ -3539,7 +3938,8 @@ public:
                 };
                 const auto config = ml_model_builder_configs->create(
                     user->id, text_field("projectId"), text_field("baseModelId"),
-                    name, text_field("description"), source_type);
+                    name, text_field("description"), source_type,
+                    text_field("datasetId"));
                 audit.append("ml.model_builder_config.create", user->id, "success",
                              config.id);
                 return response(201, "Created", model_builder_config_json(config));
@@ -3665,6 +4065,34 @@ public:
                     "{\"error\":\"invalid_ml_model_builder_config_settings\",\"detail\":\"" +
                         json_escape(error.what()) + "\"}");
             }
+        }
+        // This pass: submits a configuration for real -- hands it off to
+        // run_model_builder_config() above instead of the route being pure
+        // status-flip CRUD. See that function's comment for exactly what
+        // "real" means here (a genuine TrainingJob against the declared
+        // dataset via the existing tabular trainer) and what it does not
+        // mean (no from-scratch architecture-configurable training exists
+        // in this codebase).
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/model-builder-configs/", 0U) == 0U &&
+            request.target.size() > 4U &&
+            request.target.compare(request.target.size() - 4U, 4U,
+                                   "/run") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.modelbuilder.manage")) return *denied;
+            const auto id = request.target.substr(
+                33U, request.target.size() - 33U - 4U);
+            const auto existing = ml_model_builder_configs->find(id);
+            if (!existing) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_model_builder_config_not_found\"}");
+            }
+            const auto result = run_model_builder_config(
+                *ml_model_builder_configs, *ml_training_jobs, audit, user->id,
+                *existing);
+            return response(
+                200, "OK",
+                "{\"status\":" + json_string(result.first) + ",\"detail\":" +
+                    json_string(result.second) + "}");
         }
         if (request.method == "POST" &&
             request.target.rfind("/api/v1/ml/model-builder-configs/", 0U) == 0U &&
@@ -4812,6 +5240,101 @@ public:
                         json_escape(error.what()) + "\"}");
             }
         }
+        // This pass: replaces an exam's real question bank/passing
+        // threshold wholesale -- see SubjectExamStore::set_questions()'s
+        // masterai.hpp comment for the required {"questionText",
+        // "expectedAnswer"} shape.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/subject-exams/", 0U) == 0U &&
+            request.target.size() > 10U &&
+            request.target.compare(request.target.size() - 10U, 10U,
+                                   "/questions") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.subjectexams.manage")) return *denied;
+            const auto id = request.target.substr(
+                25U, request.target.size() - 25U - 10U);
+            try {
+                auto root = parse_json(request.body);
+                const auto& questions = root.required("questions");
+                const auto* threshold_field = root.optional("passingThreshold");
+                const double passing_threshold =
+                    threshold_field ? threshold_field->as_double() : 0.7;
+                if (!ml_subject_exams->set_questions(
+                        id, json_stringify(questions), passing_threshold)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_subject_exam_not_found\"}");
+                }
+                audit.append("ml.subject_exam.configure_questions", user->id,
+                             "success", id);
+                return response(
+                    200, "OK",
+                    subject_exam_json(*ml_subject_exams->find(id)));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_subject_exam_questions\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        // This pass: runs a real exam -- see run_subject_exam()'s comment
+        // above for exactly what "real" means (a genuine model call per
+        // question via execute_rag_generation(), scored with a plain
+        // text-overlap heuristic, never a fabricated "AI grading" claim).
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/subject-exams/", 0U) == 0U &&
+            request.target.size() > 4U &&
+            request.target.compare(request.target.size() - 4U, 4U,
+                                   "/run") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.subjectexams.manage")) return *denied;
+            const auto id = request.target.substr(
+                25U, request.target.size() - 25U - 4U);
+            const auto existing = ml_subject_exams->find(id);
+            if (!existing) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_subject_exam_not_found\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                const auto model_id = root.required("modelId").as_string();
+                const auto outcome =
+                    run_subject_exam(*existing, model_id, user->id);
+                return response(
+                    200, "OK",
+                    "{\"status\":" + json_string(outcome.status) +
+                        ",\"detail\":" + json_string(outcome.detail) +
+                        ",\"questionsTotal\":" +
+                        std::to_string(outcome.questions_total) +
+                        ",\"questionsPassed\":" +
+                        std::to_string(outcome.questions_passed) +
+                        ",\"score\":" + std::to_string(outcome.score) +
+                        ",\"passed\":" +
+                        (outcome.passed ? "true" : "false") + "}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_subject_exam_run\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        // Real run outcome -- see SubjectExamResultStore's masterai.hpp
+        // comment (latest run only, matching ExperimentResultStore's
+        // precedent).
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/subject-exams/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/result") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.subjectexams.view")) return *denied;
+            const auto id = request.target.substr(
+                25U, request.target.size() - 25U - 7U);
+            const auto result = ml_subject_exam_results->find(id);
+            if (!result) {
+                return response(
+                    404, "Not Found",
+                    "{\"error\":\"ml_subject_exam_result_not_found\",\"detail\":"
+                    "\"this exam has not been run yet\"}");
+            }
+            return response(200, "OK", *result);
+        }
         if (request.method == "POST" &&
             request.target.rfind("/api/v1/ml/subject-exams/", 0U) == 0U &&
             request.target.size() > 7U &&
@@ -4854,9 +5377,16 @@ public:
                     const auto* value = root.optional(field);
                     return value ? value->as_string() : std::string{};
                 };
+                const auto* max_trials_field = root.optional("maxTrials");
+                const std::uint32_t max_trials =
+                    max_trials_field
+                        ? static_cast<std::uint32_t>(
+                              max_trials_field->as_integer())
+                        : 10U;
                 const auto search = ml_hyperparameter_searches->create(
                     user->id, training_job_id, name,
-                    text_field("description"), text_field("strategy"));
+                    text_field("description"), text_field("strategy"),
+                    text_field("searchSpaceJson"), max_trials);
                 audit.append("ml.hyperparameter_search.create", user->id,
                              "success", search.id);
                 return response(201, "Created",
@@ -4895,6 +5425,35 @@ public:
                     "{\"error\":\"invalid_ml_hyperparameter_search_status\",\"detail\":\"" +
                         json_escape(error.what()) + "\"}");
             }
+        }
+        // This pass: runs a real, bounded grid search -- see
+        // run_hyperparameter_search()'s comment above for exactly what
+        // "real" means (genuine train_tabular_model()/
+        // evaluate_tabular_model() trials against the referenced training
+        // job's dataset, hard-capped at kMaxHyperparameterTrials) rather
+        // than the route being pure status-flip CRUD.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/hyperparameter-searches/", 0U) ==
+                0U &&
+            request.target.size() > 4U &&
+            request.target.compare(request.target.size() - 4U, 4U,
+                                   "/run") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.hyperparams.manage")) return *denied;
+            const auto id = request.target.substr(
+                35U, request.target.size() - 35U - 4U);
+            const auto existing = ml_hyperparameter_searches->find(id);
+            if (!existing) {
+                return response(
+                    404, "Not Found",
+                    "{\"error\":\"ml_hyperparameter_search_not_found\"}");
+            }
+            const auto result = run_hyperparameter_search(
+                *ml_hyperparameter_searches, *ml_training_jobs,
+                *ml_dataset_content, audit, user->id, *existing);
+            return response(
+                200, "OK",
+                "{\"status\":" + json_string(result.first) + ",\"detail\":" +
+                    json_string(result.second) + "}");
         }
         if (request.method == "POST" &&
             request.target.rfind("/api/v1/ml/hyperparameter-searches/", 0U) ==
@@ -4939,9 +5498,12 @@ public:
                     const auto* value = root.optional(field);
                     return value ? value->as_string() : std::string{};
                 };
+                const auto* threshold_field = root.optional("pruningThreshold");
+                const double pruning_threshold =
+                    threshold_field ? threshold_field->as_double() : 1e-3;
                 const auto run = ml_model_optimizations->create(
                     user->id, model_id, name, text_field("description"),
-                    text_field("operation"));
+                    text_field("operation"), pruning_threshold);
                 audit.append("ml.model_optimization.create", user->id,
                              "success", run.id);
                 return response(201, "Created", model_optimization_json(run));
@@ -4965,6 +5527,30 @@ public:
                 auto root = parse_json(request.body);
                 const auto status = parse_model_optimization_status(
                     root.required("status").as_string());
+                // Phase 53: requesting "running" actually executes the run
+                // via the same run_model_optimization() the Phase 72
+                // Automation Pipeline's Optimize stage uses, instead of
+                // only flipping the status enum -- the standalone interface
+                // is no longer intent-only for the one operation
+                // ("pruning") that has a real executor.
+                if (status == ModelOptimizationStatus::running) {
+                    const auto existing = ml_model_optimizations->find(id);
+                    if (!existing) {
+                        return response(
+                            404, "Not Found",
+                            "{\"error\":\"ml_model_optimization_not_found\"}");
+                    }
+                    ml_model_optimizations->set_status(
+                        id, ModelOptimizationStatus::running);
+                    const auto result = run_model_optimization(
+                        *ml_model_optimizations, *ml_trained_models, audit,
+                        user->id, *existing);
+                    return response(
+                        200, "OK",
+                        "{\"updated\":true,\"status\":" +
+                            json_string(result.first) + ",\"detail\":" +
+                            json_string(result.second) + "}");
+                }
                 if (!ml_model_optimizations->set_status(id, status)) {
                     return response(
                         404, "Not Found",
@@ -5907,6 +6493,37 @@ public:
             }
             if (request.method == "POST" &&
                 request.target.rfind(policies_prefix, 0U) == 0U &&
+                request.target.size() > 12U &&
+                request.target.compare(request.target.size() - 12U, 12U,
+                                       "/enforcement") == 0) {
+                // Admin-only toggle for this policy's restricted-terms
+                // enforcement (see SafetyPolicy::enforcement_enabled). The
+                // baseline secret-token/prompt-injection scans in
+                // scan_content_for_risks() are never affected by this and
+                // cannot be disabled through this endpoint or any other.
+                if (auto denied = forbidden_unless(user->role, "ml.safety.manage")) return *denied;
+                const auto id = request.target.substr(
+                    policies_prefix.size(),
+                    request.target.size() - policies_prefix.size() - 12U);
+                try {
+                    auto root = parse_json(request.body);
+                    const auto enabled = root.required("enabled").as_boolean();
+                    if (!ml_safety_governance->set_policy_enforcement(id, enabled)) {
+                        return response(404, "Not Found",
+                                        "{\"error\":\"ml_safety_policy_not_found\"}");
+                    }
+                    audit.append("ml.safety_policy.enforcement", user->id,
+                                 enabled ? "enabled" : "disabled", id);
+                    return response(200, "OK", "{\"updated\":true}");
+                } catch (const std::exception& error) {
+                    return response(
+                        400, "Bad Request",
+                        "{\"error\":\"invalid_ml_safety_policy_enforcement\",\"detail\":\"" +
+                            json_escape(error.what()) + "\"}");
+                }
+            }
+            if (request.method == "POST" &&
+                request.target.rfind(policies_prefix, 0U) == 0U &&
                 request.target.size() > 7U &&
                 request.target.compare(request.target.size() - 7U, 7U,
                                        "/delete") == 0) {
@@ -6629,6 +7246,16 @@ public:
             if (auto denied = forbidden_unless(user->role, "chats.write")) return *denied;
             return set_chat_model(request, *user);
         }
+        // Phase 27: marks/unmarks a chat as a shareable public prompt
+        // template -- see set_chat_shared_template()'s comment.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/chats/", 0U) == 0U &&
+            request.target.size() > 30U &&
+            request.target.compare(request.target.size() - 16U, 16U,
+                                   "/shared-template") == 0) {
+            if (auto denied = forbidden_unless(user->role, "chats.write")) return *denied;
+            return set_chat_shared_template(request, *user);
+        }
         // Deletes a chat and its full message history. A POST-with-suffix
         // action (matching /model, /messages above) rather than the DELETE
         // verb, so it falls under the same "/api/v1/chats" POST scope check
@@ -6657,6 +7284,54 @@ public:
             request.target.compare(request.target.size() - 7U, 7U,
                                    "/unload") == 0) {
             return workloads->unload_model(*user);
+        }
+        // Phase 29: advisory tier selection -- ModelRouter::select_initial_
+        // tier() run against caller-supplied signals plus live hardware
+        // availability. Advisory only: this never switches a chat's model
+        // itself (see docs/PLAN.md Phase 29's status note); it exists so a
+        // caller/administrator can see what the router would recommend once
+        // AppConfig::model_tier_assignments declares at least one tier.
+        if (request.method == "POST" && request.target == "/api/v1/models/route") {
+            if (auto denied = forbidden_unless(user->role, "chats.write")) return *denied;
+            try {
+                const auto root = parse_json(request.body);
+                RoutingSignals signals;
+                if (const auto* v = root.optional("taskCategory")) signals.task_category = v->as_string();
+                if (const auto* v = root.optional("language")) signals.language = v->as_string();
+                if (const auto* v = root.optional("contextSizeTokens")) signals.context_size_tokens = static_cast<std::uint64_t>(v->as_double());
+                signals.requested_quality =
+                    root.optional("requestedQuality")
+                        ? root.required("requestedQuality").as_string()
+                        : std::string("standard");
+                if (const auto* v = root.optional("latencyRequirementMs")) signals.latency_requirement_ms = static_cast<std::uint32_t>(v->as_double());
+                if (const auto* caps = root.optional("requiredCapabilities")) {
+                    for (const auto& item : caps->as_array()) {
+                        signals.required_capabilities.insert(item.as_string());
+                    }
+                }
+                if (const auto* v = root.optional("queueDepth")) signals.queue_depth = static_cast<std::uint32_t>(v->as_double());
+                if (const auto* v = root.optional("userPinnedModelId")) signals.user_pinned_model_id = v->as_string();
+                const auto hardware = probe_hardware(configuration.runtime_root);
+                signals.available_ram_mib = hardware.available_ram_mib;
+                signals.available_vram_mib = hardware.gpu_memory_mib;
+                if (!model_router) {
+                    return response(200, "OK", "{\"assignment\":null}");
+                }
+                const auto assignment = model_router->select_initial_tier(signals);
+                if (!assignment) {
+                    return response(200, "OK", "{\"assignment\":null}");
+                }
+                return response(
+                    200, "OK",
+                    "{\"assignment\":{\"tier\":\"" + to_string(assignment->tier) +
+                        "\",\"modelId\":\"" + json_escape(assignment->model_id) +
+                        "\"}}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_routing_request\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
         }
         if (request.method == "GET" &&
             request.target == "/api/v1/model-downloads") {
@@ -7663,8 +8338,7 @@ private:
                 any_failed = true;
                 return {"failed", "no model available to optimize"};
             }
-            auto model = ml_trained_models->find(current_model_id);
-            if (!model) {
+            if (!ml_trained_models->find(current_model_id)) {
                 any_failed = true;
                 return {"failed", "model " + current_model_id +
                                        " has not been trained yet"};
@@ -7673,26 +8347,11 @@ private:
                 user_id, current_model_id,
                 pipeline.name + " (pipeline pruning)",
                 "created by automation pipeline run", "pruning");
-            try {
-                const auto prune = prune_tabular_model(*model, 1e-3);
-                ml_trained_models->put(*model);
-                ml_model_optimizations->set_status(
-                    run.id, ModelOptimizationStatus::completed);
-                audit.append("ml.model_optimization.run", user_id, "success",
-                            run.id);
-                return {"completed",
-                        "optimization run " + run.id + " pruned " +
-                            std::to_string(prune.weights_pruned) + " of " +
-                            std::to_string(prune.weights_total) +
-                            " weight(s) below magnitude 0.001"};
-            } catch (const std::exception& error) {
-                any_failed = true;
-                ml_model_optimizations->set_status(
-                    run.id, ModelOptimizationStatus::failed);
-                audit.append("ml.model_optimization.run", user_id, "failure",
-                            run.id);
-                return {"failed", error.what()};
-            }
+            const auto result = run_model_optimization(
+                *ml_model_optimizations, *ml_trained_models, audit, user_id,
+                run);
+            if (result.first == "failed") any_failed = true;
+            return result;
         };
         const auto run_staging_tests_stage =
             [&]() -> std::pair<std::string, std::string> {
@@ -8210,7 +8869,9 @@ private:
                     "\",\"createdAtEpochSeconds\":" +
                     std::to_string(chat.created_at_epoch_seconds) +
                     ",\"messageCount\":" +
-                    std::to_string(chat.messages.size()) + "}";
+                    std::to_string(chat.messages.size()) +
+                    ",\"isSharedTemplate\":" +
+                    (chat.is_shared_template ? "true" : "false") + "}";
         }
         return response(200, "OK", body + "]}");
     }
@@ -8395,6 +9056,36 @@ private:
             audit.append("chat.model_change", user.id, "success", chat_id);
             warm_model_async(model_id);
             return response(200, "OK", "{\"modelId\":\"" + json_escape(model_id) + "\"}");
+        } catch (const std::exception&) {
+            return response(400, "Bad Request",
+                            "{\"error\":\"invalid_chat_request\"}");
+        }
+    }
+
+    // Phase 27: marks/unmarks a chat as a shareable public prompt template.
+    // Only meaningful once an administrator has separately admitted prefix
+    // sharing (kv_cache->admit_prefix_sharing(), the
+    // POST /api/v1/performance/kv-cache "admit-prefix-sharing" action) --
+    // marking a chat here is what actually lets send_chat_message() attempt
+    // the shared-template reuse path once that admission exists; see the
+    // ChatRecord::is_shared_template comment.
+    std::string set_chat_shared_template(Request& request,
+                                         const UserRecord& user) {
+        const std::string prefix{"/api/v1/chats/"};
+        const auto chat_id = request.target.substr(
+            prefix.size(),
+            request.target.size() - prefix.size() - 16U);
+        try {
+            const auto root = parse_json(request.body);
+            const auto shared = root.required("sharedTemplate").as_boolean();
+            if (!chats->set_shared_template(chat_id, user.id, shared)) {
+                return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
+            }
+            audit.append("chat.shared_template", user.id, "success", chat_id);
+            return response(
+                200, "OK",
+                "{\"sharedTemplate\":" + std::string(shared ? "true" : "false") +
+                    "}");
         } catch (const std::exception&) {
             return response(400, "Bad Request",
                             "{\"error\":\"invalid_chat_request\"}");
@@ -8772,6 +9463,25 @@ private:
             tuning.continuous_batching =
                 advanced_optimizations != nullptr &&
                 advanced_optimizations->is_enabled("continuous_batching");
+            // Phase 27 (this pass): same "admitted state is itself the
+            // toggle, no separate preference knob" shape as
+            // continuous_batching above. Preference order (most to least
+            // aggressive reduction) picks the first precision an
+            // administrator has actually admitted via
+            // POST /api/v1/performance/kv-cache -- KvCacheManager::
+            // precision_admitted() never returns true for anything beyond
+            // KvPrecision::full on its own, so this stays KvPrecision::full
+            // until that explicit admin action has run.
+            if (kv_cache != nullptr) {
+                for (const auto candidate :
+                     {KvPrecision::quantized_k, KvPrecision::quantized_v,
+                      KvPrecision::half}) {
+                    if (kv_cache->precision_admitted(candidate)) {
+                        tuning.kv_precision = candidate;
+                        break;
+                    }
+                }
+            }
             const unsigned int parallel_slots =
                 configuration.session_reuse_enabled
                     ? configuration.session_reuse_max_slots
@@ -8961,8 +9671,15 @@ private:
                        });
         if (lower.find("gpt-oss") != std::string::npos) {
             std::string header = "Reasoning effort: " + effort + ".";
+            // The <think>...</think> wrapper matches Qwen's own native
+            // convention below (see web_ui.cpp's renderMarkdown()), so the
+            // client's collapsible reasoning panel works the same way for
+            // both families instead of needing a second parsing rule.
             header += (thinking == "on")
-                          ? " Show your reasoning before the final answer."
+                          ? " Wrap your reasoning in <think></think> tags "
+                            "before the final answer, e.g. "
+                            "<think>...reasoning...</think> then your "
+                            "answer."
                           : " Respond directly without showing your "
                             "reasoning.";
             return header + "\n\n" + content;
@@ -9138,44 +9855,129 @@ private:
         JsonValue arguments;
     };
 
-    // Looks for the tool-call block at the tail of a generated reply,
-    // mirroring detect_and_strip_auto_drive_marker()'s tail-anchored
-    // search. On a match, the block (open marker through close marker, plus
-    // any trailing whitespace) is erased from `text` in place -- callers
-    // persist/render only the clean prose before it -- and the parsed
-    // {tool, arguments} is returned. A block quoted mid-explanation rather
-    // than issued as the reply's actual final action (anything meaningful
-    // follows the close marker), or one with a malformed body, reports
-    // std::nullopt and leaves `text` untouched.
+    // Scans every [[TOOL_CALL]]...[[/TOOL_CALL]] block in a generated reply
+    // (a model can emit more than one, or wrap one in extra prose/markers
+    // despite the directive asking for exactly one at the tail -- small
+    // local models don't always follow instructions precisely). Every block
+    // found, whether it parses or not, is erased from `text` in place so a
+    // malformed or extra block never leaks raw JSON/markers into what gets
+    // persisted or rendered to the user. The first block that parses into a
+    // valid {tool, arguments} request is returned as the call to execute;
+    // any others are silently discarded from the transcript. Returns
+    // std::nullopt (with `text` still fully cleaned of marker debris) if no
+    // block in the reply parsed.
     static std::optional<ToolCallRequest> detect_and_strip_tool_call(
         std::string& text) {
-        const auto open_pos = text.rfind(kToolCallOpenMarker);
-        if (open_pos == std::string::npos) return std::nullopt;
-        const auto body_start = open_pos + std::strlen(kToolCallOpenMarker);
-        const auto close_pos = text.find(kToolCallCloseMarker, body_start);
-        if (close_pos == std::string::npos) return std::nullopt;
-        const auto after_close = close_pos + std::strlen(kToolCallCloseMarker);
-        if (text.find_first_not_of(" \t\r\n", after_close) != std::string::npos) {
-            return std::nullopt;
-        }
-        const auto body = text.substr(body_start, close_pos - body_start);
-        try {
-            const auto parsed = parse_json(body);
-            ToolCallRequest request;
-            request.tool_name = parsed.required("tool").as_string();
-            if (const auto* arguments = parsed.optional("arguments")) {
-                request.arguments = *arguments;
+        std::optional<ToolCallRequest> result;
+        std::size_t search_from = 0U;
+        while (true) {
+            const auto open_pos = text.find(kToolCallOpenMarker, search_from);
+            if (open_pos == std::string::npos) break;
+            const auto body_start =
+                open_pos + std::strlen(kToolCallOpenMarker);
+            const auto close_pos =
+                text.find(kToolCallCloseMarker, body_start);
+            if (close_pos == std::string::npos) {
+                // Unterminated block (truncated generation, or the model
+                // never closed it) -- strip from the open marker to the end
+                // rather than leaving a dangling marker visible.
+                text.erase(open_pos);
+                break;
             }
-            text.erase(open_pos);
-            while (!text.empty() &&
-                  (text.back() == '\n' || text.back() == '\r' ||
-                   text.back() == ' ' || text.back() == '\t')) {
-                text.pop_back();
+            const auto after_close =
+                close_pos + std::strlen(kToolCallCloseMarker);
+            if (!result.has_value()) {
+                const auto body =
+                    text.substr(body_start, close_pos - body_start);
+                try {
+                    const auto parsed = parse_json(body);
+                    ToolCallRequest request;
+                    request.tool_name = parsed.required("tool").as_string();
+                    if (const auto* arguments = parsed.optional("arguments")) {
+                        request.arguments = *arguments;
+                    }
+                    result = std::move(request);
+                } catch (const std::exception&) {
+                    // Malformed body -- still stripped below, just not
+                    // executed; keep scanning for a later, valid block.
+                }
             }
-            return request;
-        } catch (const std::exception&) {
-            return std::nullopt;
+            text.erase(open_pos, after_close - open_pos);
+            search_from = open_pos;
         }
+        while (!text.empty() &&
+              (text.back() == '\n' || text.back() == '\r' ||
+               text.back() == ' ' || text.back() == '\t')) {
+            text.pop_back();
+        }
+        return result;
+    }
+
+    // The markers detect_and_strip_tool_call()/detect_and_strip_auto_drive_
+    // marker() remove from the text that gets persisted/returned to the
+    // client -- but those only ever see the *complete* reply. A streaming
+    // turn instead hands each chunk to the client the instant it is
+    // generated, before the full reply (and therefore any marker) is known,
+    // so without holding chunks back, the raw "[[TOOL_CALL]]{...}
+    // [[/TOOL_CALL]]" / "[[TASK_CONTINUE]]" text would flash into the chat
+    // bubble live, on screen, before ever being stripped.
+    static constexpr const char* kStreamingHoldbackMarkers[] = {
+        kToolCallOpenMarker, kAutoDriveContinueMarker,
+        kAutoDriveCompleteMarker};
+
+    // Length of the longest suffix of `text` that is also a prefix of
+    // `marker` (up to the whole marker) -- i.e. how many trailing bytes of a
+    // streaming buffer must still be withheld because a future chunk could
+    // still grow them into a complete marker.
+    static std::size_t marker_suffix_overlap(const std::string& text,
+                                             const std::string_view marker) {
+        const std::size_t max_len = std::min(text.size(), marker.size());
+        for (std::size_t len = max_len; len > 0U; --len) {
+            if (text.compare(text.size() - len, len,
+                             marker.substr(0U, len)) == 0) {
+                return len;
+            }
+        }
+        return 0U;
+    }
+
+    // Feeds one newly generated chunk through the hold-back window: appends
+    // it to `pending_hold` and returns the prefix of the combined buffer
+    // that is now provably safe to stream on to the client (not the start of
+    // any marker in kStreamingHoldbackMarkers). `pending_hold` is left
+    // holding whatever must still wait on more input to be resolved either
+    // way. If a marker is found to have fully started, everything from its
+    // start onward -- this chunk's remainder and, since the caller stops
+    // invoking this once `marker_seen` is set, every later chunk too -- is
+    // withheld rather than streamed, matching what detect_and_strip_tool_
+    // call()/detect_and_strip_auto_drive_marker() will remove from the
+    // persisted text anyway.
+    static std::string apply_streaming_marker_holdback(
+        std::string& pending_hold, const std::string& chunk,
+        bool& marker_seen) {
+        std::string candidate = pending_hold + chunk;
+        std::size_t earliest = std::string::npos;
+        for (const char* marker : kStreamingHoldbackMarkers) {
+            const auto pos = candidate.find(marker);
+            if (pos != std::string::npos &&
+                (earliest == std::string::npos || pos < earliest)) {
+                earliest = pos;
+            }
+        }
+        if (earliest != std::string::npos) {
+            std::string safe = candidate.substr(0U, earliest);
+            pending_hold.clear();
+            marker_seen = true;
+            return safe;
+        }
+        std::size_t hold_len = 0U;
+        for (const char* marker : kStreamingHoldbackMarkers) {
+            hold_len = std::max(hold_len,
+                                marker_suffix_overlap(candidate, marker));
+        }
+        std::string safe = candidate.substr(0U, candidate.size() - hold_len);
+        pending_hold = candidate.substr(candidate.size() - hold_len);
+        return safe;
     }
 
     ChatTemplate chat_template_for_architecture(
@@ -9340,6 +10142,122 @@ private:
             record_end();
             throw;
         }
+    }
+
+    // Phase 51: docs/PLAN.md "Machine Learning Abilities" section 24
+    // (Subject Examination System). A member function (not a file-scope
+    // free function like run_model_optimization()/run_model_builder_
+    // config()/run_hyperparameter_search() above) because it must call
+    // execute_rag_generation() just above, which itself needs deep access
+    // to `inference`/`memory`/`request_scheduler`/etc. -- the same reason
+    // execute_training_job()/execute_experiment_run() elsewhere in this
+    // class are members rather than free functions. For each configured
+    // question, asks `target_model_id` for a real answer via that same
+    // non-chat generation path Phase 76's RAG route and Phase 74's
+    // classifier scan already use, then scores the answer with
+    // subject_exam_answer_matches() -- a plain, inspectable text-overlap
+    // heuristic (masterai.hpp/ml.cpp), deliberately NOT an "AI grading"
+    // claim; this codebase has no LLM-judge scoring path wired for this
+    // purpose, so none is fabricated. A question the model fails to
+    // answer (execute_rag_generation throws, e.g. the model is not
+    // loadable) counts as failed, not skipped, so an exam cannot pass by
+    // silently omitting hard questions. Does not touch the exam's own
+    // SubjectExamStatus -- that five-state field is a reviewer-approval
+    // lifecycle for the exam's authored content, not a run lifecycle, and
+    // an approved exam may legitimately be run many times against
+    // different models without its approval status changing.
+    struct SubjectExamRunOutcome {
+        std::string status;  // "completed" | "failed"
+        std::string detail;
+        std::size_t questions_total{0};
+        std::size_t questions_passed{0};
+        double score{0.0};
+        bool passed{false};
+    };
+    SubjectExamRunOutcome run_subject_exam(const SubjectExam& exam,
+                                           const std::string& target_model_id,
+                                           const std::string& user_id) {
+        SubjectExamRunOutcome outcome;
+        if (target_model_id.empty()) {
+            outcome.status = "failed";
+            outcome.detail = "a target model id is required to run subject "
+                             "exam " + exam.id;
+            audit.append("ml.subject_exam.run", user_id, "failure", exam.id);
+            return outcome;
+        }
+        if (exam.questions_json.empty()) {
+            outcome.status = "failed";
+            outcome.detail = "subject exam " + exam.id +
+                             " has no configured questions";
+            audit.append("ml.subject_exam.run", user_id, "failure", exam.id);
+            return outcome;
+        }
+        std::vector<std::pair<std::string, std::string>> questions;
+        try {
+            const auto root = parse_json(exam.questions_json);
+            for (const auto& item : root.as_array()) {
+                questions.emplace_back(
+                    item.required("questionText").as_string(),
+                    item.required("expectedAnswer").as_string());
+            }
+        } catch (const std::exception& error) {
+            outcome.status = "failed";
+            outcome.detail = std::string("stored question bank is invalid: ") +
+                             error.what();
+            audit.append("ml.subject_exam.run", user_id, "failure", exam.id);
+            return outcome;
+        }
+        std::size_t passed = 0U;
+        std::string detail_json = "[";
+        bool first_question = true;
+        for (const auto& question : questions) {
+            bool ok = false;
+            std::string answer_text;
+            try {
+                answer_text = execute_rag_generation(target_model_id,
+                                                     question.first)
+                                  .text;
+                ok = subject_exam_answer_matches(answer_text, question.second);
+            } catch (const std::exception&) {
+                ok = false;
+            }
+            if (ok) ++passed;
+            if (!first_question) detail_json += ",";
+            first_question = false;
+            detail_json += "{\"questionText\":" + json_string(question.first) +
+                           ",\"expectedAnswer\":" +
+                           json_string(question.second) + ",\"answer\":" +
+                           json_string(answer_text) + ",\"passed\":" +
+                           (ok ? "true" : "false") + "}";
+        }
+        detail_json += "]";
+        outcome.questions_total = questions.size();
+        outcome.questions_passed = passed;
+        outcome.score = questions.empty()
+                             ? 0.0
+                             : static_cast<double>(passed) /
+                                   static_cast<double>(questions.size());
+        outcome.passed = outcome.score >= exam.passing_threshold;
+        outcome.status = "completed";
+        outcome.detail = "subject exam " + exam.id + " scored " +
+                         std::to_string(passed) + "/" +
+                         std::to_string(questions.size()) + " (" +
+                         (outcome.passed ? "pass" : "fail") +
+                         ") against model " + target_model_id;
+        const std::string result_json =
+            "{\"examId\":" + json_string(exam.id) + ",\"modelId\":" +
+            json_string(target_model_id) + ",\"questionsTotal\":" +
+            std::to_string(outcome.questions_total) +
+            ",\"questionsPassed\":" +
+            std::to_string(outcome.questions_passed) + ",\"score\":" +
+            std::to_string(outcome.score) + ",\"passingThreshold\":" +
+            std::to_string(exam.passing_threshold) + ",\"passed\":" +
+            (outcome.passed ? "true" : "false") + ",\"questions\":" +
+            detail_json + ",\"ranAtEpochSeconds\":" +
+            std::to_string(epoch_seconds()) + "}";
+        ml_subject_exam_results->put(exam.id, result_json);
+        audit.append("ml.subject_exam.run", user_id, "success", exam.id);
+        return outcome;
     }
 
     // Phase 77: real network listener for one `active` InferenceEndpoint --
@@ -9632,6 +10550,17 @@ private:
         // join key, so two different users' concurrent requests -- or the
         // same user's requests spanning a policy change -- can never join.
         retrieval_request.requester_id = user.id;
+        // Phase 24: left empty (fail-closed) for this UI/session chat path.
+        // McpOutboundGateway::invoke() requires the literal
+        // "mcp.tools.invoke" scope on every call
+        // (mcp_outbound_service.cpp's authorized check), which only an
+        // ApiTokenStore::Token carries today -- UserRecord has no scope
+        // concept of its own. A caller that reaches retrieve() with a real
+        // token's scopes available (e.g. an MCP-inbound or API-token-
+        // authenticated request path) should populate this field; until
+        // then, mcp_resource simply contributes no evidence here rather
+        // than silently over-authorizing every chat user for outbound MCP
+        // reads.
         retrieval_request.policy_generation = cache_key.policy_generation;
         retrieval_request.query_text = inference_prompt;
         retrieval_request.deadline = std::chrono::milliseconds(
@@ -9642,6 +10571,12 @@ private:
             configuration.retrieval_maximum_chunks_per_source;
         retrieval_request.maximum_total_chunks =
             configuration.retrieval_maximum_total_chunks;
+        retrieval_request.semantic_embedding_enabled =
+            configuration.retrieval_semantic_embedding_enabled;
+        retrieval_request.git_diff_enabled =
+            configuration.retrieval_git_diff_enabled;
+        retrieval_request.mcp_resource_enabled =
+            configuration.retrieval_mcp_resource_enabled;
         auto retrieved = retrieval_planner->retrieve(retrieval_request);
         if (configuration.cache_enabled && !retrieved.partial) {
             cache->put(CacheCategory::retrieval_result, cache_key,
@@ -9786,6 +10721,15 @@ private:
         // this far rather than silently discarding a reply the user already
         // read on screen.
         std::string streamed_text;
+        // Hold-back buffer for apply_streaming_marker_holdback() -- text
+        // already appended to streamed_text but not yet confirmed safe to
+        // forward to the client's live token stream. See on_chunk below.
+        std::string pending_stream_holdback;
+        // Set once a [[TOOL_CALL]]/[[TASK_CONTINUE]]/[[TASK_COMPLETE]]
+        // marker has been found starting in the stream -- from that point
+        // on nothing further this turn is streamed raw (it's either the
+        // rest of the marker or, for TOOL_CALL, its JSON body/close tag).
+        bool streaming_marker_seen = false;
         try {
             query_id = queries.begin(user.id, chat->project_id, chat->model_id);
             queries.transition(query_id, QueryStage::authentication,
@@ -10000,6 +10944,11 @@ private:
             // Phase 18 exit-criterion evidence.
             SessionFingerprint fingerprint;
             SessionDecision session_decision;
+            // Phase 27: set only when this turn used the shared-template
+            // reuse path below, so the matching record call after
+            // generation (further down) records against the same key
+            // instead of the private per-chat try_reuse()/record() pair.
+            std::optional<SharedTemplateKey> shared_template_key;
             if (configuration.session_reuse_enabled) {
                 if (model) fingerprint.model_sha256 = model->manifest.model_sha256;
                 fingerprint.backend_executable =
@@ -10020,8 +10969,37 @@ private:
                             index_status->index.generation;
                     }
                 }
-                session_decision = prompt_sessions->try_reuse(
-                    chat_id, fingerprint, generation_prompt);
+                // Phase 27: a chat explicitly marked as a shareable public
+                // template (see ChatRecord::is_shared_template) attempts the
+                // cross-caller shared-template reuse path instead of the
+                // private per-chat one, but only once an administrator has
+                // separately admitted prefix sharing
+                // (kv_cache->prefix_sharing_admitted()) -- both this
+                // per-chat opt-in and that separate evidence-backed
+                // admission are required, matching this codebase's
+                // multi-layer opt-in convention elsewhere.
+                if (chat->is_shared_template &&
+                    kv_cache->prefix_sharing_admitted()) {
+                    SharedTemplateKey template_key;
+                    // The reusable prefix a different caller's chat must
+                    // literally share to hit this slot is the template's
+                    // fixed opening message, not this turn's full prompt
+                    // (which is unique to this caller/turn).
+                    template_key.prefix_content_sha256 = sha256_hex(
+                        chat->messages.empty() ? generation_prompt
+                                               : chat->messages.front().content);
+                    template_key.model_sha256 = fingerprint.model_sha256;
+                    template_key.policy_generation =
+                        cache->current_policy_generation();
+                    template_key.authorized_roles = {role(user.role)};
+                    shared_template_key = template_key;
+                    session_decision = prompt_sessions->try_reuse_shared_template(
+                        template_key, generation_prompt,
+                        kv_cache->prefix_sharing_admitted());
+                } else {
+                    session_decision = prompt_sessions->try_reuse(
+                        chat_id, fingerprint, generation_prompt);
+                }
                 // Phase 78 (this pass): the real KV-cache-hit-rate telemetry
                 // the Phase 78 gap note said this adapter had no
                 // instrumentation for -- this is the actual reuse decision
@@ -10166,26 +11144,40 @@ private:
                         }
                     }
                     streamed_text += chunk;
-                    if (streaming) {
-                        // Phase 30: escape straight into a byte vector and
-                        // move it (no copy -- SharedBuffer's vector
-                        // constructor takes ownership) into a SharedBuffer,
-                        // then hand a BufferView over it to
-                        // send_chunk_parts(), which writes the JSON envelope
-                        // prefix/escaped-payload/suffix directly to the
-                        // socket instead of concatenating them into one
-                        // throwaway std::string first (the old
-                        // "prefix + json_escape(chunk) + suffix" line above
-                        // built two intermediate strings, then send_chunk()
-                        // built a third to add chunked-encoding framing --
-                        // all three copies of the full payload are gone).
-                        SharedBuffer escaped_buffer(json_escape_bytes(chunk));
-                        BufferView escaped_view(escaped_buffer, 0U,
-                                                escaped_buffer.size());
-                        if (!send_chunk_parts(stream_socket,
-                                              "{\"type\":\"token\",\"content\":\"",
-                                              escaped_view, "\"}\n")) {
-                            cancellation.store(true);
+                    if (streaming && !streaming_marker_seen) {
+                        // Withhold whatever might still turn into a
+                        // [[TOOL_CALL]]/[[TASK_CONTINUE]]/[[TASK_COMPLETE]]
+                        // marker rather than forwarding this chunk verbatim
+                        // -- see apply_streaming_marker_holdback().
+                        const std::string safe_to_send =
+                            apply_streaming_marker_holdback(
+                                pending_stream_holdback, chunk,
+                                streaming_marker_seen);
+                        if (!safe_to_send.empty()) {
+                            // Phase 30: escape straight into a byte vector
+                            // and move it (no copy -- SharedBuffer's vector
+                            // constructor takes ownership) into a
+                            // SharedBuffer, then hand a BufferView over it to
+                            // send_chunk_parts(), which writes the JSON
+                            // envelope prefix/escaped-payload/suffix
+                            // directly to the socket instead of
+                            // concatenating them into one throwaway
+                            // std::string first (the old
+                            // "prefix + json_escape(chunk) + suffix" line
+                            // above built two intermediate strings, then
+                            // send_chunk() built a third to add
+                            // chunked-encoding framing -- all three copies
+                            // of the full payload are gone).
+                            SharedBuffer escaped_buffer(
+                                json_escape_bytes(safe_to_send));
+                            BufferView escaped_view(escaped_buffer, 0U,
+                                                    escaped_buffer.size());
+                            if (!send_chunk_parts(
+                                    stream_socket,
+                                    "{\"type\":\"token\",\"content\":\"",
+                                    escaped_view, "\"}\n")) {
+                                cancellation.store(true);
+                            }
                         }
                     }
                 };
@@ -10289,15 +11281,82 @@ private:
                 // reusable. A completed turn becomes the new prefix the
                 // *next* turn is checked against.
                 if (generated.cancelled) {
-                    prompt_sessions->release(chat_id);
+                    // release() manipulates chat-keyed private reuse state
+                    // only -- the shared-template path never established
+                    // any, so it is skipped there (nothing to release).
+                    if (!shared_template_key.has_value()) {
+                        prompt_sessions->release(chat_id);
+                    }
+                    if (session_decision.reuse) {
+                        kv_cache->set_state(session_decision.slot_id,
+                                            KvSlotState::failed_cancelled);
+                    }
                 } else {
-                    prompt_sessions->record(
-                        chat_id, fingerprint, generation_prompt,
-                        session_decision.reuse
-                            ? std::optional<unsigned int>(session_decision.slot_id)
-                            : std::nullopt,
-                        generated.prompt_tokens);
+                    const auto recorded_slot =
+                        shared_template_key.has_value()
+                            ? prompt_sessions->record_shared_template(
+                                  *shared_template_key, generation_prompt,
+                                  session_decision.reuse
+                                      ? std::optional<unsigned int>(
+                                            session_decision.slot_id)
+                                      : std::nullopt,
+                                  generated.prompt_tokens)
+                            : prompt_sessions->record(
+                                  chat_id, fingerprint, generation_prompt,
+                                  session_decision.reuse
+                                      ? std::optional<unsigned int>(
+                                            session_decision.slot_id)
+                                      : std::nullopt,
+                                  generated.prompt_tokens);
+                    // Phase 27 (this pass): mirrors whatever slot identity
+                    // PromptSessionManager just assigned/reused -- reserve()
+                    // is a no-op error for an already-reserved slot id, so
+                    // touch() (bump reuse_count, mark active) is used on the
+                    // reuse path and reserve() only for a first-time slot.
+                    if (kv_cache->find(recorded_slot).has_value()) {
+                        kv_cache->touch(recorded_slot);
+                        kv_cache->set_state(recorded_slot, KvSlotState::idle);
+                    } else {
+                        KvSlotAccounting accounting;
+                        accounting.slot_id = recorded_slot;
+                        accounting.owning_user_id = user.id;
+                        accounting.owning_chat_id = chat_id;
+                        accounting.owning_project_id = chat->project_id;
+                        accounting.context_length_tokens =
+                            configuration.chat_context_length;
+                        accounting.token_count =
+                            generated.prompt_tokens + generated.generated_tokens;
+                        accounting.precision = KvPrecision::full;
+                        accounting.state = KvSlotState::idle;
+                        // One sequence's worth, matching the
+                        // kv_bytes_per_sequence estimate this same request
+                        // path's MemoryBudgetManager admission already used
+                        // above -- a real accounting number, not a guess
+                        // independent of what was actually reserved.
+                        accounting.bytes_reserved = 128ULL * 1024ULL * 1024ULL;
+                        kv_cache->reserve(accounting);
+                    }
                 }
+            }
+            // Generation is done, so pending_stream_holdback can no longer
+            // grow into a marker -- if it never actually matched one (e.g.
+            // the reply legitimately ended in a literal "[[" that just
+            // happened to share a marker's prefix), flush it now as one
+            // final token chunk so the client's live bubble ends up showing
+            // exactly what generated.text/streamed_text hold. If a marker
+            // *was* found, streaming_marker_seen is already true and this
+            // buffer was cleared when it was found -- nothing to flush.
+            if (streaming && !pending_stream_holdback.empty()) {
+                SharedBuffer escaped_buffer(
+                    json_escape_bytes(pending_stream_holdback));
+                BufferView escaped_view(escaped_buffer, 0U,
+                                        escaped_buffer.size());
+                if (!send_chunk_parts(stream_socket,
+                                      "{\"type\":\"token\",\"content\":\"",
+                                      escaped_view, "\"}\n")) {
+                    cancellation.store(true);
+                }
+                pending_stream_holdback.clear();
             }
             queries.transition(query_id, QueryStage::persistence,
                                QueryStatus::generating);
@@ -10564,7 +11623,20 @@ private:
             // than reopening the chat to find it silently gone.
             if (!streamed_text.empty()) {
                 try {
-                    chats->append(chat_id, ChatRole::assistant, streamed_text);
+                    // streamed_text accumulates every raw chunk on_chunk
+                    // saw, including any [[TOOL_CALL]]/[[TASK_CONTINUE]]/
+                    // [[TASK_COMPLETE]] marker text -- but the client's live
+                    // bubble never showed that part (apply_streaming_marker_
+                    // holdback() withheld it), so the persisted transcript
+                    // must not show it either. Strip the same way the
+                    // success path does before saving.
+                    std::string persisted_text = streamed_text;
+                    detect_and_strip_auto_drive_marker(persisted_text);
+                    detect_and_strip_tool_call(persisted_text);
+                    if (!persisted_text.empty()) {
+                        chats->append(chat_id, ChatRole::assistant,
+                                     persisted_text);
+                    }
                 } catch (const std::exception& append_exception) {
                     std::cerr << "chat.generate: failed to persist partial "
                                  "streamed reply for chat '"
@@ -10784,6 +11856,7 @@ private:
     std::unique_ptr<VectorStoreStore> ml_vector_stores;
     std::unique_ptr<RagConfigStore> ml_rag_configs;
     std::unique_ptr<SubjectExamStore> ml_subject_exams;
+    std::unique_ptr<SubjectExamResultStore> ml_subject_exam_results;
     std::unique_ptr<HyperparameterSearchStore> ml_hyperparameter_searches;
     std::unique_ptr<ModelOptimizationStore> ml_model_optimizations;
     std::unique_ptr<TrainingCheckpointStore> ml_training_checkpoints;
@@ -10863,6 +11936,9 @@ private:
     // other member -- it holds no thread and no reference to them.
     MemoryCleanupTracker memory_cleanup;
     std::unique_ptr<PromptSessionManager> prompt_sessions;
+    // Phase 27 (this pass): real accounting/eviction, always constructed
+    // (see constructor comment near prompt_sessions above).
+    std::unique_ptr<KvCacheManager> kv_cache;
     // Phase 30A: declared (and therefore destroyed) before `memory`,
     // `inference`, `cache`, and `prompt_sessions` themselves so its
     // background thread always stops -- see ~MemorySweeper()'s join --
@@ -10892,6 +11968,15 @@ private:
     // Phase 20: durable, administrator-controlled evidence/admission state.
     // Declared after records, which outlives it; constructed after open().
     std::unique_ptr<AdvancedOptimizationRegistry> advanced_optimizations;
+    // Phase 28: probed once at startup (topology does not change while the
+    // process is running) and reused by every connection worker thread's
+    // NUMA-placement check below rather than re-probing per connection.
+    HardwareTopology hardware_topology;
+    // Phase 29: built once at startup from AppConfig::model_tier_assignments
+    // -- empty (the default) leaves every ModelRouter call inert (no tier
+    // has any candidate model), matching numa_local_placement_enabled's
+    // "off by default, opt-in" convention above.
+    std::unique_ptr<ModelRouter> model_router;
     // Phase 32: durable, administrator-submitted per-(target,draft)-pair
     // measured acceptance rate. Declared after records for the same reason
     // advanced_optimizations is above.
@@ -11090,6 +12175,26 @@ bool HttpServer::run(std::atomic_bool& stop_requested) {
                     done->store(true);
                 }
             } guard{active_connections_, finished};
+
+            // Phase 28: NUMA-local placement for this connection's worker
+            // thread. Both an evidence-backed administrator admission of
+            // the "numa_affinity" Advanced Optimization AND the
+            // configuration opt-in are required; recommend_thread_placement
+            // itself still no-ops on any single-NUMA-node host, so this is
+            // a true no-op on the overwhelming majority of hosts.
+            if (configuration_.numa_local_placement_enabled &&
+                state_->advanced_optimizations != nullptr &&
+                state_->advanced_optimizations->is_enabled("numa_affinity")) {
+                TopologyAffinityPolicy policy;
+                policy.numa_local_placement_enabled = true;
+                const auto placement = recommend_thread_placement(
+                    state_->hardware_topology, ThreadClass::http_streaming,
+                    policy, probe_on_battery_power());
+                if (placement.preferred_numa_node.has_value()) {
+                    apply_current_thread_to_numa_node(
+                        *placement.preferred_numa_node);
+                }
+            }
 
             try {
 #if defined(_WIN32)

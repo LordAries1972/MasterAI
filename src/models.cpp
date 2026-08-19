@@ -732,6 +732,32 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
         arguments.emplace_back("--ubatch-size");
         arguments.emplace_back(std::to_string(tuning.ubatch_tokens));
     }
+    // Phase 27: reduced-precision KV cache. llama-server's own documented
+    // --cache-type-k/--cache-type-v flags accept f16 (default, full
+    // precision) or a quantized type name; f32 is never requested (strictly
+    // worse than the f16 default for this codebase's purposes). This
+    // function only ever emits what `tuning.kv_precision` already says --
+    // it never decides admission; see KvCacheManager::precision_admitted()
+    // for the honesty-convention gate a caller must have already checked
+    // before setting anything other than KvPrecision::full here.
+    switch (tuning.kv_precision) {
+        case KvPrecision::full:
+            break;
+        case KvPrecision::half:
+            arguments.emplace_back("--cache-type-k");
+            arguments.emplace_back("f16");
+            arguments.emplace_back("--cache-type-v");
+            arguments.emplace_back("f16");
+            break;
+        case KvPrecision::quantized_k:
+            arguments.emplace_back("--cache-type-k");
+            arguments.emplace_back("q8_0");
+            break;
+        case KvPrecision::quantized_v:
+            arguments.emplace_back("--cache-type-v");
+            arguments.emplace_back("q8_0");
+            break;
+    }
     // llama-server's prompt-cache "context checkpoints" each hold a full
     // extra copy of the KV cache, on the *same device* the KV cache lives
     // on (GPU, when gpu_layers > 0). Its own default of 32 checkpoints
@@ -769,9 +795,15 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
         // window: at most 16 tokens speculated per step, never fewer than
         // 5 -- conservative, well below any context-length concern, and
         // independent of context_length/parallel_slots above.
-        arguments.emplace_back("--draft-max");
+        // --draft-max/--draft-min were removed by upstream llama.cpp and
+        // replaced with --spec-draft-n-max/--spec-draft-n-min (confirmed
+        // 2026-08-18 against the exact vendored llama-server.exe binary --
+        // the old flag names now hard-fail runner launch with "the argument
+        // has been removed", exactly the incompatible-vendored-binary
+        // failure mode this function's class comment already warns about).
+        arguments.emplace_back("--spec-draft-n-max");
         arguments.emplace_back("16");
-        arguments.emplace_back("--draft-min");
+        arguments.emplace_back("--spec-draft-n-min");
         arguments.emplace_back("5");
     }
     std::map<std::string, std::string> environment;

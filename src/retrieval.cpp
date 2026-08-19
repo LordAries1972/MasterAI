@@ -235,6 +235,62 @@ RetrievalDisclosureEntry make_entry(const std::string& source,
 // two requests can only ever collide here if every one of these fields is
 // byte-identical -- in particular requester_id and policy_generation, which
 // is what guarantees joining never crosses an authorization boundary.
+// Phase 85: retrieval-result cache key. CacheCategory::retrieval_result and
+// its (de)serialization already existed (see cache.cpp's
+// benchmark_retrieval_cache(), which proved the round trip) but nothing on
+// the real request path ever wrote or read it -- every call re-ran the full
+// multi-stage scan even for a byte-identical repeated query against an
+// unchanged index. index_generation is folded in exactly like every other
+// CacheKey consumer, so a project reindex is an automatic miss with no
+// explicit invalidation call needed; version_tag folds in the parts of the
+// request that can change the outcome (priority and the three optional-
+// strategy enable flags) but aren't already covered by canonical_identity/
+// content_digest, so two requests can only share a cached entry when both
+// would genuinely compute the same thing. Distinct from request_key() above
+// (the in-flight join key): that one joins only genuinely concurrent
+// byte-identical calls and is emptied before retrieve() returns; this one
+// backs a standing cache that serves repeated *sequential* calls too.
+CacheKey retrieval_cache_key(const RetrievalRequest& request,
+                             const std::string& trimmed_query,
+                             const std::uint64_t index_generation) {
+    CacheKey key;
+    key.user_id = request.requester_id;
+    key.project_id = request.project.id;
+    key.policy_generation = request.policy_generation;
+    key.canonical_identity = trimmed_query;
+    key.content_digest = sha256_hex(trimmed_query);
+    key.version_tag =
+        std::string("retrieval-v1|") +
+        (request.priority == RetrievalPriority::interactive ? "i" : "b") +
+        (request.semantic_embedding_enabled ? "1" : "0") +
+        (request.mcp_resource_enabled ? "1" : "0") +
+        (request.git_diff_enabled ? "1" : "0") + "|" +
+        std::to_string(request.maximum_context_bytes) + "|" +
+        std::to_string(request.maximum_chunks_per_source) + "|" +
+        std::to_string(request.maximum_total_chunks);
+    key.index_generation = index_generation;
+    return key;
+}
+
+// Phase 85: a cached outcome is only ever safe to serve again when every
+// strategy that contributed to it is purely a function of the indexed
+// project state at `index_generation` -- mcp_resource (external server
+// content), git_diff (working-tree state, which can change without any
+// index republication), and conversation_memory (grows with every new
+// message) are all excluded from caching by inspecting which strategies
+// actually contributed disclosed evidence, rather than trusting the
+// request's enable flags alone (a stage can be "enabled" yet simply find
+// nothing, which is still safe to cache).
+bool retrieval_outcome_cache_eligible(const RetrievalOutcome& outcome) {
+    for (const auto& entry : outcome.disclosure) {
+        if (entry.source == "mcp_resource" || entry.source == "git_diff" ||
+            entry.source == "conversation_memory") {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::string request_key(const RetrievalRequest& request) {
     static constexpr char separator = '\x1f';
     std::string key = request.project.id;
@@ -268,13 +324,19 @@ std::string to_string(const RetrievalStrategy strategy) {
     return "unknown";
 }
 
-// Phase 24: single source of truth for which strategies this build can
-// actually execute -- exact_symbol/exact_text/lexical shipped in Phase 16;
-// filename_path and recent_change are the adapters this phase adds against
-// index metadata (relative_path) and project file mtimes that already
-// exist. Every remaining entry has no adapter (no embedding model, no MCP
-// resource plumbing, no call-graph/type index, no git integration, no
-// cross-session memory store) and stays disabled rather than faking output.
+// Phase 24: single source of truth for which strategies this *build* can
+// execute. Every RetrievalStrategy now has a real adapter implementation
+// (indexing.cpp's heuristic scans; git_retrieval.cpp; mcp_retrieval.cpp;
+// semantic_retrieval.cpp; UserMemoryStore for conversation_memory), so this
+// is unconditionally true for every entry -- it is deliberately kept as an
+// explicit switch (rather than collapsing to `return true;`) so a future
+// strategy the enum grows must be added here consciously, matching this
+// function's original "no silent default" discipline. Whether a *specific*
+// RetrievalPlanner instance actually runs semantic_embedding/mcp_resource/
+// conversation_memory depends on optional constructor dependencies it may
+// not have been given -- see retrieve_uncached()'s per-instance skip
+// reasons below, which is a distinct, runtime question this function does
+// not answer.
 bool retrieval_strategy_has_adapter(const RetrievalStrategy strategy) noexcept {
     switch (strategy) {
         case RetrievalStrategy::exact_symbol:
@@ -282,32 +344,27 @@ bool retrieval_strategy_has_adapter(const RetrievalStrategy strategy) noexcept {
         case RetrievalStrategy::lexical:
         case RetrievalStrategy::filename_path:
         case RetrievalStrategy::recent_change:
+        case RetrievalStrategy::semantic_embedding:
+        case RetrievalStrategy::mcp_resource:
+        case RetrievalStrategy::call_graph:
+        case RetrievalStrategy::type_reference:
+        case RetrievalStrategy::git_diff:
+        case RetrievalStrategy::dependency_neighbour:
+        case RetrievalStrategy::conversation_memory:
             return true;
-        default:
-            return false;
     }
+    return false;
 }
 
+// After this pass every strategy has a build-level adapter, so this list is
+// always empty -- kept (rather than removed) so RetrievalOutcome's
+// disabled_strategy_reasons contract and every existing caller/test that
+// reads it keep working unchanged; the per-instance runtime skip reasons
+// retrieve_uncached() appends below now carry the honesty this static list
+// used to.
 const std::vector<std::pair<RetrievalStrategy, std::string>>&
 disabled_retrieval_strategy_reasons() {
-    static const std::vector<RetrievalStrategy> all_strategies{
-        RetrievalStrategy::exact_symbol, RetrievalStrategy::exact_text,
-        RetrievalStrategy::lexical, RetrievalStrategy::filename_path,
-        RetrievalStrategy::recent_change, RetrievalStrategy::semantic_embedding,
-        RetrievalStrategy::mcp_resource, RetrievalStrategy::call_graph,
-        RetrievalStrategy::type_reference, RetrievalStrategy::git_diff,
-        RetrievalStrategy::dependency_neighbour,
-        RetrievalStrategy::conversation_memory};
-    static const std::vector<std::pair<RetrievalStrategy, std::string>> reasons = [] {
-        std::vector<std::pair<RetrievalStrategy, std::string>> value;
-        for (const auto strategy : all_strategies) {
-            if (retrieval_strategy_has_adapter(strategy)) continue;
-            value.emplace_back(
-                strategy, "no adapter: " + to_string(strategy) +
-                              " has no implementation wired to retrieval yet");
-        }
-        return value;
-    }();
+    static const std::vector<std::pair<RetrievalStrategy, std::string>> reasons;
     return reasons;
 }
 
@@ -361,8 +418,15 @@ RetrievalRequestClassification classify_retrieval_request(
 }
 
 RetrievalPlanner::RetrievalPlanner(ProjectIndexService& indexes,
-                                   MemoryBudgetManager* memory)
-    : indexes_(indexes), memory_(memory) {}
+                                   MemoryBudgetManager* memory,
+                                   UserMemoryStore* user_memory,
+                                   RunnerSupervisor* embedding_runner,
+                                   CacheManager* embedding_cache,
+                                   McpOutboundRegistry* mcp_registry,
+                                   McpOutboundGateway* mcp_gateway)
+    : indexes_(indexes), memory_(memory), user_memory_(user_memory),
+      embedding_runner_(embedding_runner), embedding_cache_(embedding_cache),
+      mcp_registry_(mcp_registry), mcp_gateway_(mcp_gateway) {}
 
 std::uint64_t RetrievalPlanner::uncached_invocation_count() const noexcept {
     return uncached_invocations_.load(std::memory_order_relaxed);
@@ -599,10 +663,19 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
     }();
 
     const auto classification = classify_retrieval_request(trimmed_query);
+    // Phase 24: per-instance runtime skip reasons -- distinct from (and in
+    // addition to) disabled_retrieval_strategy_reasons()'s now-always-empty
+    // build-capability list. Populated below whenever a candidate-generating
+    // stage is skipped because this particular RetrievalPlanner instance
+    // wasn't constructed with the optional dependency that strategy needs.
+    std::vector<std::string> runtime_skip_reasons;
     const auto stamp_common = [&](RetrievalOutcome outcome) {
         outcome.classification = to_string(classification);
         for (const auto& entry : disabled_retrieval_strategy_reasons()) {
             outcome.disabled_strategy_reasons.push_back(entry.second);
+        }
+        for (const auto& reason : runtime_skip_reasons) {
+            outcome.disabled_strategy_reasons.push_back(reason);
         }
         return outcome;
     };
@@ -612,6 +685,42 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
             {}, BufferView{}, "none", false,
             "query too short for retrieval", 0U, 0U, 0U));
     }
+
+    // Phase 85: retrieval-result cache. index_generation is looked up once,
+    // up front (a cheap in-memory status read, not a scan), so both the
+    // lookup below and finish()'s write at the bottom key off the exact same
+    // "as of" index snapshot. No cache backing (embedding_cache_ == nullptr,
+    // the common case for a test fixture or a planner instance that opted
+    // out) or no published index yet for this project both mean caching is
+    // simply skipped -- retrieve_uncached() behaves exactly as it did before
+    // this change.
+    std::optional<std::uint64_t> cache_index_generation;
+    if (embedding_cache_ != nullptr) {
+        if (const auto status = indexes_.status(request.project.id)) {
+            cache_index_generation = status->index.generation;
+        }
+    }
+    if (cache_index_generation.has_value()) {
+        const auto cache_key = retrieval_cache_key(request, trimmed_query,
+                                                    *cache_index_generation);
+        if (const auto cached =
+                embedding_cache_->get(CacheCategory::retrieval_result, cache_key)) {
+            return deserialize_retrieval_outcome(*cached);
+        }
+    }
+    // Only a complete (non-partial) outcome built entirely from strategies
+    // that are pure functions of the indexed project state is ever written
+    // back -- see retrieval_outcome_cache_eligible()'s rationale above.
+    const auto finish = [&](RetrievalOutcome outcome) {
+        if (cache_index_generation.has_value() && !outcome.partial &&
+            retrieval_outcome_cache_eligible(outcome)) {
+            const auto cache_key = retrieval_cache_key(request, trimmed_query,
+                                                        *cache_index_generation);
+            embedding_cache_->put(CacheCategory::retrieval_result, cache_key,
+                                  serialize_retrieval_outcome(outcome));
+        }
+        return outcome;
+    };
 
     const auto tokens = identifier_tokens(trimmed_query, 6U);
     const auto path_tokens = path_like_tokens(trimmed_query, 4U);
@@ -780,12 +889,156 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
         strategy = strategy == "none" ? "lexical" : "hybrid";
     }
 
+    // Stage 4 (interactive: cheap, in-memory heuristic scans, same cost
+    // class as Stage 1): call_graph then type_reference over the same
+    // identifier-shaped tokens already extracted above.
+    if (!sufficient && std::chrono::steady_clock::now() < deadline) {
+        for (const auto& token : tokens) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                partial = true;
+                break;
+            }
+            merge("call_graph",
+                  indexes_.search_calls(request.project.id, token, per_step_results),
+                  1.8, "call site of " + token + " matched");
+            if (!fused.empty()) break;
+        }
+        strategy = strategy == "none" ? "call_graph" : "hybrid";
+        sufficient = !fused.empty();
+    }
+    if (!sufficient && std::chrono::steady_clock::now() < deadline) {
+        for (const auto& token : tokens) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                partial = true;
+                break;
+            }
+            merge("type_reference",
+                  indexes_.search_type_usage(request.project.id, token,
+                                             per_step_results),
+                  1.8, "type reference to " + token + " matched");
+            if (!fused.empty()) break;
+        }
+        strategy = strategy == "none" ? "type_reference" : "hybrid";
+        sufficient = !fused.empty();
+    }
+
+    // Stage 5 (background: the most expensive stage, a network round trip
+    // per candidate chunk): semantic_embedding. Only runs when this planner
+    // instance was constructed with an embedding runner.
+    if (!sufficient && request.semantic_embedding_enabled &&
+        std::chrono::steady_clock::now() < deadline) {
+        if (embedding_runner_ != nullptr) {
+            const auto candidates = indexes_.all_chunks(
+                request.project.id,
+                std::min<std::size_t>(2048U, per_step_results * 64U));
+            if (candidates.available && !candidates.chunks.empty()) {
+                auto semantic_chunks = semantic_embedding_search(
+                    *embedding_runner_, embedding_cache_, request.project.id,
+                    candidates.chunks, trimmed_query, per_step_results, deadline);
+                merge("semantic_embedding",
+                      IndexSearchResult{std::move(semantic_chunks),
+                                        candidates.generation, true},
+                      2.2, "semantic similarity matched");
+                strategy = strategy == "none" ? "semantic_embedding" : "hybrid";
+                sufficient = !fused.empty();
+            }
+        } else {
+            runtime_skip_reasons.push_back(
+                "semantic_embedding: no embedding runner configured for this "
+                "planner instance");
+        }
+    }
+
+    // Stage 6 (background, I/O-bound, best-effort): mcp_resource then
+    // conversation_memory. A failure here degrades to "no evidence", never
+    // a retrieval error.
+    if (!sufficient && request.mcp_resource_enabled &&
+        std::chrono::steady_clock::now() < deadline) {
+        if (mcp_registry_ != nullptr && mcp_gateway_ != nullptr) {
+            std::atomic_bool mcp_cancellation{false};
+            auto mcp_chunks = mcp_resource_search(
+                *mcp_registry_, *mcp_gateway_, request.requester_id,
+                request.requester_scopes, request.project.id, tokens,
+                per_step_results, mcp_cancellation);
+            merge("mcp_resource",
+                  IndexSearchResult{std::move(mcp_chunks), 0U, true}, 1.5,
+                  "MCP resource content matched");
+            strategy = strategy == "none" ? "mcp_resource" : "hybrid";
+            sufficient = !fused.empty();
+        } else {
+            runtime_skip_reasons.push_back(
+                "mcp_resource: no MCP outbound registry/gateway configured "
+                "for this planner instance");
+        }
+    }
+    if (!sufficient && std::chrono::steady_clock::now() < deadline) {
+        if (user_memory_ != nullptr) {
+            const auto recalled = user_memory_->recall_context(
+                request.requester_id,
+                static_cast<std::size_t>(request.maximum_context_bytes));
+            if (!recalled.empty()) {
+                IndexChunk memory_chunk;
+                memory_chunk.relative_path = "conversation-memory";
+                memory_chunk.language = "text";
+                memory_chunk.offset = 0U;
+                memory_chunk.text = recalled;
+                memory_chunk.digest = sha256_hex(recalled);
+                memory_chunk.id =
+                    sha256_hex("conversation-memory:" + request.requester_id +
+                              ":" + memory_chunk.digest);
+                merge("conversation_memory",
+                      IndexSearchResult{{std::move(memory_chunk)}, 0U, true},
+                      1.5, "recorded user memory matched");
+                strategy = strategy == "none" ? "conversation_memory" : "hybrid";
+                sufficient = !fused.empty();
+            }
+        } else {
+            runtime_skip_reasons.push_back(
+                "conversation_memory: no user memory store configured for "
+                "this planner instance");
+        }
+    }
+
+    // Stage 7 (background, cheap sandboxed subprocess): git_diff. No
+    // optional dependency to check -- silently empty when the project isn't
+    // a git working tree or `git` can't be run (see git_diff_search).
+    if (!sufficient && request.git_diff_enabled &&
+        std::chrono::steady_clock::now() < deadline) {
+        auto git_chunks =
+            git_diff_search(request.project.root, per_step_results);
+        merge("git_diff", IndexSearchResult{std::move(git_chunks), 0U, true},
+              1.6, "uncommitted/recent change matched");
+        strategy = strategy == "none" ? "git_diff" : "hybrid";
+    }
+
     if (fused.empty()) {
-        return stamp_common(ContextBudgeter::apply(
+        return finish(stamp_common(ContextBudgeter::apply(
             {}, BufferView{}, strategy, partial,
             partial ? "retrieval deadline expired before any evidence was found"
                     : "no matching project evidence found",
-            0U, 0U, 0U));
+            0U, 0U, 0U)));
+    }
+
+    // Stage 8 (always runs post-fusion, like recent_change below, since it
+    // only ever adds corroborating evidence rather than gating sufficiency):
+    // dependency_neighbour. Anchored on whichever already-fused chunk
+    // currently scores highest.
+    {
+        const RetrievalCandidate* anchor = nullptr;
+        for (const auto& entry : fused) {
+            if (anchor == nullptr ||
+                entry.second->disclosure.score > anchor->disclosure.score) {
+                anchor = entry.second;
+            }
+        }
+        if (anchor != nullptr &&
+            std::chrono::steady_clock::now() < deadline) {
+            merge("dependency_neighbour",
+                  indexes_.search_dependency_neighbours(
+                      request.project.id, anchor->chunk.relative_path,
+                      per_step_results),
+                  1.2, "dependency neighbour of " + anchor->chunk.relative_path);
+        }
     }
 
     // Remaining enabled strategy (recent_change): a cheap post-fusion
@@ -836,11 +1089,11 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
     SharedBuffer arena_buffer(std::move(arena));
     BufferView arena_view(arena_buffer, 0U, arena_size);
 
-    return stamp_common(ContextBudgeter::apply(
+    return finish(stamp_common(ContextBudgeter::apply(
         std::move(ranked), arena_view, strategy, partial,
         partial ? "retrieval deadline expired" : "",
         request.maximum_context_bytes, request.maximum_chunks_per_source,
-        request.maximum_total_chunks));
+        request.maximum_total_chunks)));
 }
 
 // Accepts ranked candidates in order, capping per-source (per-file) chunk

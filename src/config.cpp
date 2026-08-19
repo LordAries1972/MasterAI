@@ -157,6 +157,32 @@ std::string array(const std::set<std::string>& values) {
     return result + "]";
 }
 
+std::string array(const std::vector<std::string>& values) {
+    std::string result{"["};
+    bool first = true;
+    for (const auto& value : values) {
+        if (!first) result += ",";
+        first = false;
+        result += quote(value);
+    }
+    return result + "]";
+}
+
+// Phase 29: AppConfig::model_tier_assignments -- a std::map already sorts by
+// key, so this round-trips deterministically the same way every other
+// section here does.
+std::string tier_assignments(
+    const std::map<std::string, std::vector<std::string>>& assignments) {
+    std::string result{"{"};
+    bool first = true;
+    for (const auto& entry : assignments) {
+        if (!first) result += ",";
+        first = false;
+        result += quote(entry.first) + ":" + array(entry.second);
+    }
+    return result + "}";
+}
+
 // Phase 33 (LOCAL-ONLY slice): renders AppConfig::local_runner_pool the same
 // hand-written way every other configuration section in this file is
 // serialized (no generic JSON-object writer exists here -- see quote()/
@@ -579,11 +605,34 @@ AppConfig ConfigurationManager::load(
                 indexing->required("watchProjectFiles").as_boolean();
         }
 
+        if (const auto* topology = root.optional("topology")) {
+            require_only(*topology, {"numaLocalPlacementEnabled"}, "topology.");
+            config.numa_local_placement_enabled =
+                topology->required("numaLocalPlacementEnabled").as_boolean();
+        }
+
+        if (const auto* model_routing = root.optional("modelRouting")) {
+            require_only(*model_routing, {"tiers"}, "modelRouting.");
+            if (const auto* tiers = model_routing->optional("tiers")) {
+                for (const auto& tier_field : tiers->as_object()) {
+                    // Throws on an unknown tier spelling, matching every
+                    // other strict-parse field in this loader.
+                    parse_model_tier(tier_field.first);
+                    std::vector<std::string> model_ids;
+                    for (const auto& item : tier_field.second.as_array()) {
+                        model_ids.push_back(item.as_string());
+                    }
+                    config.model_tier_assignments[tier_field.first] = model_ids;
+                }
+            }
+        }
+
         if (const auto* retrieval = root.optional("retrieval")) {
             require_only(*retrieval,
                          {"enabled", "deadlineMilliseconds",
                           "maximumContextBytes", "maximumChunksPerSource",
-                          "maximumTotalChunks"},
+                          "maximumTotalChunks", "semanticEmbeddingEnabled",
+                          "gitDiffEnabled", "mcpResourceEnabled"},
                          "retrieval.");
             config.retrieval_enabled =
                 retrieval->required("enabled").as_boolean();
@@ -596,6 +645,25 @@ AppConfig ConfigurationManager::load(
                     positive(*retrieval, "maximumChunksPerSource", 256U));
             config.retrieval_maximum_total_chunks = static_cast<std::uint32_t>(
                 positive(*retrieval, "maximumTotalChunks", 1024U));
+            // Phase 24: per-strategy opt-outs for the expensive/IO-bound
+            // adapters only -- absent in an older saved config.json (these
+            // three are new), each keeps its AppConfig-default of true so
+            // an upgrade doesn't silently disable a strategy nobody asked
+            // to turn off. The cheap heuristic strategies (call_graph,
+            // type_reference, dependency_neighbour, filename_path,
+            // recent_change) have no toggle, same as before this pass.
+            if (retrieval->optional("semanticEmbeddingEnabled") != nullptr) {
+                config.retrieval_semantic_embedding_enabled =
+                    retrieval->required("semanticEmbeddingEnabled").as_boolean();
+            }
+            if (retrieval->optional("gitDiffEnabled") != nullptr) {
+                config.retrieval_git_diff_enabled =
+                    retrieval->required("gitDiffEnabled").as_boolean();
+            }
+            if (retrieval->optional("mcpResourceEnabled") != nullptr) {
+                config.retrieval_mcp_resource_enabled =
+                    retrieval->required("mcpResourceEnabled").as_boolean();
+            }
         }
 
         if (const auto* knowledge = root.optional("knowledge")) {
@@ -922,6 +990,10 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         std::to_string(c.tabular_dataset_maximum_csv_bytes) + "},\n"
         "  \"indexing\":{\"watchProjectFiles\":" +
         (c.watch_project_files ? "true" : "false") + "},\n"
+        "  \"topology\":{\"numaLocalPlacementEnabled\":" +
+        (c.numa_local_placement_enabled ? "true" : "false") + "},\n"
+        "  \"modelRouting\":{\"tiers\":" +
+        tier_assignments(c.model_tier_assignments) + "},\n"
         "  \"retrieval\":{\"enabled\":" +
         (c.retrieval_enabled ? "true" : "false") +
         ",\"deadlineMilliseconds\":" +
@@ -931,7 +1003,13 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         ",\"maximumChunksPerSource\":" +
         std::to_string(c.retrieval_maximum_chunks_per_source) +
         ",\"maximumTotalChunks\":" +
-        std::to_string(c.retrieval_maximum_total_chunks) + "},\n"
+        std::to_string(c.retrieval_maximum_total_chunks) +
+        ",\"semanticEmbeddingEnabled\":" +
+        (c.retrieval_semantic_embedding_enabled ? "true" : "false") +
+        ",\"gitDiffEnabled\":" +
+        (c.retrieval_git_diff_enabled ? "true" : "false") +
+        ",\"mcpResourceEnabled\":" +
+        (c.retrieval_mcp_resource_enabled ? "true" : "false") + "},\n"
         "  \"cache\":{\"enabled\":" +
         (c.cache_enabled ? "true" : "false") +
         ",\"maximumBytesPerCategory\":" +

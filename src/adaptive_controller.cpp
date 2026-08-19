@@ -300,6 +300,33 @@ AdaptiveControllerReport AdaptiveController::evaluate(
         report.proposed_not_yet_applied.push_back(idle_unload);
     }
 
+    // Thread count and GPU offload: same "disclosed only, no live setter
+    // yet" honesty as idle_unload_seconds above -- battery power and
+    // sustained high/critical memory pressure are the two live signals this
+    // pass has that plausibly justify either knob, so both recommendations
+    // are gated on them rather than emitted unconditionally.
+    if (signals.on_battery_power || signals.memory.pressure >= MemoryPressure::high) {
+        AdaptiveAdjustment thread_count;
+        thread_count.parameter = "thread_count";
+        thread_count.reason = signals.on_battery_power
+            ? "on battery power -- reduce worker thread count for power draw"
+            : "memory pressure elevated -- reduce worker thread count";
+        thread_count.previous_value = 0.0;
+        thread_count.proposed_value = -1.0;
+        thread_count.confidence = confidence;
+        report.proposed_not_yet_applied.push_back(thread_count);
+
+        AdaptiveAdjustment gpu_offload;
+        gpu_offload.parameter = "gpu_offload";
+        gpu_offload.reason = signals.on_battery_power
+            ? "on battery power -- reduce GPU layer offload"
+            : "memory pressure elevated -- reduce GPU layer offload";
+        gpu_offload.previous_value = 0.0;
+        gpu_offload.proposed_value = -1.0;
+        gpu_offload.confidence = confidence;
+        report.proposed_not_yet_applied.push_back(gpu_offload);
+    }
+
     return report;
 }
 

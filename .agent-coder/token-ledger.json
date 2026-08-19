@@ -731,5 +731,23 @@
     "failed": false,
     "usageAvailable": true,
     "id": "87e509ad-4147-4724-bee4-62f8a4efd8bb"
+  },
+  {
+    "taskType": "analyze-decision",
+    "requestId": "9aa6c4e3-0c4b-4fbd-b613-e8fc46f5ad22",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "estimatedInputTokens": 4468,
+    "latencyMs": 62523,
+    "recordedAtMs": 1786969987140,
+    "files": [],
+    "callKind": "primary",
+    "actualInputTokens": 6520,
+    "actualOutputTokens": 4090,
+    "schemaValid": true,
+    "estimatedCostUsd": 0.08091,
+    "failed": false,
+    "usageAvailable": true,
+    "id": "1c806795-d51e-4e39-91b4-f4912a820e93"
   }
 ]

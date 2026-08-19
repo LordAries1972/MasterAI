@@ -85,8 +85,8 @@ disables inference; every chat request then fails with
 |---|---|---|---|
 | `llamaServerExecutable` | string path | `""` | Path to a version-pinned `llama-server` / `llama-server.exe`. MasterAI supervises it as a separate process; it does not vendor or build it. |
 | `runnerPort` | integer | `7081`; `65535` (min `1024`) | Loopback port MasterAI's inference supervisor talks to the runner process on. |
-| `chatMaxReplyTokens` | integer, optional | `8192`; `32768` | Ceiling on tokens generated per reply (`n_predict`). A safety cap, not a target length — generation still stops earlier at the model's own end-of-turn token or a configured stop sequence. |
-| `chatContextLength` | integer, optional | `4096`; `1048576` | Total context window (`n_ctx`) the runner is launched with. **This must comfortably exceed a chat's full running total** — prior turns' history is resent every message (there is no automatic history truncation), plus the new turn, plus headroom for the reply. Once that total exceeds `chatContextLength`, the runner rejects the completion request (surfaced as `"runner generation request failed"`). Raise this — bounded by what your model supports and what your RAM/VRAM can hold for its KV cache — for long-running conversations. `131072` matches Llama 3.2's advertised maximum context. |
+| `chatMaxReplyTokens` | integer, optional | `16384`; `32768` | Ceiling on tokens generated per reply (`n_predict`). A safety cap, not a target length — generation still stops earlier at the model's own end-of-turn token or a configured stop sequence. |
+| `chatContextLength` | integer, optional | `32768`; `1048576` | Total context window (`n_ctx`) the runner is launched with. **This must comfortably exceed a chat's full running total** — prior turns' history is resent every message (there is no automatic history truncation), plus the new turn, plus headroom for the reply. Once that total exceeds `chatContextLength`, the runner rejects the completion request (surfaced as `"runner generation request failed"`). Raise this — bounded by what your model supports and what your RAM/VRAM can hold for its KV cache — for long-running conversations. `131072` matches Llama 3.2's advertised maximum context. |
 | `startupTimeoutSeconds` | integer, optional | `120`; `3600` | How long to wait for the runner's readiness probe after launch before declaring a cold load failed. Large models (e.g. DeepSeek-class) need more than the default. |
 
 ### GPU offload
@@ -126,6 +126,18 @@ vendored or linked, distributed separately, configured by filesystem path.
 |---|---|---|---|
 | `watchProjectFiles` | boolean | `true` | Runs a native file-watcher/branch-switch adapter (`ProjectWatcher`) that requests an incremental reindex automatically on save or `.git/HEAD` change. Disabling this only turns off the automatic adapter — the authenticated index/notify/rebuild routes stay available either way. |
 
+## `topology` (optional)
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `numaLocalPlacementEnabled` | boolean | `false` | Phase 28: opt-in NUMA-local thread placement for per-connection worker threads. Off by default per the plan's "applied only where measurement shows benefit — not pinned by default"; `recommend_thread_placement()` also no-ops on any single-NUMA-node host regardless of this flag. Additionally gated at the call site by the Phase 20 `numa_affinity` Advanced Optimization admission (`POST /api/v1/performance/advanced-optimizations`) — both the evidence-backed admission and this flag are required before any thread is actually pinned to a NUMA node. |
+
+## `modelRouting` (optional)
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `tiers` | object of `string -> string[]` | `{}` | Phase 29: declares which registered model ids belong to each of the five `ModelTier`s (`deterministic_processing`, `compact_router`, `small_fast`, `medium_general`, `large_specialist`). Empty by default: the advisory `POST /api/v1/models/route` endpoint and the post-turn cascade-escalation audit entry both stay inert (no tier configured to select from) until an administrator declares at least one tier here. This is advisory routing only in this pass -- it never automatically switches a chat's model; see `docs/PLAN.md` Phase 29's status note. |
+
 ## `retrieval` (optional)
 
 Deadline-bound hybrid retrieval, applied once per chat message before prompt
@@ -138,6 +150,20 @@ assembly. Disabling it leaves attachment-based context untouched.
 | `maximumContextBytes` | integer | `16384` (16 KiB); `4194304` (4 MiB) | Ceiling on retrieved text injected into one prompt. |
 | `maximumChunksPerSource` | integer | `6`; `256` | Ceiling on chunks contributed by any single retrieval strategy. |
 | `maximumTotalChunks` | integer | `20`; `1024` | Ceiling on chunks across all strategies combined. |
+| `semanticEmbeddingEnabled` | boolean | `true` | Opt-out for the `semantic_embedding` strategy (a `/v1/embeddings` backend round trip per candidate chunk). Only runs when a live embedding-capable runner is also configured. |
+| `gitDiffEnabled` | boolean | `true` | Opt-out for the `git_diff` strategy (a sandboxed `git` subprocess). Silently produces no evidence when the project isn't a git working tree or `git` isn't installed. |
+| `mcpResourceEnabled` | boolean | `true` | Opt-out for the `mcp_resource` strategy (reads from outbound MCP servers). Only runs for a requester whose scopes actually include `mcp.tools.invoke` on an authorized server. |
+
+As of this pass every `RetrievalStrategy` has a real adapter (see
+`docs/PLAN.md`'s Phase 16/24 status notes): `exact_symbol`, `exact_text`,
+`lexical`, `filename_path`, `recent_change`, `call_graph`, `type_reference`,
+and `dependency_neighbour` are always-on heuristic scans with no separate
+toggle; `semantic_embedding`, `git_diff`, and `mcp_resource` are gated both
+by the booleans above and by whether this MasterAI instance actually has the
+underlying dependency wired in (an embedding-capable runner, the `git`
+executable, or an authorized outbound MCP server respectively) —
+`conversation_memory` has no toggle of its own since it only ever surfaces a
+user's own previously recorded memories.
 
 ## `cache` (optional)
 

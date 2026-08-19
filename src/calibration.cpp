@@ -175,30 +175,78 @@ PreTouchReport pre_touch_model_file(
                 offset, std::min(mapping_window_bytes, policy_bytes - offset));
         }
     }
-    volatile std::uint8_t page_sink = 0U;
-    for (const auto& range : ranges) {
-        if (cancellation.load(std::memory_order_acquire) ||
-            (should_yield && should_yield())) {
-            report.cancelled = true;
-            break;
-        }
-        MappedBufferView mapped(model_file, range.first, range.second);
-        std::uint64_t range_bytes_touched = 0U;
-        for (std::size_t offset = 0U; offset < mapped.size();
-             offset += static_cast<std::size_t>(page_bytes)) {
+    // Phase 85: each range is an independent memory-mapped window (a
+    // separate MappedBufferView), so touching several at once is safe --
+    // there is no shared mapping state between them, only the atomic
+    // counters below. A cold "resident"/layer_window pre-touch of a 3-5GB
+    // model file at 4KB-page granularity is disk-I/O-bound (each first touch
+    // faults the page in from storage), so splitting the range list across
+    // several worker threads lets that I/O and page-fault handling overlap
+    // instead of serializing one page at a time. should_yield is an
+    // arbitrary caller-supplied callback -- calling it concurrently from
+    // multiple workers would be unsafe unless the caller documented
+    // otherwise, so it stays behind yield_mutex and is only actually invoked
+    // when a worker is about to claim its next range, matching the original
+    // per-range check frequency.
+    std::atomic<std::size_t> next_range{0U};
+    std::atomic<std::uint64_t> pages_touched{0U};
+    std::atomic<std::uint64_t> bytes_touched{0U};
+    std::atomic_bool cancelled{false};
+    std::mutex yield_mutex;
+    const auto worker = [&]() {
+        volatile std::uint8_t page_sink = 0U;
+        while (true) {
             if (cancellation.load(std::memory_order_acquire)) {
-                report.cancelled = true;
-                break;
+                cancelled.store(true, std::memory_order_release);
+                return;
             }
-            page_sink = static_cast<std::uint8_t>(page_sink ^ mapped.data()[offset]);
-            ++report.pages_touched;
-            range_bytes_touched += std::min<std::uint64_t>(
-                page_bytes, mapped.size() - offset);
+            {
+                std::lock_guard<std::mutex> lock(yield_mutex);
+                if (should_yield && should_yield()) {
+                    cancelled.store(true, std::memory_order_release);
+                    return;
+                }
+            }
+            const auto index = next_range.fetch_add(1U);
+            if (index >= ranges.size()) return;
+            const auto& range = ranges[index];
+            MappedBufferView mapped(model_file, range.first, range.second);
+            std::uint64_t range_bytes_touched = 0U;
+            std::uint64_t range_pages_touched = 0U;
+            for (std::size_t offset = 0U; offset < mapped.size();
+                 offset += static_cast<std::size_t>(page_bytes)) {
+                if (cancellation.load(std::memory_order_acquire)) {
+                    cancelled.store(true, std::memory_order_release);
+                    break;
+                }
+                page_sink =
+                    static_cast<std::uint8_t>(page_sink ^ mapped.data()[offset]);
+                ++range_pages_touched;
+                range_bytes_touched += std::min<std::uint64_t>(
+                    page_bytes, mapped.size() - offset);
+            }
+            pages_touched.fetch_add(range_pages_touched, std::memory_order_relaxed);
+            bytes_touched.fetch_add(range_bytes_touched, std::memory_order_relaxed);
+            if (cancelled.load(std::memory_order_acquire)) return;
         }
-        report.bytes_touched += range_bytes_touched;
-        if (report.cancelled) break;
+    };
+    const auto worker_count = std::max<std::size_t>(
+        1U, std::min<std::size_t>(
+                {ranges.size(), 8U,
+                 static_cast<std::size_t>(std::max(1U, std::thread::hardware_concurrency()))}));
+    if (worker_count <= 1U) {
+        worker();
+    } else {
+        std::vector<std::thread> workers;
+        workers.reserve(worker_count);
+        for (std::size_t index = 0U; index < worker_count; ++index) {
+            workers.emplace_back(worker);
+        }
+        for (auto& thread : workers) thread.join();
     }
-    static_cast<void>(page_sink);
+    report.pages_touched = pages_touched.load();
+    report.bytes_touched = bytes_touched.load();
+    report.cancelled = cancelled.load();
     report.elapsed_microseconds = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - started).count());
@@ -279,6 +327,36 @@ unsigned int select_gpu_layers(const HardwareInfo& hardware,
     return kGpuLayersOffloadAll;
 }
 
+// Phase 85: --threads was plumbed through LaunchTuning/build_launch_spec()
+// since Phase 19 but resolve()/calibrate() never actually populated it, so
+// llama-server's own default thread count ran unconditionally regardless of
+// the host's real core count. Physical cores are preferred over logical
+// (hyperthread) count: llama.cpp's matrix-multiply-bound decode step gains
+// far more from an additional physical core than from a sibling hyperthread
+// sharing the same execution units. One core is reserved on multi-core
+// hosts so MasterAI's own process and the OS still get scheduled time
+// during generation, mirroring the headroom idea kUsableVramFraction
+// already applies to GPU memory above. Returns 0 (meaning "no override,
+// keep the backend's own default") only when the hardware probe found no
+// usable core count at all.
+unsigned int select_thread_count(const HardwareInfo& hardware) noexcept {
+    const unsigned int cores = hardware.physical_cpu_count > 0U
+                                   ? hardware.physical_cpu_count
+                                   : hardware.logical_cpu_count;
+    if (cores == 0U) return 0U;
+    if (cores == 1U) return 1U;
+    return cores - 1U;
+}
+
+// Phase 85: llama.cpp's own long-standing default micro-batch size (512
+// tokens) is only safe to request explicitly when the configured context
+// window is at least that large; a smaller context clamps ubatch down to
+// the context length itself so --ubatch-size can never exceed --ctx-size.
+unsigned int select_ubatch_tokens(const unsigned int context_length) noexcept {
+    constexpr unsigned int default_ubatch = 512U;
+    return std::min(default_ubatch, context_length);
+}
+
 TuningProfile safe_default_profile(const std::string& profile_name) {
     static const std::set<std::string> known{"auto", "minimal", "balanced",
                                              "performance"};
@@ -312,6 +390,12 @@ LaunchTuning launch_tuning_from_profile(const TuningProfile& profile) {
     tuning.allow_memory_map = profile.recommended_allow_memory_map;
     tuning.allow_memory_lock = profile.recommended_allow_memory_lock;
     tuning.batch_tokens = profile.recommended_batch_tokens;
+    // Phase 85: see select_thread_count()/select_ubatch_tokens() above --
+    // these two default to 0 on a pre-Phase-85 persisted profile, which
+    // build_launch_spec() already treats as "no override", so restoring an
+    // old profile keeps behaving exactly as it did before this change.
+    tuning.thread_count = profile.recommended_thread_count;
+    tuning.ubatch_tokens = profile.recommended_ubatch_tokens;
     // Phase 26: load_mode/pre_touch ride along as advisory metadata -- their
     // *effect* on the actual llama-server launch is already fully expressed
     // through allow_memory_map/allow_memory_lock above (set consistently
@@ -382,7 +466,12 @@ void TuningProfileStore::save(const TuningProfile& profile) {
              profile.gpu_telemetry_available ? "true" : "false",
              profile.gpu_vendor,
              std::to_string(profile.average_gpu_utilization_percent),
-             std::to_string(profile.peak_gpu_temperature_celsius)});
+             std::to_string(profile.peak_gpu_temperature_celsius),
+             // Phase 85: appended at the end, same "old readers never see
+             // it, restore() requires the new count" convention the Phase
+             // 19/26 fields above already used.
+             std::to_string(profile.recommended_thread_count),
+             std::to_string(profile.recommended_ubatch_tokens)});
         record_store_->put("tuning_profiles", key, value);
     }
 }
@@ -439,12 +528,17 @@ void TuningProfileStore::restore() {
         // takes the whole control plane down at startup -- even though a
         // mismatched schema almost always also carries a stale build_id, so
         // TuningProfileStore::find() would never have matched it anyway.
-        // Recognized older schemas (currently just the pre-Phase-19 26-field
-        // one) are parsed with their new fields defaulted; anything else is
-        // logged and dropped rather than crashing the server. This profile
-        // is only ever advisory evidence a fresh calibrate() regenerates --
-        // never durable data whose loss would be silent or irreversible.
-        if (fields.size() != 30U && fields.size() != 26U) {
+        // Phase 85: two more fields appended after the Phase 19 GPU-
+        // telemetry quartet (30 -> 32), same reasoning as the comment above:
+        // a mismatched schema almost always also carries a stale build_id,
+        // so TuningProfileStore::find() would never have matched it anyway.
+        // Recognized older schemas (pre-Phase-19 26-field, pre-Phase-85
+        // 30-field) are parsed with their new fields defaulted; anything
+        // else is logged and dropped rather than crashing the server. This
+        // profile is only ever advisory evidence a fresh calibrate()
+        // regenerates -- never durable data whose loss would be silent or
+        // irreversible.
+        if (fields.size() != 32U && fields.size() != 30U && fields.size() != 26U) {
             log(LogLevel::warning, "tuning_profile.restore.skipped",
                "unrecognized persisted tuning profile schema (" +
                    std::to_string(fields.size()) + " fields); dropping stale "
@@ -492,6 +586,15 @@ void TuningProfileStore::restore() {
         // else: pre-Phase-19 26-field record -- GPU fields stay at their
         // struct defaults (gpu_telemetry_available == false), an honest
         // "not measured by this old record" rather than a fabricated value.
+        if (fields.size() == 32U) {
+            profile.recommended_thread_count =
+                static_cast<unsigned int>(std::stoul(fields[30]));
+            profile.recommended_ubatch_tokens =
+                static_cast<unsigned int>(std::stoul(fields[31]));
+        }
+        // else: pre-Phase-85 record -- thread_count/ubatch_tokens stay 0
+        // ("no override"), matching launch_tuning_from_profile()'s existing
+        // pre-Phase-85 behavior exactly for any such restored profile.
         if (!valid_sha256(profile.host_hash) ||
             !valid_sha256(profile.model_sha256)) {
             throw std::runtime_error("persisted tuning profile violates policy");
@@ -555,6 +658,9 @@ TuningProfile CalibrationService::resolve(
         accelerator_policy_ == "cpu_only"
             ? 0U
             : select_gpu_layers(hardware_, required_gpu_backend, model_size_bytes);
+    profile.recommended_thread_count = select_thread_count(hardware_);
+    profile.recommended_ubatch_tokens =
+        select_ubatch_tokens(profile.recommended_context_length);
     if (storage != nullptr) {
         profile.recommended_load_mode =
             select_load_mode(*storage, available_ram_bytes, model_size_bytes);
@@ -600,6 +706,9 @@ TuningProfile CalibrationService::calibrate(
             ? 0U
             : select_gpu_layers(hardware_, model.manifest.required_gpu_backend,
                                 model.manifest.model_size_bytes);
+    profile.recommended_thread_count = select_thread_count(hardware_);
+    profile.recommended_ubatch_tokens =
+        select_ubatch_tokens(profile.recommended_context_length);
     const auto tuning = launch_tuning_from_profile(profile);
 
     std::atomic_bool sampling{true};
@@ -768,7 +877,11 @@ std::string tuning_profile_json(const TuningProfile& profile) {
           ",\"averageGpuUtilizationPercent\":" +
           std::to_string(profile.average_gpu_utilization_percent) +
           ",\"peakGpuTemperatureCelsius\":" +
-          std::to_string(profile.peak_gpu_temperature_celsius) + "}";
+          std::to_string(profile.peak_gpu_temperature_celsius) +
+          ",\"recommendedThreadCount\":" +
+          std::to_string(profile.recommended_thread_count) +
+          ",\"recommendedUbatchTokens\":" +
+          std::to_string(profile.recommended_ubatch_tokens) + "}";
 }
 
 }  // namespace masterai

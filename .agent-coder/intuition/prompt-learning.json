@@ -901,6 +901,28 @@
       "appliedIntuitionRuleIds": [],
       "verified": false,
       "recordedAt": "2026-08-12T01:21:44.346Z"
+    },
+    {
+      "promptStrategyId": "verified-default",
+      "promptStrategyVersion": 1,
+      "requestId": "9aa6c4e3-0c4b-4fbd-b613-e8fc46f5ad22",
+      "taskType": "analyze-decision",
+      "providerId": "claude",
+      "modelId": "claude-sonnet-5",
+      "promptTokens": 6520,
+      "completionTokens": 4090,
+      "attempts": 1,
+      "responseSchemaValid": true,
+      "assumptionsRejected": 0,
+      "evidenceCoverage": 0,
+      "patchAccepted": false,
+      "userCorrectionRequired": false,
+      "rolledBack": false,
+      "finalOutcome": "partially_successful",
+      "verificationEvidence": [],
+      "appliedIntuitionRuleIds": [],
+      "verified": false,
+      "recordedAt": "2026-08-17T12:33:08.071Z"
     }
   ],
   "lessons": [],
@@ -1204,6 +1226,13 @@
       "timestamp": "2026-08-12T01:21:44.346Z",
       "action": "record-outcome",
       "targetId": "3438c3a3-8472-42f7-8598-47a19893a26f",
+      "detail": "Outcome remains temporary and cannot influence ranking."
+    },
+    {
+      "id": "36650c91-96ca-4cfe-b627-085bbee450f7",
+      "timestamp": "2026-08-17T12:33:08.071Z",
+      "action": "record-outcome",
+      "targetId": "9aa6c4e3-0c4b-4fbd-b613-e8fc46f5ad22",
       "detail": "Outcome remains temporary and cannot influence ranking."
     }
   ]

@@ -432,6 +432,19 @@ bool ChatStore::set_model(const std::string& chat_id,
     return true;
 }
 
+bool ChatStore::set_shared_template(const std::string& chat_id,
+                                    const std::string& owner_id,
+                                    const bool shared) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = chats_.find(chat_id);
+    if (found == chats_.end() || found->second.owner_id != owner_id) {
+        return false;
+    }
+    found->second.is_shared_template = shared;
+    persist_header(found->second);
+    return true;
+}
+
 std::optional<ChatRecord> ChatStore::find_for_owner(
     const std::string& chat_id, const std::string& owner_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -487,7 +500,8 @@ void ChatStore::restore() {
     // 5 under either older scheme.
     for (const auto& item : records_->list("chats")) {
         const auto fields = unpack(item.second);
-        const bool split_format = fields.size() == 5U || fields.size() == 8U;
+        const bool split_format = fields.size() == 5U || fields.size() == 8U ||
+                                  fields.size() == 9U;
         const bool current_format =
             !split_format && fields.size() >= 6U && fields.size() % 3U == 0U;
         const bool legacy_format =
@@ -506,7 +520,7 @@ void ChatStore::restore() {
         if (split_format) {
             chat.title = fields[3];
             chat.created_at_epoch_seconds = std::stoull(fields[4]);
-            if (fields.size() == 8U) {
+            if (fields.size() == 8U || fields.size() == 9U) {
                 if (fields[5] != "memory-v1" ||
                     (fields[6] != "true" && fields[6] != "false") ||
                     fields[7].size() > 4096U) {
@@ -515,6 +529,13 @@ void ChatStore::restore() {
                 }
                 chat.memory_context_initialized = fields[6] == "true";
                 chat.memory_context = fields[7];
+            }
+            if (fields.size() == 9U) {
+                if (fields[8] != "true" && fields[8] != "false") {
+                    throw std::runtime_error(
+                        "persisted chat shared-template flag is invalid");
+                }
+                chat.is_shared_template = fields[8] == "true";
             }
             chats_.emplace(chat.id, std::move(chat));
             continue;
@@ -606,7 +627,8 @@ void ChatStore::persist_header(const ChatRecord& chat) {
                         std::to_string(chat.created_at_epoch_seconds),
                         "memory-v1",
                         chat.memory_context_initialized ? "true" : "false",
-                        chat.memory_context}));
+                        chat.memory_context,
+                        chat.is_shared_template ? "true" : "false"}));
 }
 
 void ChatStore::persist_message(const std::string& chat_id,

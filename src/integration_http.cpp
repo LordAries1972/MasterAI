@@ -422,9 +422,32 @@ std::string IntegrationHttpController::handle_inbound_mcp(Request& request) {
                         "{\"error\":\"method_not_allowed\"}",
                         {"Allow: POST"});
     }
+    // The Streamable HTTP transport spec requires the MCP-Protocol-Version
+    // header on every request *after* negotiation, but the client cannot
+    // know the negotiated version before its first "initialize" call
+    // completes -- that negotiation happens via the JSON-RPC body's own
+    // protocolVersion field (McpInboundServer::handle, src/mcp.cpp), not
+    // this header. Enforcing the header on "initialize" itself rejects
+    // every spec-compliant external client on first contact (confirmed
+    // 2026-08-18 against the official @modelcontextprotocol/inspector,
+    // which -- correctly per spec -- omits this header on its first
+    // request). So this header is only required starting with the second
+    // request of a session.
+    bool is_initialize_call = false;
+    try {
+        const auto peek = parse_json(request.body);
+        const auto* method = peek.optional("method");
+        is_initialize_call =
+            method != nullptr && method->as_string() == "initialize";
+    } catch (const std::exception&) {
+        // Malformed JSON is rejected below by McpInboundServer::handle
+        // itself with a proper JSON-RPC parse error; fall through to the
+        // ordinary header requirement rather than misreport it here.
+    }
     const auto protocol = request.headers.find("mcp-protocol-version");
-    if (protocol == request.headers.end() ||
-        protocol->second != mcp_protocol_version()) {
+    if (!is_initialize_call &&
+        (protocol == request.headers.end() ||
+         protocol->second != mcp_protocol_version())) {
         return response(400, "Bad Request",
                         "{\"error\":\"unsupported_mcp_protocol\"}");
     }

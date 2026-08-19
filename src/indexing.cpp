@@ -29,13 +29,23 @@ std::string language_for(const std::filesystem::path& path) {
     if (extension == ".json") return "json";
     if (extension == ".cmake" || path.filename() == "CMakeLists.txt")
         return "cmake";
+    // Phase 24: these three drive the heuristic call_graph/type_reference/
+    // dependency_neighbour retrieval adapters' per-language keyword tables
+    // (see call_site_match/type_reference_match/import_targets_for below) --
+    // extending language_for() here is what actually lets those adapters see
+    // Python/JS/TS project files at all, since indexable() below gates them
+    // out of the index entirely otherwise.
+    if (extension == ".py") return "python";
+    if (extension == ".ts" || extension == ".tsx") return "typescript";
+    if (extension == ".js" || extension == ".jsx") return "javascript";
     return "text";
 }
 
 bool indexable(const std::filesystem::path& path) {
     static const std::set<std::string> allowed{
         ".cpp", ".cc", ".cxx", ".c", ".hpp", ".h", ".md",
-        ".txt", ".json", ".cmake", ".ps1", ".sh"};
+        ".txt", ".json", ".cmake", ".ps1", ".sh",
+        ".py", ".ts", ".tsx", ".js", ".jsx"};
     return path.filename() == "CMakeLists.txt" ||
            allowed.find(path.extension().string()) != allowed.end();
 }
@@ -77,7 +87,13 @@ bool identifier_character(const char value) {
     return std::isalnum(byte) != 0 || value == '_';
 }
 
-bool contains_symbol(const std::string& text, const std::string& symbol) {
+// Calls `visitor(position)` for every identifier-boundary occurrence of
+// `symbol` in `text`, stopping early if the visitor returns true. Shared by
+// contains_symbol/call_site_match/type_reference_match so the boundary-check
+// arithmetic exists in exactly one place.
+template <typename Visitor>
+bool for_each_symbol_boundary(const std::string& text, const std::string& symbol,
+                              Visitor visitor) {
     std::size_t position = text.find(symbol);
     while (position != std::string::npos) {
         const bool left_boundary =
@@ -85,10 +101,142 @@ bool contains_symbol(const std::string& text, const std::string& symbol) {
         const auto end = position + symbol.size();
         const bool right_boundary =
             end == text.size() || !identifier_character(text[end]);
-        if (left_boundary && right_boundary) return true;
+        if (left_boundary && right_boundary && visitor(position, end)) {
+            return true;
+        }
         position = text.find(symbol, position + 1U);
     }
     return false;
+}
+
+bool contains_symbol(const std::string& text, const std::string& symbol) {
+    return for_each_symbol_boundary(
+        text, symbol, [](std::size_t, std::size_t) { return true; });
+}
+
+// Phase 24: heuristic call-graph/type-reference/dependency-neighbour adapters.
+// These are deliberately NOT a parser -- they scan chunk.text with the same
+// identifier-boundary discipline contains_symbol() already uses, at query
+// time, exactly like search_symbol/search_path. No new persisted index data,
+// no AST, no per-language grammar; false positives/negatives are expected on
+// unusual formatting and are an accepted trade-off for shipping real (not
+// stubbed) call_graph/type_reference/dependency_neighbour evidence without a
+// from-scratch parser. Scope: C++/Python/JavaScript/TypeScript only, per the
+// four languages language_for() now recognizes.
+
+// Returns the last non-whitespace identifier-shaped token immediately before
+// `position` on the same line, or an empty string if none exists (start of
+// line / only punctuation precedes it).
+std::string preceding_token(const std::string& text, std::size_t position) {
+    std::size_t end = position;
+    while (end > 0U && text[end - 1U] == ' ') --end;
+    if (end == 0U || text[end - 1U] == '\n') return {};
+    std::size_t start = end;
+    while (start > 0U && identifier_character(text[start - 1U])) --start;
+    if (start == end) return {};
+    return text.substr(start, end - start);
+}
+
+// True when `symbol` appears at an identifier boundary immediately followed
+// (skipping spaces/tabs) by '(', and the token immediately preceding it is
+// not one of a small fixed set of declaration-introducing keywords -- a
+// bounded approximation of "this is a call site, not a definition".
+bool call_site_match(const std::string& text, const std::string& symbol) {
+    static const std::set<std::string> declaration_keywords{
+        "def", "function", "class", "struct", "interface", "void",
+        "new", "typename", "async"};
+    return for_each_symbol_boundary(
+        text, symbol, [&](std::size_t position, std::size_t end) {
+            std::size_t next = end;
+            while (next < text.size() &&
+                   (text[next] == ' ' || text[next] == '\t')) {
+                ++next;
+            }
+            return next < text.size() && text[next] == '(' &&
+                   declaration_keywords.find(preceding_token(text, position)) ==
+                       declaration_keywords.end();
+        });
+}
+
+// True when `type_name` appears at an identifier boundary either preceded by
+// a type-introducing keyword (class/struct/interface/typename/extends/
+// implements/new/:) or immediately followed by '<' (template/generic) or
+// "::" (scope resolution) -- a bounded approximation of "this is a type
+// position, not an arbitrary identifier".
+bool type_reference_match(const std::string& text, const std::string& type_name) {
+    static const std::set<std::string> type_keywords{
+        "class", "struct", "interface", "typename", "extends",
+        "implements", "new", ":"};
+    return for_each_symbol_boundary(
+        text, type_name, [&](std::size_t position, std::size_t end) {
+            if (type_keywords.find(preceding_token(text, position)) !=
+                type_keywords.end()) {
+                return true;
+            }
+            if (end < text.size() && text[end] == '<') return true;
+            return end + 1U < text.size() && text[end] == ':' &&
+                   text[end + 1U] == ':';
+        });
+}
+
+// Extracts the raw import/include target strings a chunk's text references,
+// per language. Targets are returned exactly as written (e.g. "../foo/bar",
+// "<vector>", "os.path") -- resolving them to a project-relative path is the
+// caller's job (search_dependency_neighbours), since only the caller knows
+// the full set of indexed relative paths to match suffixes against.
+std::vector<std::string> import_targets_for(const std::string& language,
+                                            const std::string& text) {
+    std::vector<std::string> targets;
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (language == "cpp" || language == "cpp-header") {
+            const auto hash = line.find("#include");
+            if (hash == std::string::npos) continue;
+            const auto open = line.find_first_of("\"<", hash);
+            if (open == std::string::npos) continue;
+            const char closing = line[open] == '<' ? '>' : '"';
+            const auto close = line.find(closing, open + 1U);
+            if (close == std::string::npos) continue;
+            targets.push_back(line.substr(open + 1U, close - open - 1U));
+        } else if (language == "python") {
+            std::size_t keyword_end = std::string::npos;
+            std::size_t search_from = 0U;
+            while (search_from < line.size() && line[search_from] == ' ') {
+                ++search_from;
+            }
+            if (line.compare(search_from, 5U, "from ") == 0) {
+                keyword_end = search_from + 5U;
+            } else if (line.compare(search_from, 7U, "import ") == 0) {
+                keyword_end = search_from + 7U;
+            }
+            if (keyword_end == std::string::npos) continue;
+            auto end = keyword_end;
+            while (end < line.size() && line[end] != ' ' &&
+                   line[end] != ',' && line[end] != '\n') {
+                ++end;
+            }
+            if (end > keyword_end) {
+                targets.push_back(line.substr(keyword_end, end - keyword_end));
+            }
+        } else if (language == "javascript" || language == "typescript") {
+            for (const char quote : {'\'', '"'}) {
+                const bool import_like =
+                    line.find("import ") != std::string::npos ||
+                    line.find("import(") != std::string::npos ||
+                    line.find("require(") != std::string::npos ||
+                    line.find("export ") != std::string::npos;
+                if (!import_like) continue;
+                const auto open = line.find(quote);
+                if (open == std::string::npos) continue;
+                const auto close = line.find(quote, open + 1U);
+                if (close == std::string::npos) continue;
+                targets.push_back(line.substr(open + 1U, close - open - 1U));
+                break;
+            }
+        }
+    }
+    return targets;
 }
 
 }  // namespace
@@ -248,6 +396,17 @@ public:
     IndexStatus current;
     std::vector<IndexChunk> chunks;
     std::filesystem::path active_segment;
+    // Phase 85: search_dependency_neighbours()'s file->import-target edge
+    // map, cached across calls instead of rebuilt from every chunk's text on
+    // every single call. Valid exactly when dependency_graph_generation ==
+    // current.generation -- chunks (and current.generation) only ever change
+    // together, under `mutex`, inside publish() above, so this simple
+    // generation-equality check is sufficient staleness detection without a
+    // separate dirty flag.
+    bool dependency_graph_valid{false};
+    std::uint64_t dependency_graph_generation{0U};
+    std::set<std::string> dependency_graph_known_paths;
+    std::map<std::string, std::vector<std::string>> dependency_graph_targets;
 };
 
 ProjectIndexer::ProjectIndexer(ProjectRecord project,
@@ -476,6 +635,152 @@ std::vector<IndexChunk> ProjectIndexer::search_path(
             result.push_back(chunk);
             if (result.size() == maximum_results) break;
         }
+    }
+    return result;
+}
+
+// Phase 24: call_graph adapter -- heuristic call-site scan, see
+// call_site_match() above for exactly what "call site" means here.
+std::vector<IndexChunk> ProjectIndexer::search_calls(
+    const std::string& symbol, const std::size_t maximum_results) const {
+    if (symbol.empty() || maximum_results == 0U || maximum_results > 1024U ||
+        !std::all_of(symbol.begin(), symbol.end(), identifier_character)) {
+        return {};
+    }
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    std::vector<IndexChunk> result;
+    for (const auto& chunk : state_->chunks) {
+        if (call_site_match(chunk.text, symbol)) {
+            result.push_back(chunk);
+            if (result.size() == maximum_results) break;
+        }
+    }
+    return result;
+}
+
+// Phase 24: type_reference adapter -- heuristic type-position scan, see
+// type_reference_match() above.
+std::vector<IndexChunk> ProjectIndexer::search_type_usage(
+    const std::string& type_name, const std::size_t maximum_results) const {
+    if (type_name.empty() || maximum_results == 0U ||
+        maximum_results > 1024U ||
+        !std::all_of(type_name.begin(), type_name.end(), identifier_character)) {
+        return {};
+    }
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    std::vector<IndexChunk> result;
+    for (const auto& chunk : state_->chunks) {
+        if (type_reference_match(chunk.text, type_name)) {
+            result.push_back(chunk);
+            if (result.size() == maximum_results) break;
+        }
+    }
+    return result;
+}
+
+// Phase 24: dependency_neighbour adapter. Builds a per-call, in-memory
+// file->target edge map from every chunk's import_targets_for() output, then
+// returns chunks belonging to any file that is a direct neighbour of
+// `anchor_relative_path` in either direction (anchor imports it, or it
+// imports anchor). Target strings are resolved to indexed relative paths on
+// a best-effort suffix match (e.g. python target "os.path" or JS target
+// "./foo/bar" both need normalization no single project convention shares),
+// so this is a heuristic like the two adapters above, not a resolved build
+// graph.
+std::vector<IndexChunk> ProjectIndexer::search_dependency_neighbours(
+    const std::string& anchor_relative_path,
+    const std::size_t maximum_results) const {
+    if (anchor_relative_path.empty() || maximum_results == 0U ||
+        maximum_results > 1024U) {
+        return {};
+    }
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    // Phase 85: rebuild the file->import-target edge map only when the
+    // published index generation has actually moved on since it was last
+    // built, instead of re-scanning every chunk's import statements on every
+    // call -- see State::dependency_graph_valid's comment for why a simple
+    // generation-equality check is sufficient staleness detection here.
+    if (!state_->dependency_graph_valid ||
+        state_->dependency_graph_generation != state_->current.generation) {
+        state_->dependency_graph_known_paths.clear();
+        state_->dependency_graph_targets.clear();
+        for (const auto& chunk : state_->chunks) {
+            state_->dependency_graph_known_paths.insert(chunk.relative_path);
+            for (auto& target :
+                 import_targets_for(chunk.language, chunk.text)) {
+                state_->dependency_graph_targets[chunk.relative_path]
+                    .push_back(std::move(target));
+            }
+        }
+        state_->dependency_graph_generation = state_->current.generation;
+        state_->dependency_graph_valid = true;
+    }
+    const auto& known_paths = state_->dependency_graph_known_paths;
+    const auto& file_targets = state_->dependency_graph_targets;
+    const auto path_matches_target = [](const std::string& path,
+                                        const std::string& target) {
+        // Strip a leading "./" or "../" run and any quoting/extension noise;
+        // a target matches a known path when one is a suffix of the other
+        // (covers "foo/bar.hpp" matching "#include \"foo/bar.hpp\"" and
+        // "src/foo" matching python's "from src.foo import x" once dots are
+        // normalized to slashes below).
+        std::string normalized = target;
+        for (auto& character : normalized) {
+            if (character == '.' &&
+                normalized.find('/') == std::string::npos) {
+                character = '/';
+            }
+        }
+        const auto suffix_match = [](const std::string& a, const std::string& b) {
+            return a.size() >= b.size() &&
+                   a.compare(a.size() - b.size(), b.size(), b) == 0;
+        };
+        return suffix_match(path, normalized) || suffix_match(normalized, path) ||
+               suffix_match(path, target) || suffix_match(target, path);
+    };
+    std::set<std::string> neighbours;
+    const auto anchor_targets = file_targets.find(anchor_relative_path);
+    if (anchor_targets != file_targets.end()) {
+        for (const auto& target : anchor_targets->second) {
+            for (const auto& path : known_paths) {
+                if (path != anchor_relative_path &&
+                    path_matches_target(path, target)) {
+                    neighbours.insert(path);
+                }
+            }
+        }
+    }
+    for (const auto& [path, targets] : file_targets) {
+        if (path == anchor_relative_path) continue;
+        for (const auto& target : targets) {
+            if (path_matches_target(anchor_relative_path, target)) {
+                neighbours.insert(path);
+                break;
+            }
+        }
+    }
+    std::vector<IndexChunk> result;
+    for (const auto& chunk : state_->chunks) {
+        if (neighbours.find(chunk.relative_path) == neighbours.end()) continue;
+        result.push_back(chunk);
+        if (result.size() == maximum_results) break;
+    }
+    return result;
+}
+
+// Phase 24: bounded full enumeration, needed by the semantic_embedding
+// adapter (it has to consider every chunk, not ones matching a literal). Not
+// used by any literal/substring search above -- those stay cheap targeted
+// scans.
+std::vector<IndexChunk> ProjectIndexer::all_chunks(
+    const std::size_t maximum_results) const {
+    if (maximum_results == 0U) return {};
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    std::vector<IndexChunk> result;
+    result.reserve(std::min<std::size_t>(maximum_results, state_->chunks.size()));
+    for (const auto& chunk : state_->chunks) {
+        result.push_back(chunk);
+        if (result.size() == maximum_results) break;
     }
     return result;
 }
@@ -727,6 +1032,46 @@ IndexSearchResult ProjectIndexService::search_path(
     const auto found = state_->indexes.find(project_id);
     if (found == state_->indexes.end()) return {};
     return {found->second->search_path(path_fragment, maximum_results),
+            found->second->status().generation, true};
+}
+
+IndexSearchResult ProjectIndexService::search_calls(
+    const std::string& project_id, const std::string& symbol,
+    const std::size_t maximum_results) const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    const auto found = state_->indexes.find(project_id);
+    if (found == state_->indexes.end()) return {};
+    return {found->second->search_calls(symbol, maximum_results),
+            found->second->status().generation, true};
+}
+
+IndexSearchResult ProjectIndexService::search_type_usage(
+    const std::string& project_id, const std::string& type_name,
+    const std::size_t maximum_results) const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    const auto found = state_->indexes.find(project_id);
+    if (found == state_->indexes.end()) return {};
+    return {found->second->search_type_usage(type_name, maximum_results),
+            found->second->status().generation, true};
+}
+
+IndexSearchResult ProjectIndexService::search_dependency_neighbours(
+    const std::string& project_id, const std::string& anchor_relative_path,
+    const std::size_t maximum_results) const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    const auto found = state_->indexes.find(project_id);
+    if (found == state_->indexes.end()) return {};
+    return {found->second->search_dependency_neighbours(anchor_relative_path,
+                                                         maximum_results),
+            found->second->status().generation, true};
+}
+
+IndexSearchResult ProjectIndexService::all_chunks(
+    const std::string& project_id, const std::size_t maximum_results) const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    const auto found = state_->indexes.find(project_id);
+    if (found == state_->indexes.end()) return {};
+    return {found->second->all_chunks(maximum_results),
             found->second->status().generation, true};
 }
 

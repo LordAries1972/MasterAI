@@ -19,9 +19,11 @@ third-party application framework the foundation of the system.
 
 > [!IMPORTANT]
 > MasterAI is under active development and is **not yet production-ready**.
-> Several major capabilities are implemented and test-covered, but real-model,
-> external-client, distribution-packaging, and large-project exit checks remain
-> outstanding. See [Project status](#project-status) and the authoritative
+> Several major capabilities are implemented and test-covered, but
+> distribution-packaging certification and the full multi-machine/multi-
+> storage-media performance certification matrix remain outstanding (both
+> genuinely require physical hardware this checkout does not have). See
+> [Project status](#project-status) and the authoritative
 > [implementation plan](docs/PLAN.md).
 
 ## Why MasterAI?
@@ -260,9 +262,9 @@ The current source includes native implementations for:
   `GET`/`POST /api/v1/admin/config` reads and writes the live `settings.json`
   (surfaced in the web UI's Settings -> System configuration panel), applying
   every field a live request path already re-reads immediately and reporting
-  which changed fields need a restart. The one remaining deliverable is the
-  matched `auto`-vs-`cpu_only` real-model benchmark matrix, which needs a
-  pinned local GGUF and dedicated hardware run.
+  which changed fields need a restart. The matched `auto`-vs-`cpu_only`
+  real-model benchmark matrix is recorded against a pinned local GGUF
+  (`docs/performance/phase-19-qwen3b-matrix.md`), closing this phase.
 - A durable, administrator-controlled Phase 20 registry for optional
   advanced-throughput candidates (continuous batching, speculative decoding,
   NUMA affinity, storage prefetch, multiple warm runners, GPU/CPU KV
@@ -400,7 +402,7 @@ The current source includes native implementations for:
   offloaded hardware) requires an administrator to actually run this page
   on each real target host -- no software on one machine can manufacture a
   second physical drive or GPU.
-- Phase 32 (evidence-pending): speculative decoding. `check_draft_target_
+- Phase 32: speculative decoding. `check_draft_target_
   compatibility()`, `SpeculativeDecodingStats`, and
   `decide_speculative_decoding_for_request()`
   (`src/speculative_decoding.cpp`) implement exact draft/target
@@ -412,8 +414,13 @@ The current source includes native implementations for:
   The sampling-compatibility gate correctly reflects that llama.cpp's
   rejection-sampling verification supports this codebase's real (non-greedy)
   chat sampling presets, so the feature activates for live chat traffic once
-  admitted and evidenced. Still unvalidated on real hardware -- no measured
-  throughput run has exercised the launch path yet.
+  admitted and evidenced. Real hardware evidence is now recorded via the
+  `masterai speculative-benchmark` CLI command
+  (`docs/performance/phase-32-speculative-matrix.md`): on this low-VRAM
+  test host the dual-model path measured 22.5% *slower* than the
+  single-model baseline, an honest negative result -- the launch path
+  itself works, but this host lacks the compute/VRAM headroom for it to
+  pay off.
 - A native asynchronous storage and prefetch engine (`IAsyncFileReader`):
   IOCP-backed overlapped reads on Windows and a bounded worker-pool `pread`
   fallback on POSIX, adjacent-request read coalescing, an adaptive
@@ -438,9 +445,16 @@ The current source includes native implementations for:
   filename/path and recent-change strategies, a deterministic request
   classifier, sticky-sufficiency staged execution, an authorization-scoped
   in-flight request join table, and reference-first (`ChunkReference`)
-  candidate materialization gated on `ContextBudgeter` admission, with
-  not-yet-adapted strategies (semantic embedding, MCP-resource, call-graph,
-  and others) declared but disabled and disclosed on the query trace.
+  candidate materialization gated on `ContextBudgeter` admission. Every
+  strategy now has a real adapter: heuristic call-graph/type-reference/
+  dependency-neighbour scans (C++/Python/JavaScript/TypeScript), a
+  sandboxed `git diff` adapter, real cosine-similarity semantic-embedding
+  search over the already-live `/v1/embeddings` backend call, conversation
+  memory recall, and outbound-MCP resource reads -- the four expensive/
+  IO-bound ones are gated both by a config toggle and by whether the
+  requesting `RetrievalPlanner` instance was actually constructed with the
+  optional dependency each needs, with a runtime "not configured" reason
+  disclosed on the query trace when it wasn't.
 - Explicit model load-mode/pre-touch selection and a warm-model state
   machine: `ModelLoadMode`/`PreTouchLevel` chosen from measured storage and
   RAM evidence, and a `WarmModelState` machine layered onto the existing
@@ -505,7 +519,7 @@ section records the distinction.
 ## Project status
 
 Status below reflects the evidence recorded in
-[docs/PLAN.md](docs/PLAN.md) on **6 August 2026**.
+[docs/PLAN.md](docs/PLAN.md) on **18 August 2026**.
 
 | Phase | Area | Status |
 |---:|---|---|
@@ -536,17 +550,17 @@ Status below reflects the evidence recorded in
 | 24 | Advanced retrieval fan-out and adaptive query planning | Implementation complete; authored Release evaluation clears Phase 16 baseline |
 | 25 | Continuous inference batching and request scheduling | Implementation complete; backend activation remains calibrated and default-off |
 | 26 | Model loading, mapping, pre-touch, and warm-state management | Implementation complete; all selective pre-touch levels actionable |
-| 27 | KV-cache compression, placement, and lifecycle management | Accounting/placement/lifecycle implemented at a scoped-down level; compression and prefix sharing gated |
-| 28 | NUMA, processor-group, and topology-aware execution | Discovery and recommendation implemented at a scoped-down level; live affinity pending evidence |
-| 29 | Model tiering, routing, and cascade inference | Decision logic implemented at a scoped-down level; live chat routing/cascade execution pending |
+| 27 | KV-cache compression, placement, and lifecycle management | Accounting/placement/lifecycle, reduced-precision launch flags + quality-parity check, and cross-request prefix sharing all real; every admission stays explicit-administrator-gated (never self-enabling); chats can now be marked as shareable templates and `send_chat_message()` uses the shared-template reuse path in production once prefix sharing is admitted |
+| 28 | NUMA, processor-group, and topology-aware execution | Discovery and recommendation implemented; real thread-pinning now wired into every connection worker thread, gated on an off-by-default configuration flag plus the Phase 20 admission; live per-host benefit evidence (Phase 36) still pending |
+| 29 | Model tiering, routing, and cascade inference | Decision logic implemented; a live advisory `POST /api/v1/models/route` endpoint now consults it once tiers are configured; automatic chat-model routing/cascade execution still pending |
 | 30 | Memory deduplication and immutable shared-data architecture | Implemented at a scoped-down level |
-| 30A | CPU-only and GPU-disabled low-memory operation | Implemented; matched real-model benchmark matrix pending |
+| 30A | CPU-only and GPU-disabled low-memory operation | Implemented; matched real-model benchmark matrix recorded |
 | 31 | Storage tiering, virtual drives, and scratch-volume management | Implemented, including Priority B tier-migration tooling |
-| 32 | Speculative decoding and draft-model acceleration | Implemented; real dual-model launch path added, real-hardware throughput evidence pending |
+| 32 | Speculative decoding and draft-model acceleration | Implemented; real dual-model launch path measured on real hardware (negative result on this low-VRAM host) |
 | 33 | Distributed local runners and multi-device orchestration | Implemented; local runner pool and intranet mTLS worker protocol |
 | 34 | Adaptive performance controller | Implemented at a scoped-down level |
 | 35 | Performance administration interfaces | Implemented at a scoped-down level; one consolidated Performance page |
-| 36 | Full performance certification and regression gates | Implemented at a scoped-down level; real quality-plus-five-regression-check-group certification with threshold-gated build comparison, physical cross-device matrix remains an administrator-run exercise |
+| 36 | Full performance certification and regression gates | Implemented at a scoped-down level; real quality-plus-five-regression-check-group certification with threshold-gated build comparison, real evidence recorded on this host via `scripts/run-certification.ps1`; physical cross-device matrix remains an administrator-run exercise on further hosts |
 | 37 | Machine Learning module foundation | Implemented at a scoped-down level |
 | 38 | Machine Learning projects | Implemented at a scoped-down level |
 | 39 | ML model registry and dataset manager | Implemented at a scoped-down level |
@@ -556,13 +570,13 @@ Status below reflects the evidence recorded in
 | 43 | Evaluation Lab | Implemented; real tabular scoring harness (Phase 56) |
 | 44 | Experiment Tracking | Implemented at a scoped-down level initially; Phase 80 adds a real training/evaluation executor and side-by-side comparison |
 | 45 | Fine-Tuning Interface | Implemented at a scoped-down level; no fine-tuning executor |
-| 46 | Model Builder | Fully implemented (full section 9 design sheet, basic/advanced modes); no construction executor |
+| 46 | Model Builder | Fully implemented (full section 9 design sheet, basic/advanced modes); `POST .../run` hands a submitted configuration off to a real `TrainingJob` against the existing tabular trainer (the from-scratch architecture sheet is recorded but not consumed — no such trainer exists) |
 | 47 | Prompt and Instruction Training | Implemented at a scoped-down metadata level initially; Phase 81 adds the real content record, generation, multi-model testing, duplicate/contradiction detection, and structured-output validation |
 | 48 | Synthetic Data Generation | Implemented at a scoped-down metadata level initially; Phase 82 adds a real generation executor |
 | 49 | Embeddings and Vector Stores | Registry implemented; real local hashing-vector index added in Phase 59 |
 | 50 | Retrieval-Augmented Generation | Configuration implemented; real retrieval/context executor added in Phase 60 |
-| 51 | Subject Examination System | Implemented at a scoped-down record level; no exam administration |
-| 52 | Hyperparameter Optimization | Implemented at a scoped-down record level; no search executor |
+| 51 | Subject Examination System | Implemented at a scoped-down record level; `POST .../run` genuinely asks the target model each configured question and scores answers with a plain text-overlap heuristic, not "AI grading" |
+| 52 | Hyperparameter Optimization | Implemented at a scoped-down record level; `POST .../run` runs a real, bounded grid search over learning rate and epochs against the referenced training job's dataset |
 | 53 | Model Optimization | Implemented at a scoped-down record level; no optimizer executor |
 | 54 | Checkpoint Management | Implemented at a scoped-down retention-record level initially; Phase 79 adds real mid-training weight-snapshot capture and a resume-training executor |
 | 55 | Deployment Manager | Implemented at a scoped-down approval-record level initially; Phase 82 adds a real deploy/health/rollback executor |
@@ -596,6 +610,7 @@ Status below reflects the evidence recorded in
 | 83 | Safety and Governance roster completion | Implemented; no new executor needed — Phase 74's real content scanning and Phase 82's approval-gated deployment/inference enforcement already met the bar, so the roster entry moves from `planned` to `available`; added the missing `SafetyGovernanceStore`/`scan_content_for_risks` store-level test |
 | — | ML forms clarity pass | Implemented; hover/focus "?" hint bubbles on ambiguous fields (toggleable off per-browser from Machine Learning Settings), every remaining raw-ID text field converted to a named dropdown, and every remaining comma-separated multi-id field converted to a checkbox multi-select |
 | 84 | Agentic tool use in chat | Implemented at a first-increment level, not yet build/host validated; real `read_file`/`list_directory`/`search`/`write_file`/`delete_file`/`run_command` tools, an auto-drive mode ("confirm"/"implement"/"proceed"-style composer messages) that keeps a turn working a stated plan across turns with no further input until the model reports it done, mandatory Approve/Deny for destructive actions regardless of mode, and every tool call/result shown live in the transcript. Admin allow-list management routes/UI and MCP inbound exposure of the new tools are not yet implemented |
+| 85 | Inference and retrieval throughput tuning | Implemented, not yet build/host validated; evidence-based `--threads`/`--ubatch-size` launch tuning derived from the host's real core count (Phase 19's `thread_count`/`ubatch_tokens` fields existed since their introduction but were never populated until now); `CacheCategory::retrieval_result` actually wired into the live retrieval request path (the category and its serializer existed since Phase 17 but nothing had ever called them); parallel worker-pool dispatch for the semantic-embedding adapter's per-chunk embed calls and for model pre-touch; a cached (not rebuilt-per-call) dependency-graph map for the `dependency_neighbour` retrieval strategy |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -1018,6 +1033,22 @@ Run native security and hardware diagnostics:
 sh ./scripts/diagnose.sh ./config/settings.json Release
 ```
 
+### Certificate material for a future SSH transport
+
+`scripts/generate-ssh-certificates.ps1` generates a long-lived self-signed
+TLS certificate plus an `ed25519` SSH host key pair under
+`config/certificates/` (already excluded from version control, both via
+the existing `/config/` `.gitignore` rule and explicit `*.pem`/`*.key`/
+`*_host_key*` entries). This is preparation only -- no SSH inbound
+transport exists yet; MCP inbound currently supports `stdio` and
+Streamable HTTP (see [Command-line interface](#command-line-interface) and
+[MCP inbound](docs/PLAN.md)). Subject fields default to `Ultimanium
+Designs` / `Melbourne, Victoria, AU` and can be overridden:
+
+```powershell
+.\scripts\generate-ssh-certificates.ps1 -Organization "Your Org" -Locality "Your City" -ValidityDays 3650
+```
+
 ## Configuration
 
 For a complete, field-by-field explanation of every `config/settings.json`
@@ -1330,6 +1361,7 @@ masterai rollback <settings> <active> <receipt>
 masterai performance-probe [iterations]
 masterai index-probe <project-root> [index-root]
 masterai calibrate <settings> <model-id> <auto|minimal|balanced|performance>
+masterai speculative-benchmark <settings> <target-model-id> <draft-model-id> <quick|standard|extended>
 masterai security-status [runtime-root]
 ```
 

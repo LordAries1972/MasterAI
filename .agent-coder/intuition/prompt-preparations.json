@@ -2188,5 +2188,53 @@
     ],
     "estimatedTokens": 108,
     "preparedAt": "2026-08-12T01:21:40.226Z"
+  },
+  {
+    "requestId": "9aa6c4e3-0c4b-4fbd-b613-e8fc46f5ad22",
+    "taskType": "analyze-decision",
+    "strategyId": "verified-default",
+    "strategyVersion": 1,
+    "questionType": "generate_tests",
+    "appliedRuleIds": [],
+    "conflictCount": 0,
+    "componentSources": [
+      {
+        "id": "acceptance_criteria",
+        "source": "question builder",
+        "estimatedTokens": 40
+      },
+      {
+        "id": "constraints",
+        "source": "confirmed request and project governance",
+        "estimatedTokens": 1
+      },
+      {
+        "id": "stop_conditions",
+        "source": "question builder and safety policy",
+        "estimatedTokens": 19
+      },
+      {
+        "id": "validation_rules",
+        "source": "question builder",
+        "estimatedTokens": 18
+      },
+      {
+        "id": "current_state",
+        "source": "agent lifecycle",
+        "estimatedTokens": 13
+      },
+      {
+        "id": "response_format",
+        "source": "question builder",
+        "estimatedTokens": 16
+      },
+      {
+        "id": "token_limit",
+        "source": "token ceiling",
+        "estimatedTokens": 2
+      }
+    ],
+    "estimatedTokens": 109,
+    "preparedAt": "2026-08-17T12:32:04.532Z"
   }
 ]

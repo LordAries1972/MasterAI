@@ -35,6 +35,22 @@ namespace masterai {
 // declaration needs no more than that -- every caller that actually
 // constructs a std::vector<JsonValue> already includes json.hpp itself.
 class JsonValue;
+// Forward-declared for the same reason as JsonValue above: mcp_resource_search()
+// (declared near RetrievalStrategy below, defined in mcp_retrieval.cpp) only
+// needs these two by reference; their full definitions live later in this
+// same header, alongside the rest of the outbound-MCP client types.
+class McpOutboundRegistry;
+class McpOutboundGateway;
+// Forward-declared for semantic_embedding_search() (declared near
+// RetrievalStrategy below, defined in semantic_retrieval.cpp); full
+// definition is later in this header, alongside the rest of the cache types.
+class CacheManager;
+// Forward-declared so LaunchTuning (below) can carry a KvPrecision field;
+// full definition is later in this header, alongside the rest of the
+// Phase 27 KV-cache types. Scoped enums default to an `int` underlying type
+// even when forward-declared without one, so this is well-formed and must
+// stay consistent with the (also implicit-int) definition further down.
+enum class KvPrecision;
 
 enum class LogLevel { debug, info, warning, error };
 
@@ -315,6 +331,15 @@ struct AppConfig {
     std::uint64_t retrieval_maximum_context_bytes{16U * 1024U};
     std::uint32_t retrieval_maximum_chunks_per_source{6U};
     std::uint32_t retrieval_maximum_total_chunks{20U};
+    // Phase 24: per-strategy opt-outs for the three expensive/IO-bound
+    // adapters (a network round trip, an external MCP call, and a
+    // sandboxed subprocess respectively). The cheap heuristic strategies
+    // (call_graph, type_reference, dependency_neighbour, filename_path,
+    // recent_change) have no toggle, matching how filename_path/
+    // recent_change already had none before this pass.
+    bool retrieval_semantic_embedding_enabled{true};
+    bool retrieval_git_diff_enabled{true};
+    bool retrieval_mcp_resource_enabled{true};
     // Phase 17: security-partitioned cache hierarchy. Disabling it leaves
     // every request path exactly as it behaves without Phase 17 (always a
     // fresh RetrievalPlanner run, no reuse).
@@ -326,8 +351,19 @@ struct AppConfig {
     // until EOS/stop-sequence, which is what "max_tokens" is meant to be --
     // a safety ceiling, not a target length. Bounded by the runner's own
     // hard policy ceiling (32768, RunnerSupervisor::generate()).
-    std::uint32_t chat_max_reply_tokens{8192U};
-    std::uint32_t chat_context_length{4096U};
+    // 2026-08-18: both defaults raised well above their original
+    // introductory values (8192/4096) -- a 4096-token context budget is
+    // exhausted almost immediately once a chat carries any real history,
+    // an attached document, or a tool result (Phase 84), forcing the
+    // prompt-fit clamp at send_chat_message's assemble step to shrink
+    // max_tokens far below what a real multi-step task needs. 32768/16384
+    // gives a large working budget out of the box while staying well under
+    // both hard policy ceilings above (1,048,576 / 32,768) and remaining
+    // adjustable per-install via Settings -> Inference in the web UI
+    // (POST /api/v1/admin/config) for hardware that can go higher, or
+    // needs to go lower.
+    std::uint32_t chat_max_reply_tokens{16384U};
+    std::uint32_t chat_context_length{32768U};
     // Phase 18: runner prompt-prefix / KV-session reuse. Off by default --
     // see docs/PLAN.md Phase 18 -- until a same-host repeated-turn benchmark
     // records the exit-criterion evidence, matching how other real-model
@@ -363,6 +399,24 @@ struct AppConfig {
     // WorkerModeConfig's class comment. Disabled by default; every existing
     // deployment stays loopback-only and unaffected.
     WorkerModeConfig worker_mode;
+    // Phase 28: opt-in NUMA-local thread placement -- see
+    // TopologyAffinityPolicy's comment and recommend_thread_placement().
+    // Off by default, matching the plan's "applied only where measurement
+    // shows benefit -- not pinned by default": an administrator enables this
+    // only after Phase 36 benchmark-matrix evidence justifies it on their
+    // host, and even then recommend_thread_placement() still no-ops on any
+    // single-NUMA-node host. Also gated at the call site by the Phase 20
+    // "numa_affinity" AdvancedOptimizationRegistry admission, so both an
+    // explicit evidence-backed admission and this configuration flag are
+    // required before any thread affinity is actually pinned.
+    bool numa_local_placement_enabled{false};
+    // Phase 29: administrator-declared tier -> registered-model-id
+    // membership (keys are ModelTier's to_string() spelling: e.g.
+    // "small_fast", "medium_general"). Empty (the default) means no tier is
+    // configured, so ModelRouter has nothing to select from and the
+    // advisory routing/cascade-escalation surface stays fully inert --
+    // every existing deployment that never sets this is unaffected.
+    std::map<std::string, std::vector<std::string>> model_tier_assignments;
 };
 
 class ConfigurationManager final {
@@ -543,6 +597,13 @@ ThreadPlacementRecommendation recommend_thread_placement(
 // pin. Not invoked by any code path in this pass -- see the scope note
 // above.
 bool apply_current_thread_to_numa_node(unsigned int numa_node_id);
+
+// Real on Windows (GetSystemPowerStatus's ACLineStatus == 0); a documented
+// false everywhere else and whenever the OS call itself fails, matching
+// apply_current_thread_to_numa_node()'s "no silent guess" convention. Feeds
+// both AdaptiveSignalSnapshot::on_battery_power (Phase 34) and the
+// TopologyAffinityPolicy on_battery_power argument (Phase 28).
+bool probe_on_battery_power();
 
 std::string to_string(ThreadClass klass);
 std::string hardware_topology_json(const HardwareTopology& topology);
@@ -1987,6 +2048,11 @@ private:
 std::string to_string(ModelTier tier);
 std::string to_string(ResidentModelProfile profile);
 std::string to_string(EscalationReason reason);
+// Inverse of to_string(ModelTier) -- throws std::invalid_argument on any
+// spelling that isn't one of the five declared tiers. Used both to validate
+// AppConfig::model_tier_assignments keys at load time and to build the
+// ModelRouter's tier_models_ map from that configuration.
+ModelTier parse_model_tier(const std::string& text);
 
 class ModelRegistry final {
 public:
@@ -2212,6 +2278,13 @@ unsigned int select_gpu_layers(const HardwareInfo& hardware,
                                const std::string& required_gpu_backend,
                                std::uint64_t model_size_bytes) noexcept;
 
+// Phase 85: evidence-based --threads/--ubatch-size recommendations. See
+// their definitions in calibration.cpp for the full rationale; declared here
+// (rather than kept file-local) so calibration tests can exercise them
+// directly, matching select_gpu_layers()'s own visibility.
+unsigned int select_thread_count(const HardwareInfo& hardware) noexcept;
+unsigned int select_ubatch_tokens(unsigned int context_length) noexcept;
+
 // Phase 19: optional backend-launch tuning a calibration profile can
 // recommend. Every field's default reproduces exactly what
 // build_launch_spec() emitted before Phase 19 (no GPU-layer flag, mmap left
@@ -2250,6 +2323,13 @@ struct LaunchTuning {
     // failure rather than a distinct diagnostic.
     std::filesystem::path speculative_draft_model_file;
     unsigned int speculative_draft_gpu_layers{0};
+    // Phase 27: reduced-precision KV cache. Left at its implicit default
+    // (KvPrecision::full, see the enum's definition further down) for every
+    // caller that hasn't explicitly resolved a non-full precision through
+    // KvCacheManager::precision_admitted() -- build_launch_spec() only ever
+    // emits the corresponding --cache-type-k/v flags for a caller that
+    // explicitly set this, it never decides admission itself.
+    KvPrecision kv_precision{};
 };
 
 // Forward declaration only: RunnerSupervisor below stores an optional
@@ -2848,6 +2928,14 @@ struct ChatRecord {
     // a snapshot yet get one on their first post-upgrade message.
     bool memory_context_initialized{false};
     std::string memory_context;
+    // Phase 27: marks this chat as a shareable public prompt template.
+    // Off by default -- only an owner/administrator explicitly marking a
+    // chat this way (see ChatStore::set_shared_template()) lets
+    // send_chat_message() attempt the KvCacheManager::admit_prefix_sharing()
+    // -gated PromptSessionManager::try_reuse_shared_template()/
+    // record_shared_template() path instead of (in addition to) the
+    // ordinary private per-chat try_reuse()/record() path.
+    bool is_shared_template{false};
     std::vector<ChatMessage> messages;
 };
 
@@ -2885,6 +2973,11 @@ public:
     // into the same 404 find_for_owner()'s callers already return.
     bool set_model(const std::string& chat_id, const std::string& owner_id,
                    const std::string& model_id);
+    // Phase 27: marks/unmarks a chat as a shareable public prompt template.
+    // Owner-scoped like set_model() above -- returns false (no-op) if the
+    // chat doesn't exist or isn't owned by owner_id.
+    bool set_shared_template(const std::string& chat_id,
+                             const std::string& owner_id, bool shared);
     std::optional<ChatRecord> find_for_owner(const std::string& chat_id,
                                              const std::string& owner_id) const;
     // Newest first, so callers can split "recent" from "history" by index
@@ -3210,6 +3303,16 @@ struct TuningProfile {
     unsigned int recommended_parallel_slots{1U};
     unsigned int recommended_batch_tokens{0};
     unsigned int recommended_gpu_layers{0};
+    // Phase 85: --threads/--ubatch-size were plumbed all the way through
+    // LaunchTuning/build_launch_spec() since Phase 19 but never actually
+    // populated by resolve()/calibrate() -- both stayed at LaunchTuning's
+    // default of 0, so llama-server's own (often conservative) default
+    // thread count was used regardless of the host's real core count. These
+    // two fields close that gap; see select_thread_count()/
+    // select_ubatch_tokens() in calibration.cpp for the evidence-based
+    // derivation. 0 keeps meaning "no override" for a pre-Phase-33 profile.
+    unsigned int recommended_thread_count{0};
+    unsigned int recommended_ubatch_tokens{0};
     bool recommended_allow_memory_map{true};
     bool recommended_allow_memory_lock{false};
     std::uint32_t recommended_idle_unload_seconds{600U};
@@ -4434,6 +4537,20 @@ struct ModelBuilderConfig {
     std::string owner_id;
     ModelBuilderConfigStatus status{ModelBuilderConfigStatus::draft};
     ModelBuilderSettings settings;
+    // This pass (closing Phase 46's real-executor gap): the dataset
+    // run_model_builder_config() (server.cpp) hands to TrainingJobStore::
+    // create() when this configuration is submitted. Optional at draft/
+    // configuring time -- an administrator may still be designing settings
+    // before picking training data -- but required before submission,
+    // since the hand-off trainer cannot train on nothing; submission fails
+    // clearly rather than silently if it is still empty.
+    std::string dataset_id;
+    // Set by run_model_builder_config() on a successful submission: the id
+    // of the real TrainingJob this configuration produced. Empty until
+    // then. This is how a "submitted" ModelBuilderConfig points at the
+    // genuine job doing the actual training, instead of submission being a
+    // status flip with nothing real behind it.
+    std::string resulting_training_job_id;
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -4447,7 +4564,8 @@ public:
                               const std::string& base_model_id,
                               const std::string& name,
                               const std::string& description,
-                              const std::string& source_type);
+                              const std::string& source_type,
+                              const std::string& dataset_id = {});
     std::optional<ModelBuilderConfig> find(const std::string& id) const;
     std::vector<ModelBuilderConfig> list() const;
     bool set_status(const std::string& id, ModelBuilderConfigStatus status);
@@ -4456,6 +4574,16 @@ public:
     // partial merge semantics are unnecessary). Returns false for an unknown
     // id; throws std::invalid_argument for out-of-range values.
     bool configure(const std::string& id, const ModelBuilderSettings& settings);
+    // This pass: lets an administrator attach/change the target dataset
+    // after creation (the web UI's build-settings form flow finalizes a
+    // dataset choice alongside the rest of the settings, not necessarily at
+    // creation time). Returns false for an unknown id.
+    bool set_dataset(const std::string& id, const std::string& dataset_id);
+    // Called by run_model_builder_config() (server.cpp) once submission
+    // has created the real TrainingJob -- records which job now owns the
+    // actual training. Returns false for an unknown id.
+    bool attach_training_job(const std::string& id,
+                             const std::string& training_job_id);
     bool remove(const std::string& id);
 
 private:
@@ -4468,6 +4596,16 @@ private:
 
 std::string model_builder_config_json(const ModelBuilderConfig& config);
 std::string model_builder_configs_json(const std::vector<ModelBuilderConfig>& configs);
+
+// docs/PLAN.md section 9: "The interface must provide basic and advanced
+// configuration modes" -- those two modes are the whole closed set, and the
+// two fractional settings have hard numeric ranges, so configure() rejects
+// out-of-range values instead of persisting nonsense. Declared here (rather
+// than staying file-local to ml.cpp) so run_model_builder_config()
+// (server.cpp) can re-validate a stored configuration's settings at
+// submission time using the exact same rule configure() already enforced
+// at save time, instead of duplicating the checks.
+void validate_model_builder_settings(const ModelBuilderSettings& settings);
 
 // Phase 47: docs/PLAN.md "Machine Learning Abilities" section 19 (Prompt and
 // Instruction Training). Every instruction example targets one dataset
@@ -4889,6 +5027,21 @@ struct SubjectExam {
     std::string question_format;
     std::string owner_id;
     SubjectExamStatus status{SubjectExamStatus::draft};
+    // This pass (closing Phase 51's real-executor gap): the exam's real
+    // question bank, as a JSON array of {"questionText","expectedAnswer"}
+    // objects -- free-form JSON text, the same precedent
+    // ModelBuilderConfig's build settings and Experiment's
+    // hyperparameters_json already set for this store family, rather than
+    // a separate per-question store, since an exam's question count is
+    // small and always wanted together with the rest of the record. Set
+    // via SubjectExamStore::set_questions() below, not create(), the same
+    // create-then-configure split ModelBuilderConfigStore::configure()
+    // already uses.
+    std::string questions_json;
+    // Fraction [0.0, 1.0] of questions a run must answer correctly to pass
+    // -- administrator-configurable per exam, defaulting to a reasonable
+    // 0.7 (70%) rather than an all-or-nothing 1.0.
+    double passing_threshold{0.7};
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -4905,6 +5058,16 @@ public:
     std::optional<SubjectExam> find(const std::string& id) const;
     std::vector<SubjectExam> list() const;
     bool set_status(const std::string& id, SubjectExamStatus status);
+    // Replaces an exam's question bank and passing threshold wholesale,
+    // the same replace-wholesale semantics ModelBuilderConfigStore::
+    // configure() uses for build settings. questions_json must parse as a
+    // JSON array of at least one {"questionText","expectedAnswer"} object
+    // -- run_subject_exam() (server.cpp) is the only real consumer, and an
+    // exam with no real questions cannot be honestly administered. Throws
+    // std::invalid_argument on a malformed bank or an out-of-range
+    // threshold; returns false for an unknown id.
+    bool set_questions(const std::string& id, const std::string& questions_json,
+                       double passing_threshold);
     bool remove(const std::string& id);
 
 private:
@@ -4917,6 +5080,40 @@ private:
 
 std::string subject_exam_json(const SubjectExam& exam);
 std::string subject_exams_json(const std::vector<SubjectExam>& exams);
+
+// The real outcome of one run_subject_exam() (server.cpp) execution --
+// which model was examined, the real per-question pass/fail detail, the
+// score, and whether it cleared the exam's passing_threshold -- as one
+// opaque pre-built JSON blob, keyed by SubjectExam id. The same
+// identity/content-split, latest-run-wins shape ExperimentResultStore
+// already uses for a different real executor's output (an exam may be
+// re-run against different models over time; only the latest run's result
+// is kept, matching that precedent exactly rather than inventing history-
+// keeping semantics nothing else in this codebase provides).
+class SubjectExamResultStore final {
+public:
+    SubjectExamResultStore() = default;
+    explicit SubjectExamResultStore(RecordStore& records);
+    void put(const std::string& exam_id, const std::string& result_json);
+    std::optional<std::string> find(const std::string& exam_id) const;
+    bool remove(const std::string& exam_id);
+
+private:
+    RecordStore* records_{nullptr};
+};
+
+// A heuristic, not semantic grading: true when `generated_answer`
+// (case-insensitive, whitespace-collapsed) contains `expected_answer` as a
+// substring, or -- when `expected_answer` is short (at most six
+// whitespace-separated tokens, e.g. a single word/number/short phrase
+// answer) -- when every one of its tokens appears as a whole word
+// somewhere in `generated_answer`. The same class of plain, inspectable
+// text-overlap check `instruction_examples_are_near_duplicate()` above
+// already uses for a different judgment, not a fabricated "AI grading"
+// capability. Returns false for an empty expected answer (nothing
+// meaningful to check).
+bool subject_exam_answer_matches(const std::string& generated_answer,
+                                 const std::string& expected_answer);
 
 // Phase 52: docs/PLAN.md "Machine Learning Abilities" section 26
 // (Hyperparameter Optimization). Scoped down from the section's full
@@ -4960,6 +5157,40 @@ struct HyperparameterSearch {
     std::string strategy;
     std::string owner_id;
     HyperparameterSearchStatus status{HyperparameterSearchStatus::draft};
+    // This pass (closing Phase 52's real-executor gap): the two ranges
+    // run_hyperparameter_search() (server.cpp) actually searches, as a
+    // small JSON object -- e.g. {"learningRate":{"min":0.01,"max":0.2},
+    // "epochs":{"min":50,"max":200}}. Free-form JSON text, the same
+    // precedent Experiment's hyperparameters_json field already set on
+    // this store family, rather than a typed struct, since the executor
+    // parses it directly with JsonValue. An empty value means "use the
+    // executor's own documented default range". Only learning_rate and
+    // epochs are exposed -- the only two TabularTrainingOptions fields
+    // (src/masterai.hpp) that genuinely change what train_tabular_model()
+    // learns; test_fraction/seed change the evaluation split, not the
+    // search, so they are not tunable knobs here.
+    std::string search_space_json;
+    // Administrator-requested trial budget; the executor always caps the
+    // real number of trials run at kMaxHyperparameterTrials (20,
+    // server.cpp) regardless of this value, so a request can never trigger
+    // unbounded compute.
+    std::uint32_t max_trials{10};
+    // Real per-trial results (learning rate, epochs, and the measured
+    // held-out score) as a JSON array, written by run_hyperparameter_
+    // search() after every genuine train_tabular_model()/
+    // evaluate_tabular_model() trial -- the same free-form-JSON-output
+    // precedent as ModelBuilderConfig's settings persistence, kept on this
+    // flat record rather than a separate result store since the whole
+    // trial history is small and always wanted together with the summary
+    // fields below.
+    std::string trials_json;
+    double best_learning_rate{0.0};
+    std::uint32_t best_epochs{0};
+    // Held-out accuracy (classification) or R-squared (regression) of the
+    // best trial -- the real evaluate_tabular_model() metric, never an
+    // interpolated or fabricated number.
+    double best_score{0.0};
+    std::uint32_t trials_run{0};
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -4972,10 +5203,18 @@ public:
                                 const std::string& training_job_id,
                                 const std::string& name,
                                 const std::string& description,
-                                const std::string& strategy);
+                                const std::string& strategy,
+                                const std::string& search_space_json = {},
+                                std::uint32_t max_trials = 10U);
     std::optional<HyperparameterSearch> find(const std::string& id) const;
     std::vector<HyperparameterSearch> list() const;
     bool set_status(const std::string& id, HyperparameterSearchStatus status);
+    // Called by run_hyperparameter_search() (server.cpp) once a real
+    // search has finished -- persists the real trial history and the best
+    // trial's real parameters/score. Returns false for an unknown id.
+    bool record_result(const std::string& id, const std::string& trials_json,
+                       double best_learning_rate, std::uint32_t best_epochs,
+                       double best_score, std::uint32_t trials_run);
     bool remove(const std::string& id);
 
 private:
@@ -5030,6 +5269,14 @@ struct ModelOptimizationRun {
     std::string operation;
     std::string owner_id;
     ModelOptimizationStatus status{ModelOptimizationStatus::draft};
+    // Phase 53/72 unification: the magnitude-pruning threshold
+    // run_model_optimization() passes to prune_tabular_model() when
+    // operation == "pruning" (the only operation with a real executor
+    // today). Administrator-supplied at creation time; defaults to the
+    // same 1e-3 the Phase 72 Automation Pipeline "Optimize" stage
+    // previously hardcoded, so existing pipeline-triggered runs behave
+    // identically.
+    double pruning_threshold{1e-3};
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -5042,7 +5289,8 @@ public:
                                 const std::string& model_id,
                                 const std::string& name,
                                 const std::string& description,
-                                const std::string& operation);
+                                const std::string& operation,
+                                double pruning_threshold = 1e-3);
     std::optional<ModelOptimizationRun> find(const std::string& id) const;
     std::vector<ModelOptimizationRun> list() const;
     bool set_status(const std::string& id, ModelOptimizationStatus status);
@@ -6165,6 +6413,12 @@ struct SafetyPolicy {
     std::string restricted_data_categories;
     std::string owner_id;
     SafetyPolicyStatus status{SafetyPolicyStatus::pending};
+    // Admin-only toggle: when false, scan_content_for_risks() skips this
+    // policy's restricted_data_categories check (see ml_safety_scan.cpp).
+    // The unconditional secret-token and prompt-injection-phrase scans are
+    // never gated by this flag -- only the policy's own configured terms
+    // can be turned off, not the baseline scans.
+    bool enforcement_enabled{true};
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -6196,6 +6450,7 @@ public:
     std::optional<SafetyPolicy> find_policy(const std::string& id) const;
     std::vector<SafetyPolicy> list_policies() const;
     bool set_policy_status(const std::string& id, SafetyPolicyStatus status);
+    bool set_policy_enforcement(const std::string& id, bool enabled);
     bool remove_policy(const std::string& id);
 
     ModelCard create_model_card(const std::string& owner_id,
@@ -6919,6 +7174,25 @@ public:
     // matching chunks whose path contains `path_fragment` as a substring.
     std::vector<IndexChunk> search_path(const std::string& path_fragment,
                                         std::size_t maximum_results) const;
+    // Phase 24: call_graph adapter -- heuristic call-site scan (see
+    // src/indexing.cpp's call_site_match for exactly what counts as a call
+    // site). Not a parser; scope is C++/Python/JavaScript/TypeScript.
+    std::vector<IndexChunk> search_calls(const std::string& symbol,
+                                         std::size_t maximum_results) const;
+    // Phase 24: type_reference adapter -- heuristic type-position scan (see
+    // type_reference_match in src/indexing.cpp).
+    std::vector<IndexChunk> search_type_usage(const std::string& type_name,
+                                              std::size_t maximum_results) const;
+    // Phase 24: dependency_neighbour adapter -- heuristic import/include
+    // graph built on the fly from every chunk's text (see
+    // import_targets_for in src/indexing.cpp); no persisted dependency data.
+    std::vector<IndexChunk> search_dependency_neighbours(
+        const std::string& anchor_relative_path,
+        std::size_t maximum_results) const;
+    // Phase 24: bounded full enumeration -- needed by the semantic_embedding
+    // adapter, which must consider every chunk rather than ones matching a
+    // literal.
+    std::vector<IndexChunk> all_chunks(std::size_t maximum_results) const;
     IndexStatus status() const;
 
 private:
@@ -6983,6 +7257,21 @@ public:
     IndexSearchResult search_path(const std::string& project_id,
                                   const std::string& path_fragment,
                                   std::size_t maximum_results) const;
+    // Phase 24: call_graph/type_reference/dependency_neighbour/full-
+    // enumeration adapters -- same generation/availability contract as the
+    // lookups above; see ProjectIndexer's declarations for what each does.
+    IndexSearchResult search_calls(const std::string& project_id,
+                                   const std::string& symbol,
+                                   std::size_t maximum_results) const;
+    IndexSearchResult search_type_usage(const std::string& project_id,
+                                        const std::string& type_name,
+                                        std::size_t maximum_results) const;
+    IndexSearchResult search_dependency_neighbours(
+        const std::string& project_id,
+        const std::string& anchor_relative_path,
+        std::size_t maximum_results) const;
+    IndexSearchResult all_chunks(const std::string& project_id,
+                                 std::size_t maximum_results) const;
 
 private:
     class State;
@@ -7010,23 +7299,24 @@ private:
     std::unique_ptr<State> state_;
 };
 
-// Phase 24: every retrieval strategy the planner knows about. The first
-// group has a working adapter today (either since Phase 16, or added by
-// Phase 24 against index metadata already tracked by indexing.cpp); the
-// second group is intentionally declared but has no adapter wired to it
-// yet (no embedding model, no MCP resource plumbing, no call-graph/type
-// index, no git integration, no cross-session memory store exist in this
-// codebase) -- retrieval_strategy_has_adapter() is the single source of
-// truth callers use to decide whether a strategy can ever run, and
-// RetrievalPlanner records a "no adapter" skip reason on every disabled
-// entry rather than silently ignoring it or faking results for it.
+// Phase 24: every retrieval strategy the planner knows about. Every entry
+// now has a real adapter (retrieval_strategy_has_adapter() -- this build can
+// execute all of them). The four below the recency boost are also gated at
+// runtime on an optional per-instance dependency this planner may or may not
+// have been constructed with (an embedding runner, an MCP registry/gateway,
+// a user memory store) -- a planner instance missing one of those records a
+// dynamic "not configured for this instance" skip reason instead of running
+// the strategy, distinct from (and layered on top of) the static
+// build-capability question retrieval_strategy_has_adapter() answers. See
+// RetrievalPlanner's class comment and retrieve_uncached() in retrieval.cpp.
 enum class RetrievalStrategy {
     exact_symbol,
     exact_text,
     lexical,
     filename_path,
     recent_change,
-    // Declared but disabled: no adapter exists in-repo yet.
+    // Real adapters, each gated at runtime on an optional planner
+    // dependency (see RetrievalPlanner's constructor).
     semantic_embedding,
     mcp_resource,
     call_graph,
@@ -7035,6 +7325,43 @@ enum class RetrievalStrategy {
     dependency_neighbour,
     conversation_memory
 };
+
+// Phase 24: git_diff adapter -- shells out to the system `git` binary
+// (sandboxed via run_sandboxed_process(), see src/git_retrieval.cpp) for
+// uncommitted changes, falling back to the most recent commit's diff when
+// the working tree is clean. Returns an empty result (not an error) whenever
+// `project_root` isn't a git working tree or `git` can't be run.
+std::vector<IndexChunk> git_diff_search(const std::filesystem::path& project_root,
+                                        std::size_t maximum_results,
+                                        std::uint64_t max_total_bytes = 32U * 1024U);
+
+// Phase 24: mcp_resource adapter -- lists and reads resources on outbound
+// MCP servers enabled/authorized for `project_id` through the existing
+// McpOutboundRegistry/McpOutboundGateway (mcp_outbound.cpp), keeping only
+// resources whose uri/name lexically matches `query_tokens`. Performs no
+// authorization decision itself -- McpOutboundGateway::invoke() already
+// enforces the registry's rules on every call. Best-effort: a server that
+// fails to list/read is silently skipped (see src/mcp_retrieval.cpp).
+std::vector<IndexChunk> mcp_resource_search(
+    McpOutboundRegistry& registry, McpOutboundGateway& gateway,
+    const std::string& requester_id, const std::set<std::string>& requester_scopes,
+    const std::string& project_id, const std::vector<std::string>& query_tokens,
+    std::size_t maximum_results, std::atomic_bool& cancellation);
+
+// Phase 24: semantic_embedding adapter -- real cosine-similarity search over
+// `candidates`' embeddings (computed through embedding_runner.embed(), the
+// same POST /v1/embeddings backend call RunnerSupervisor already makes for
+// Phase 21's knowledge index). `cache`, when non-null, memoizes each
+// candidate's embedding under CacheCategory::embedding keyed by chunk
+// digest; nullptr still works, just re-embeds every call. Bounded by
+// `deadline` -- stops considering further candidates (not mid-computation)
+// once it passes, returning whatever was already scored. See
+// src/semantic_retrieval.cpp.
+std::vector<IndexChunk> semantic_embedding_search(
+    RunnerSupervisor& embedding_runner, CacheManager* cache,
+    const std::string& project_id, const std::vector<IndexChunk>& candidates,
+    const std::string& query_text, std::size_t maximum_results,
+    std::chrono::steady_clock::time_point deadline);
 
 std::string to_string(RetrievalStrategy strategy);
 // True only for strategies this build can actually execute.
@@ -7079,6 +7406,12 @@ struct RetrievalRequest {
     // these fields matches, so joining can never cross an authorization or
     // project boundary.
     std::string requester_id;
+    // Phase 24: only consulted by the mcp_resource adapter, forwarded
+    // verbatim into McpOutboundCall::actor_scopes so
+    // McpOutboundGateway::invoke() authorizes each call against the
+    // requester's real scopes rather than an implicit "trust everything"
+    // default. Every other adapter ignores this field.
+    std::set<std::string> requester_scopes;
     std::uint64_t policy_generation{0};
     std::string query_text;
     std::chrono::milliseconds deadline{1500};
@@ -7086,6 +7419,15 @@ struct RetrievalRequest {
     std::uint64_t maximum_chunks_per_source{6U};
     std::uint64_t maximum_total_chunks{20U};
     RetrievalPriority priority{RetrievalPriority::interactive};
+    // Phase 24: per-strategy opt-outs for the three expensive/IO-bound
+    // adapters, mirrored from AppConfig::retrieval_semantic_embedding_enabled/
+    // retrieval_git_diff_enabled/retrieval_mcp_resource_enabled by the
+    // caller that builds this request (see server.cpp) -- defaulting true
+    // here too so a test/fixture that never sets these keeps every
+    // strategy this planner instance has a live dependency for.
+    bool semantic_embedding_enabled{true};
+    bool git_diff_enabled{true};
+    bool mcp_resource_enabled{true};
 };
 
 // One disclosed piece of evidence: which file/offset it came from, which
@@ -7128,32 +7470,45 @@ struct RetrievalOutcome {
     std::vector<std::string> disabled_strategy_reasons;
 };
 
-// Chooses the least expensive sufficient index-backed strategy across an
-// explicit staged list (cheap-exact symbol/exact-text first, lexical/path
-// second, remaining enabled strategies -- currently just the recent-change
-// recency boost -- last), running independent strategy steps across bounded
+// Chooses the least expensive sufficient strategy across an explicit staged
+// list (cheap-exact symbol/exact-text first, lexical/path/heuristic
+// call-graph/type-reference second, the expensive/IO-bound strategies --
+// semantic embedding, MCP resource, conversation memory, git diff -- next,
+// then the always-on post-fusion boosts -- recent-change and dependency-
+// neighbour -- last), running independent strategy steps across bounded
 // parallel workers with a hard wall-clock deadline and sticky sufficiency
-// (once any stage finds evidence, later, more expensive stages are skipped
-// entirely). On expiry it stops launching further steps and returns
-// whatever evidence bounded workers already produced rather than blocking;
-// it never performs a security or membership decision itself -- callers
-// must have already authorized the caller against `project` before calling
-// retrieve(). Semantic/embedding, MCP-resource, call-graph, type-reference,
-// git-diff, dependency-neighbour, and conversation-memory strategies remain
-// forward work (see RetrievalStrategy) -- this planner covers every
-// strategy that Phase 15's disk-backed index can actually serve today, plus
-// Phase 24's own in-flight de-duplication of identical concurrent requests.
+// (once any candidate-generating stage finds evidence, later, more
+// expensive candidate-generating stages are skipped entirely). On expiry it
+// stops launching further steps and returns whatever evidence bounded
+// workers already produced rather than blocking; it never performs a
+// security or membership decision itself -- callers must have already
+// authorized the caller against `project` before calling retrieve(), and
+// every optional adapter dependency below (embedding runner, MCP
+// registry/gateway, memory store) is itself never an authorization
+// decision-maker either. Every RetrievalStrategy (see enum above) now has a
+// real adapter; the four expensive/IO-bound ones only run when this
+// instance was constructed with their optional dependency -- a planner
+// built without one records a runtime "not configured for this instance"
+// skip reason instead of silently omitting the strategy (see
+// retrieve_uncached()'s stamp_common in retrieval.cpp).
 class RetrievalPlanner final {
 public:
-    // Phase 30: `memory` is optional (nullable) so every existing test
-    // fixture and call site that predates this pass keeps compiling and
-    // behaving exactly as before -- pass nullptr to opt out of the
-    // fusion-candidate pool's MemoryBudgetManager accounting entirely (the
-    // pool itself still works identically either way, since bytes_reserved()
-    // registration is a diagnostic side effect of BudgetTrackedPool, not a
-    // correctness dependency of RetrievalCandidate fusion).
+    // Every dependency after `indexes` is optional (nullable) so every
+    // existing test fixture and call site keeps compiling and behaving
+    // exactly as before -- pass nullptr for any adapter this planner
+    // instance shouldn't (or, in a test, doesn't need to) run. `memory`
+    // (Phase 30) accounts the fusion-candidate pool; `user_memory` backs
+    // conversation_memory; `embedding_runner`+`embedding_cache` back
+    // semantic_embedding (embedding_cache alone, with no runner, is never
+    // used); `mcp_registry`+`mcp_gateway` back mcp_resource (both are
+    // required together -- either alone is treated as "not configured").
     explicit RetrievalPlanner(ProjectIndexService& indexes,
-                              MemoryBudgetManager* memory = nullptr);
+                              MemoryBudgetManager* memory = nullptr,
+                              UserMemoryStore* user_memory = nullptr,
+                              RunnerSupervisor* embedding_runner = nullptr,
+                              CacheManager* embedding_cache = nullptr,
+                              McpOutboundRegistry* mcp_registry = nullptr,
+                              McpOutboundGateway* mcp_gateway = nullptr);
     RetrievalOutcome retrieve(const RetrievalRequest& request) const;
     // Diagnostic only (mirrors SharedBuffer::use_count()'s convention):
     // counts how many times retrieve_uncached() actually ran, so tests can
@@ -7168,6 +7523,11 @@ private:
 
     ProjectIndexService& indexes_;
     MemoryBudgetManager* memory_{nullptr};
+    UserMemoryStore* user_memory_{nullptr};
+    RunnerSupervisor* embedding_runner_{nullptr};
+    CacheManager* embedding_cache_{nullptr};
+    McpOutboundRegistry* mcp_registry_{nullptr};
+    McpOutboundGateway* mcp_gateway_{nullptr};
     mutable std::atomic<std::uint64_t> uncached_invocations_{0};
     // Phase 24: request-key -> shared_future join table. The leader (first
     // caller to observe a given key with nothing in flight) actually runs
@@ -7988,19 +8348,18 @@ struct SessionDecision {
 // reservation, and deterministic eviction ordering, layered over the same
 // slot identity PromptSessionManager (Phase 18/23) already tracks.
 //
-// Scope note (docs/PLAN.md Phase 27): reduced-precision KV (half/quantized)
-// and the cross-request prefix-tree sharing the plan describes both
-// explicitly "require backend-validated support before any precision
-// change is admitted" / must "never expose private conversation KV state
-// across unauthorized boundaries" -- this codebase launches llama.cpp as an
-// external process and has not validated either against it, so both stay
-// declared-but-disabled here, following the exact honesty convention
-// AdvancedOptimizationRegistry (Phase 20) already established: recording
-// evidence is supported and tested, but it can never itself flip a
-// precision policy or prefix-sharing on. What ships working and tested this
-// pass: per-slot/layer accounting by context length, token count, dtype,
-// and CPU/GPU/split placement; bounded-growth-step reservation against a
-// hard per-slot ceiling; and the plan's deterministic eviction order.
+// Scope note (docs/PLAN.md Phase 27), updated this pass: reduced-precision
+// KV and cross-request prefix-tree sharing are now real, backend-validated
+// mechanisms (--cache-type-k/v launch flags in models.cpp;
+// run_kv_precision_quality_check() in src/kv_quality.cpp; shared-template
+// prefix lookup in PromptSessionManager, session_cache.cpp) rather than
+// pure accounting scaffolding -- but recording evidence (or building the
+// shared-prefix mechanism) still never self-enables anything, exactly as
+// AdvancedOptimizationRegistry (Phase 20) established. `precision_admitted()`
+// and `prefix_sharing_admitted()` both stay false until an administrator
+// calls `admit_precision()`/`admit_prefix_sharing()` explicitly, after
+// reviewing recorded evidence -- there is no automatic threshold or
+// evidence count that flips either gate on its own.
 enum class KvPrecision { full, half, quantized_k, quantized_v };
 enum class KvPlacement { cpu, gpu, split };
 enum class KvSlotState { active, idle, failed_cancelled, expired };
@@ -8046,9 +8405,19 @@ struct KvPrecisionEvidence {
 
 class KvCacheManager final {
 public:
+    // `records`, when non-null, persists admit_precision()/
+    // admit_prefix_sharing()'s admission state (never per-slot accounting,
+    // which is process-lifetime only, same rationale as
+    // PromptSessionManager) across a MasterAI restart -- mirroring
+    // AdvancedOptimizationRegistry's own RecordStore-backed admission
+    // persistence (Phase 20), so an administrator's explicit admission
+    // decision does not silently reset on every restart. nullptr (the
+    // default) keeps every existing call site/test compiling and behaving
+    // exactly as before: admission state is then process-lifetime only.
     KvCacheManager(MemoryBudgetManager& memory,
                   std::uint64_t hard_max_bytes_per_slot,
-                  std::uint64_t growth_step_bytes);
+                  std::uint64_t growth_step_bytes,
+                  RecordStore* records = nullptr);
     ~KvCacheManager();
     KvCacheManager(const KvCacheManager&) = delete;
     KvCacheManager& operator=(const KvCacheManager&) = delete;
@@ -8075,9 +8444,28 @@ public:
     static std::string to_json(const std::vector<KvSlotAccounting>& slots);
 
     // Backend-validated reduced-precision admission gate; see class-level
-    // scope note. Always false for non-full precision in this pass.
+    // scope note. Always true for KvPrecision::full; for any other value,
+    // true only after an administrator has explicitly called
+    // admit_precision() for that exact precision -- recording evidence
+    // alone (record_precision_evidence()) never flips this.
     bool precision_admitted(KvPrecision precision) const;
     void record_precision_evidence(const KvPrecisionEvidence& evidence);
+    std::vector<KvPrecisionEvidence> precision_evidence() const;
+    // Administrator-only explicit admission action -- see class-level scope
+    // note. Not gated on evidence existing (an administrator may have
+    // validated it out of band), but every production call site (see
+    // server.cpp's admin KV precision admission route) requires the
+    // administrator role before reaching here.
+    void admit_precision(KvPrecision precision);
+
+    // Cross-request prefix-tree sharing admission gate (docs/PLAN.md Phase
+    // 27's "cross-request prefix-tree sharing" deliverable). False until an
+    // administrator explicitly calls admit_prefix_sharing() -- see
+    // PromptSessionManager::try_reuse_shared_template() (session_cache.cpp),
+    // which consults this gate before ever resolving a shared-template
+    // prefix lookup across different chats/users.
+    bool prefix_sharing_admitted() const;
+    void admit_prefix_sharing();
 
 private:
     class State;
@@ -8087,6 +8475,32 @@ private:
 std::string to_string(KvPrecision precision);
 std::string to_string(KvPlacement placement);
 std::string to_string(KvSlotState state);
+
+// Phase 27: real backend-validated quality-parity check -- both runners
+// must already be loaded (one at KvPrecision::full, one at
+// `candidate_precision`) against the same model/context by the caller; this
+// function only runs `authored_prompts` through both and compares. See
+// src/kv_quality.cpp. Never called by anything that itself decides
+// admission -- the resulting KvPrecisionEvidence is for a human to review.
+KvPrecisionEvidence run_kv_precision_quality_check(
+    RunnerSupervisor& full_precision_runner, RunnerSupervisor& candidate_runner,
+    KvPrecision candidate_precision,
+    const std::vector<std::string>& authored_prompts,
+    const std::string& backend_hash);
+
+// Phase 27: identity for a cross-request shareable prefix. Deliberately
+// carries no chat_id/user_id -- see try_reuse_shared_template()'s comment
+// below for why that absence is the actual security property.
+struct SharedTemplateKey {
+    std::string prefix_content_sha256;
+    std::string model_sha256;
+    std::uint64_t policy_generation{0};
+    std::set<std::string> authorized_roles;
+
+    // Stable, order-independent serialization used as the internal lookup
+    // key -- authorized_roles is a std::set so this is already sorted.
+    std::string to_key() const;
+};
 
 class PromptSessionManager final {
 public:
@@ -8139,6 +8553,27 @@ public:
     // is gone with it).
     void reset();
     std::size_t active_sessions() const;
+
+    // Phase 27: cross-request prefix-tree sharing for explicitly-marked
+    // public templates -- a second, deliberately separate lookup from
+    // try_reuse() above. Keyed on (prefix content hash, model fingerprint,
+    // policy generation, authorized role set) -- never chat_id or user_id --
+    // so two different users under the *same* admin-approved policy/role
+    // can share a slot only for the byte-identical public prefix; a private
+    // (non-template) prompt never enters this lookup at all, since callers
+    // decide what counts as a "template" and only ever call these two
+    // methods for that explicit, opt-in case. Both refuse outright
+    // (SessionInvalidationReason::no_prior_session, reuse=false) unless
+    // `prefix_sharing_admitted` is true -- the caller is expected to pass
+    // `kv_cache.prefix_sharing_admitted()`, so this mechanism existing at
+    // all never itself turns cross-user sharing on.
+    SessionDecision try_reuse_shared_template(
+        const SharedTemplateKey& key, const std::string& generation_prompt,
+        bool prefix_sharing_admitted) const;
+    unsigned int record_shared_template(
+        const SharedTemplateKey& key, const std::string& generation_prompt,
+        std::optional<unsigned int> reused_slot,
+        std::optional<std::uint64_t> prompt_token_count = std::nullopt);
 
 private:
     class State;

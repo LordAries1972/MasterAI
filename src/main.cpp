@@ -62,6 +62,17 @@ ResolvedModel resolve_model_or_throw(const masterai::AppConfig& configuration,
     return ResolvedModel{std::move(hardware), std::move(*found)};
 }
 
+// Shared by benchmark-model, calibrate's sibling speculative-benchmark, and
+// any future benchmark-profile command: all three accept the same
+// quick/standard/extended vocabulary and must reject anything else the same
+// way.
+masterai::BenchmarkProfile parse_benchmark_profile(const std::string& text) {
+    if (text == "quick") return masterai::BenchmarkProfile::quick;
+    if (text == "standard") return masterai::BenchmarkProfile::standard;
+    if (text == "extended") return masterai::BenchmarkProfile::extended;
+    throw std::runtime_error("benchmark profile is invalid");
+}
+
 const char* model_state_name(const masterai::ModelState state) noexcept {
     switch (state) {
         case masterai::ModelState::discovered: return "discovered";
@@ -116,6 +127,8 @@ void show_usage() {
         << "  masterai index-probe <project-root> [index-root]\n"
         << "  masterai calibrate <settings> <model-id> "
            "<auto|minimal|balanced|performance>\n"
+        << "  masterai speculative-benchmark <settings> <target-model-id> "
+           "<draft-model-id> <quick|standard|extended>\n"
         << "  masterai security-status [runtime-root]\n";
 }
 
@@ -657,16 +670,7 @@ int main(int argc, char* argv[]) {
                 throw std::runtime_error(
                     "inference.llamaServerExecutable is not configured");
             }
-            const std::string profile_text(argv[4]);
-            const auto profile =
-                profile_text == "quick"
-                    ? masterai::BenchmarkProfile::quick
-                    : (profile_text == "standard"
-                           ? masterai::BenchmarkProfile::standard
-                           : (profile_text == "extended"
-                                  ? masterai::BenchmarkProfile::extended
-                                  : throw std::runtime_error(
-                                        "benchmark profile is invalid")));
+            const auto profile = parse_benchmark_profile(argv[4]);
             const auto resolved = resolve_model_or_throw(
                 configuration, argv[3], "benchmark model was not found");
             const auto& hardware = resolved.hardware;
@@ -754,6 +758,128 @@ int main(int argc, char* argv[]) {
                       << profile.average_gpu_utilization_percent << '\n'
                       << "peakGpuTemperatureCelsius\t"
                       << profile.peak_gpu_temperature_celsius << '\n';
+            return 0;
+        }
+        if (command == "speculative-benchmark") {
+            // Phase 32 real-hardware evidence: masterai calibrate/benchmark-
+            // model never set LaunchTuning::speculative_draft_model_file, so
+            // the dual-model (draft+target) launch path in
+            // LlamaCppAdapter::build_launch_spec (src/models.cpp) has never
+            // actually been exercised end to end. This command runs the same
+            // BenchmarkRunner suite twice against the same target model --
+            // once with default LaunchTuning{} (today's ordinary single-
+            // model launch, the "off" baseline) and once with
+            // speculative_draft_model_file pointing at a second, compatible
+            // model (the "on" run, mirroring exactly how src/server.cpp's
+            // live chat pipeline populates LaunchTuning once
+            // check_draft_target_compatibility() and
+            // decide_speculative_decoding_for_request() have both approved
+            // the pair) -- so the printed delta is a real measurement of the
+            // dual-model launch path, not a simulated estimate.
+            if (argc != 6) {
+                throw std::runtime_error(
+                    "speculative-benchmark requires settings, target model "
+                    "ID, draft model ID, and a profile "
+                    "(quick, standard, or extended)");
+            }
+            const auto configuration =
+                load_operational_configuration(argv[2]);
+            if (configuration.llama_server_executable.empty()) {
+                throw std::runtime_error(
+                    "inference.llamaServerExecutable is not configured");
+            }
+            const auto profile = parse_benchmark_profile(argv[5]);
+            const auto target = resolve_model_or_throw(
+                configuration, argv[3], "target model was not found");
+            const auto draft = resolve_model_or_throw(
+                configuration, argv[4], "draft model was not found");
+            const auto compatibility = masterai::check_draft_target_compatibility(
+                target.model.manifest, draft.model.manifest);
+            if (!compatibility.compatible) {
+                std::string reasons;
+                for (const auto& reason : compatibility.incompatibility_reasons) {
+                    if (!reasons.empty()) reasons += "; ";
+                    reasons += reason;
+                }
+                throw std::runtime_error(
+                    "target and draft models are not compatible for "
+                    "speculative decoding: " + reasons);
+            }
+            const auto& hardware = target.hardware;
+            const auto hardware_id = hardware.platform + "-" +
+                                     hardware.architecture + "-" +
+                                     std::to_string(hardware.logical_cpu_count);
+            masterai::RecordStore records(configuration.runtime_root / "database");
+            records.open();
+            masterai::BenchmarkStore store(records);
+
+            masterai::RunnerSupervisor baseline_inference(
+                configuration.llama_server_executable,
+                configuration.runtime_root);
+            baseline_inference.load(target.model, 4096U,
+                                    configuration.runner_port);
+            masterai::BenchmarkRunner baseline_runner(baseline_inference, store);
+            const auto baseline_record = baseline_runner.run(
+                argv[3], "llama.cpp-b10156", "masterai-0.1.0", hardware_id,
+                profile, stop_requested);
+            baseline_inference.unload();
+
+            masterai::LaunchTuning tuning;
+            tuning.speculative_draft_model_file =
+                draft.model.directory / draft.model.manifest.model_file;
+            masterai::RunnerSupervisor speculative_inference(
+                configuration.llama_server_executable,
+                configuration.runtime_root);
+            // Dual-model cold load (target + draft, both warming up) is
+            // measurably slower than a single-model load on modest hardware
+            // (observed: still warming up past the 30s default on an 8GB/
+            // 4GB-VRAM host) -- use the configured startup timeout rather
+            // than the single-model default so this doesn't spuriously fail
+            // readiness on exactly the low-resource hosts this benchmark
+            // matters most for.
+            speculative_inference.load(
+                target.model, 4096U, configuration.runner_port,
+                configuration.runner_startup_timeout_seconds, 1U, tuning,
+                configuration.accelerator_policy);
+            masterai::BenchmarkRunner speculative_runner(speculative_inference,
+                                                         store);
+            const auto speculative_record = speculative_runner.run(
+                argv[3], "llama.cpp-b10156", "masterai-0.1.0", hardware_id,
+                profile, stop_requested);
+            speculative_inference.unload();
+
+            const auto tokens_per_second =
+                [](const masterai::BenchmarkRecord& record) {
+                    return record.elapsed_microseconds == 0U
+                               ? 0.0
+                               : static_cast<double>(record.generated_tokens) *
+                                     1'000'000.0 /
+                                     static_cast<double>(
+                                         record.elapsed_microseconds);
+                };
+            const auto baseline_tps = tokens_per_second(baseline_record);
+            const auto speculative_tps = tokens_per_second(speculative_record);
+            std::cout << std::fixed << std::setprecision(2);
+            std::cout << "targetModel\t" << argv[3] << '\n'
+                      << "draftModel\t" << argv[4] << '\n'
+                      << "hardwareId\t" << hardware_id << '\n'
+                      << "baselineGeneratedTokens\t"
+                      << baseline_record.generated_tokens << '\n'
+                      << "baselineElapsedMicroseconds\t"
+                      << baseline_record.elapsed_microseconds << '\n'
+                      << "baselineTokensPerSecond\t" << baseline_tps << '\n'
+                      << "speculativeGeneratedTokens\t"
+                      << speculative_record.generated_tokens << '\n'
+                      << "speculativeElapsedMicroseconds\t"
+                      << speculative_record.elapsed_microseconds << '\n'
+                      << "speculativeTokensPerSecond\t" << speculative_tps
+                      << '\n'
+                      << "throughputDeltaPercent\t"
+                      << (baseline_tps == 0.0
+                              ? 0.0
+                              : (speculative_tps - baseline_tps) * 100.0 /
+                                    baseline_tps)
+                      << '\n';
             return 0;
         }
         if (command == "security-status") {

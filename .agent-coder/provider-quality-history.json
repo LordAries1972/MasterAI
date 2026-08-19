@@ -550,5 +550,17 @@
     "failed": false,
     "id": "c396eba5-6596-4fd6-8a40-0b8e5e2d9c44",
     "recordedAt": "2026-08-12T01:21:44.336Z"
+  },
+  {
+    "requestId": "9aa6c4e3-0c4b-4fbd-b613-e8fc46f5ad22",
+    "provider": "claude",
+    "model": "claude-sonnet-5",
+    "taskShape": "multiFilePlanning",
+    "latencyMs": 62523,
+    "inputTokens": 6520,
+    "outputTokens": 4090,
+    "failed": false,
+    "id": "ecdcfec5-6c9c-47ff-bec2-c4444ea4bf47",
+    "recordedAt": "2026-08-17T12:33:07.527Z"
   }
 ]

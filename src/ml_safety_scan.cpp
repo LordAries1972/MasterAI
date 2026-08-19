@@ -129,7 +129,9 @@ void scan_prompt_injection(const std::string& text,
 }
 
 // Splits a SafetyPolicy's comma-separated restricted_data_categories and
-// searches for each term verbatim (case-insensitive) in `text`.
+// searches for each term verbatim (case-insensitive) in `text`. Callers
+// must check policy.enforcement_enabled before calling this -- it is not
+// checked here so this function stays a pure term search.
 void scan_restricted_terms(const std::string& text, const SafetyPolicy& policy,
                            std::vector<ContentScanFinding>& findings) {
     const auto haystack = lower(text);
@@ -160,9 +162,14 @@ void scan_restricted_terms(const std::string& text, const SafetyPolicy& policy,
 ContentScanReport scan_content_for_risks(const std::string& text,
                                          const SafetyPolicy* policy) {
     ContentScanReport report;
+    // Secret-token and prompt-injection-phrase scanning are the baseline
+    // and always run, regardless of any policy's enforcement_enabled flag
+    // -- only a policy's own configured restricted terms can be disabled.
     scan_secret_tokens(text, report.findings);
     scan_prompt_injection(text, report.findings);
-    if (policy != nullptr) scan_restricted_terms(text, *policy, report.findings);
+    if (policy != nullptr && policy->enforcement_enabled) {
+        scan_restricted_terms(text, *policy, report.findings);
+    }
     return report;
 }
 

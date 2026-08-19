@@ -347,7 +347,17 @@ Current phase status:
   restart, and shut down gracefully. No optional candidate is currently
   admitted: candidate implementations and measurements remain independently
   gated, exactly as this optional phase requires, rather than being
-  misrepresented as enabled throughput.
+  misrepresented as enabled throughput. **`numa_affinity`'s
+  `implementation_available` is now `true` (2026-08-19)** — see the Phase 28
+  status entry: every per-connection worker thread in `src/server.cpp` now
+  calls `recommend_thread_placement()`/`apply_current_thread_to_numa_node()`
+  when both this registry admits `numa_affinity` AND the new
+  `AppConfig::numa_local_placement_enabled` configuration flag is set. Still
+  not admitted by default (an administrator must separately record evidence
+  and call `admit()`), and `recommend_thread_placement()` itself still
+  no-ops on any single-NUMA-node host. `numa_affinity` and
+  `multiple_warm_runners` remain the two candidates with no real
+  implementation at all.
 - Phase 21: Implementation complete (2026-08-05) — native
   asynchronous storage and prefetch engine. `Win32OverlappedFileReader`
   (IOCP) on Windows and a bounded `PosixPreadPoolReader` fallback on POSIX
@@ -432,6 +442,22 @@ Current phase status:
   discipline from Phase 20) since this codebase has not validated either
   against the external llama.cpp backend it launches. Priority B (accounting/
   placement, delivered) with Priority C precision/prefix-sharing still gated.
+  **Cross-request prefix-tree sharing is now wired into the live chat path
+  (2026-08-19)**: `ChatRecord` gained an `is_shared_template` field
+  (`src/masterai.hpp`, persisted as a 9th packed header field in
+  `src/workflows.cpp`'s `ChatStore::restore()`/`persist_header()`) and a new
+  owner-scoped `ChatStore::set_shared_template()`/`POST
+  /api/v1/chats/{id}/shared-template` route. `send_chat_message()`
+  (`src/server.cpp`) now branches: when a chat is marked shared AND an
+  administrator has separately called `kv_cache->admit_prefix_sharing()`, it
+  builds a `SharedTemplateKey` (prefix hash of the template chat's first
+  message, model sha256, `cache->current_policy_generation()`, the caller's
+  role) and calls `try_reuse_shared_template()`/`record_shared_template()`
+  instead of the private per-chat `try_reuse()`/`record()` pair; otherwise
+  behavior is unchanged. Both this per-chat opt-in and the separate
+  evidence-backed KV admission are required, matching this codebase's
+  multi-layer opt-in convention (see Phase 20/28). Reduced-precision KV
+  stays declared-but-disabled as described above.
 - Phase 28: Implemented at a scoped-down level (2026-08-01) — NUMA,
   processor-group, and hybrid-core topology awareness. `probe_hardware_topology()`
   (`src/topology.cpp`) enumerates packages, NUMA nodes, Windows processor
@@ -445,7 +471,21 @@ Current phase status:
   thread's startup in this pass — the plan requires affinity be applied only
   where per-host measurement shows benefit, and that measurement is Phase
   36's still-Planned benchmark matrix. Priority C; superset of the Phase 20
-  NUMA candidate.
+  NUMA candidate. **The pinning primitive is now wired into a real call
+  site (2026-08-19)**: every per-connection worker thread in
+  `src/server.cpp` calls `recommend_thread_placement()`/
+  `apply_current_thread_to_numa_node()` once at thread startup, gated on
+  both the new `AppConfig::numa_local_placement_enabled` configuration flag
+  (off by default -- see `docs/architecture/configuration.md`'s `topology`
+  section) and the Phase 20 `numa_affinity` `AdvancedOptimizationRegistry`
+  admission, so this remains a true no-op until an administrator both
+  enables the flag and admits real per-host evidence; `recommend_thread_
+  placement()` itself still no-ops on any single-NUMA-node host. A new real
+  `probe_on_battery_power()` (Win32 `GetSystemPowerStatus`) also now feeds
+  both this call site's `on_battery_power` argument and Phase 34's
+  `AdaptiveSignalSnapshot::on_battery_power`, closing a second honest gap
+  (that field was previously always `false`). The Phase 36 benchmark-matrix
+  measurement dependency for actually enabling the flag remains outstanding.
 - Phase 29: Implemented at a scoped-down level (2026-08-01) — model tiering,
   routing, and cascade inference decision logic. `ModelRouter`
   (`src/model_routing.cpp`) selects the cheapest of five declared tiers
@@ -463,7 +503,21 @@ Current phase status:
   so a real request is transparently routed and, on escalation, re-run
   against a second warm runner is out of scope this pass — that needs Phase
   26 warm-state management driving which tiers stay resident, itself only
-  scoped-down. Priority B.
+  scoped-down. Priority B. **`ModelRouter` is now wired into a live,
+  advisory server endpoint (2026-08-19)**: a new administrator-declared
+  `AppConfig::model_tier_assignments` configuration section (`modelRouting.
+  tiers`, keyed by the five `ModelTier` spellings; parsed/validated via a
+  new `parse_model_tier()`) builds a real `ModelRouter` member at server
+  startup, and a new `POST /api/v1/models/route` endpoint runs
+  `select_initial_tier()` against caller-supplied `RoutingSignals` plus live
+  `probe_hardware()` RAM/VRAM figures, returning the recommended tier/model.
+  This closes "the router is fully implemented but never consulted by the
+  live server" — it is now genuinely consulted on request. It remains
+  advisory only in this pass: the response is a recommendation the caller
+  can act on, not an automatic chat-model switch, and
+  `evaluate_cascade()`-driven automatic escalation-with-rerun into
+  `send_chat_message()` is still not wired — that remains the real
+  outstanding gap and still needs the Phase 26 warm-state work named above.
 - Phase 30: Implemented at a scoped-down level (2026-08-01) — immutable
   shared buffers, request-scoped arenas, and zero-copy streaming.
   `SharedBuffer`/`BufferView`/`MappedBufferView`/`ChunkReference`/
@@ -718,7 +772,19 @@ Current phase status:
   disclosed, not yet wired to an automatic call site" pattern Phase 26/28
   already established (e.g. Phase 28's topology-aware thread-pinning
   primitive). Administrator-only routes: `GET /api/v1/performance/adaptive`,
-  `POST .../mode`, `POST .../ceilings`, `POST .../rollback`.
+  `POST .../mode`, `POST .../ceilings`, `POST .../rollback`. **Correction and
+  extension (2026-08-19)**: the previous entry above overstated this --
+  before this pass `evaluate()` only ever computed `idle_unload_seconds`
+  among the disclosed-only knobs; `thread_count`/`gpu_offload` are now also
+  computed and pushed to `proposed_not_yet_applied` (gated on
+  `signals.on_battery_power` -- now a real, non-always-false signal via the
+  new `probe_on_battery_power()`, see Phase 28 -- or sustained
+  high/critical memory pressure). `signals.on_battery_power` is populated
+  with a real value at the one existing call site (`GET
+  /api/v1/performance/adaptive` in `src/server.cpp`). Prefetch distance,
+  cache quotas, batch size, warm-up policy, NUMA policy, KV placement, and
+  background-job rate remain entirely uncomputed (not merely unapplied) --
+  still the honest remaining gap.
 - Phase 35: Implemented at a scoped-down level (2026-08-13; extended
   2026-08-13, this pass) — one consolidated "Performance" administration
   page (`/app/performance`, `src/web_ui.cpp`) rather than the plan's full
@@ -851,7 +917,13 @@ Current phase status:
   reads as above, and whatever accelerator mode the current launch actually
   used, recorded from `RunnerMetrics` rather than assumed); an
   administrator runs the matrix across whichever further axes their real
-  hardware supports.
+  hardware supports. **2026-08-18: `scripts/run-certification.ps1` runbook
+  added, and two real fingerprint-matched certification runs recorded on
+  this host** (`llama32-1b-instruct-q4km`, GTX 960M) — the second run
+  compared cleanly against the first across all seven metrics (accepted),
+  proving the whole recorded-evidence-vs-baseline path end to end, not just
+  its unit-tested pieces. See `docs/validation/phase-36-certification-
+  runbook.md`.
 - Phase 37: Implemented at a scoped-down level (2026-08-01) — the Machine
   Learning module foundation described in the "Machine Learning Abilities"
   section below. A new administrator-only `ml.dashboard.view` permission
@@ -1081,6 +1153,45 @@ Current phase status:
   exclusion list adds it accordingly. The build-settings record describes
   the intended build; the model-construction executor that consumes it is
   a separate future phase.
+  **Submission is no longer intent-only (2026-08-19)**: this codebase has
+  no from-scratch, architecture-configurable neural network trainer -- only
+  the existing tabular linear/logistic/softmax-regression trainer
+  (`train_tabular_model`, `src/ml_engine.cpp`) that `TrainingJob` already
+  drives. Rather than fabricate a fake deep-learning executor claiming to
+  honor `ModelBuilderSettings`' architecture/hidden-dimension/attention/
+  optimiser/scheduler fields, submitting a configuration now hands off to
+  that same real trainer via a genuine `TrainingJob`: `ModelBuilderConfig`
+  gained `dataset_id` (administrator-supplied, threaded through `create()`
+  as a new optional trailing parameter so every existing caller keeps
+  compiling) and `resulting_training_job_id` (set on a successful
+  submission), plus `ModelBuilderConfigStore::set_dataset()`/
+  `attach_training_job()`. `validate_model_builder_settings()` moved out of
+  `src/ml.cpp`'s anonymous namespace and is now declared in
+  `src/masterai.hpp` so the new free function `run_model_builder_config()`
+  (`src/server.cpp`, file-scope, beside `run_model_optimization()`) can
+  re-run the exact same range checks `configure()` already applies at save
+  time before creating the job. A missing dataset or a settings validation
+  failure leaves the configuration's status untouched (`ModelBuilderConfig
+  Status` has no "failed" state -- it is a design-time draft/review
+  lifecycle, not a job lifecycle) so an administrator can fix the problem
+  and resubmit; a successful submission calls `TrainingJobStore::create()`
+  with the configuration's project/base-model/dataset/name/description and
+  its free-text `source_type` as the job's `training_type`, attaches the
+  new job's id, and moves the configuration to its existing terminal
+  `submitted` status. New `POST /api/v1/ml/model-builder-configs/{id}/run`
+  route (administrator-only `ml.modelbuilder.manage`, same permission the
+  other routes already use) returns the real `{"status","detail"}` outcome.
+  `ModelBuilderSettings`' from-scratch-architecture fields (architecture,
+  hidden dimensions, attention configuration, optimiser, learning-rate
+  scheduler, ...) stay on the record for a human to read, but the resulting
+  `TrainingJob` does **not** consume them -- there is no executor in this
+  codebase that understands a custom architecture/hidden-dimension/
+  attention configuration, and this is a permanent, honest scope limit, not
+  a bug to fix later (see `docs/ToDo.md`). `test_machine_learning_model_
+  builder_lifecycle` gained coverage for the new `dataset_id` creation
+  parameter, `set_dataset()`/`attach_training_job()`, their reload/JSON
+  round-trip, and direct calls into the now-public
+  `validate_model_builder_settings()`.
 - Phase 47: Implemented at a scoped-down level (2026-08-04) — Prompt and
   Instruction Training (section 19 below), scoped down to identity, the
   dataset each example targets, a free-text subject classification, and a
@@ -1236,6 +1347,49 @@ Current phase status:
   `test_machine_learning_foundation_dashboard`'s fixed exclusion list
   stays frozen at Phase 42's interface set, so this phase changes nothing
   there.
+  **`POST .../{id}/run` is no longer intent-only (2026-08-19)**: `SubjectExam`
+  gained a real question bank -- `questions_json` (a JSON array of
+  `{"questionText","expectedAnswer"}` objects, set wholesale via the new
+  `SubjectExamStore::set_questions()`, the same create-then-configure split
+  `ModelBuilderConfigStore::configure()` already uses; validated as
+  non-empty, well-formed JSON at set time) -- and a `passing_threshold`
+  (fraction of questions a run must answer correctly, default `0.7`), both
+  threaded through `restore()`/`persist()` the same way `ModelOptimizationRun
+  ::pruning_threshold` was added in Phase 53's own gap-closing pass; legacy
+  six-field records restore with an empty bank and the in-struct-default
+  threshold. New `POST /api/v1/ml/subject-exams/{id}/questions` route sets
+  the bank/threshold. The new member function `run_subject_exam()`
+  (`src/server.cpp`, a *member* of `HttpServer::State` rather than a
+  file-scope free function like `run_model_optimization()`/
+  `run_model_builder_config()`/`run_hyperparameter_search()`, because it
+  must call `execute_rag_generation()` -- the same non-chat, single-turn
+  generation path Phase 76's RAG route and Phase 74's classifier scan
+  already use -- which itself needs deep access to `inference`/`memory`/
+  `request_scheduler`) asks the exam's target model each configured
+  question for real, then scores every answer with the new
+  `subject_exam_answer_matches()` (`masterai.hpp`/`src/ml.cpp`): a plain,
+  case-insensitive substring/whole-token-overlap heuristic, deliberately
+  **not** an "AI grading" claim -- this codebase has no LLM-judge path
+  wired for this purpose (Phase 74's classifier scans content for risk
+  categories, a different task), so none is fabricated. A question the
+  model fails to answer counts as failed, not skipped. The real per-
+  question detail, score, and pass/fail against `passing_threshold` are
+  persisted via the new `SubjectExamResultStore` (`masterai.hpp`/
+  `src/ml.cpp`) -- the same opaque-JSON-blob, latest-run-wins shape
+  `ExperimentResultStore` already established, since an exam may be
+  re-run against different models over time. New `POST /api/v1/ml/subject-
+  exams/{id}/run` (body: `{"modelId": "..."}`) and
+  `GET /api/v1/ml/subject-exams/{id}/result` routes (same
+  `ml.subjectexams.manage`/`.view` permissions as the other routes).
+  Running an exam does **not** change `SubjectExamStatus` -- that remains
+  a reviewer-approval lifecycle for the exam's authored content, not a run
+  lifecycle, so an approved exam may be run repeatedly against different
+  models without its approval status changing. `test_machine_learning_
+  subject_exam_lifecycle` gained coverage for `set_questions()` and its
+  validation, `subject_exam_answer_matches()`'s substring/token-overlap/
+  case-insensitivity/empty-answer behavior, `SubjectExamResultStore`'s
+  put/find/remove/overwrite semantics, the new fields' reload/JSON
+  round-trip, and legacy-record restore.
 - Phase 52: Implemented at a scoped-down level (2026-08-05) —
   Hyperparameter Optimization (section 26 below), scoped down to identity,
   a mandatory `training_job_id` referencing a `TrainingJobStore` entry (a
@@ -1262,6 +1416,41 @@ Current phase status:
   The dashboard roster's `hyperparameter-optimization` interface entry
   intentionally still reports `planned`, exactly as Phases 43-51 left
   their own roster entries.
+  **`POST .../{id}/run` is no longer intent-only (2026-08-19)**: of
+  section 26's full tunable search space, only two knobs genuinely change
+  what the real trainer learns -- `TabularTrainingOptions::learning_rate`
+  and `::epochs` (`src/masterai.hpp`); `test_fraction`/`seed` change the
+  evaluation split rather than the search, so they stay out of scope.
+  `HyperparameterSearch` gained `search_space_json` (an optional JSON
+  object narrowing the learning-rate/epoch ranges, validated as parseable
+  JSON at `create()` time), `max_trials` (administrator-requested budget,
+  range-checked into [1, 20] at `create()`), and the real-executor output
+  fields `trials_json`/`best_learning_rate`/`best_epochs`/`best_score`/
+  `trials_run`, plus `HyperparameterSearchStore::record_result()` to
+  persist them (all threaded through `create()`/`persist()`/`restore()`
+  the same way `ModelOptimizationRun::pruning_threshold` was added in
+  Phase 53's own gap-closing pass; legacy six-field records restore with
+  in-struct defaults). The new free function `run_hyperparameter_search()`
+  (`src/server.cpp`, file-scope, beside `run_model_optimization()`) looks
+  up the referenced `TrainingJob` and its uploaded dataset content, resolves
+  the search space (or a documented default range), then runs a genuine
+  bounded grid search: `floor(sqrt(min(max_trials, 20)))` steps per
+  dimension, so the real trial count run never exceeds the request or the
+  `kMaxHyperparameterTrials = 20` hard cap. Every trial actually calls
+  `train_tabular_model()` against the dataset and scores the result with
+  the real `evaluate_tabular_model()` held-out metric (accuracy for
+  classification, R-squared for regression) -- never a fabricated or
+  interpolated score; a trial that fails to train is skipped, not counted
+  as a zero. The best-scoring trial's real parameters/score are persisted
+  via `record_result()` and the search moves to `completed` (or `failed`,
+  with the status genuinely used this time, if the job/dataset is missing,
+  the search space is malformed/out of range, or every trial fails). New
+  `POST /api/v1/ml/hyperparameter-searches/{id}/run` route (same
+  `ml.hyperparams.manage` permission as the other routes) returns the real
+  `{"status","detail"}` outcome. `test_machine_learning_hyperparameter_
+  search_lifecycle` gained coverage for the new `search_space_json`/
+  `max_trials` creation parameters and their validation, `record_result()`,
+  the new fields' reload/JSON round-trip, and legacy-record restore.
 - Phase 53: Implemented at a scoped-down level (2026-08-05) — Model
   Optimization (section 28 below), scoped down to identity, a mandatory
   `model_id` referencing a `ModelRegistryStore` entry (an optimization run
@@ -1283,6 +1472,25 @@ Current phase status:
   52's test, plus the required-model-id rule. The dashboard roster's
   `model-optimization` interface entry intentionally still reports
   `planned`, exactly as Phases 43-52 left their own roster entries.
+  **The standalone interface is no longer intent-only for its one real
+  operation (2026-08-19)**: `ModelOptimizationRun` gained a
+  `pruning_threshold` field (administrator-supplied at creation via a new
+  optional `pruningThreshold` request field, default `1e-3`), and a new
+  shared free function `run_model_optimization()` (`src/server.cpp`,
+  file-scope, right before `ascii_lower()`) does the real work the Phase 72
+  Automation Pipeline's "Optimize" stage previously did only for itself:
+  looks up the target `TrainedModelStore` entry, and for `operation ==
+  "pruning"` (still the only operation with a real executor) calls the
+  existing `prune_tabular_model()`, persists the pruned weights, and sets a
+  terminal status; any other `operation` value now fails clearly instead of
+  silently completing. Both the Phase 72 pipeline stage and the standalone
+  `POST /api/v1/ml/model-optimizations/{id}/status` handler (when the
+  requested status is `running`) now call this same function, so a
+  standalone-created run with `operation: "pruning"` genuinely prunes the
+  referenced model, returning the real status/detail in the response body.
+  Quantization/distillation/graph-optimization/etc. remain intent-only --
+  the honest gap is now narrowed to "no executor exists for those
+  operations" rather than "no executor exists for any operation."
 - Phase 54: Implemented at a scoped-down level (2026-08-05) — Checkpoint
   Management (section 33 below), scoped down to identity, a mandatory
   `training_job_id` referencing a `TrainingJobStore` entry (a checkpoint
@@ -2332,6 +2540,59 @@ Current phase status:
   `test_machine_learning_real_training_and_prediction` (`test/tests.cpp`):
   a JSON array and the equivalent JSONL text produce byte-identical CSV, a
   missing field renders as an empty cell, and a nested field is rejected.
+- Phase 85: Implemented (2026-08-19) — targeted inference/retrieval
+  throughput work, prompted by a real cold-load/generation-speed complaint
+  on a 3-5GB model host. Closes two gaps `LaunchTuning::thread_count`/
+  `ubatch_tokens` had carried since Phase 19 without ever being populated:
+  `CalibrationService::resolve()`/`calibrate()` now compute real
+  `--threads`/`--ubatch-size` recommendations from the host's actual
+  physical-core count and configured context length
+  (`select_thread_count()`/`select_ubatch_tokens()`, `src/calibration.cpp`)
+  instead of silently falling back to llama-server's own default thread
+  count regardless of hardware; `TuningProfile` gained the two matching
+  persisted fields (schema 30 -> 32, old records restore with them at 0 --
+  "no override", identical to today's behavior). `RetrievalPlanner::
+  retrieve_uncached()` (`src/retrieval.cpp`) now actually reads/writes
+  `CacheCategory::retrieval_result` -- the category and its (de)serializer
+  already existed and were proven correct by `benchmark_retrieval_cache()`,
+  but nothing on the real request path had ever called them, so every
+  retrieval re-ran its full multi-stage scan even for a repeated identical
+  query against an unchanged index generation; a cached entry is only ever
+  written for a complete (non-partial) outcome that drew no evidence from a
+  strategy whose result can change without any index republication
+  (`mcp_resource`, `git_diff`, `conversation_memory` are excluded by
+  inspecting the outcome's own disclosure sources, not just trusting the
+  request's enable flags). `semantic_embedding_search()`
+  (`src/semantic_retrieval.cpp`) dispatches its per-chunk embed/cache round
+  trip across a small bounded worker pool instead of one HTTP call at a
+  time -- `RunnerSupervisor::embed()` opens an independent socket per call
+  with no shared mutable state, so this is safe with no change to its
+  cache-hit behavior. `search_dependency_neighbours()`
+  (`src/indexing.cpp`) now caches its file->import-target edge map on
+  `ProjectIndexer::State`, rebuilt only when the published index generation
+  actually advances instead of on every call. `pre_touch_model_file()`
+  (`src/calibration.cpp`) now splits its range list across a bounded worker
+  pool instead of touching pages one range at a time; note this closes a
+  real gap in the function itself, but as of this pass the production
+  `RunnerSupervisor::load()` call site (`src/inference.cpp`) still only
+  invokes it for `metadata`/`first_use`/`layer_window` pre-touch (`full`
+  pre-touch is realized through `--mlock` on the backend side instead, per
+  that call site's existing comment), so the parallel path's real-world
+  benefit is currently limited to `layer_window`'s up-to-8-range case and
+  whatever future caller invokes `full` pre-touch directly. Deliberately
+  scoped out after reading the code: the `exact_symbol`/`call_graph`/
+  `type_reference` per-token stages in `retrieve_uncached()` were **not**
+  parallelized despite an initial research pass flagging them, because the
+  existing Phase 24 comment directly above them documents that a worker
+  pool costs more than the in-memory probe itself on small/medium indexes
+  -- parallelizing them would have contradicted a reasoned, already-in-place
+  design decision, not fixed a gap. Honest limitation: none of the above has
+  a real measured tokens/sec number recorded against it yet (this session
+  does not build or run the binary -- see the Phase 19 status entry's
+  `docs/performance/phase-19-qwen3b-matrix.md` for the pre-existing
+  12.43 tok/s GPU / 6.48 tok/s CPU baseline these changes target); an
+  administrator re-running `masterai calibrate` and a generation benchmark
+  on real hardware is what turns this into a verified before/after number.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -2410,8 +2671,11 @@ Phase 0 through Phase 3 exit criteria are satisfied for this work order.
 Pinned-distribution packaging certification remains an operations follow-up,
 as explicitly deferred. Phase 4–7 implementation tests do not substitute for
 the real backend/model, interrupted external transfer, and same-host benchmark
-exit checks listed above. Phase 8 still requires its external-client
-operational check.
+exit checks listed above. Phase 8's external-client operational check is now
+complete (2026-08-18) — see `docs/validation/phase-8-mcp-external-client.md`;
+that check also caught and fixed a real protocol-negotiation bug
+(`src/integration_http.cpp` was rejecting a spec-compliant client's first
+`initialize` call) that no in-process test could have found.
 
 Validation evidence recorded on 2026-08-01:
 
@@ -4665,10 +4929,18 @@ Exit criteria:
 
 ### Phase 8 — MCP inbound
 
-Status: Complete (validated 2026-08-05). A live independent Streamable HTTP
-client authenticated with a short-lived project-bound token, negotiated the
-pinned protocol, listed four tools, listed only its bound project resource,
-and then revoked its token.
+Status: Complete (validated 2026-08-18 with the official, independent
+`@modelcontextprotocol/inspector` CLI against a live server — see
+`docs/validation/phase-8-mcp-external-client.md`; supersedes an earlier
+2026-08-05 note that turned out to describe only an in-process simulation,
+not a genuine external client). The real external client authenticated with
+a short-lived project-bound token, negotiated the pinned protocol, listed
+four tools, listed only its bound project resource, invoked an authorized
+tool, and had its token revoked. The very first connection attempt failed
+and surfaced a real bug — `src/integration_http.cpp` was requiring the
+`MCP-Protocol-Version` header even on the initial `initialize` call, which
+a spec-compliant client never sends before negotiation completes — fixed by
+only enforcing that header from the second request of a session onward.
 
 Deliverables:
 
@@ -5016,6 +5288,12 @@ deferred (see Deliverables) since none of their supporting infrastructure
 exists yet. The authored hybrid-vs-full-text evaluation now passes 2/2 versus
 0/2 within the configured deadline and context budget.
 
+**Update (this pass):** every strategy this section originally deferred now
+has a real adapter -- see Phase 24's update note below, which covers all
+seven (this phase's deferral list is a subset of Phase 24's). See
+`docs/performance/phase-24-extended-retrieval-evaluation.md` for the
+authored evaluation set covering the newly-implemented strategies.
+
 Purpose:
 
 - Retrieve a small, strong, explainable context set quickly instead of
@@ -5239,9 +5517,12 @@ Exit criteria:
 
 ### Phase 19 — Adaptive hardware and model calibration
 
-Status: Implemented, exit validation pending (see the dated validation
-evidence entry above for what shipped and what real-hardware-class
-measurement remains outstanding).
+Status: Complete (2026-08-13) — NVML (NVIDIA) and vendored ADLX (AMD) GPU
+utilization/thermal telemetry is wired into `CalibrationService`
+(`src/gpu_vendor.cpp`, `src/calibration.cpp`), and real measured evidence
+(including live GPU-memory delta and thermal trend, GTX 960M) is recorded in
+`docs/performance/phase-19-qwen3b-matrix.md`. See the dated validation
+evidence entries above (2026-08-13, 2026-08-17) for the closure record.
 
 Purpose:
 
@@ -5595,6 +5876,37 @@ Phase 16 bounded-worker fan-out at 736 us/401 us, with both expected markers
 recovered, no deadline violation, and no context-budget violation. This also
 closes the Phase 16 authored-evaluation requirement.
 
+**Update (this pass):** every previously declared-but-disabled strategy now
+has a real adapter, so `retrieval_strategy_has_adapter()` returns `true` for
+all seven and `disabled_retrieval_strategy_reasons()` is now always empty.
+`call_graph`/`type_reference`/`dependency_neighbour` are heuristic (not
+AST-based) scans over `chunk.text` at query time, scoped to C++/Python/
+JavaScript/TypeScript (`src/indexing.cpp`'s `call_site_match`/
+`type_reference_match`/`import_targets_for`) -- no new persisted index data.
+`git_diff` shells out to the system `git` binary through the existing
+`tool_exec.cpp` sandboxed-subprocess containment (`src/git_retrieval.cpp`),
+silently empty when the project isn't a git working tree. `mcp_resource`
+consumes the existing outbound MCP client (`McpOutboundRegistry`/
+`McpOutboundGateway`, `src/mcp_retrieval.cpp`), performing no authorization
+decision itself -- it requires the requester's real `mcp.tools.invoke` scope,
+which the primary chat retrieval call site does not currently have a scope
+concept to supply (documented fail-closed at that call site in
+`server.cpp`). `semantic_embedding` is a real cosine-similarity search
+(`src/semantic_retrieval.cpp`) over embeddings computed through the already-
+live `RunnerSupervisor::embed()` -> `POST /v1/embeddings` call, cached under
+`CacheCategory::embedding` keyed by chunk digest. `conversation_memory`
+wraps the existing `UserMemoryStore::recall_context()`. Every one of the
+four expensive/IO-bound adapters is gated both by a new
+`AppConfig`/`RetrievalRequest` boolean (`retrieval.semanticEmbeddingEnabled`/
+`gitDiffEnabled`/`mcpResourceEnabled`; `conversation_memory` has no toggle)
+and by whether the `RetrievalPlanner` instance was constructed with the
+optional dependency that strategy needs -- a planner missing one records a
+runtime "not configured for this instance" skip reason distinct from (and
+layered on top of) `retrieval_strategy_has_adapter()`'s now-unconditional
+build-capability answer. `test_phase_twentyfour_extended_retrieval_strategies`
+(`test/tests.cpp`) and
+`docs/performance/phase-24-extended-retrieval-evaluation.md` cover all seven.
+
 Purpose:
 
 - Retrieve the strongest useful evidence faster without loading whole
@@ -5761,6 +6073,53 @@ reduced-precision KV and prefix-tree sharing stay declared-but-disabled.
 Priority B for accounting and placement modes (delivered); Priority C
 for reduced-precision KV and prefix-tree sharing given their quality-parity
 and cross-boundary-isolation risk (still gated).
+
+**Update (this pass):** both Priority C deliverables are now real,
+backend-validated mechanisms, still gated by an explicit administrator
+action rather than anything self-enabling. `LlamaCppAdapter::build_launch_spec()`
+(`src/models.cpp`) emits `--cache-type-k`/`--cache-type-v` from a new
+`LaunchTuning::kv_precision` field; `run_kv_precision_quality_check()`
+(`src/kv_quality.cpp`) launches a full-precision and a candidate-precision
+runner against the same authored prompt set and compares generated text,
+producing an honest `KvPrecisionEvidence` (see
+`docs/performance/phase-27-kv-cache-evaluation.md`). `KvCacheManager` gains
+`admit_precision()`/`admit_prefix_sharing()` — explicit administrator-only
+actions (a new `POST /api/v1/performance/kv-cache` endpoint,
+administrator-role-gated, mirroring Phase 20's advanced-optimizations route)
+that are the *only* way `precision_admitted()`/`prefix_sharing_admitted()`
+ever return true for anything beyond `KvPrecision::full`; admission state now
+persists across a restart via an optional `RecordStore*` constructor
+parameter, matching `AdvancedOptimizationRegistry`'s own durable-admission
+discipline. Cross-request prefix-tree sharing is a genuinely separate lookup
+path on `PromptSessionManager` (`try_reuse_shared_template()`/
+`record_shared_template()`, `session_cache.cpp`) keyed by
+`SharedTemplateKey` (prefix content hash + model fingerprint + policy
+generation + authorized role set — never chat id or user id), refusing
+outright unless `prefix_sharing_admitted()` is true; a private per-chat
+`try_reuse()` lookup can never resolve to a shared-template entry or vice
+versa (tested directly, including a policy-generation-boundary case).
+`server.cpp` now constructs a real, always-live `KvCacheManager` and calls
+`reserve()`/`touch()`/`set_state()` on every chat turn's actual slot
+lifecycle (previously zero production callers existed), and resolves the
+runner's launch-time KV precision from whatever an administrator has
+actually admitted (same "admitted state is itself the toggle" shape as
+Phase 25's `continuous_batching`). Extended
+`test_phase_twentyseven_kv_cache_accounting_and_eviction` covers: launch-flag
+emission per precision, the quality-check function against the fixture
+backend, admission persistence across a fresh instance sharing one
+`RecordStore`, and shared-template reuse/isolation (including the
+policy-generation boundary).
+
+**Scope note:** `try_reuse_shared_template()`/`record_shared_template()` are
+real, tested, and isolation-verified, but `send_chat_message()` does not yet
+call them for any live chat -- there is no chat/project field an
+administrator can set to mark a chat's system prompt as a shareable public
+template, so this mechanism has no production trigger yet even after an
+administrator admits prefix sharing. Wiring "which chats count as a public
+template" is a distinct product-surface decision (a new field, an admin UI,
+an authoring flow) left for a follow-up pass; reduced-precision KV, by
+contrast, is fully wired end to end (launch flags through the live request
+path).
 
 Purpose:
 
@@ -5962,11 +6321,11 @@ Exit criteria:
 
 ### Phase 30A — CPU-only and GPU-disabled low-memory operation
 
-Status: Implemented (2026-08-02), except the real-model benchmark matrix
-(deliverable/implementation-order item 6's benchmark half) which remains
-outstanding pending a pinned local GGUF and dedicated hardware run — the same
-open-until-measured status every other real-model exit criterion in this
-project (Phases 4-7) carries. This phase is an integration and hardening
+Status: Complete (2026-08-13) — the real-model `auto` vs `cpu_only` benchmark
+matrix (deliverable/implementation-order item 6's benchmark half) is recorded
+against the pinned local `qwen25-coder-3b-q4km` GGUF in
+`docs/performance/phase-19-qwen3b-matrix.md`, closing the last outstanding
+deliverable. This phase is an integration and hardening
 phase over the existing Phase 14, 19, 21–27, and 30 controls; it does not
 create a second memory manager or a second inference pipeline. Implementation
 notes:
@@ -6211,18 +6570,24 @@ Exit criteria:
 
 ### Phase 32 — Speculative decoding and draft-model acceleration
 
-Status: **Implemented, evidence-pending (2026-08-13; sampling-gate correction
-2026-08-13, this pass)** — see the Phase 32 entry in the status summary
-above for the full breakdown. Priority C — the decision logic (compatibility
-checks, acceptance-rate tracking, per-request enable/disable) is real and
-tested, wired to a real dual-model (draft+target concurrently resident)
-launch path (`LlamaCppAdapter::build_launch_spec`'s `--model-draft` flags),
-and the sampling-compatibility gate now correctly reflects that llama.cpp's
-speculative verification supports this codebase's real (non-greedy) chat
-sampling presets, so the feature activates for live chat traffic once an
-administrator admits it and records a qualifying measured acceptance rate.
-Still explicitly unvalidated on real hardware -- no measured throughput run
-has exercised the launch path yet.
+Status: **Complete, real-hardware evidence recorded (2026-08-18)** — the
+decision logic (compatibility checks, acceptance-rate tracking, per-request
+enable/disable) is real and tested, wired to a real dual-model (draft+target
+concurrently resident) launch path (`LlamaCppAdapter::build_launch_spec`'s
+`--model-draft` flags), and the sampling-compatibility gate correctly
+reflects that llama.cpp's speculative verification supports this codebase's
+real (non-greedy) chat sampling presets. The new `masterai speculative-
+benchmark` CLI command exercised the launch path end to end on real
+hardware (GTX 960M, `qwen25-coder-3b-q4km` target + `qwen25-coder-1.5b-q4km`
+draft); see `docs/performance/phase-32-speculative-matrix.md`. That run also
+caught and fixed a real vendored-binary flag incompatibility
+(`--draft-max`/`--draft-min` were removed upstream; `src/models.cpp` now
+emits `--spec-draft-n-max`/`--spec-draft-n-min`). The measured result on
+this particular low-VRAM host was a **-22.5% throughput regression**, not an
+improvement — an honest negative result, not a gap: the dual-model launch
+path itself is proven to work (real generation completed under it), but
+this host's compute/VRAM headroom is too small for the draft model's
+overhead to pay off. A host with more headroom may show a positive result.
 
 Purpose:
 
@@ -6465,16 +6830,23 @@ Exit criteria:
 
 ### Phase 36 — Full performance certification and regression gates
 
-Status: Implemented at a scoped-down level (2026-08-17). See the Phase 36
+Status: Implemented at a scoped-down level, with real single-host evidence
+now recorded and a runbook for further hosts (2026-08-18). See the Phase 36
 status summary entry above for the full breakdown of what ships
 (`PerformanceCertificationRunner`/`PerformanceCertificationStore` in
 `src/regression_gate.cpp`, the five regression check groups, threshold-
 gated fingerprint-matched build comparison, the `/api/v1/performance/
 certification*` routes, and the "Benchmarks & Regression" Performance
-page, real queue-wait and storage-bytes-read measurement) versus what
-remains an administrator-run, per-real-host exercise (the plan's full
-cold/warm-runner/HDD-SATA-SSD-NVMe/GPU-offloaded physical matrix below —
-dimensions no single host can manufacture on demand).
+page, real queue-wait and storage-bytes-read measurement). Two real,
+fingerprint-matched certification runs were recorded on this host
+(`llama32-1b-instruct-q4km`, GTX 960M) via the new `scripts/run-
+certification.ps1` runbook — the second run correctly compared itself
+against the first across all seven regression metrics and passed. See
+`docs/validation/phase-36-certification-runbook.md`. What remains is
+purely physical, not software: the plan's full cold/warm-runner/HDD-SATA-
+SSD-NVMe/GPU-offloaded matrix spans storage media and machines this single
+host does not have — an administrator repeats the same runbook on each
+further physical host/storage medium they have access to.
 
 Purpose:
 
@@ -6533,6 +6905,70 @@ Exit criteria:
   starves interactive requests, model startup regresses without justified
   benefit, page-fault rates indicate destructive paging, an advanced
   optimization's fallback fails, or benchmark identity is incomplete.
+
+### Phase 85 — Inference and retrieval throughput tuning
+
+Status: Implemented (2026-08-19). See the Phase 85 status summary entry
+above for the full breakdown of what changed
+(`select_thread_count()`/`select_ubatch_tokens()` in `src/calibration.cpp`,
+the `TuningProfile::recommended_thread_count`/`recommended_ubatch_tokens`
+fields, `CacheCategory::retrieval_result` wired into
+`RetrievalPlanner::retrieve_uncached()`, the parallel worker pool in
+`semantic_embedding_search()`, the cached dependency-graph map in
+`ProjectIndexer::search_dependency_neighbours()`, and the parallel worker
+pool in `pre_touch_model_file()`). No new configuration surface: every
+change either fills in a value an existing struct/flag already had a slot
+for (`LaunchTuning::thread_count`/`ubatch_tokens`, `CacheCategory::
+retrieval_result`) or is purely an internal cache/parallelism change behind
+an existing function's unchanged signature and return contract.
+
+Purpose:
+
+- Close specific, evidence-backed throughput gaps found by reading the
+  cold-load and retrieval hot paths, rather than a general "optimize
+  everything" pass: an administrator reported generation speed and 3-5GB
+  model warm-up time as too slow for their host.
+
+Dependencies:
+
+- Phase 19 calibration/tuning-profile infrastructure (thread/ubatch
+  recommendations ride the same `TuningProfile`/`LaunchTuning` path GPU
+  layers and batch tokens already used); Phase 17 `CacheManager` and its
+  `retrieval_result` category (already declared, never previously wired to
+  a real caller); Phase 24 retrieval planner and semantic-embedding
+  adapter; Phase 15 project index generation counters; Phase 26 pre-touch.
+
+Deliverables:
+
+- Evidence-based `--threads`/`--ubatch-size` launch flags derived from the
+  host's real physical-core count and configured context length, instead
+  of an unconditional 0 ("no override") that left llama-server's own
+  default thread count in force regardless of hardware.
+- A real, generation-versioned retrieval-result cache on the live request
+  path: a repeated identical query against an unchanged project index
+  generation is now served from `CacheManager` instead of re-running the
+  full multi-stage lexical/symbol/semantic scan.
+- Parallel dispatch (bounded worker pool) for the semantic-embedding
+  adapter's per-chunk embed/cache round trips and for `pre_touch_model_
+  file()`'s memory-mapped range list, instead of one at a time.
+- A cached file->import-target dependency graph on the project indexer,
+  rebuilt only when the index generation actually advances.
+
+Exit criteria:
+
+- Every change preserves prior behavior exactly when its new inputs are at
+  their pre-existing defaults (0 thread/ubatch count, no `CacheManager`
+  wired in, single-range pre-touch, unchanged index generation) -- no
+  caller needs to opt in or change configuration to keep working.
+- A cached retrieval outcome is never served across a project reindex, a
+  policy-generation change, or a different requester/budget, and is never
+  written for a partial result or one that drew evidence from a strategy
+  whose output can change without an index republication.
+- Honest, disclosed gap: no measured tokens/sec before/after number is
+  recorded in this pass (this session does not build or run the binary);
+  turning this into a verified result requires an administrator to
+  re-calibrate and re-benchmark on real hardware, the same discipline every
+  other performance phase in this plan already follows.
 
 ### Phase 84 — Agentic tool use in chat
 
@@ -6626,6 +7062,64 @@ Deliverables:
   in place of the generic "Thinking" indicator while a tool is active.
   Escape/the existing Stop button abort both the in-flight turn and any
   further auto-drive continuation.
+- 2026-08-17 fix: `detect_and_strip_tool_call()` (`src/server.cpp`) used to
+  require the reply's *only* `[[TOOL_CALL]]...[[/TOOL_CALL]]` block to sit
+  at the very tail with nothing after it — a model that emitted more than
+  one block, or trailed explanatory prose after one, made the whole thing
+  bail out to `std::nullopt` and leave the raw markers/JSON sitting in the
+  text that gets persisted and shown to the user. It now scans the whole
+  reply, strips every tool-call-shaped block regardless of position or
+  well-formedness (so raw markers never leak into the transcript again),
+  and executes the first block that actually parses.
+- 2026-08-17 addition: reasoning-capable architectures (Qwen's native
+  `/think` convention, and gpt-oss's directive — see
+  `apply_reasoning_directive()`) are asked to wrap their reasoning in
+  `<think>...</think>` ahead of the final answer. `renderMarkdown()`
+  (`src/web_ui.cpp`) pulls a leading `<think>` block out of any reply —
+  live-streaming or reloaded from history alike — and renders it as a
+  collapsed `<details class="thinkBlock">` panel above the answer, the
+  same shape as claude.ai's extended-thinking panel. Server-side storage is
+  unchanged (the raw `<think>` tags stay in the persisted message text);
+  this is display-only for now — prior turns' reasoning is still re-fed to
+  the model verbatim on the next turn rather than stripped, which Qwen's
+  own docs discourage for context bloat/quality reasons. Follow-up, not a
+  blocker.
+- 2026-08-18 fix: `detect_and_strip_tool_call()`/`detect_and_strip_auto_
+  drive_marker()` only ever saw the *complete* reply, so they cleaned what
+  got persisted and what a non-streaming response returned — but a
+  streaming turn hands each token to the client the instant it's generated,
+  before the full reply (and therefore any marker) is known. The raw
+  `[[TOOL_CALL]]{...}[[/TOOL_CALL]]` / `[[TASK_CONTINUE]]` / `[[TASK_
+  COMPLETE]]` text was flashing into the live chat bubble on screen before
+  ever being stripped, even though the persisted transcript looked clean on
+  reload. `apply_streaming_marker_holdback()` (`src/server.cpp`) now buffers
+  each `on_chunk` callback's output through a small hold-back window sized
+  to the longest marker, forwarding only the prefix provably not the start
+  of any marker; once a marker is confirmed to have started, nothing further
+  that turn streams raw (matching what gets stripped from the persisted
+  text anyway). Any leftover hold-back that never matched a marker (e.g. a
+  reply legitimately ending in a literal `[[`) is flushed once generation
+  finishes, so the live bubble still ends up showing the same text as the
+  persisted transcript. The partial-reply-on-failure fallback path (which
+  used to persist the raw, unstripped `streamed_text` verbatim) now runs it
+  through both strip functions first too.
+- 2026-08-18 fix: `inference.chatContextLength`'s default (4096, unchanged
+  since its Phase 18 introduction — see the entry above) was too small for
+  chat's real usage pattern: the prompt-fit clamp at `send_chat_message`
+  (`src/server.cpp`) counts the *entire* running transcript plus any
+  attachment/retrieval text plus every prior `[Tool result for ...]` turn
+  against this one budget, so a project-bound chat doing real multi-step
+  work (Phase 84 tool use) could exhaust a 4096-token context after only a
+  couple of file reads, well before the task was anywhere near done, and
+  fail with the "shorten the chat or raise `inference.chatContextLength`"
+  error the clamp logic raises. `AppConfig::chat_context_length` default is
+  now `32768` and `chat_max_reply_tokens` is now `16384` (`src/masterai.hpp`)
+  — both remain live-adjustable per install, in either direction, via
+  Settings -> Inference in the web UI (already wired end-to-end since
+  Phase 18: `src/web_ui.cpp`'s `cfgChatContextLength`/`cfgChatMaxReplyTokens`
+  fields, `PUT /api/v1/admin/config`), still bounded by the same hard policy
+  ceilings (`1,048,576` / `32,768`) `RunnerSupervisor::generate()` and the
+  config schema already enforced.
 
 Explicitly out of scope this pass:
 

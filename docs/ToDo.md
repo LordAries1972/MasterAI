@@ -1,69 +1,121 @@
 # To-Do
 
-Things left to do:-
+Current outstanding work only, derived from docs/PLAN.md status notes (2026-08-18 pass).
+Completed phases are not listed here — see docs/PLAN.md for the full status record.
 
-I now have a clear picture. Here's what's still not fully completed in MasterAI, based on docs/PLAN.md (including the uncommitted Phase 72–78 additions currently in your working tree):
+## Real-hardware / manual validation gates (implementation done, needs a human run)
 
-## Whole phases not started (Priority A/B/C performance track)
+- Phase 1 — Ubuntu 24.04 / Debian 13 packaging certification: deferred
+  (Windows-only per build-scope preference).
+- Phase 36 — physical-hardware certification matrix (multiple storage media,
+  multiple machines, GPU-offloaded hardware): every software-controllable
+  dimension is wired to a real measurement and two real fingerprint-matched
+  runs are recorded on this host via `scripts/run-certification.ps1`
+  (see `docs/validation/phase-36-certification-runbook.md`); only running
+  that same runbook on further physical hosts/storage media remains.
+- Phase 28 — NUMA/topology: the real thread-pinning primitive is now wired
+  into every per-connection worker thread (2026-08-19), gated on both a new
+  `AppConfig::numa_local_placement_enabled` configuration flag (off by
+  default) and the Phase 20 `numa_affinity` admission -- so this is code-
+  complete but stays inert until an administrator both enables the flag and
+  records the Phase 36 benchmark-matrix evidence needed to justify it on
+  their host.
 
-- Phase 31 — storage tiering / ScratchVolumeManager: DONE, including
-  Priority B tier-migration tooling (migrate_durable_file(), POST
-  /api/v1/system/storage/migrate) — 2026-08-13.
-- Phase 32 — speculative decoding: DONE, real dual-model launch path added
-  (2026-08-13); still explicitly unvalidated on real hardware.
-- Phase 33 — distributed local runners / mTLS: DONE (2026-08-13), both the
-  local-only runner pool and the intranet mTLS worker protocol.
-- Phase 34 — adaptive performance controller: DONE at a scoped-down level
-  (2026-08-13) — AdaptiveController (src/adaptive_controller.cpp), all
-  eight named modes, live-mutable knobs applied through
-  MemoryBudgetManager::set_policy(); every other named knob computed and
-  disclosed but not yet wired to a live setter.
-- Phase 35 — performance administration sidebar: DONE at a scoped-down
-  level (2026-08-13, extended 2026-08-17) — one consolidated "Performance"
-  page (/app/performance) plus the new "Benchmarks & Regression" page
-  (Phase 36, below); Query Traces, Runner Configuration, and Model
-  Comparison remain deferred (no dedicated telemetry route exists yet).
-- Phase 36 — full performance benchmark matrix / regression suite: DONE at
-  a scoped-down level (2026-08-17) — PerformanceCertificationRunner/
-  PerformanceCertificationStore (src/regression_gate.cpp) run the quality
-  benchmark suite plus five real regression check groups (runner
-  attribution, low memory, prompt cache, calibration, model routing)
-  against this codebase's own live decision logic, plus real queue-wait
-  (an actual RequestScheduler admission, timed end-to-end) and real
-  storage-bytes-read (delta of the process's own disk-read counter)
-  measurement, with threshold-gated comparison against the previous
-  accepted run sharing the exact same fingerprint. Every software-
-  controllable dimension and threshold the plan names is wired to a real
-  measurement; only the plan's physical-hardware matrix (multiple storage
-  media, multiple machines, GPU-offloaded hardware) remains an
-  administrator-run, per-real-host exercise — no software running on one
-  host can manufacture a second physical drive or GPU. See the Phase 36
-  status note in docs/PLAN.md.
+## In progress (partially wired, not fully live)
 
-## Honest, named gaps inside otherwise-implemented recent phases
+- Phase 20 — advanced throughput: `numa_affinity`'s `implementation_
+  available` is now `true` (2026-08-19, see Phase 28) since a real caller
+  exists; `continuous_batching`/`speculative_decoding`/`storage_prefetch`/
+  `gpu_cpu_kv_placement` also have real implementations. None are admitted
+  by default (gate intentionally not tripped) -- an administrator must
+  record real per-host evidence and call `admit()`. `multiple_warm_runners`
+  remains the one candidate with no implementation at all.
+- Phase 29 — model tiering/routing: `ModelRouter` is now consulted by a
+  live, advisory `POST /api/v1/models/route` endpoint (2026-08-19, gated on
+  a new `AppConfig::model_tier_assignments` / `modelRouting.tiers`
+  configuration section, empty and inert by default) but still does not
+  drive `send_chat_message()` itself -- no automatic tier selection or
+  `evaluate_cascade()`-triggered escalation-with-rerun on the live chat
+  path yet. Still blocked on Phase 26 warm-state management for the
+  escalation-rerun half.
+- Phase 34 — adaptive controller: only the MemoryBudgetManager knobs are
+  live-applied. `thread_count`/`gpu_offload` are now also computed and
+  disclosed (2026-08-19, gated on real battery-power/pressure signals) but
+  have no live setter. Prefetch distance, cache quotas, batch size, warm-up
+  policy, NUMA policy, KV placement, and background-job rate remain
+  entirely uncomputed, not merely unapplied.
+- Phase 46 — Model Builder: submission now hands off to a real
+  `TrainingJob` run against the existing tabular trainer
+  (`run_model_builder_config()`, `src/server.cpp`, 2026-08-19) instead of
+  being a status flip with nothing behind it. This is a **permanent** scope
+  limit, not a temporarily-deferred gap: this codebase has no from-scratch,
+  architecture-configurable neural network trainer, so `ModelBuilderSettings`'
+  architecture/hidden-dimension/attention/optimiser/scheduler fields are
+  recorded for a human to read but are never consumed by the job that
+  actually runs. Closing that gap for real would mean building a genuine
+  configurable deep-learning training engine, which is out of scope for
+  this codebase's tabular-model-only ML execution layer.
+- Phase 51 — Subject Examination System: `POST .../{id}/run` now asks the
+  target model each configured question for real via
+  `execute_rag_generation()` and scores answers with a plain, inspectable
+  text-overlap heuristic (`run_subject_exam()`, `src/server.cpp`,
+  2026-08-19). This is a real, honest but simple grader, not "AI grading":
+  this codebase has no LLM-judge scoring path wired for exam answers, so a
+  substring/whole-token-overlap check is what is actually implemented, not
+  a claim of semantic understanding.
+- Phase 52 — Hyperparameter Optimization: `POST .../{id}/run` now runs a
+  real, bounded grid search over learning rate and epoch count
+  (`run_hyperparameter_search()`, `src/server.cpp`, 2026-08-19), genuinely
+  retraining and re-evaluating the referenced training job's dataset per
+  trial, hard-capped at 20 trials. Section 26's wider search space
+  (batch size, optimiser, dropout, adapter rank, and more) stays
+  permanently out of scope: `train_tabular_model()` does not read any of
+  those as tunable parameters, so there is nothing real to search over for
+  them without first building a trainer that accepts them.
 
-- Phase 72 (automation pipelines): DONE — "Label data" now runs a real
-  heuristic auto-labeler (auto_label_tabular_dataset(), quantile-binning or
-  existing-label validation) when no LabelTaskStore entry exists —
-  2026-08-13.
-- Phase 73 (LoRA fine-tuning): exact llama.cpp finetune/export-lora CLI flags are pinned to a historical interface that may drift; out of scope to track upstream changes.
-- Phase 74 (safety scanning): DONE — scan_content_with_model_classifier()
-  adds a real LLM-as-judge classifier pass (bias/hallucination_risk/
-  harmful_content) alongside the existing heuristic scan — 2026-08-13.
-- Phase 77 (inference endpoints): DONE — per-endpoint policy
-  (contentScanEnabled/blockOnScanFinding/blockAnswerOnScanFinding/
-  safetyPolicyId/modelClassifierEnabled) via POST .../inference-endpoints/
-  {id}/policy, re-read live on every request — 2026-08-13. The surface
-  remains this codebase's own, not OpenAI-compatible, and there is still no
-  tool-calling surface on /v1/completions to attach an "allowed tools"
-  policy to.
-- Phase 78 (telemetry): DONE — live per-step training curves
-  (TrainingProgressTracker, GET .../training-jobs/{id}/live-progress) and
-  cache-hit-rate telemetry (InferenceMetricsStore::record_cache_decision(),
-  wired to PromptSessionManager::try_reuse()) are both now real — 2026-08-13.
+## Planned (not started)
 
-## Recurring cross-cutting items still outstanding everywhere
+- Phase 35 — Query Traces, Runner Configuration, and Model Comparison admin
+  pages: no dedicated telemetry route exists yet.
+- Phase 65/74/83 — Safety and Governance: PII, copyright, and
+  data-poisoning detectors; retention/export/network policy enforcement.
+- Blanket: every ML executor not explicitly named elsewhere as real remains
+  `Planned` — a metadata record or lifecycle transition is not execution
+  proof.
 
-- Real-hardware/real-model exit validation for Phases 4–7, 19 (GPU utilization/thermal probing — no approved vendor SDK yet), and the Phase 30A auto vs cpu_only benchmark matrix.
-- Phase 15/16/17: authored retrieval-quality evaluation set and representative-query latency benchmark; semantic/dependency/conversation-memory/MCP-resource retrieval strategies remain deferred.
-- Ubuntu 24.04 / Debian 13 packaging certification (explicitly deferred by you — Windows-only per your build-scope preference).
+## Phase 84 — agentic tool use in chat
+
+First increment only; not yet validated on a live host. Gaps:
+
+- No admin allow-list management UI (currently metadata-store-write only).
+- No MCP inbound tool exposure.
+- No real diff shown for `write_file`.
+- Persistent shell/web-fetch tool parity is out of scope for this increment.
+
+## Manual/config gates (ML)
+
+- Phase 63/67/75 — remote/fleet telemetry: real agent process exists but
+  must be deployed on each remote node by an administrator.
+- Phase 73 — LoRA fine-tuning: exact llama.cpp finetune/export-lora CLI
+  flags are pinned to a historical interface that may drift; tracking
+  upstream changes is out of scope, may need admin-supplied extra args.
+
+## Documented scope limits (not gaps — just noting them)
+
+- Phase 53 — Model Optimization: the standalone interface now genuinely
+  executes `operation: "pruning"` runs (2026-08-19, shared with the Phase
+  72 pipeline's Optimize stage via `run_model_optimization()`), but
+  quantization/distillation/graph-optimization/operator-fusion/weight-
+  compression/etc. (twelve of the section 28's thirteen example operations)
+  remain intent-only -- no executor exists for them, and none is planned
+  this pass.
+- Phase 77 — inference endpoints: the surface is this codebase's own, not
+  OpenAI-compatible; no tool-calling surface on `/v1/completions`.
+- Phase 24 — `mcp_resource` retrieval strategy: the adapter is real
+  (`src/mcp_retrieval.cpp`), but the primary chat retrieval call site
+  (`server.cpp`) leaves `RetrievalRequest::requester_scopes` empty since a
+  UI/session chat user has no `mcp.tools.invoke`-scoped token today —
+  `McpOutboundGateway::invoke()` requires that literal scope, so this
+  strategy contributes no evidence on that path until a caller with a real
+  token's scopes (e.g. an MCP-inbound or API-token-authenticated request)
+  populates the field.

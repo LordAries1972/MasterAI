@@ -57,6 +57,15 @@ std::string to_string(EscalationReason reason) {
     return "unknown";
 }
 
+ModelTier parse_model_tier(const std::string& text) {
+    if (text == "deterministic_processing") return ModelTier::deterministic_processing;
+    if (text == "compact_router") return ModelTier::compact_router;
+    if (text == "small_fast") return ModelTier::small_fast;
+    if (text == "medium_general") return ModelTier::medium_general;
+    if (text == "large_specialist") return ModelTier::large_specialist;
+    throw std::invalid_argument("unknown model tier: " + text);
+}
+
 namespace {
 
 constexpr std::array<ModelTier, 5> kTierOrder{

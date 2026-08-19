@@ -81,7 +81,7 @@
         "startupTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
         "stallTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 3600}
       },
-      "$comment": "runnerPort must also differ from server.port -- a cross-field check ConfigurationManager::validate() enforces, not representable per-property here. chatMaxReplyTokens/chatContextLength/startupTimeoutSeconds default to 8192/4096/120 respectively when omitted -- see docs/architecture/configuration.md. stallTimeoutSeconds (default 120) bounds how long a live generation may go without receiving a byte from the runner before it is treated as hung."
+      "$comment": "runnerPort must also differ from server.port -- a cross-field check ConfigurationManager::validate() enforces, not representable per-property here. chatMaxReplyTokens/chatContextLength/startupTimeoutSeconds default to 16384/32768/120 respectively when omitted -- see docs/architecture/configuration.md. stallTimeoutSeconds (default 120) bounds how long a live generation may go without receiving a byte from the runner before it is treated as hung."
     },
     "downloads": {
       "type": "object", "additionalProperties": false,
@@ -105,6 +105,25 @@
         "watchProjectFiles": {"type": "boolean"}
       }
     },
+    "topology": {
+      "type": "object", "additionalProperties": false,
+      "required": ["numaLocalPlacementEnabled"],
+      "properties": {
+        "numaLocalPlacementEnabled": {"type": "boolean"}
+      },
+      "$comment": "Phase 28: off by default. Enable only after Phase 36 benchmark-matrix evidence justifies NUMA-local thread pinning on this host; also gated at the call site by the Phase 20 'numa_affinity' AdvancedOptimizationRegistry admission -- see docs/architecture/configuration.md."
+    },
+    "modelRouting": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tiers"],
+      "properties": {
+        "tiers": {
+          "type": "object",
+          "additionalProperties": {"type": "array", "items": {"type": "string"}}
+        }
+      },
+      "$comment": "Phase 29: empty by default -- advisory-only tier routing/cascade-escalation surface (POST /api/v1/models/route) stays inert until an administrator declares at least one tier's registered model ids. Keys must be one of the five ModelTier spellings -- see docs/architecture/configuration.md."
+    },
     "retrieval": {
       "type": "object", "additionalProperties": false,
       "required": ["enabled", "deadlineMilliseconds", "maximumContextBytes",
@@ -114,7 +133,10 @@
         "deadlineMilliseconds": {"type": "integer", "minimum": 1, "maximum": 30000},
         "maximumContextBytes": {"type": "integer", "minimum": 1, "maximum": 4194304},
         "maximumChunksPerSource": {"type": "integer", "minimum": 1, "maximum": 256},
-        "maximumTotalChunks": {"type": "integer", "minimum": 1, "maximum": 1024}
+        "maximumTotalChunks": {"type": "integer", "minimum": 1, "maximum": 1024},
+        "semanticEmbeddingEnabled": {"type": "boolean"},
+        "gitDiffEnabled": {"type": "boolean"},
+        "mcpResourceEnabled": {"type": "boolean"}
       }
     },
     "cache": {

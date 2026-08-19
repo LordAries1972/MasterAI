@@ -6,6 +6,7 @@
 
 #include <map>
 #include <mutex>
+#include <set>
 
 namespace masterai {
 
@@ -56,29 +57,75 @@ public:
         std::string memory_lease_id;
     };
 
+    static constexpr const char* kCollection = "kv_cache_admission";
+    static constexpr const char* kKey = "state";
+
     State(MemoryBudgetManager& manager, std::uint64_t hard_max,
-         std::uint64_t step)
+         std::uint64_t step, RecordStore* store)
         : memory(manager), hard_max_bytes_per_slot(hard_max),
-          growth_step_bytes(step == 0U ? 1U : step) {}
+          growth_step_bytes(step == 0U ? 1U : step), records(store) {
+        restore();
+    }
 
     std::uint64_t round_up_to_step(std::uint64_t bytes) const {
         const auto steps = (bytes + growth_step_bytes - 1U) / growth_step_bytes;
         return steps * growth_step_bytes;
     }
 
+    // Encoding: "half=0/1,quantizedK=0/1,quantizedV=0/1,prefixSharing=0/1"
+    // -- a small fixed-shape record, matching AdvancedOptimizationRegistry's
+    // own simple durable-encoding convention rather than pulling in a full
+    // JSON round trip for four booleans.
+    void persist_locked() {
+        if (records == nullptr) return;
+        std::string value = "half=";
+        value += admitted_precisions.count(KvPrecision::half) ? "1" : "0";
+        value += ",quantizedK=";
+        value += admitted_precisions.count(KvPrecision::quantized_k) ? "1" : "0";
+        value += ",quantizedV=";
+        value += admitted_precisions.count(KvPrecision::quantized_v) ? "1" : "0";
+        value += ",prefixSharing=";
+        value += prefix_sharing_admitted_flag ? "1" : "0";
+        records->put(kCollection, kKey, value);
+    }
+
+    void restore() {
+        if (records == nullptr) return;
+        const auto stored = records->get(kCollection, kKey);
+        if (!stored.has_value()) return;
+        const auto contains_true = [&](const std::string& field) {
+            return stored->find(field + "=1") != std::string::npos;
+        };
+        if (contains_true("half")) admitted_precisions.insert(KvPrecision::half);
+        if (contains_true("quantizedK")) {
+            admitted_precisions.insert(KvPrecision::quantized_k);
+        }
+        if (contains_true("quantizedV")) {
+            admitted_precisions.insert(KvPrecision::quantized_v);
+        }
+        prefix_sharing_admitted_flag = contains_true("prefixSharing");
+    }
+
     MemoryBudgetManager& memory;
     std::uint64_t hard_max_bytes_per_slot;
     std::uint64_t growth_step_bytes;
+    RecordStore* records{nullptr};
     mutable std::mutex mutex;
     std::map<unsigned int, Slot> slots;
     std::vector<KvPrecisionEvidence> precision_evidence;
+    // Phase 27 (this pass): explicit administrator admission state -- see
+    // KvCacheManager::admit_precision()/admit_prefix_sharing(). Neither is
+    // ever set by record_precision_evidence() or any other automatic path.
+    std::set<KvPrecision> admitted_precisions{KvPrecision::full};
+    bool prefix_sharing_admitted_flag{false};
 };
 
 KvCacheManager::KvCacheManager(MemoryBudgetManager& memory,
                                std::uint64_t hard_max_bytes_per_slot,
-                               std::uint64_t growth_step_bytes)
+                               std::uint64_t growth_step_bytes,
+                               RecordStore* records)
     : state_(std::make_unique<State>(memory, hard_max_bytes_per_slot,
-                                     growth_step_bytes)) {}
+                                     growth_step_bytes, records)) {}
 
 KvCacheManager::~KvCacheManager() {
     std::lock_guard<std::mutex> lock(state_->mutex);
@@ -276,16 +323,41 @@ std::vector<KvSlotAccounting> KvCacheManager::status() const {
     return result;
 }
 
-bool KvCacheManager::precision_admitted(KvPrecision precision) const {
+bool KvCacheManager::precision_admitted(const KvPrecision precision) const {
     // See the class-level scope note: reduced precision never self-enables
-    // from recorded evidence in this pass, regardless of how much evidence
-    // exists, matching AdvancedOptimizationRegistry's discipline.
-    return precision == KvPrecision::full;
+    // from recorded evidence alone, regardless of how much evidence exists,
+    // matching AdvancedOptimizationRegistry's discipline -- only an explicit
+    // admit_precision() call (see below) ever adds an entry here.
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->admitted_precisions.find(precision) !=
+           state_->admitted_precisions.end();
 }
 
 void KvCacheManager::record_precision_evidence(const KvPrecisionEvidence& evidence) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     state_->precision_evidence.push_back(evidence);
+}
+
+std::vector<KvPrecisionEvidence> KvCacheManager::precision_evidence() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->precision_evidence;
+}
+
+void KvCacheManager::admit_precision(const KvPrecision precision) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->admitted_precisions.insert(precision);
+    state_->persist_locked();
+}
+
+bool KvCacheManager::prefix_sharing_admitted() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->prefix_sharing_admitted_flag;
+}
+
+void KvCacheManager::admit_prefix_sharing() {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->prefix_sharing_admitted_flag = true;
+    state_->persist_locked();
 }
 
 std::string KvCacheManager::to_json(const std::vector<KvSlotAccounting>& slots) {

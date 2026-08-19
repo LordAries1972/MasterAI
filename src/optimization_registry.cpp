@@ -101,7 +101,16 @@ void AdvancedOptimizationRegistry::initialize_features() {
          false, true, true, std::nullopt},
         {"numa_affinity",
          "NUMA-aware placement and affinity for measured multi-node hosts.",
-         false, true, false, std::nullopt},
+         // Phase 28: implementation_available flipped to true now that a
+         // real caller exists -- each per-connection worker thread in
+         // server.cpp calls recommend_thread_placement()/
+         // apply_current_thread_to_numa_node() when both this feature is
+         // admitted here AND AppConfig::numa_local_placement_enabled is
+         // set, and recommend_thread_placement() itself still no-ops on any
+         // single-NUMA-node host. Admission still requires an administrator
+         // to separately record real evidence and admit, per this
+         // registry's own "evidence never self-enables" rule.
+         false, true, true, std::nullopt},
         {"storage_prefetch",
          "Storage-specific prefetch/read-ahead and alternate asynchronous "
          "I/O.",

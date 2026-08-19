@@ -1907,10 +1907,14 @@ std::string format_settings_double(const double value) {
     return text.empty() ? "0" : text;
 }
 
+}  // namespace
+
 // docs/PLAN.md section 9: "The interface must provide basic and advanced
 // configuration modes" -- those two modes are the whole closed set, and the
 // two fractional settings have hard numeric ranges, so configure() rejects
-// out-of-range values instead of persisting nonsense.
+// out-of-range values instead of persisting nonsense. Declared in
+// masterai.hpp (not file-local) so run_model_builder_config() (server.cpp)
+// can reuse this exact check at submission time.
 void validate_model_builder_settings(const ModelBuilderSettings& settings) {
     if (settings.configuration_mode != "basic" &&
         settings.configuration_mode != "advanced") {
@@ -1927,8 +1931,6 @@ void validate_model_builder_settings(const ModelBuilderSettings& settings) {
     }
 }
 
-}  // namespace
-
 ModelBuilderConfigStore::ModelBuilderConfigStore(RecordStore& records) : records_(&records) {
     restore();
 }
@@ -1938,10 +1940,12 @@ void ModelBuilderConfigStore::restore() {
         const auto fields = unpack(item.second);
         // 7 fields is the legacy scoped-down Phase 46 record (identity/
         // project/base-model/source-type/status only); 31 is the full-
-        // surface record with the 24 ModelBuilderSettings fields appended.
-        // Legacy records restore with default (unset) settings so existing
-        // databases keep working without a migration step.
-        if (fields.size() != 7U && fields.size() != 31U) {
+        // surface record with the 24 ModelBuilderSettings fields appended;
+        // 33 (this pass) adds dataset_id/resulting_training_job_id for the
+        // real submission executor. Legacy records restore with default
+        // (unset) settings/dataset/job-id so existing databases keep
+        // working without a migration step.
+        if (fields.size() != 7U && fields.size() != 31U && fields.size() != 33U) {
             throw std::runtime_error(
                 "persisted model builder config record field count is wrong");
         }
@@ -1954,7 +1958,7 @@ void ModelBuilderConfigStore::restore() {
         config.source_type = fields[4];
         config.owner_id = fields[5];
         config.status = parse_model_builder_config_status(fields[6]);
-        if (fields.size() == 31U) {
+        if (fields.size() == 31U || fields.size() == 33U) {
             auto& s = config.settings;
             s.configuration_mode = fields[7];
             s.architecture = fields[8];
@@ -1981,6 +1985,10 @@ void ModelBuilderConfigStore::restore() {
             s.reproducibility_settings = fields[29];
             s.distributed_training_settings = fields[30];
         }
+        if (fields.size() == 33U) {
+            config.dataset_id = fields[31];
+            config.resulting_training_job_id = fields[32];
+        }
         configs_[config.id] = config;
     }
 }
@@ -2005,13 +2013,15 @@ void ModelBuilderConfigStore::persist(const ModelBuilderConfig& config) {
              std::to_string(s.checkpoint_frequency),
              std::to_string(s.validation_frequency),
              s.early_stopping ? "1" : "0", std::to_string(s.random_seed),
-             s.reproducibility_settings, s.distributed_training_settings}));
+             s.reproducibility_settings, s.distributed_training_settings,
+             config.dataset_id, config.resulting_training_job_id}));
 }
 
 ModelBuilderConfig ModelBuilderConfigStore::create(
     const std::string& owner_id, const std::string& project_id,
     const std::string& base_model_id, const std::string& name,
-    const std::string& description, const std::string& source_type) {
+    const std::string& description, const std::string& source_type,
+    const std::string& dataset_id) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("model builder config name is invalid");
     }
@@ -2027,6 +2037,7 @@ ModelBuilderConfig ModelBuilderConfigStore::create(
     config.description = description;
     config.source_type = source_type;
     config.owner_id = owner_id;
+    config.dataset_id = dataset_id;
     config.status = ModelBuilderConfigStatus::draft;
     config.created_at_epoch_seconds = epoch_seconds();
     config.updated_at_epoch_seconds = config.created_at_epoch_seconds;
@@ -2073,6 +2084,28 @@ bool ModelBuilderConfigStore::configure(const std::string& id,
     return true;
 }
 
+bool ModelBuilderConfigStore::set_dataset(const std::string& id,
+                                          const std::string& dataset_id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = configs_.find(id);
+    if (found == configs_.end()) return false;
+    found->second.dataset_id = dataset_id;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool ModelBuilderConfigStore::attach_training_job(
+    const std::string& id, const std::string& training_job_id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = configs_.find(id);
+    if (found == configs_.end()) return false;
+    found->second.resulting_training_job_id = training_job_id;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
 bool ModelBuilderConfigStore::remove(const std::string& id) {
     const std::lock_guard<std::mutex> lock(mutex_);
     const auto found = configs_.find(id);
@@ -2086,7 +2119,8 @@ std::string model_builder_config_json(const ModelBuilderConfig& config) {
     const auto& s = config.settings;
     return "{\"id\":\"" + json_escape(config.id) + "\",\"projectId\":\"" +
            json_escape(config.project_id) + "\",\"baseModelId\":\"" +
-           json_escape(config.base_model_id) + "\",\"name\":\"" +
+           json_escape(config.base_model_id) + "\",\"datasetId\":\"" +
+           json_escape(config.dataset_id) + "\",\"name\":\"" +
            json_escape(config.name) + "\",\"description\":\"" +
            json_escape(config.description) + "\",\"sourceType\":\"" +
            json_escape(config.source_type) + "\",\"ownerId\":\"" +
@@ -2129,7 +2163,9 @@ std::string model_builder_config_json(const ModelBuilderConfig& config) {
            json_escape(s.reproducibility_settings) +
            "\",\"distributedTrainingSettings\":\"" +
            json_escape(s.distributed_training_settings) +
-           "\"},\"createdAtEpochSeconds\":" +
+           "\"},\"resultingTrainingJobId\":\"" +
+           json_escape(config.resulting_training_job_id) +
+           "\",\"createdAtEpochSeconds\":" +
            std::to_string(config.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
            std::to_string(config.updated_at_epoch_seconds) + "}";
@@ -2988,7 +3024,13 @@ SubjectExamStore::SubjectExamStore(RecordStore& records) : records_(&records) {
 void SubjectExamStore::restore() {
     for (const auto& item : records_->list("ml_subject_exams")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 6U) {
+        // 6 fields is the legacy scoped-down Phase 51 record (identity/
+        // subject/question-format/status only); 8 (this pass) adds the
+        // real question bank and passing threshold. Legacy records restore
+        // with an empty question bank and the in-struct-default 0.7
+        // threshold so existing databases keep working without a
+        // migration step.
+        if (fields.size() != 6U && fields.size() != 8U) {
             throw std::runtime_error(
                 "persisted subject exam record field count is wrong");
         }
@@ -3000,6 +3042,10 @@ void SubjectExamStore::restore() {
         exam.question_format = fields[3];
         exam.owner_id = fields[4];
         exam.status = parse_subject_exam_status(fields[5]);
+        if (fields.size() == 8U) {
+            exam.questions_json = fields[6];
+            exam.passing_threshold = std::stod(fields[7]);
+        }
         exams_[exam.id] = exam;
     }
 }
@@ -3009,7 +3055,8 @@ void SubjectExamStore::persist(const SubjectExam& exam) {
         "ml_subject_exams", exam.id,
         pack({exam.subject_id, exam.name, exam.description,
              exam.question_format, exam.owner_id,
-             subject_exam_status_name(exam.status)}));
+             subject_exam_status_name(exam.status), exam.questions_json,
+             std::to_string(exam.passing_threshold)}));
 }
 
 SubjectExam SubjectExamStore::create(const std::string& owner_id,
@@ -3065,6 +3112,46 @@ bool SubjectExamStore::set_status(const std::string& id,
     return true;
 }
 
+bool SubjectExamStore::set_questions(const std::string& id,
+                                     const std::string& questions_json,
+                                     const double passing_threshold) {
+    if (passing_threshold < 0.0 || passing_threshold > 1.0) {
+        throw std::invalid_argument(
+            "subject exam passing threshold must be between 0.0 and 1.0");
+    }
+    if (questions_json.size() > 65536U) {
+        throw std::invalid_argument(
+            "subject exam question bank is too large");
+    }
+    JsonValue::Array questions;
+    try {
+        questions = parse_json(questions_json).as_array();
+    } catch (const std::exception& error) {
+        throw std::invalid_argument(
+            std::string("subject exam question bank is invalid: ") +
+            error.what());
+    }
+    if (questions.empty()) {
+        throw std::invalid_argument(
+            "subject exam question bank must have at least one question");
+    }
+    for (const auto& question : questions) {
+        // required() throws std::runtime_error (not std::invalid_argument)
+        // on a missing key -- let it propagate as-is here rather than
+        // wrapping, since the caller only ever catches std::exception.
+        question.required("questionText").as_string();
+        question.required("expectedAnswer").as_string();
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = exams_.find(id);
+    if (found == exams_.end()) return false;
+    found->second.questions_json = questions_json;
+    found->second.passing_threshold = passing_threshold;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
 bool SubjectExamStore::remove(const std::string& id) {
     const std::lock_guard<std::mutex> lock(mutex_);
     const auto found = exams_.find(id);
@@ -3081,8 +3168,11 @@ std::string subject_exam_json(const SubjectExam& exam) {
            json_escape(exam.description) + "\",\"questionFormat\":\"" +
            json_escape(exam.question_format) + "\",\"ownerId\":\"" +
            json_escape(exam.owner_id) + "\",\"status\":\"" +
-           subject_exam_status_name(exam.status) +
-           "\",\"createdAtEpochSeconds\":" +
+           subject_exam_status_name(exam.status) + "\",\"questions\":" +
+           (exam.questions_json.empty() ? "[]" : exam.questions_json) +
+           ",\"passingThreshold\":" +
+           std::to_string(exam.passing_threshold) +
+           ",\"createdAtEpochSeconds\":" +
            std::to_string(exam.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
            std::to_string(exam.updated_at_epoch_seconds) + "}";
@@ -3097,6 +3187,72 @@ std::string subject_exams_json(const std::vector<SubjectExam>& exams) {
         body += subject_exam_json(exam);
     }
     return body + "]";
+}
+
+namespace {
+
+// Lowercases and collapses runs of whitespace -- the same normalization
+// normalize_instruction_text() above uses, duplicated locally rather than
+// shared across the anonymous-namespace boundary that already separates
+// the two unrelated features.
+std::string normalize_exam_text(const std::string& text) {
+    std::string result;
+    result.reserve(text.size());
+    bool last_was_space = false;
+    for (const unsigned char character : text) {
+        if (std::isspace(character)) {
+            if (!last_was_space && !result.empty()) result += ' ';
+            last_was_space = true;
+        } else {
+            result += static_cast<char>(std::tolower(character));
+            last_was_space = false;
+        }
+    }
+    while (!result.empty() && result.back() == ' ') result.pop_back();
+    return result;
+}
+
+}  // namespace
+
+SubjectExamResultStore::SubjectExamResultStore(RecordStore& records)
+    : records_(&records) {}
+
+void SubjectExamResultStore::put(const std::string& exam_id,
+                                 const std::string& result_json) {
+    records_->put("ml_subject_exam_results", exam_id, result_json);
+}
+
+std::optional<std::string> SubjectExamResultStore::find(
+    const std::string& exam_id) const {
+    return records_->get("ml_subject_exam_results", exam_id);
+}
+
+bool SubjectExamResultStore::remove(const std::string& exam_id) {
+    if (!records_->get("ml_subject_exam_results", exam_id)) return false;
+    records_->erase("ml_subject_exam_results", exam_id);
+    return true;
+}
+
+bool subject_exam_answer_matches(const std::string& generated_answer,
+                                 const std::string& expected_answer) {
+    const auto normalized_generated = normalize_exam_text(generated_answer);
+    const auto normalized_expected = normalize_exam_text(expected_answer);
+    if (normalized_expected.empty()) return false;
+    if (normalized_generated.find(normalized_expected) != std::string::npos) {
+        return true;
+    }
+    std::istringstream expected_stream(normalized_expected);
+    std::vector<std::string> expected_tokens;
+    std::string token;
+    while (expected_stream >> token) expected_tokens.push_back(token);
+    if (expected_tokens.empty() || expected_tokens.size() > 6U) return false;
+    const auto generated_tokens = tokenize(normalized_generated);
+    for (const auto& expected_token : expected_tokens) {
+        if (generated_tokens.find(expected_token) == generated_tokens.end()) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Phase 52: docs/PLAN.md "Machine Learning Abilities" section 26
@@ -3148,7 +3304,13 @@ HyperparameterSearchStore::HyperparameterSearchStore(RecordStore& records)
 void HyperparameterSearchStore::restore() {
     for (const auto& item : records_->list("ml_hyperparameter_searches")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 6U) {
+        // 6 fields is the legacy scoped-down Phase 52 record (identity/
+        // training-job/strategy/status only); 12 (this pass) adds the
+        // search-space/trial-budget inputs and the trial-history/best-
+        // trial outputs the real executor produces. Legacy records restore
+        // with default (unset) search fields so existing databases keep
+        // working without a migration step.
+        if (fields.size() != 6U && fields.size() != 12U) {
             throw std::runtime_error(
                 "persisted hyperparameter search record field count is wrong");
         }
@@ -3160,6 +3322,14 @@ void HyperparameterSearchStore::restore() {
         search.strategy = fields[3];
         search.owner_id = fields[4];
         search.status = parse_hyperparameter_search_status(fields[5]);
+        if (fields.size() == 12U) {
+            search.search_space_json = fields[6];
+            search.max_trials = static_cast<std::uint32_t>(std::stoul(fields[7]));
+            search.trials_json = fields[8];
+            search.best_learning_rate = std::stod(fields[9]);
+            search.best_epochs = static_cast<std::uint32_t>(std::stoul(fields[10]));
+            search.best_score = std::stod(fields[11]);
+        }
         searches_[search.id] = search;
     }
 }
@@ -3169,19 +3339,41 @@ void HyperparameterSearchStore::persist(const HyperparameterSearch& search) {
         "ml_hyperparameter_searches", search.id,
         pack({search.training_job_id, search.name, search.description,
              search.strategy, search.owner_id,
-             hyperparameter_search_status_name(search.status)}));
+             hyperparameter_search_status_name(search.status),
+             search.search_space_json, std::to_string(search.max_trials),
+             search.trials_json, std::to_string(search.best_learning_rate),
+             std::to_string(search.best_epochs),
+             std::to_string(search.best_score)}));
 }
 
 HyperparameterSearch HyperparameterSearchStore::create(
     const std::string& owner_id, const std::string& training_job_id,
     const std::string& name, const std::string& description,
-    const std::string& strategy) {
+    const std::string& strategy, const std::string& search_space_json,
+    const std::uint32_t max_trials) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("hyperparameter search name is invalid");
     }
     if (training_job_id.empty()) {
         throw std::invalid_argument(
             "hyperparameter search training job id is required");
+    }
+    if (max_trials < 1U || max_trials > 20U) {
+        throw std::invalid_argument(
+            "hyperparameter search max trials must be between 1 and 20");
+    }
+    if (!search_space_json.empty()) {
+        // Validate shape only -- run_hyperparameter_search() (server.cpp)
+        // is the real consumer and re-parses this at run time; failing
+        // fast here means a malformed search space is rejected at create
+        // time instead of silently falling back to defaults later.
+        try {
+            parse_json(search_space_json);
+        } catch (const std::exception& error) {
+            throw std::invalid_argument(
+                std::string("hyperparameter search space is invalid: ") +
+                error.what());
+        }
     }
     const std::lock_guard<std::mutex> lock(mutex_);
     HyperparameterSearch search;
@@ -3191,6 +3383,8 @@ HyperparameterSearch HyperparameterSearchStore::create(
     search.description = description;
     search.strategy = strategy;
     search.owner_id = owner_id;
+    search.search_space_json = search_space_json;
+    search.max_trials = max_trials;
     search.status = HyperparameterSearchStatus::draft;
     search.created_at_epoch_seconds = epoch_seconds();
     search.updated_at_epoch_seconds = search.created_at_epoch_seconds;
@@ -3227,6 +3421,23 @@ bool HyperparameterSearchStore::set_status(
     return true;
 }
 
+bool HyperparameterSearchStore::record_result(
+    const std::string& id, const std::string& trials_json,
+    const double best_learning_rate, const std::uint32_t best_epochs,
+    const double best_score, const std::uint32_t trials_run) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = searches_.find(id);
+    if (found == searches_.end()) return false;
+    found->second.trials_json = trials_json;
+    found->second.best_learning_rate = best_learning_rate;
+    found->second.best_epochs = best_epochs;
+    found->second.best_score = best_score;
+    found->second.trials_run = trials_run;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
 bool HyperparameterSearchStore::remove(const std::string& id) {
     const std::lock_guard<std::mutex> lock(mutex_);
     const auto found = searches_.find(id);
@@ -3244,7 +3455,15 @@ std::string hyperparameter_search_json(const HyperparameterSearch& search) {
            json_escape(search.strategy) + "\",\"ownerId\":\"" +
            json_escape(search.owner_id) + "\",\"status\":\"" +
            hyperparameter_search_status_name(search.status) +
-           "\",\"createdAtEpochSeconds\":" +
+           "\",\"searchSpaceJson\":\"" +
+           json_escape(search.search_space_json) + "\",\"maxTrials\":" +
+           std::to_string(search.max_trials) + ",\"trialsJson\":\"" +
+           json_escape(search.trials_json) + "\",\"bestLearningRate\":" +
+           std::to_string(search.best_learning_rate) + ",\"bestEpochs\":" +
+           std::to_string(search.best_epochs) + ",\"bestScore\":" +
+           std::to_string(search.best_score) + ",\"trialsRun\":" +
+           std::to_string(search.trials_run) +
+           ",\"createdAtEpochSeconds\":" +
            std::to_string(search.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
            std::to_string(search.updated_at_epoch_seconds) + "}";
@@ -3309,9 +3528,15 @@ ModelOptimizationStore::ModelOptimizationStore(RecordStore& records)
 }
 
 void ModelOptimizationStore::restore() {
+    // Field count 6 is the pre-2026-08-19 format (no pruning_threshold) --
+    // accepted here so an existing database keeps working without a
+    // migration step, the same backward-compatibility convention
+    // HyperparameterSearchStore::restore() uses for its own field-count
+    // growth. A legacy record gets the same 1e-3 default create() itself
+    // uses.
     for (const auto& item : records_->list("ml_model_optimizations")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 6U) {
+        if (fields.size() != 6U && fields.size() != 7U) {
             throw std::runtime_error(
                 "persisted model optimization record field count is wrong");
         }
@@ -3323,6 +3548,7 @@ void ModelOptimizationStore::restore() {
         run.operation = fields[3];
         run.owner_id = fields[4];
         run.status = parse_model_optimization_status(fields[5]);
+        run.pruning_threshold = fields.size() == 7U ? std::stod(fields[6]) : 1e-3;
         runs_[run.id] = run;
     }
 }
@@ -3331,18 +3557,23 @@ void ModelOptimizationStore::persist(const ModelOptimizationRun& run) {
     records_->put(
         "ml_model_optimizations", run.id,
         pack({run.model_id, run.name, run.description, run.operation,
-             run.owner_id, model_optimization_status_name(run.status)}));
+             run.owner_id, model_optimization_status_name(run.status),
+             std::to_string(run.pruning_threshold)}));
 }
 
 ModelOptimizationRun ModelOptimizationStore::create(
     const std::string& owner_id, const std::string& model_id,
     const std::string& name, const std::string& description,
-    const std::string& operation) {
+    const std::string& operation, const double pruning_threshold) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("model optimization name is invalid");
     }
     if (model_id.empty()) {
         throw std::invalid_argument("model optimization model id is required");
+    }
+    if (!(pruning_threshold >= 0.0) || pruning_threshold > 1.0) {
+        throw std::invalid_argument(
+            "model optimization pruning threshold must be in [0, 1]");
     }
     const std::lock_guard<std::mutex> lock(mutex_);
     ModelOptimizationRun run;
@@ -3352,6 +3583,7 @@ ModelOptimizationRun ModelOptimizationStore::create(
     run.description = description;
     run.operation = operation;
     run.owner_id = owner_id;
+    run.pruning_threshold = pruning_threshold;
     run.status = ModelOptimizationStatus::draft;
     run.created_at_epoch_seconds = epoch_seconds();
     run.updated_at_epoch_seconds = run.created_at_epoch_seconds;
@@ -3405,7 +3637,9 @@ std::string model_optimization_json(const ModelOptimizationRun& run) {
            json_escape(run.operation) + "\",\"ownerId\":\"" +
            json_escape(run.owner_id) + "\",\"status\":\"" +
            model_optimization_status_name(run.status) +
-           "\",\"createdAtEpochSeconds\":" +
+           "\",\"pruningThreshold\":" +
+           std::to_string(run.pruning_threshold) +
+           ",\"createdAtEpochSeconds\":" +
            std::to_string(run.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
            std::to_string(run.updated_at_epoch_seconds) + "}";
@@ -4690,7 +4924,10 @@ SafetyGovernanceStore::SafetyGovernanceStore(RecordStore& records)
 void SafetyGovernanceStore::restore() {
     for (const auto& item : records_->list("ml_safety_policies")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 5U) {
+        // 5 fields is the pre-enforcement-toggle record shape; treat those
+        // as enforcement_enabled=true so policies persisted before this
+        // change keep behaving exactly as they did before.
+        if (fields.size() != 5U && fields.size() != 6U) {
             throw std::runtime_error(
                 "persisted safety policy record field count is wrong");
         }
@@ -4701,6 +4938,7 @@ void SafetyGovernanceStore::restore() {
         policy.restricted_data_categories = fields[2];
         policy.owner_id = fields[3];
         policy.status = parse_safety_policy_status(fields[4]);
+        policy.enforcement_enabled = fields.size() == 6U ? fields[5] == "1" : true;
         policies_[policy.id] = policy;
     }
     for (const auto& item : records_->list("ml_model_cards")) {
@@ -4734,7 +4972,8 @@ void SafetyGovernanceStore::persist_policy(const SafetyPolicy& policy) {
     records_->put("ml_safety_policies", policy.id,
                   pack({policy.name, policy.scope,
                        policy.restricted_data_categories, policy.owner_id,
-                       safety_policy_status_name(policy.status)}));
+                       safety_policy_status_name(policy.status),
+                       policy.enforcement_enabled ? "1" : "0"}));
 }
 
 void SafetyGovernanceStore::persist_model_card(const ModelCard& card) {
@@ -4761,6 +5000,7 @@ SafetyPolicy SafetyGovernanceStore::create_policy(
     policy.restricted_data_categories = restricted_data_categories;
     policy.owner_id = owner_id;
     policy.status = SafetyPolicyStatus::pending;
+    policy.enforcement_enabled = true;
     policy.created_at_epoch_seconds = epoch_seconds();
     policy.updated_at_epoch_seconds = policy.created_at_epoch_seconds;
     policies_[policy.id] = policy;
@@ -4790,6 +5030,17 @@ bool SafetyGovernanceStore::set_policy_status(
     const auto found = policies_.find(id);
     if (found == policies_.end()) return false;
     found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist_policy(found->second);
+    return true;
+}
+
+bool SafetyGovernanceStore::set_policy_enforcement(const std::string& id,
+                                                   const bool enabled) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = policies_.find(id);
+    if (found == policies_.end()) return false;
+    found->second.enforcement_enabled = enabled;
     found->second.updated_at_epoch_seconds = epoch_seconds();
     if (records_) persist_policy(found->second);
     return true;
@@ -4880,7 +5131,9 @@ std::string safety_policy_json(const SafetyPolicy& policy) {
            json_escape(policy.restricted_data_categories) +
            "\",\"ownerId\":\"" + json_escape(policy.owner_id) +
            "\",\"status\":\"" + safety_policy_status_name(policy.status) +
-           "\",\"createdAtEpochSeconds\":" +
+           "\",\"enforcementEnabled\":" +
+           (policy.enforcement_enabled ? std::string("true") : std::string("false")) +
+           ",\"createdAtEpochSeconds\":" +
            std::to_string(policy.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
            std::to_string(policy.updated_at_epoch_seconds) + "}";
