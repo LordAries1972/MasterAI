@@ -1177,7 +1177,14 @@ The native service provides browser workflows for:
   message is sent — so the runner has a head start on the wait. Concurrent
   first-message loads wait on that same bounded operation, and duplicate
   background warm requests are coalesced
-- Incrementally streamed responses and cancellation
+- Incrementally streamed responses and cancellation, rendered at most once per
+  painted frame so a fast-streaming reply never stalls the page
+- Persistent HTTP keep-alive connections for ordinary (non-streaming) API
+  calls, so chat polling and background status requests do not exhaust the
+  browser's per-origin connection limit while a streamed reply is open
+- A "Copy" and "Save" button on every code block in a reply, letting the
+  generated snippet be copied or saved to a real file independent of any
+  project binding or tool call
 - Model-independent, per-user remembered chat details with explicit
   `save to memory:` commands, bounded automatic capture, later-turn recall,
   and an inspect/add/forget sidebar
@@ -1197,6 +1204,14 @@ authentication, users, projects, chats, user memories (`GET/POST
 benchmarks, resources, memory, request metrics, project indexes, MCP
 integrations, IDE connections, and administrator-only Machine Learning
 records under `/api/v1/ml/*`.
+
+All HTTP endpoints serve over persistent (keep-alive) connections by
+default: a connection stays open across multiple ordinary requests (up to a
+100-request cap and a 5-second idle timeout) unless the client sends
+`Connection: close` or uses HTTP/1.0 without requesting keep-alive. A
+streaming chat-completion response is the one exception — it holds the
+socket for the whole generation and always closes the connection when the
+stream ends.
 
 Inputs are bounded and strictly parsed. Administrative mutations require the
 applicable identity, role, scope, project binding, host/origin checks, CSRF

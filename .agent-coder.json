@@ -149,5 +149,5 @@
     "requireApprovalAtBudgetPercentage": 90,
     "hardStopAtBudgetPercentage": 100
   },
-  "maxScannedFileSizeMB": 10
+  "maxScannedFileSizeMB": 2
 }

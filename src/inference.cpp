@@ -586,8 +586,14 @@ public:
         PROCESS_INFORMATION process{};
         const auto working = widen(specification.working_directory.string());
         auto environment_block = build_environment_block(specification.environment);
+        // CREATE_NEW_PROCESS_GROUP makes this runner's own PID its console
+        // process-group id, so Process::stop() below can target it alone
+        // with GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, ...) -- without a
+        // group of its own, that call would also reach this parent process
+        // (they'd share masterai.exe's group), which is not what a runner
+        // shutdown should do.
         const DWORD creation_flags =
-            CREATE_NO_WINDOW |
+            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP |
             (environment_block.empty() ? 0U
                                        : static_cast<DWORD>(
                                              CREATE_UNICODE_ENVIRONMENT));
@@ -673,6 +679,18 @@ public:
         }
         bool forced = false;
 #if defined(_WIN32)
+        // Mirrors the POSIX kill(SIGTERM) below: ask the runner to exit on
+        // its own (llama.cpp's server installs a SIGINT/SIGTERM handler,
+        // which the CRT maps a console-control event onto for a process in
+        // its own group -- see CREATE_NEW_PROCESS_GROUP above) before ever
+        // waiting on it. Without this, the old code just idled for the
+        // entire grace period doing nothing -- nothing was ever going to
+        // make the runner exit early -- then force-killed, so every unload
+        // (and every loaded runner at shutdown, sequentially) always cost
+        // the full grace_seconds instead of only when the process actually
+        // failed to respond.
+        GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT,
+                                 static_cast<DWORD>(process_id_));
         if (WaitForSingleObject(handle_, grace_seconds * 1000U) == WAIT_TIMEOUT) {
             TerminateProcess(handle_, 1U);
             WaitForSingleObject(handle_, 2000U);

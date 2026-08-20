@@ -7413,6 +7413,29 @@ public:
         if (downloads) downloads->cancel_all();
     }
 
+    // Registration pair for a streaming chat generation's own local
+    // `cancellation` flag (see send_chat_message()) so cancel_all_generations()
+    // below can reach it. Called via an RAII guard at that call site so a
+    // flag is always unregistered again once its request finishes, even on
+    // an exception.
+    void register_generation_cancellation(std::atomic_bool* flag) {
+        std::lock_guard<std::mutex> lock(active_generation_cancellations_mutex);
+        active_generation_cancellations.push_back(flag);
+    }
+    void unregister_generation_cancellation(std::atomic_bool* flag) noexcept {
+        std::lock_guard<std::mutex> lock(active_generation_cancellations_mutex);
+        auto& flags = active_generation_cancellations;
+        flags.erase(std::remove(flags.begin(), flags.end(), flag), flags.end());
+    }
+    // Called from HttpServer::stop(), same reasoning as
+    // cancel_all_downloads() above: a generation already streaming when
+    // shutdown is requested has to be told to stop, or stop() would block
+    // for however long that generation still had left to run.
+    void cancel_all_generations() noexcept {
+        std::lock_guard<std::mutex> lock(active_generation_cancellations_mutex);
+        for (auto* flag : active_generation_cancellations) flag->store(true);
+    }
+
 private:
     std::string session_cookie(const std::string& token) const {
         return "Set-Cookie: masterai_session=" + token +
@@ -9866,6 +9889,128 @@ private:
     // any others are silently discarded from the transcript. Returns
     // std::nullopt (with `text` still fully cleaned of marker debris) if no
     // block in the reply parsed.
+    // The exact six tool names execute_chat_tool() dispatches -- also used
+    // below to recognize a stray tool-call attempt that never used the
+    // [[TOOL_CALL]] markers at all (see find_bare_tool_call_span()).
+    static constexpr const char* kKnownToolNames[] = {
+        "read_file", "list_directory", "search",
+        "write_file", "delete_file", "run_command"};
+
+    static bool is_known_tool_name(const std::string& name) {
+        for (const char* known : kKnownToolNames) {
+            if (name == known) return true;
+        }
+        return false;
+    }
+
+    // Small local models don't reliably follow the exact "end your reply
+    // with [[TOOL_CALL]]{...}[[/TOOL_CALL]]" instruction -- some instead
+    // fall back to a generic agentic JSON shape they saw in training (a
+    // bare {"tool":"write_file","arguments":{...}} object, often wrapped in
+    // a ```json fence) with no markers at all. Without this, that JSON
+    // never matches kToolCallOpenMarker and leaks straight into the chat
+    // bubble as raw, unexecuted text -- which is exactly what a real
+    // [[TOOL_CALL]] block being unavailable in a non-project chat used to
+    // let through. This scans for the first '{' that opens a brace-balanced
+    // JSON object parsing to a "tool" field naming one of the six real
+    // tools, and returns its [start,end) span in `text` (including an
+    // immediately enclosing ```/```json fence, if present, so that gets
+    // removed too) -- or nullopt if nothing like that is present.
+    static std::optional<std::pair<std::size_t, std::size_t>>
+    find_bare_tool_call_span(const std::string& text) {
+        std::size_t search_from = 0U;
+        while (true) {
+            const auto brace_pos = text.find('{', search_from);
+            if (brace_pos == std::string::npos) return std::nullopt;
+            int depth = 0;
+            std::size_t end_pos = std::string::npos;
+            bool in_string = false;
+            bool escape = false;
+            for (std::size_t i = brace_pos; i < text.size(); ++i) {
+                const char c = text[i];
+                if (in_string) {
+                    if (escape) {
+                        escape = false;
+                    } else if (c == '\\') {
+                        escape = true;
+                    } else if (c == '"') {
+                        in_string = false;
+                    }
+                    continue;
+                }
+                if (c == '"') { in_string = true; continue; }
+                if (c == '{') { ++depth; }
+                else if (c == '}') {
+                    --depth;
+                    if (depth == 0) { end_pos = i + 1U; break; }
+                }
+            }
+            if (end_pos == std::string::npos) {
+                // Unbalanced -- nothing valid starting at this '{', try the
+                // next one rather than giving up on the whole text.
+                search_from = brace_pos + 1U;
+                continue;
+            }
+            const auto candidate = text.substr(brace_pos, end_pos - brace_pos);
+            try {
+                const auto parsed = parse_json(candidate);
+                if (const auto* tool_field = parsed.optional("tool")) {
+                    if (is_known_tool_name(tool_field->as_string())) {
+                        auto span_start = brace_pos;
+                        auto span_end = end_pos;
+                        // Pull in an immediately enclosing ```/```json fence
+                        // so it doesn't leave an empty, orphaned code block
+                        // behind once the JSON inside it is stripped.
+                        const auto fence_open =
+                            text.find_last_of('\n', span_start);
+                        const auto line_start = fence_open == std::string::npos
+                            ? 0U : fence_open + 1U;
+                        const auto trimmed = text.substr(
+                            line_start, span_start - line_start);
+                        const auto first_non_ws =
+                            trimmed.find_first_not_of(" \t");
+                        if (first_non_ws != std::string::npos &&
+                            trimmed.compare(first_non_ws, 3, "```") == 0) {
+                            span_start = line_start;
+                        }
+                        auto fence_close = text.find("\n```", span_end);
+                        if (fence_close != std::string::npos) {
+                            const auto between = text.substr(
+                                span_end, fence_close - span_end);
+                            if (between.find_first_not_of(" \t\r\n") ==
+                                std::string::npos) {
+                                span_end = fence_close + 4U;
+                            }
+                        }
+                        return std::make_pair(span_start, span_end);
+                    }
+                }
+            } catch (const std::exception&) {
+                // Not valid JSON, or no usable "tool" field -- keep
+                // scanning past this brace for another candidate.
+            }
+            search_from = brace_pos + 1U;
+        }
+    }
+
+    // Shared by both passes of detect_and_strip_tool_call() below (the
+    // marker-delimited body and the marker-less fallback span) so the parse
+    // logic exists in exactly one place.
+    static std::optional<ToolCallRequest> parse_tool_call_body(
+        const std::string& body) {
+        try {
+            const auto parsed = parse_json(body);
+            ToolCallRequest request;
+            request.tool_name = parsed.required("tool").as_string();
+            if (const auto* arguments = parsed.optional("arguments")) {
+                request.arguments = *arguments;
+            }
+            return request;
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
     static std::optional<ToolCallRequest> detect_and_strip_tool_call(
         std::string& text) {
         std::optional<ToolCallRequest> result;
@@ -9887,23 +10032,24 @@ private:
             const auto after_close =
                 close_pos + std::strlen(kToolCallCloseMarker);
             if (!result.has_value()) {
-                const auto body =
-                    text.substr(body_start, close_pos - body_start);
-                try {
-                    const auto parsed = parse_json(body);
-                    ToolCallRequest request;
-                    request.tool_name = parsed.required("tool").as_string();
-                    if (const auto* arguments = parsed.optional("arguments")) {
-                        request.arguments = *arguments;
-                    }
-                    result = std::move(request);
-                } catch (const std::exception&) {
-                    // Malformed body -- still stripped below, just not
-                    // executed; keep scanning for a later, valid block.
-                }
+                // Malformed body -- still stripped below, just not
+                // executed; keep scanning for a later, valid block.
+                result = parse_tool_call_body(
+                    text.substr(body_start, close_pos - body_start));
             }
             text.erase(open_pos, after_close - open_pos);
             search_from = open_pos;
+        }
+        // Properly marked blocks are gone; now catch the marker-less
+        // fallback shape described above. Repeats until none remain (a
+        // model can emit more than one attempt), capturing the first as
+        // `result` only if the marker-based pass above found nothing.
+        while (const auto span = find_bare_tool_call_span(text)) {
+            if (!result.has_value()) {
+                result = parse_tool_call_body(
+                    text.substr(span->first, span->second - span->first));
+            }
+            text.erase(span->first, span->second - span->first);
         }
         while (!text.empty() &&
               (text.back() == '\n' || text.back() == '\r' ||
@@ -10714,6 +10860,21 @@ private:
         // has generated.elapsed_microseconds as its real measured latency.
         auto request_started = std::chrono::steady_clock::now();
         std::atomic_bool cancellation{false};
+        // Registered for the lifetime of this request so HttpServer::stop()
+        // can flip `cancellation` via cancel_all_generations() instead of
+        // blocking until this generation finishes on its own -- see that
+        // method's comment. The guard unregisters on every exit path
+        // (normal return or exception) since register_generation_cancellation()
+        // takes the address of a stack variable that must not outlive it.
+        struct GenerationCancellationGuard {
+            State* state;
+            std::atomic_bool* flag;
+            ~GenerationCancellationGuard() {
+                state->unregister_generation_cancellation(flag);
+            }
+        };
+        register_generation_cancellation(&cancellation);
+        GenerationCancellationGuard generation_cancellation_guard{this, &cancellation};
         // Tokens are streamed to the client as they arrive, so a client
         // watching the reply has already seen this text by the time
         // anything below can fail (a dropped runner connection, a policy
@@ -11388,10 +11549,18 @@ private:
             // asks the model to end a reply with one or the other) --
             // strip it the same tail-anchored way so the persisted
             // transcript never shows the raw [[TOOL_CALL]] block either.
+            // Stripping always runs, even in a chat with no project bound
+            // (tools_available false) and no auto-drive requested: a model
+            // can still hallucinate tool-call-shaped JSON it has no real
+            // tools to back in that case (see find_bare_tool_call_span()'s
+            // comment), and that text must never reach the transcript
+            // either way -- only *executing* the parsed call stays gated on
+            // tools actually being available for this chat.
+            const std::optional<ToolCallRequest> tool_call_detected =
+                detect_and_strip_tool_call(generated.text);
             const std::optional<ToolCallRequest> tool_call =
-                (auto_drive || tools_available)
-                    ? detect_and_strip_tool_call(generated.text)
-                    : std::nullopt;
+                (auto_drive || tools_available) ? tool_call_detected
+                                                : std::nullopt;
             // Persist the runner-reported token figures with the transcript:
             // the reply's generated count on the assistant message, and the
             // evaluated prompt count back-filled onto this turn's user
@@ -11898,6 +12067,17 @@ private:
     std::unique_ptr<WorkerListener> worker_listener;
     std::thread worker_listener_thread;
     std::unique_ptr<DownloadManager> downloads;
+    // Every in-flight streaming chat generation registers its own
+    // `cancellation` flag here for the duration of send_chat_message() (see
+    // register_generation_cancellation()/unregister_generation_cancellation()
+    // and the RAII guard at that call site) so HttpServer::stop() can flip
+    // them all at once via cancel_all_generations() -- without this, a
+    // generation in progress when shutdown is requested had nothing telling
+    // it to stop, so stop() could block for its full length (potentially
+    // minutes on a long reply) instead of returning promptly like the
+    // download-cancellation path above already does.
+    std::mutex active_generation_cancellations_mutex;
+    std::vector<std::atomic_bool*> active_generation_cancellations;
     std::unique_ptr<BenchmarkStore> benchmarks;
     // Phase 36: full performance benchmark matrix and regression gate.
     std::unique_ptr<PerformanceCertificationStore> certifications;
@@ -12216,54 +12396,201 @@ bool HttpServer::run(std::atomic_bool& stop_requested) {
                            sizeof(client_timeout));
 #endif
 
-                std::string request;
-                std::array<char, 8192> buffer{};
-                while (request.size() < 16384U &&
-                       request.find("\r\n\r\n") == std::string::npos) {
-                    const auto received = recv(
-                        client, buffer.data(), static_cast<int>(buffer.size()), 0);
-                    if (received <= 0) {
-                        break;
+                // HTTP keep-alive: without this, every JSON status/poll
+                // request (runner status, memory status, chat list, ...) as
+                // well as every chat turn opened a brand-new TCP connection
+                // and forced "Connection: close". Browsers cap concurrent
+                // connections per origin at ~6, so a live chat stream plus
+                // the sidebar's periodic pollers routinely exhausted that
+                // budget and made unrelated requests (e.g. switching chats)
+                // visibly queue in the browser -- indistinguishable from the
+                // server itself stalling, even though no C++ mutex was ever
+                // contended. Serving multiple requests per connection here
+                // keeps ordinary polling off the browser's connection limit
+                // entirely. Streaming chat responses (handle() returns an
+                // empty string because it wrote directly to the socket) keep
+                // their own "Connection: close" and end the connection as
+                // before, since they already hold the socket for the whole
+                // generation.
+                constexpr int kKeepAliveIdleTimeoutSeconds = 5;
+                constexpr int kMaxRequestsPerConnection = 100;
+                std::string carry_over;
+                int requests_served = 0;
+                for (;;) {
+                    std::string request = std::move(carry_over);
+                    carry_over.clear();
+
+                    if (requests_served > 0) {
+                        // Waiting for the client's *next* request on an
+                        // already-served connection: use a short idle
+                        // timeout so a browser that opened a keep-alive
+                        // connection but has nothing more to send doesn't
+                        // tie up a worker thread for the full request
+                        // timeout. Restored to the normal request timeout
+                        // below the moment any byte of a new request arrives.
+#if defined(_WIN32)
+                        const DWORD idle_ms =
+                            static_cast<DWORD>(kKeepAliveIdleTimeoutSeconds) * 1000U;
+                        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                                   reinterpret_cast<const char*>(&idle_ms),
+                                   sizeof(idle_ms));
+#else
+                        timeval idle_timeout{};
+                        idle_timeout.tv_sec = kKeepAliveIdleTimeoutSeconds;
+                        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &idle_timeout,
+                                   sizeof(idle_timeout));
+#endif
                     }
-                    request.append(buffer.data(), static_cast<std::size_t>(received));
-                }
-                const auto header_end = request.find("\r\n\r\n");
-                bool invalid_length = false;
-                std::uint64_t content_length = 0U;
-                if (header_end != std::string::npos) {
-                    const std::string headers = lower(request.substr(0U, header_end));
-                    const std::string marker = "\r\ncontent-length:";
-                    const auto position = headers.find(marker);
-                    if (position != std::string::npos) {
-                        const auto start = headers.find_first_not_of(
-                            ' ', position + marker.size());
-                        const auto end = headers.find("\r\n", start);
-                        try {
-                            content_length = std::stoull(
-                                headers.substr(start, end - start));
-                        } catch (const std::exception&) {
-                            invalid_length = true;
-                        }
-                    }
-                    while (!invalid_length &&
-                           content_length <= configuration_.max_request_bytes &&
-                           request.size() < header_end + 4U + content_length) {
+
+                    std::array<char, 8192> buffer{};
+                    bool received_any_byte = false;
+                    while (request.size() < 16384U &&
+                           request.find("\r\n\r\n") == std::string::npos) {
                         const auto received = recv(
                             client, buffer.data(), static_cast<int>(buffer.size()), 0);
-                        if (received <= 0) break;
+                        if (received <= 0) {
+                            break;
+                        }
+                        if (!received_any_byte && requests_served > 0) {
+                            received_any_byte = true;
+#if defined(_WIN32)
+                            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                                       reinterpret_cast<const char*>(&timeout_ms),
+                                       sizeof(timeout_ms));
+#else
+                            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                                       &client_timeout, sizeof(client_timeout));
+#endif
+                        }
                         request.append(buffer.data(), static_cast<std::size_t>(received));
                     }
-                }
-                if (request.size() >= 16384U && header_end == std::string::npos) {
-                    send_all(client, response(431, "Request Header Fields Too Large",
-                                              "{\"error\":\"headers_too_large\"}"));
-                } else if (invalid_length ||
-                           content_length > configuration_.max_request_bytes) {
-                    send_all(client, response(413, "Payload Too Large",
-                                              "{\"error\":\"body_too_large\"}"));
-                } else {
+                    if (requests_served > 0 && request.empty()) {
+                        // Idle keep-alive connection timed out or the client
+                        // closed it -- an ordinary end to a reused
+                        // connection, not an error worth logging.
+                        break;
+                    }
+                    const auto header_end = request.find("\r\n\r\n");
+                    bool invalid_length = false;
+                    std::uint64_t content_length = 0U;
+                    std::string lowered_headers;
+                    if (header_end != std::string::npos) {
+                        lowered_headers = lower(request.substr(0U, header_end));
+                        const std::string marker = "\r\ncontent-length:";
+                        const auto position = lowered_headers.find(marker);
+                        if (position != std::string::npos) {
+                            const auto start = lowered_headers.find_first_not_of(
+                                ' ', position + marker.size());
+                            const auto end = lowered_headers.find("\r\n", start);
+                            try {
+                                content_length = std::stoull(
+                                    lowered_headers.substr(start, end - start));
+                            } catch (const std::exception&) {
+                                invalid_length = true;
+                            }
+                        }
+                        while (!invalid_length &&
+                               content_length <= configuration_.max_request_bytes &&
+                               request.size() < header_end + 4U + content_length) {
+                            const auto received = recv(
+                                client, buffer.data(), static_cast<int>(buffer.size()), 0);
+                            if (received <= 0) break;
+                            request.append(buffer.data(), static_cast<std::size_t>(received));
+                        }
+                    }
+                    if (request.size() >= 16384U && header_end == std::string::npos) {
+                        send_all(client, response(431, "Request Header Fields Too Large",
+                                                  "{\"error\":\"headers_too_large\"}"));
+                        break;
+                    }
+                    if (invalid_length ||
+                        content_length > configuration_.max_request_bytes) {
+                        send_all(client, response(413, "Payload Too Large",
+                                                  "{\"error\":\"body_too_large\"}"));
+                        break;
+                    }
+                    if (header_end == std::string::npos) {
+                        // Connection dropped mid-request; nothing to serve.
+                        break;
+                    }
+
+                    // Bytes belonging to a request the client pipelined
+                    // after this one (rare without pipelining, but a single
+                    // recv() can legitimately return more than one request's
+                    // worth of bytes) get carried into the next loop
+                    // iteration instead of being fed to handle() as part of
+                    // this request's body.
+                    const std::size_t consumed = header_end + 4U + content_length;
+                    if (request.size() > consumed) {
+                        carry_over.assign(request.begin() +
+                                              static_cast<std::ptrdiff_t>(consumed),
+                                          request.end());
+                        request.resize(consumed);
+                    }
+
+                    const std::string first_line =
+                        request.substr(0U, request.find("\r\n"));
+                    const bool is_http10 =
+                        first_line.find("HTTP/1.0") != std::string::npos;
+                    const auto connection_marker =
+                        lowered_headers.find("\r\nconnection:");
+                    std::string connection_value;
+                    if (connection_marker != std::string::npos) {
+                        const auto start = lowered_headers.find_first_not_of(
+                            ' ', connection_marker + 13U);
+                        const auto end = lowered_headers.find("\r\n", start);
+                        connection_value = lowered_headers.substr(start, end - start);
+                    }
+                    const bool client_wants_close =
+                        connection_value.find("close") != std::string::npos;
+                    const bool client_wants_keep_alive =
+                        connection_value.find("keep-alive") != std::string::npos;
+                    const bool keep_alive_eligible =
+                        !client_wants_close &&
+                        (!is_http10 || client_wants_keep_alive) &&
+                        requests_served + 1 < kMaxRequestsPerConnection;
+
                     const auto outgoing = state_->handle(request, client);
-                    if (!outgoing.empty()) send_all(client, outgoing);
+                    if (outgoing.empty()) {
+                        // A streaming response (chat token stream) already
+                        // wrote its own "Connection: close" headers directly
+                        // to the socket and finished the chunked body; the
+                        // connection ends here regardless of keep-alive.
+                        break;
+                    }
+                    if (!keep_alive_eligible) {
+                        send_all(client, outgoing);
+                        break;
+                    }
+                    // Rewrite this ordinary response's "Connection: close"
+                    // (the default every response() / html_response() call
+                    // builds) to keep-alive so the socket can serve this
+                    // client's next request instead of being torn down.
+                    const auto body_separator = outgoing.find("\r\n\r\n");
+                    const auto header_section_end =
+                        body_separator == std::string::npos ? outgoing.size()
+                                                             : body_separator;
+                    const auto close_header_position =
+                        outgoing.find("Connection: close", 0U);
+                    if (close_header_position != std::string::npos &&
+                        close_header_position < header_section_end) {
+                        std::string rewritten = outgoing;
+                        rewritten.replace(
+                            close_header_position,
+                            std::string("Connection: close").size(),
+                            "Connection: keep-alive\r\nKeep-Alive: timeout=" +
+                                std::to_string(kKeepAliveIdleTimeoutSeconds) +
+                                ", max=" + std::to_string(kMaxRequestsPerConnection));
+                        send_all(client, rewritten);
+                    } else {
+                        // No "Connection: close" header to rewrite (e.g. a
+                        // handler that already built its own headers) --
+                        // send as-is and close, rather than guessing at its
+                        // intended connection semantics.
+                        send_all(client, outgoing);
+                        break;
+                    }
+                    ++requests_served;
                 }
             } catch (const std::exception& exception) {
                 log(LogLevel::error, "server.connection_failed", exception.what());
@@ -12312,6 +12639,12 @@ void HttpServer::stop() noexcept {
     // itself takes.
     if (state_) {
         state_->cancel_all_downloads();
+        // Same reasoning as cancel_all_downloads() above, for a chat reply
+        // that's still streaming: without this, active_connections_ below
+        // would not drop to zero until that generation finished on its own,
+        // which could keep this call (and stop.ps1's 30-second wait for the
+        // process to exit) blocked for as long as the reply took to finish.
+        state_->cancel_all_generations();
     }
 
     // Wait for in-flight request-handling threads to finish naturally (the

@@ -756,10 +756,50 @@ std::string application_script() {
         "btn.setAttribute('aria-label','Copy message');"
         "btn.addEventListener('click',()=>copyToClipboard(msgEl.dataset.raw,btn));"
         "msgEl.append(btn);}"
-        // One button per fenced code block (renderMarkdown() emits
-        // <pre><code>) so a snippet can be copied on its own without the
-        // surrounding prose -- idempotent (skips a <pre> that already has
-        // one) since streamed re-renders call this again on every token.
+        // A chat reply has no location on disk of its own -- it's just
+        // generated text -- so a model can never actually write a file for
+        // it (that's what the [[TOOL_CALL]] write_file mechanism is for,
+        // and only inside a project-bound chat, where the project root is a
+        // known location). For every other chat, and for any snippet a user
+        // wants saved somewhere other than the project, this button lets
+        // the *user* pick a real save location instead. showSaveFilePicker
+        // gives a native save dialog where supported (Chromium); the
+        // Blob/anchor fallback below covers every other browser.
+        "const LANG_EXT={javascript:'js',js:'js',jsx:'jsx',typescript:'ts',"
+        "ts:'ts',tsx:'tsx',python:'py',py:'py',cpp:'cpp','c++':'cpp',"
+        "c:'c',csharp:'cs','c#':'cs',java:'java',go:'go',golang:'go',"
+        "rust:'rs',rs:'rs',ruby:'rb',rb:'rb',php:'php',html:'html',"
+        "css:'css',scss:'scss',json:'json',yaml:'yaml',yml:'yaml',"
+        "sql:'sql',bash:'sh',sh:'sh',shell:'sh',zsh:'sh',"
+        "powershell:'ps1',ps1:'ps1',xml:'xml',markdown:'md',md:'md',"
+        "kotlin:'kt',swift:'swift',dart:'dart',lua:'lua',"
+        "dockerfile:'dockerfile',toml:'toml',ini:'ini'};"
+        "async function saveCodeBlock(text,lang,btn){"
+        "const ext=LANG_EXT[(lang||'').toLowerCase()]||'txt';"
+        "const name='snippet.'+ext;"
+        "if(window.showSaveFilePicker){try{"
+        "const handle=await window.showSaveFilePicker({suggestedName:name});"
+        "const writable=await handle.createWritable();"
+        "await writable.write(text||'');await writable.close();"
+        "const old=btn.textContent;btn.textContent='Saved!';"
+        "setTimeout(()=>{btn.textContent=old;},1500);return;}"
+        // AbortError is just the user cancelling the picker -- not a
+        // failure worth falling back for. Any other error (e.g. the API
+        // existing but being denied by policy) still falls through to the
+        // anchor-download fallback below.
+        "catch(e){if(e&&e.name==='AbortError')return;}}"
+        "const blob=new Blob([text||''],{type:'text/plain'});"
+        "const url=URL.createObjectURL(blob);"
+        "const a=document.createElement('a');a.href=url;a.download=name;"
+        "document.body.append(a);a.click();a.remove();"
+        "setTimeout(()=>URL.revokeObjectURL(url),1000);"
+        "const old=btn.textContent;btn.textContent='Saved!';"
+        "setTimeout(()=>{btn.textContent=old;},1500);}"
+        // One Copy + Save button pair per fenced code block (renderMarkdown()
+        // emits <pre><code>) so a snippet can be copied or saved on its own
+        // without the surrounding prose -- idempotent (skips a <pre> that
+        // already has them) since streamed re-renders call this again on
+        // every token.
         "function addCodeCopyButtons(container){"
         "container.querySelectorAll('pre').forEach(pre=>{"
         "if(pre.querySelector('.codeCopyBtn'))return;"
@@ -769,7 +809,14 @@ std::string application_script() {
         "btn.addEventListener('click',e=>{e.stopPropagation();"
         "const code=pre.querySelector('code');"
         "copyToClipboard(code?code.textContent:pre.textContent,btn);});"
-        "pre.append(btn);});}"
+        "const saveBtn=document.createElement('button');saveBtn.type='button';"
+        "saveBtn.className='codeSaveBtn';saveBtn.textContent='Save';"
+        "saveBtn.setAttribute('aria-label','Save code block to a file');"
+        "saveBtn.addEventListener('click',e=>{e.stopPropagation();"
+        "const code=pre.querySelector('code');"
+        "const lang=((code&&code.className)||'').replace('language-','');"
+        "saveCodeBlock(code?code.textContent:pre.textContent,lang,saveBtn);});"
+        "pre.append(saveBtn,btn);});}"
         // Best-effort LaTeX-to-HTML for the common constructs model replies
         // actually use (fractions, super/subscripts, Greek letters, common
         // operators) -- not a real TeX engine (this project takes no
@@ -4494,6 +4541,22 @@ std::string application_script() {
         // .../tool-approvals/{id}, which streams the same event shapes).
         // Returns the last 'complete' event seen (or null on error/abort),
         // so the caller can decide whether to continue the auto-drive loop.
+        // Re-parsing and re-patching the *entire* accumulated reply on every
+        // single token (the old behaviour) is O(reply length) per token, so
+        // a long streamed reply got visibly slower to render as it grew --
+        // once the model warmed up and tokens arrived faster than that
+        // shrinking per-token budget, the main thread started missing
+        // frames and the whole page read as stalling roughly once a second.
+        // Coalescing with requestAnimationFrame instead renders at most once
+        // per painted frame no matter how many token events land in
+        // between, so cost scales with frames-on-screen, not tokens
+        // received. el.rafPending guards against queuing more than one
+        // frame at a time per bubble.
+        "function scheduleAssistantRender(el,box){if(!el||el.rafPending)return;"
+        "el.rafPending=true;requestAnimationFrame(()=>{el.rafPending=false;"
+        "const bodyEl=el.querySelector('.msgBody');if(!bodyEl)return;"
+        "patchMsgBody(bodyEl,renderMarkdown(el.dataset.raw||''));"
+        "addCodeCopyButtons(bodyEl);box.scrollTop=box.scrollHeight;});}"
         "async function readTurnStream(r,box,chatId,userEl,assistantEl){"
         "const reader=r.body.getReader(),decoder=new TextDecoder();let pending='';"
         "let completeEvent=null;"
@@ -4505,9 +4568,7 @@ std::string application_script() {
         "if(event.type==='token'){"
         "if(!assistantEl){assistantEl=appendMessage(box,'assistant','');}"
         "assistantEl.dataset.raw=(assistantEl.dataset.raw||'')+event.content;"
-        "const bodyEl=assistantEl.querySelector('.msgBody');"
-        "patchMsgBody(bodyEl,renderMarkdown(assistantEl.dataset.raw));"
-        "addCodeCopyButtons(bodyEl);box.scrollTop=box.scrollHeight;}"
+        "scheduleAssistantRender(assistantEl,box);}"
         "if(event.type==='tool_call'){"
         "if(!assistantEl){assistantEl=appendMessage(box,'assistant','');}"
         "setLiveStatus(assistantEl,'Running '+event.tool+"
@@ -4527,6 +4588,15 @@ std::string application_script() {
         "if(event.memorySaved)refreshMemories().catch(()=>{});}"
         "if(event.type==='error')throw new Error(event.error,"
         "{cause:event.detail});}}"
+        // The stream is finished here, but a render scheduled via
+        // scheduleAssistantRender() may still be waiting on its
+        // requestAnimationFrame -- which a backgrounded tab can throttle to
+        // once a second or slower. Flush synchronously so the bubble always
+        // ends up showing the exact final text the moment the turn
+        // completes, regardless of tab visibility/frame timing.
+        "if(assistantEl){const bodyEl=assistantEl.querySelector('.msgBody');"
+        "if(bodyEl){patchMsgBody(bodyEl,renderMarkdown(assistantEl.dataset.raw||''));"
+        "addCodeCopyButtons(bodyEl);box.scrollTop=box.scrollHeight;}}"
         "return completeEvent;}"
         // Posts one turn's content (real user text on the very first turn
         // of an exchange, 'Continue.' on every automatic follow-up) and,
@@ -8766,6 +8836,14 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "background:rgba(255,255,255,.08);color:#c8c8d4;opacity:0;"
         "transition:opacity .15s}"
         ".chatMsg pre:hover>.codeCopyBtn,.codeCopyBtn:focus{opacity:1}"
+        // Same treatment as .codeCopyBtn, sat immediately to its left so the
+        // two read as one action pair in the block's top-right corner.
+        ".codeSaveBtn{position:absolute;top:.4rem;right:3.6rem;margin:0;"
+        "width:auto;padding:.15rem .5rem;font-size:.7rem;font-weight:600;"
+        "border-radius:.4rem;border:1px solid var(--panel-border);"
+        "background:rgba(255,255,255,.08);color:#c8c8d4;opacity:0;"
+        "transition:opacity .15s}"
+        ".chatMsg pre:hover>.codeSaveBtn,.codeSaveBtn:focus{opacity:1}"
         // Best-effort inline/block math (see renderMathExpr()): a plain
         // serif-leaning span for inline expressions, a centered block for
         // \\[...\\] with a little breathing room above/below.
@@ -8787,7 +8865,13 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "color:var(--muted)}"
         ".chatThinkingSpinner{width:.9rem;height:.9rem;flex:none;"
         "border-radius:50%;border:2px solid currentColor;"
-        "border-top-color:transparent;animation:chatThinkingSpin .7s linear infinite}"
+        "border-top-color:transparent;animation:chatThinkingSpin .7s linear infinite;"
+        // will-change promotes the spinner to its own compositor layer so its
+        // rotation keeps animating smoothly off the main thread even while
+        // token/tool events are mutating the surrounding DOM (scrollTop,
+        // sibling renders) -- without it, the browser can fold the spin into
+        // the same paint as those mutations and it reads as jerky/stepped.
+        "will-change:transform}"
         "@keyframes chatThinkingSpin{to{transform:rotate(360deg)}}"
         // The model's own <think>...</think> reasoning (see renderMarkdown()),
         // shown as a collapsed-by-default panel above the final answer --

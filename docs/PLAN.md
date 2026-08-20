@@ -19,7 +19,23 @@ Current phase status:
   shutdown. The native Linux x86-64 Release build and tests also pass under
   Ubuntu 26.04 WSL; certification on the pinned Ubuntu 24.04 and Debian 13
   packaging hosts remains a release-packaging gate, not a Phase 1 exit
-  criterion.
+  criterion. **The connection loop now supports HTTP keep-alive
+  (2026-08-19)**: every accepted connection in `src/server.cpp` previously
+  served exactly one request and then closed with `Connection: close`,
+  which meant every chat turn plus the web UI's periodic runner-status/
+  memory-status pollers each opened a brand-new TCP connection; because
+  browsers cap concurrent connections per origin at roughly six, a live
+  chat stream held open for the whole generation combined with those
+  pollers could exhaust that budget and make unrelated requests (e.g.
+  switching chats) visibly queue in the browser, surfacing as UI
+  "stalling" with no actual server-side lock contention. The per-connection
+  worker now loops, honoring the client's `Connection` header and a
+  100-request/connection cap, and rewrites each ordinary JSON/HTML
+  response's `Connection: close` to `Connection: keep-alive` before
+  sending; a short 5-second idle timeout reclaims the worker thread if the
+  browser doesn't send a next request. Streaming chat responses (which
+  write directly to the socket and hold it for the whole generation) are
+  unaffected and still close the connection when the stream ends.
 - Phase 2: Complete — one-time first-admin setup, native OS-principal mapping,
   persistent users/roles/sessions/scoped tokens, login/logout/refresh/me
   routes, cookie rotation/revocation, CSRF/host/origin/rate/body/timeout
@@ -7120,6 +7136,87 @@ Deliverables:
   fields, `PUT /api/v1/admin/config`), still bounded by the same hard policy
   ceilings (`1,048,576` / `32,768`) `RunnerSupervisor::generate()` and the
   config schema already enforced.
+- 2026-08-20 fix: `detect_and_strip_tool_call()` only ever ran when
+  `tools_available || auto_drive` (`src/server.cpp`), so a chat with no
+  project bound got no stripping *at all* — and small local models don't
+  reliably follow the `[[TOOL_CALL]]...[[/TOOL_CALL]]` marker instruction
+  in the first place, sometimes emitting a generic agentic
+  `{"tool":"write_file","arguments":{...}}` JSON blob (often inside a
+  ```json fence) with no markers, learned from training rather than this
+  app's directive. That combination let raw, unexecuted tool-call JSON leak
+  straight into the chat bubble in exactly the chats where `write_file` is
+  meaningless anyway (no project root to write into). Stripping now always
+  runs regardless of `tools_available`/`auto_drive` — only *executing* a
+  parsed call stays gated on tools actually being available for that chat —
+  and `find_bare_tool_call_span()` (`src/server.cpp`) additionally catches
+  the marker-less fallback shape (brace-balanced JSON parsing to a `"tool"`
+  field naming one of the six real tools, pulling in an enclosing ``` fence
+  if present) so a stray attempt is removed from the transcript even when
+  the model never used the real marker convention.
+- 2026-08-20 addition: a chat reply has no location on disk of its own — a
+  model can only ever write a real file through the `write_file` tool
+  above, and only inside a project-bound chat. Every code block in chat now
+  gets a "Save" button (`addCodeCopyButtons()`, `src/web_ui.cpp`) next to
+  the existing "Copy" button, using `showSaveFilePicker()` where available
+  (a native OS save dialog) or a Blob/anchor-download fallback otherwise —
+  letting the user save any generated snippet to a real location themselves,
+  independent of project binding or the tool-call mechanism.
+- 2026-08-20 fix: the streaming chat handler (`readTurnStream()`,
+  `src/web_ui.cpp`) used to call `renderMarkdown()` on the *entire*
+  accumulated reply, then re-patch the whole message body, on every single
+  `token` event — an O(reply length) cost paid once per token, so a long
+  streamed reply got visibly slower to render as it grew. Once a model
+  warmed up and began streaming tokens faster than that shrinking per-token
+  budget, the main thread started missing frames and the page read as
+  stalling roughly once a second. `scheduleAssistantRender()` now coalesces
+  with `requestAnimationFrame`, rendering at most once per painted frame no
+  matter how many token events arrive in between; a synchronous final
+  render after the stream ends guards against a backgrounded tab throttling
+  `requestAnimationFrame` and leaving the bubble showing stale text.
+- 2026-08-20 fix: `ConfigurationManager::load()`'s known-top-level-field
+  allow-list (`src/config.cpp`) was missing `topology` and `modelRouting` —
+  both are parsed by `load()` itself (`root.optional("topology")` /
+  `"modelRouting"`) and `modelRouting` is written back out by `serialize()`,
+  but neither name was in the allow-list checked against the parsed
+  document. That meant every settings save immediately failed its own
+  re-validation the moment `save_atomic()` called `load()` on the freshly
+  written temp file, rejecting the write with "unknown configuration field:
+  modelRouting". Both names are now allow-listed.
+- 2026-08-20 fix: stopping a runner process (`Process::stop()`,
+  `src/inference.cpp`, Windows) used to just wait out the full grace period
+  doing nothing, then force-`TerminateProcess()` — nothing ever asked the
+  runner to exit on its own first, so every unload (and every loaded runner
+  at server shutdown, sequentially) always cost the full grace period
+  instead of only when the process actually failed to respond. The runner
+  is now launched with `CREATE_NEW_PROCESS_GROUP` (so it has its own
+  console process-group instead of sharing the parent's) and `stop()` sends
+  it `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, ...)` before waiting —
+  llama.cpp's server maps that to its own SIGINT/SIGTERM handler and exits
+  promptly, mirroring the POSIX `kill(SIGTERM)` path this function already
+  had.
+- 2026-08-20 fix: `probe_acceleration()` (`src/platform.cpp`) re-ran the
+  full hardware probe — enumerating GPU adapters via a fresh DXGI factory
+  on Windows, or loading and unloading three backend libraries on Linux —
+  on every call, and `probe_hardware()` calls it on every chat-adjacent
+  status/telemetry request plus every 2 seconds from `MemorySweeper`'s
+  background poll for the whole server lifetime (see `memory.cpp`). CPU
+  features, loadable GPU backends, and VRAM size are static facts about the
+  machine that cannot change for the process lifetime, so repeating that
+  COM/driver work on a fixed cadence — concurrently with the same GPU being
+  used for token generation — could show up as periodic system-wide
+  stutter during a chat. The real probe now runs exactly once, cached in a
+  thread-safe static local (`cached_acceleration_probe()`); every call just
+  copies the cached result.
+- 2026-08-20 addition: `HttpServer::stop()` (`src/server.cpp`) already
+  called `cancel_all_downloads()` so an in-flight download wouldn't block
+  shutdown, but a streaming chat generation in progress at shutdown time had
+  no equivalent — `stop()` (and `stop.ps1`'s 30-second wait) could block for
+  however long that reply still had left to generate. Each streaming
+  generation's local `cancellation` flag is now registered for its lifetime
+  via an RAII guard (`register_generation_cancellation()` /
+  `unregister_generation_cancellation()`), and `stop()` calls the new
+  `cancel_all_generations()` to flip every currently-registered flag before
+  waiting for in-flight request threads to finish.
 
 Explicitly out of scope this pass:
 

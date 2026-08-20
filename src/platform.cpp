@@ -126,52 +126,87 @@ unsigned int probe_gpu_memory_mib() noexcept {
 }
 #endif
 
-void probe_acceleration(HardwareInfo& info) {
+// CPU feature bits, which GPU backend libraries are loadable, and (on
+// Windows) dedicated VRAM size are all static facts about this machine that
+// cannot change for the life of the process. probe_hardware() -- and
+// therefore this function -- is called constantly: once per chat-adjacent
+// status/telemetry request, and every 2 seconds for the whole server's
+// uptime from MemorySweeper's background poll loop (see memory.cpp). Doing
+// the real probe work on every one of those calls used to mean creating and
+// tearing down a DXGI factory and enumerating every GPU adapter (Windows),
+// or loading and unloading three backend libraries, over and over forever
+// -- COM/driver work like that briefly engaging the GPU driver's own global
+// state every couple of seconds, concurrently with that same GPU being
+// hammered by token generation, is exactly the kind of thing that shows up
+// as the whole system stuttering on a fixed cadence during a chat. The
+// real probe now runs exactly once (thread-safe static local init) and
+// every call just copies the cached result.
+struct AccelerationProbe {
+    std::set<std::string> cpu_features;
+    std::vector<std::string> gpu_backends;
+    std::uint64_t gpu_memory_mib{0};
+};
+
+const AccelerationProbe& cached_acceleration_probe() {
+    static const AccelerationProbe probe = [] {
+        AccelerationProbe result;
 #if defined(_WIN32) && defined(_M_X64)
-    int registers[4]{};
-    __cpuid(registers, 1);
-    if ((registers[2] & (1 << 20)) != 0) info.cpu_features.insert("sse4.2");
-    const bool osxsave = (registers[2] & (1 << 27)) != 0;
-    const bool avx = (registers[2] & (1 << 28)) != 0;
-    if (osxsave && avx && (_xgetbv(0) & 0x6U) == 0x6U) {
-        info.cpu_features.insert("avx");
-        __cpuidex(registers, 7, 0);
-        if ((registers[1] & (1 << 5)) != 0) info.cpu_features.insert("avx2");
-    }
-    const auto probe_library = [&](const wchar_t* name, const char* backend) {
-        HMODULE module = LoadLibraryExW(name, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (module != nullptr) {
-            info.gpu_backends.emplace_back(backend);
-            FreeLibrary(module);
+        int registers[4]{};
+        __cpuid(registers, 1);
+        if ((registers[2] & (1 << 20)) != 0) result.cpu_features.insert("sse4.2");
+        const bool osxsave = (registers[2] & (1 << 27)) != 0;
+        const bool avx = (registers[2] & (1 << 28)) != 0;
+        if (osxsave && avx && (_xgetbv(0) & 0x6U) == 0x6U) {
+            result.cpu_features.insert("avx");
+            __cpuidex(registers, 7, 0);
+            if ((registers[1] & (1 << 5)) != 0) result.cpu_features.insert("avx2");
         }
-    };
-    probe_library(L"nvcuda.dll", "cuda");
-    probe_library(L"vulkan-1.dll", "vulkan");
-    probe_library(L"amdhip64.dll", "hip");
-    if (!info.gpu_backends.empty()) info.gpu_memory_mib = probe_gpu_memory_mib();
+        const auto probe_library = [&](const wchar_t* name, const char* backend) {
+            HMODULE module = LoadLibraryExW(name, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if (module != nullptr) {
+                result.gpu_backends.emplace_back(backend);
+                FreeLibrary(module);
+            }
+        };
+        probe_library(L"nvcuda.dll", "cuda");
+        probe_library(L"vulkan-1.dll", "vulkan");
+        probe_library(L"amdhip64.dll", "hip");
+        if (!result.gpu_backends.empty()) {
+            result.gpu_memory_mib = probe_gpu_memory_mib();
+        }
 #elif defined(__linux__) && defined(__x86_64__)
-    unsigned int eax = 0U, ebx = 0U, ecx = 0U, edx = 0U;
-    if (__get_cpuid(1U, &eax, &ebx, &ecx, &edx) != 0) {
-        if ((ecx & bit_SSE4_2) != 0U) info.cpu_features.insert("sse4.2");
-        if ((ecx & bit_AVX) != 0U) info.cpu_features.insert("avx");
-    }
-    if (__get_cpuid_count(7U, 0U, &eax, &ebx, &ecx, &edx) != 0 &&
-        (ebx & bit_AVX2) != 0U) {
-        info.cpu_features.insert("avx2");
-    }
-    const auto probe_library = [&](const char* name, const char* backend) {
-        void* module = dlopen(name, RTLD_LAZY | RTLD_LOCAL);
-        if (module != nullptr) {
-            info.gpu_backends.emplace_back(backend);
-            dlclose(module);
+        unsigned int eax = 0U, ebx = 0U, ecx = 0U, edx = 0U;
+        if (__get_cpuid(1U, &eax, &ebx, &ecx, &edx) != 0) {
+            if ((ecx & bit_SSE4_2) != 0U) result.cpu_features.insert("sse4.2");
+            if ((ecx & bit_AVX) != 0U) result.cpu_features.insert("avx");
         }
-    };
-    probe_library("libcuda.so.1", "cuda");
-    probe_library("libvulkan.so.1", "vulkan");
-    probe_library("libamdhip64.so", "hip");
+        if (__get_cpuid_count(7U, 0U, &eax, &ebx, &ecx, &edx) != 0 &&
+            (ebx & bit_AVX2) != 0U) {
+            result.cpu_features.insert("avx2");
+        }
+        const auto probe_library = [&](const char* name, const char* backend) {
+            void* module = dlopen(name, RTLD_LAZY | RTLD_LOCAL);
+            if (module != nullptr) {
+                result.gpu_backends.emplace_back(backend);
+                dlclose(module);
+            }
+        };
+        probe_library("libcuda.so.1", "cuda");
+        probe_library("libvulkan.so.1", "vulkan");
+        probe_library("libamdhip64.so", "hip");
 #elif defined(__aarch64__) || defined(_M_ARM64)
-    info.cpu_features.insert("neon");
+        result.cpu_features.insert("neon");
 #endif
+        return result;
+    }();
+    return probe;
+}
+
+void probe_acceleration(HardwareInfo& info) {
+    const auto& cached = cached_acceleration_probe();
+    info.cpu_features = cached.cpu_features;
+    info.gpu_backends = cached.gpu_backends;
+    info.gpu_memory_mib = cached.gpu_memory_mib;
 }
 
 // Counts physical processor packages/cores through native topology APIs. A

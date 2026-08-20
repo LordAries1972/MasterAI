@@ -251,7 +251,16 @@ AppConfig ConfigurationManager::load(
                             "localRunnerPool",
                             // Phase 33 (INTRANET-WORKER slice): optional,
                             // absent in every pre-this-pass settings file.
-                            "intranetWorkerPool", "privateCa", "workerMode"},
+                            "intranetWorkerPool", "privateCa", "workerMode",
+                            // Bug fix: these two sections are parsed below
+                            // (root.optional("topology")/"modelRouting") and
+                            // "modelRouting" is written by serialize(), but
+                            // both were missing from this allow-list -- so
+                            // every settings save immediately failed to
+                            // re-validate ("unknown configuration field:
+                            // modelRouting") the moment save_atomic() called
+                            // load() on its own freshly written temp file.
+                            "topology", "modelRouting"},
                      "");
         config.schema_version =
             static_cast<int>(root.required("schemaVersion").as_integer());
