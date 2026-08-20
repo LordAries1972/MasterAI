@@ -835,7 +835,24 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
         if (!fused.empty()) break;
     }
 
-    std::string strategy = tokens.empty() ? "none" : "exact_symbol";
+    // Bug fix: `strategy` must only ever be stamped with a stage's name once
+    // that stage's merge() call has actually added evidence to `fused` --
+    // previously it was seeded to "exact_symbol" merely because `tokens` was
+    // non-empty (regardless of whether the Stage 1 loop above found
+    // anything), and every later stage's `strategy == "none" ? ... :
+    // "hybrid"` ternary then unconditionally overwrote it too, even on a
+    // stage that matched nothing. That made the reported `strategy` lie
+    // whenever the *first* stage to genuinely contribute evidence was not
+    // literally the first stage attempted: e.g. a query with zero lexical
+    // overlap that only conversation_memory could answer got mislabeled
+    // "hybrid" (having been falsely seeded "exact_symbol" here, then
+    // "promoted" to "hybrid" by every later no-op stage) instead of
+    // "conversation_memory". Every stage below now only touches `strategy`
+    // when `fused` is non-empty *after* its own merge() call -- and since
+    // each of these blocks is gated on `!sufficient` (i.e. `fused` was still
+    // empty on entry), a non-empty `fused` afterward can only be this
+    // stage's own contribution.
+    std::string strategy = fused.empty() ? "none" : "exact_symbol";
     // "Least expensive sufficient": exact symbol matches are the cheapest,
     // most precise strategy, so any hit at all is treated as sufficient and
     // broader (and more expensive) stages are skipped entirely.
@@ -847,7 +864,9 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
               indexes_.search_text(request.project.id, trimmed_query,
                                    per_step_results),
               2.5, "literal query text matched");
-        strategy = strategy == "none" ? "exact_text" : "hybrid";
+        if (!fused.empty()) {
+            strategy = strategy == "none" ? "exact_text" : "hybrid";
+        }
         sufficient = !fused.empty();
     }
 
@@ -864,7 +883,9 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
                   2.0, "path fragment " + token + " matched");
             if (!fused.empty()) break;
         }
-        strategy = strategy == "none" ? "filename_path" : "hybrid";
+        if (!fused.empty()) {
+            strategy = strategy == "none" ? "filename_path" : "hybrid";
+        }
         sufficient = !fused.empty();
     }
 
@@ -886,7 +907,9 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
             std::move(lexical_tasks), deadline,
             workers_for(RetrievalPriority::background, 2U));
         partial = partial || !lexical_pool.all_completed();
-        strategy = strategy == "none" ? "lexical" : "hybrid";
+        if (!fused.empty()) {
+            strategy = strategy == "none" ? "lexical" : "hybrid";
+        }
     }
 
     // Stage 4 (interactive: cheap, in-memory heuristic scans, same cost
@@ -903,7 +926,9 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
                   1.8, "call site of " + token + " matched");
             if (!fused.empty()) break;
         }
-        strategy = strategy == "none" ? "call_graph" : "hybrid";
+        if (!fused.empty()) {
+            strategy = strategy == "none" ? "call_graph" : "hybrid";
+        }
         sufficient = !fused.empty();
     }
     if (!sufficient && std::chrono::steady_clock::now() < deadline) {
@@ -918,7 +943,9 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
                   1.8, "type reference to " + token + " matched");
             if (!fused.empty()) break;
         }
-        strategy = strategy == "none" ? "type_reference" : "hybrid";
+        if (!fused.empty()) {
+            strategy = strategy == "none" ? "type_reference" : "hybrid";
+        }
         sufficient = !fused.empty();
     }
 
@@ -939,7 +966,9 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
                       IndexSearchResult{std::move(semantic_chunks),
                                         candidates.generation, true},
                       2.2, "semantic similarity matched");
-                strategy = strategy == "none" ? "semantic_embedding" : "hybrid";
+                if (!fused.empty()) {
+                    strategy = strategy == "none" ? "semantic_embedding" : "hybrid";
+                }
                 sufficient = !fused.empty();
             }
         } else {
@@ -963,7 +992,9 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
             merge("mcp_resource",
                   IndexSearchResult{std::move(mcp_chunks), 0U, true}, 1.5,
                   "MCP resource content matched");
-            strategy = strategy == "none" ? "mcp_resource" : "hybrid";
+            if (!fused.empty()) {
+                strategy = strategy == "none" ? "mcp_resource" : "hybrid";
+            }
             sufficient = !fused.empty();
         } else {
             runtime_skip_reasons.push_back(
@@ -989,7 +1020,9 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
                 merge("conversation_memory",
                       IndexSearchResult{{std::move(memory_chunk)}, 0U, true},
                       1.5, "recorded user memory matched");
-                strategy = strategy == "none" ? "conversation_memory" : "hybrid";
+                if (!fused.empty()) {
+                    strategy = strategy == "none" ? "conversation_memory" : "hybrid";
+                }
                 sufficient = !fused.empty();
             }
         } else {
@@ -1008,7 +1041,11 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
             git_diff_search(request.project.root, per_step_results);
         merge("git_diff", IndexSearchResult{std::move(git_chunks), 0U, true},
               1.6, "uncommitted/recent change matched");
-        strategy = strategy == "none" ? "git_diff" : "hybrid";
+        // Same fix as every stage above: only stamp "git_diff"/"hybrid" when
+        // this merge() call actually added evidence.
+        if (!fused.empty()) {
+            strategy = strategy == "none" ? "git_diff" : "hybrid";
+        }
     }
 
     if (fused.empty()) {
