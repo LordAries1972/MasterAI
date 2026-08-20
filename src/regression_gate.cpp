@@ -42,6 +42,35 @@ double percent_delta(const double baseline, const double current) {
     return (current - baseline) / baseline * 100.0;
 }
 
+// Absolute noise floors for compare_against_baseline() below, applied only
+// to the three metrics that are both (a) sampled live over a short window
+// on every certification run and (b) prone to a near-zero baseline: system
+// CPU%, real scheduler queue-wait time, and this process's own disk-read
+// counters (see probe_system_utilization()'s class comment in platform.cpp
+// -- CPU% in particular is sampled system-wide, i.e. it includes every
+// other process on the host, not just this one). When the baseline value
+// for one of these is itself small, ordinary machine noise -- an unrelated
+// background process nudging system CPU%, a few microseconds of OS
+// scheduler jitter, page-cache warmth changing a tiny disk-read count --
+// can move the metric by only a trivial *absolute* amount while still
+// registering as a huge *relative* swing under percent_delta() (e.g. a
+// queue wait moving from 5us to 15us is "+200%" even though both numbers
+// are noise). Without a floor, that noise alone can trip a percent-based
+// threshold and reject a run with no real regression -- the flaky-test
+// failure mode this fix addresses. TTFT/memory/throughput/quality are
+// deliberately NOT given a floor: their baselines are large enough that
+// percent_delta() does not blow up on ordinary noise, and an operator must
+// still be able to tighten those thresholds all the way to "any regression
+// fails" (see the "impossible threshold" gate test) without a noise floor
+// silently overriding that choice. Each floor here is sized to what
+// unrelated host activity can plausibly move the metric by between two
+// runs seconds apart on an otherwise-idle machine; a genuine regression
+// moves a metric far past both its floor and the percent threshold, so
+// this cannot mask a real regression -- only noise near zero.
+constexpr double kCpuNoiseFloorPercentPoints = 5.0;           // percentage points, not relative %
+constexpr double kQueueWaitNoiseFloorMicroseconds = 2000.0;   // 2 ms
+constexpr double kStorageAmplificationNoiseFloorBytesPerToken = 64.0;
+
 std::string json_escape_local(const std::string& value) {
     // json_string() already returns a quoted string; strip the surrounding
     // quotes here so callers can splice the escaped body into a larger
@@ -366,15 +395,31 @@ bool compare_against_baseline(const PerformanceCertificationRecord& baseline,
     bool all_passed = true;
     const auto add = [&](const std::string& metric, const double baseline_value,
                          const double current_value, const double threshold,
-                         const bool higher_is_worse) {
+                         const bool higher_is_worse, const double noise_floor) {
         RegressionMetricComparison comparison;
         comparison.metric = metric;
         comparison.baseline = baseline_value;
         comparison.current = current_value;
         comparison.delta_percent = percent_delta(baseline_value, current_value);
         comparison.threshold_percent = threshold;
-        comparison.passed = higher_is_worse ? comparison.delta_percent <= threshold
-                                            : comparison.delta_percent >= threshold;
+        // See the noise-floor constants' comment above: a change whose absolute
+        // size never clears the metric's noise floor is never treated as a
+        // regression, no matter how large percent_delta() reports it (that
+        // can happen precisely when the baseline is small). Only once the
+        // absolute move clears the floor does the usual percent-of-baseline
+        // threshold apply. A noise_floor of 0.0 disables this entirely --
+        // used for metrics (TTFT, memory, throughput, quality) whose
+        // baselines are large enough in absolute terms, and whose thresholds
+        // can legitimately be tightened all the way to "any regression
+        // fails" by an operator, that no measurement-noise floor should ever
+        // be allowed to override an explicit threshold decision for them.
+        const bool within_noise_floor =
+            noise_floor > 0.0 &&
+            std::fabs(current_value - baseline_value) <= noise_floor;
+        comparison.passed =
+            within_noise_floor ||
+            (higher_is_worse ? comparison.delta_percent <= threshold
+                             : comparison.delta_percent >= threshold);
         current.comparisons.push_back(comparison);
         if (!comparison.passed) all_passed = false;
     };
@@ -382,11 +427,11 @@ bool compare_against_baseline(const PerformanceCertificationRecord& baseline,
     add("ttft_microseconds",
        static_cast<double>(baseline.ttft_microseconds),
        static_cast<double>(current.ttft_microseconds),
-       thresholds.max_ttft_regression_percent, true);
+       thresholds.max_ttft_regression_percent, true, 0.0);
     add("peak_resident_memory_bytes",
        static_cast<double>(baseline.peak_resident_memory_bytes),
        static_cast<double>(current.peak_resident_memory_bytes),
-       thresholds.max_memory_increase_percent, true);
+       thresholds.max_memory_increase_percent, true, 0.0);
     const double baseline_throughput =
         baseline.total_elapsed_microseconds == 0U
             ? 0.0
@@ -398,15 +443,17 @@ bool compare_against_baseline(const PerformanceCertificationRecord& baseline,
             : static_cast<double>(current.generated_tokens) * 1000000.0 /
                   static_cast<double>(current.total_elapsed_microseconds);
     add("generation_tokens_per_second", baseline_throughput, current_throughput,
-       thresholds.min_throughput_percent, false);
+       thresholds.min_throughput_percent, false, 0.0);
     add("quality_score", baseline.quality_score, current.quality_score,
-       thresholds.max_quality_regression_percent, true);
+       thresholds.max_quality_regression_percent, true, 0.0);
     add("average_cpu_percent", baseline.average_cpu_percent,
-       current.average_cpu_percent, thresholds.max_cpu_increase_percent, true);
+       current.average_cpu_percent, thresholds.max_cpu_increase_percent, true,
+       kCpuNoiseFloorPercentPoints);
     add("queue_wait_microseconds",
        static_cast<double>(baseline.queue_wait_microseconds),
        static_cast<double>(current.queue_wait_microseconds),
-       thresholds.max_queue_wait_increase_percent, true);
+       thresholds.max_queue_wait_increase_percent, true,
+       kQueueWaitNoiseFloorMicroseconds);
     const double baseline_amplification =
         baseline.generated_tokens == 0U
             ? 0.0
@@ -419,7 +466,7 @@ bool compare_against_baseline(const PerformanceCertificationRecord& baseline,
                   static_cast<double>(current.generated_tokens);
     add("storage_bytes_read_per_generated_token", baseline_amplification,
        current_amplification, thresholds.max_storage_amplification_percent,
-       true);
+       true, kStorageAmplificationNoiseFloorBytesPerToken);
 
     return all_passed;
 }
