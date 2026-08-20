@@ -169,17 +169,28 @@ The current source includes native implementations for:
   durable details apply automatically to newly created conversations; an
   active conversation retains its own history and startup snapshot. The
   collapsed Memory sidebar makes every capture visible and removable.
-- Agentic tool use (Phase 84, first-increment): a short confirm/implement/
-  proceed/go-ahead/make-the-changes/phase/plan/strategy composer message
-  puts a turn into auto-drive mode, where the model can call real
-  read/list/search/write/delete-file and admin-allow-listed run-command
-  tools — each shown live in the transcript as it happens — and keep
-  working the task across as many turns as it takes with no further input,
-  until it reports the task complete or Escape/Stop is pressed. Any
-  destructive action (delete, or a command matching a fixed destructive-
-  pattern table) always pauses on an explicit Approve/Deny card first,
-  regardless of mode. The admin allow-list has no management UI yet and
-  MCP-connected IDEs do not see these tools yet — see docs/PLAN.md Phase 84.
+- Agentic tool use (Phase 84): a short confirm/implement/proceed/go-ahead/
+  make-the-changes/phase/plan/strategy composer message puts a turn into
+  auto-drive mode, where the model can call real read/list/search/write/
+  delete-file and admin-allow-listed run-command tools — each shown live in
+  the transcript as it happens — and keep working the task across as many
+  turns as it takes with no further input, until it reports the task
+  complete or Escape/Stop is pressed. Every chat has its own Tool execution
+  mode, set from the composer's Model settings panel: Auto (safe actions run
+  immediately, risky ones ask first — the default), Confirm every action
+  (every call, safe or not, pauses on an Approve/Deny card), or Off (no
+  tools at all for that chat). Any destructive action (delete, or a command
+  matching a fixed destructive-pattern table) always pauses on an explicit
+  Approve/Deny card first, regardless of mode — no execution mode can
+  weaken that. Administrators manage the run-command allow-list from
+  Settings -> Run-command allow-list (or GET/POST /api/v1/chat-tools/
+  allowed-commands). The same six tools are also reachable by a
+  connected MCP client (`masterai.project.read_file`/`list_directory`/
+  `search`/`write_file`/`delete_file`/`run_command`), gated by the
+  `projects.read`/`projects.write` token scopes; a call MCP classifies
+  high-risk is refused rather than executed unattended (MCP has no
+  Approve/Deny UI of its own yet), so completing that specific action still
+  means using the web chat — see docs/PLAN.md Phase 84.
 - Resumable, journaled, hash-verified model downloads with quarantine on
   integrity failure.
 - Quick, standard, and extended benchmark profiles with compatible comparison
@@ -609,7 +620,7 @@ Status below reflects the evidence recorded in
 | 82 | Deployment Manager, Inference Endpoints, and Synthetic Data completion | Implemented; Synthetic Data gets a real generation executor (technique-specific prompts via `execute_rag_generation`); Deployment Manager gets its own real deploy/health/rollback action (approved-Model-Card gate, trained-weights health signal, supersede/rollback tracking); Inference Endpoints' already-real Phase 77 listener gets its missing auth-token/policy UI. All three roster entries move from `planned` to `available` |
 | 83 | Safety and Governance roster completion | Implemented; no new executor needed — Phase 74's real content scanning and Phase 82's approval-gated deployment/inference enforcement already met the bar, so the roster entry moves from `planned` to `available`; added the missing `SafetyGovernanceStore`/`scan_content_for_risks` store-level test |
 | — | ML forms clarity pass | Implemented; hover/focus "?" hint bubbles on ambiguous fields (toggleable off per-browser from Machine Learning Settings), every remaining raw-ID text field converted to a named dropdown, and every remaining comma-separated multi-id field converted to a checkbox multi-select |
-| 84 | Agentic tool use in chat | Implemented at a first-increment level, not yet build/host validated; real `read_file`/`list_directory`/`search`/`write_file`/`delete_file`/`run_command` tools, an auto-drive mode ("confirm"/"implement"/"proceed"-style composer messages) that keeps a turn working a stated plan across turns with no further input until the model reports it done, mandatory Approve/Deny for destructive actions regardless of mode, and every tool call/result shown live in the transcript. Admin allow-list management routes/UI and MCP inbound exposure of the new tools are not yet implemented |
+| 84 | Agentic tool use in chat | Implemented, not yet build/host validated; real `read_file`/`list_directory`/`search`/`write_file`/`delete_file`/`run_command` tools, an auto-drive mode ("confirm"/"implement"/"proceed"-style composer messages) that keeps a turn working a stated plan across turns with no further input until the model reports it done, a per-chat Tool execution mode (Auto/Confirm every action/Off, set from the composer's Model settings panel), mandatory Approve/Deny for destructive actions regardless of mode, every tool call/result shown live in the transcript, admin allow-list management routes/UI, and the same six tools reachable through MCP `tools/call` (`masterai.project.*`) sharing the identical `execute_chat_tool()` dispatch — MCP refuses rather than executes a high-risk call, since it has no Approve/Deny UI of its own yet |
 | 85 | Inference and retrieval throughput tuning | Implemented, not yet build/host validated; evidence-based `--threads`/`--ubatch-size` launch tuning derived from the host's real core count (Phase 19's `thread_count`/`ubatch_tokens` fields existed since their introduction but were never populated until now); `CacheCategory::retrieval_result` actually wired into the live retrieval request path (the category and its serializer existed since Phase 17 but nothing had ever called them); parallel worker-pool dispatch for the semantic-embedding adapter's per-chunk embed calls and for model pre-touch; a cached (not rebuilt-per-call) dependency-graph map for the `dependency_neighbour` retrieval strategy |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
@@ -1204,6 +1215,38 @@ authentication, users, projects, chats, user memories (`GET/POST
 benchmarks, resources, memory, request metrics, project indexes, MCP
 integrations, IDE connections, and administrator-only Machine Learning
 records under `/api/v1/ml/*`.
+
+Two additional routes exist specifically so a third-party client (e.g. the
+separate Agent-Coder VS Code extension) can use a running MasterAI instance
+as a local LLM backend without learning a MasterAI-specific request shape:
+
+- `GET /api/v1/model-catalog` -- the same curated, size-tiered GGUF download
+  suggestions the Settings -> Models -> Download page's picker offers,
+  as `{"models":[...]}`, sorted by `displayName` ascending
+  (case-insensitive). Requires the same `models.read` bearer scope as
+  `GET /api/v1/models`.
+- `POST /v1/chat/completions` -- a stateless, non-streaming, OpenAI Chat
+  Completions-shaped endpoint (top-level, not under `/api/v1`, to mirror
+  OpenAI's own URL shape). Body: `{"model":"...","messages":[{"role":
+  "system"|"user"|"assistant","content":"..."}]}` (any other OpenAI field,
+  including `stream`, is accepted and ignored). Returns the standard
+  `chat.completion` envelope, `404` for an unknown model id, or `503` if the
+  model exists but is not yet downloaded/verified. Requires the same
+  `chats.write` bearer scope as `POST /api/v1/chats`. Distinct from the
+  per-`InferenceEndpoint` `/v1/completions` listener each configured
+  Inference Endpoint opens on its own port -- that is a separate feature
+  with a narrower (`{"prompt":"..."}`) request shape.
+
+By default MasterAI listens on `127.0.0.1:7070` (see `config/settings.json`'s
+`server.host`/`server.port`).
+
+An operator can also disable authentication entirely (`auth.enabled:false`
+in `settings.json`, or the "Require sign-in" toggle in Settings ->
+Administration) so every request -- including the two routes above -- is
+served with no login, session, or bearer token at all. This is only ever
+permitted while `server.host` is loopback (`127.0.0.1`/`localhost`/`::1`);
+MasterAI refuses to start with authentication disabled on any other host, so
+a misconfigured instance can never be exposed to the network unauthenticated.
 
 All HTTP endpoints serve over persistent (keep-alive) connections by
 default: a connection stays open across multiple ordinary requests (up to a

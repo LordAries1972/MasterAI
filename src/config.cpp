@@ -740,8 +740,18 @@ void ConfigurationManager::validate(const AppConfig& config) {
                config.tls_mode != "required") {
         throw std::runtime_error("TLS mode is invalid");
     }
-    if (!config.authentication_enabled) {
-        throw std::runtime_error("authentication cannot be disabled");
+    // Phase 86: authentication may be disabled (`auth.enabled:false`) only
+    // for a server bound to loopback -- mirrors tls.mode's
+    // "disabled-loopback-only" contract just above, where a relaxed
+    // security posture is trusted only because the socket itself is
+    // unreachable from the network. The `!local` branch above already
+    // refuses non-loopback binding unless authentication_enabled is true,
+    // so this check is belt-and-suspenders: it fails loudly here too,
+    // independent of that branch, if the two are ever changed separately.
+    if (!config.authentication_enabled && !local) {
+        throw std::runtime_error(
+            "authentication cannot be disabled unless the server is bound "
+            "to loopback");
     }
     if (!config.allow_local_password_accounts &&
         !config.allow_os_identity_accounts) {

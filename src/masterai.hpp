@@ -2911,6 +2911,17 @@ struct ChatMessage {
     std::uint64_t token_count{0};
 };
 
+// Phase 84 follow-up: user-visible control over how a chat's tool calls get
+// executed, replacing what used to be a single hardcoded server-wide policy.
+// auto_mode keeps today's behavior (classify_tool_call_risk() decides,
+// destructive calls still always pause); confirm_all forces every call
+// through the same human Approve/Deny path regardless of risk; off makes
+// tools_available false for this chat entirely, so the model is never even
+// told tools exist and nothing can be called. None of the three modes can
+// ever downgrade a destructive call below high_risk -- see
+// classify_tool_call_risk()'s own comment on why that stays unconditional.
+enum class ChatToolExecutionMode { auto_mode, confirm_all, off };
+
 struct ChatRecord {
     std::string id;
     std::string owner_id;
@@ -2936,6 +2947,9 @@ struct ChatRecord {
     // record_shared_template() path instead of (in addition to) the
     // ordinary private per-chat try_reuse()/record() path.
     bool is_shared_template{false};
+    // See ChatToolExecutionMode's own comment. Defaults to auto_mode so a
+    // legacy chat restored without this field keeps today's behavior.
+    ChatToolExecutionMode tool_execution_mode{ChatToolExecutionMode::auto_mode};
     std::vector<ChatMessage> messages;
 };
 
@@ -2946,7 +2960,9 @@ public:
     ChatRecord create(const std::string& owner_id,
                       const std::string& project_id,
                       const std::string& model_id,
-                      const std::string& memory_context = {});
+                      const std::string& memory_context = {},
+                      ChatToolExecutionMode tool_execution_mode =
+                          ChatToolExecutionMode::auto_mode);
     // Overwrites a chat's cached memory snapshot with a freshly recalled
     // one (see send_chat_message(), which calls this every turn whenever
     // durable memory changed since the cached copy). Also used to give a
@@ -2978,6 +2994,12 @@ public:
     // chat doesn't exist or isn't owned by owner_id.
     bool set_shared_template(const std::string& chat_id,
                              const std::string& owner_id, bool shared);
+    // Phase 84 follow-up: changes how this chat's future tool calls are
+    // gated (see ChatToolExecutionMode's own comment). Owner-scoped like
+    // set_model()/set_shared_template() above.
+    bool set_tool_execution_mode(const std::string& chat_id,
+                                 const std::string& owner_id,
+                                 ChatToolExecutionMode mode);
     std::optional<ChatRecord> find_for_owner(const std::string& chat_id,
                                              const std::string& owner_id) const;
     // Newest first, so callers can split "recent" from "history" by index
@@ -8800,14 +8822,23 @@ struct McpIdentity {
     std::set<std::string> project_ids;
 };
 
+// Declared here (defined further below, alongside AllowedCommandRecord) so
+// McpInboundServer can hold a reference to it without reordering the whole
+// Phase 84 tool-support section above the Phase 8 MCP section that predates it.
+class AllowedCommandStore;
+
 // Implements the pinned MCP server contract independently of its transport.
 // Both stdio and Streamable HTTP pass bounded JSON-RPC messages through this
 // class so capability, authorization, resource, and tool behavior cannot drift.
+// allowed_commands lets the same run_command tool a connected chat can call
+// be reached through MCP tools/call, sharing execute_chat_tool() (Phase 84)
+// verbatim so the two surfaces' six built-in tools cannot drift apart.
 class McpInboundServer final {
 public:
     McpInboundServer(ProjectCatalog& projects,
                      std::filesystem::path models_root,
-                     std::uint64_t memory_reserve_mib);
+                     std::uint64_t memory_reserve_mib,
+                     AllowedCommandStore& allowed_commands);
 
     std::string handle(const std::string& request_json,
                        const McpIdentity& identity,
@@ -8817,6 +8848,7 @@ private:
     ProjectCatalog& projects_;
     std::filesystem::path models_root_;
     std::uint64_t memory_reserve_mib_{0};
+    AllowedCommandStore& allowed_commands_;
 };
 
 const char* mcp_protocol_version() noexcept;

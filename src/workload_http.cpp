@@ -4,9 +4,11 @@
 // socket/authentication server while reusing the same native service instances.
 #include "server_internal.hpp"
 #include "json.hpp"
+#include "model_catalog.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <fstream>
 #include <stdexcept>
 
@@ -275,6 +277,53 @@ std::string WorkloadHttpController::model_inventory() const {
     } catch (const std::exception&) {
         return hardware_probe_failure();
     }
+}
+
+// Returns the curated, code-shipped download catalog (model_catalog.hpp) as
+// JSON, sorted by displayName ascending (case-insensitive) as the Agent-Coder
+// integration's API contract requires. An entry that never set displayName
+// (see ModelCatalogEntry's comment -- roughly a third of entries don't) sorts
+// as an empty string, i.e. first, exactly like any other field a caller
+// leaves blank -- no synthetic fallback value is invented here that the
+// JSON response itself doesn't actually carry.
+std::string WorkloadHttpController::model_catalog() const {
+    auto entries = masterai::model_catalog();
+    std::sort(entries.begin(), entries.end(),
+             [](const ModelCatalogEntry& left, const ModelCatalogEntry& right) {
+                 const auto lower = [](const std::string& value) {
+                     std::string result = value;
+                     std::transform(result.begin(), result.end(), result.begin(),
+                                    [](const unsigned char ch) {
+                                        return static_cast<char>(std::tolower(ch));
+                                    });
+                     return result;
+                 };
+                 return lower(left.display_name) < lower(right.display_name);
+             });
+    std::string body{"{\"models\":["};
+    bool first = true;
+    for (const auto& entry : entries) {
+        if (!first) body += ",";
+        first = false;
+        body += "{\"id\":\"" + json_escape(entry.id) +
+                "\",\"tier\":\"" + json_escape(entry.tier) +
+                "\",\"label\":\"" + json_escape(entry.label) +
+                "\",\"category\":\"" + json_escape(entry.category) +
+                "\",\"modelId\":\"" + json_escape(entry.model_id) +
+                "\",\"filename\":\"" + json_escape(entry.filename) +
+                "\",\"sourceUrl\":\"" + json_escape(entry.source_url) +
+                "\",\"revision\":\"" + json_escape(entry.revision) +
+                "\",\"sha256\":\"" + json_escape(entry.sha256) +
+                "\",\"minRam\":" + std::to_string(entry.min_ram_mib) +
+                ",\"recRam\":" + std::to_string(entry.rec_ram_mib) +
+                ",\"sizeBytes\":" + std::to_string(entry.size_bytes) +
+                ",\"displayName\":\"" + json_escape(entry.display_name) +
+                "\",\"architecture\":\"" + json_escape(entry.architecture) +
+                "\",\"quantization\":\"" + json_escape(entry.quantization) +
+                "\",\"licenseSpdx\":\"" + json_escape(entry.license_spdx) +
+                "\"}";
+    }
+    return response(200, "OK", body + "]}");
 }
 
 // Returns the same inventory as an escaped read-only HTML table.

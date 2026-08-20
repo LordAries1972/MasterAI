@@ -106,6 +106,19 @@ BenchmarkProfile parse_profile(const std::string& profile) {
     throw std::runtime_error("persisted benchmark profile is invalid");
 }
 
+std::string tool_execution_mode_name(const ChatToolExecutionMode mode) {
+    if (mode == ChatToolExecutionMode::confirm_all) return "confirm_all";
+    if (mode == ChatToolExecutionMode::off) return "off";
+    return "auto";
+}
+
+ChatToolExecutionMode parse_tool_execution_mode(const std::string& mode) {
+    if (mode == "confirm_all") return ChatToolExecutionMode::confirm_all;
+    if (mode == "off") return ChatToolExecutionMode::off;
+    if (mode == "auto") return ChatToolExecutionMode::auto_mode;
+    throw std::runtime_error("persisted chat tool execution mode is invalid");
+}
+
 bool approved_text_extension(std::string extension) {
     std::transform(extension.begin(), extension.end(), extension.begin(),
                    [](const unsigned char c) {
@@ -328,7 +341,8 @@ std::string message_key(const std::string& chat_id, const std::size_t index) {
 ChatRecord ChatStore::create(const std::string& owner_id,
                              const std::string& project_id,
                              const std::string& model_id,
-                             const std::string& memory_context) {
+                             const std::string& memory_context,
+                             const ChatToolExecutionMode tool_execution_mode) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!safe_identifier(owner_id) || !safe_identifier(project_id) ||
         !safe_identifier(model_id) || chats_.size() >= 10000U) {
@@ -346,6 +360,7 @@ ChatRecord ChatStore::create(const std::string& owner_id,
     record.created_at_epoch_seconds = epoch_seconds();
     record.memory_context_initialized = true;
     record.memory_context = memory_context;
+    record.tool_execution_mode = tool_execution_mode;
     chats_.emplace(id, record);
     persist_header(record);
     return record;
@@ -445,6 +460,19 @@ bool ChatStore::set_shared_template(const std::string& chat_id,
     return true;
 }
 
+bool ChatStore::set_tool_execution_mode(const std::string& chat_id,
+                                        const std::string& owner_id,
+                                        const ChatToolExecutionMode mode) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = chats_.find(chat_id);
+    if (found == chats_.end() || found->second.owner_id != owner_id) {
+        return false;
+    }
+    found->second.tool_execution_mode = mode;
+    persist_header(found->second);
+    return true;
+}
+
 std::optional<ChatRecord> ChatStore::find_for_owner(
     const std::string& chat_id, const std::string& owner_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -498,10 +526,21 @@ void ChatStore::restore() {
     // land on 4+3*count (%3==1) or 6+3*count (%3==0), while the current
     // header is always exactly 5 fields (%3==2) -- a count can never produce
     // 5 under either older scheme.
+    //
+    // The 9-field (shared-template) and 10-field (tool-execution-mode)
+    // split-header extensions below reuse this same explicit-size-list
+    // approach. 9 happens to collide with current_format's %3==0 modulus and
+    // 10 with legacy_format's %3==1 modulus, but both are still resolved
+    // unambiguously in practice: split_format is tested first, so a record
+    // of that size is only ever parsed as the split header, and the
+    // fields[5] == "memory-v1" schema-marker check below (present since the
+    // 8-field format) rejects the astronomically unlikely case of a genuine
+    // ancient inline record whose 6th field happened to equal that literal
+    // string, rather than silently misreading it.
     for (const auto& item : records_->list("chats")) {
         const auto fields = unpack(item.second);
         const bool split_format = fields.size() == 5U || fields.size() == 8U ||
-                                  fields.size() == 9U;
+                                  fields.size() == 9U || fields.size() == 10U;
         const bool current_format =
             !split_format && fields.size() >= 6U && fields.size() % 3U == 0U;
         const bool legacy_format =
@@ -520,7 +559,7 @@ void ChatStore::restore() {
         if (split_format) {
             chat.title = fields[3];
             chat.created_at_epoch_seconds = std::stoull(fields[4]);
-            if (fields.size() == 8U || fields.size() == 9U) {
+            if (fields.size() >= 8U) {
                 if (fields[5] != "memory-v1" ||
                     (fields[6] != "true" && fields[6] != "false") ||
                     fields[7].size() > 4096U) {
@@ -530,12 +569,15 @@ void ChatStore::restore() {
                 chat.memory_context_initialized = fields[6] == "true";
                 chat.memory_context = fields[7];
             }
-            if (fields.size() == 9U) {
+            if (fields.size() >= 9U) {
                 if (fields[8] != "true" && fields[8] != "false") {
                     throw std::runtime_error(
                         "persisted chat shared-template flag is invalid");
                 }
                 chat.is_shared_template = fields[8] == "true";
+            }
+            if (fields.size() == 10U) {
+                chat.tool_execution_mode = parse_tool_execution_mode(fields[9]);
             }
             chats_.emplace(chat.id, std::move(chat));
             continue;
@@ -628,7 +670,8 @@ void ChatStore::persist_header(const ChatRecord& chat) {
                         "memory-v1",
                         chat.memory_context_initialized ? "true" : "false",
                         chat.memory_context,
-                        chat.is_shared_template ? "true" : "false"}));
+                        chat.is_shared_template ? "true" : "false",
+                        tool_execution_mode_name(chat.tool_execution_mode)}));
 }
 
 void ChatStore::persist_message(const std::string& chat_id,

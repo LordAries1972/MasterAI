@@ -6988,13 +6988,38 @@ Exit criteria:
 
 ### Phase 84 — Agentic tool use in chat
 
-Status: Implemented at a first-increment level (2026-08-17), not yet built
-or validated on a live host (see Document Status conventions elsewhere in
-this file — this entry is honest about what has not been through that gate
-yet). Core mechanism is in place end-to-end; the admin allow-list has no
-management routes/UI yet (see Deliverables), and MCP inbound exposure of
-the new tools has not been added, so today this is a web-chat-only
-capability.
+Status: Implemented end-to-end across both surfaces this phase set out to
+cover (2026-08-20), not yet built or validated on a live host (see Document
+Status conventions elsewhere in this file — this entry is honest about what
+has not been through that gate yet). Core mechanism is in place end-to-end,
+including the admin allow-list's management routes/UI and MCP inbound
+exposure of the same six tools (both 2026-08-20, see Deliverables). One
+exit criterion is intentionally not, and cannot yet be, closed this pass: a
+live-host validation of the full confirm -> tool calls -> approval ->
+completion cycle, which requires an administrator to build and run the real
+binary — this session does neither (see Explicitly out of scope this pass).
+
+Session-note (2026-08-20 continuation): before this entry, MCP tools/call
+only ever exposed `masterai.project.read_file` and `masterai.project.search`
+as bespoke reimplementations that quietly drifted from the chat tool loop
+(different file-size ceilings, no write/delete/run_command path at all, a
+searchable-extension allow-list chat's own `search` tool never applied).
+`execute_chat_tool()` was already written and commented to be shared by both
+surfaces (`masterai.hpp`) but nothing outside `server.cpp`'s chat loop ever
+called it — MCP's own `mcp.cpp` had its own private `search_project()`/
+`append_file_matches()`/`search_candidate()`/`searchable_extension()`
+instead. Closed by deleting those private duplicates and routing all six
+`masterai.project.*` MCP tools (`read_file`, `search`, plus the three newly
+exposed `list_directory`, `write_file`, `delete_file`, and `run_command`)
+through `execute_chat_tool()` directly (`handle_project_tool_call()`,
+`src/mcp.cpp`) — the same function chat's own tool loop calls, so the two
+surfaces cannot drift apart again. `read_file`/`list_directory`/`search`
+still only need the existing `projects.read` scope; `write_file`/
+`delete_file`/`run_command` now require `projects.write` (the same scope
+name `integration_http.cpp`/`workload_http.cpp` already use for HTTP project
+mutation), so an MCP token minted before this change is silently *narrower*
+after it (it keeps read access, and gains no write access until an
+administrator re-issues it with the new scope) rather than silently wider.
 
 Purpose:
 
@@ -7013,11 +7038,11 @@ Deliverables:
 
 - `AllowedCommandStore` (`src/tool_exec.cpp`, declared `src/masterai.hpp`):
   durable admin allow-list of `run_command`-eligible executables, mirroring
-  `McpOutboundRegistry`'s `RecordStore`-backed shape. Implemented as a
-  store; no `/api/v1` management routes or web UI page exist yet, so an
-  allow-list entry can currently only be added by a direct `RecordStore`
-  write — `run_command` therefore always reports "not on the admin
-  allow-list" on an unmodified install. Follow-up work.
+  `McpOutboundRegistry`'s `RecordStore`-backed shape. `register_command()`/
+  `remove()`/`list()` now have real management surfaces (2026-08-20, see
+  below) — before that fix they were implemented but entirely unreachable
+  from outside the process, so `run_command` always reported "not on the
+  admin allow-list" on every install, forever, with no way to change that.
 - `run_sandboxed_process()` (`src/tool_exec.cpp`): one argv-array external
   process (never a shell) contained the same way Phase 9's outbound-MCP
   `invoke_stdio()` already contains a stdio server — a Windows Job Object
@@ -7217,24 +7242,268 @@ Deliverables:
   `unregister_generation_cancellation()`), and `stop()` calls the new
   `cancel_all_generations()` to flip every currently-registered flag before
   waiting for in-flight request threads to finish.
+- 2026-08-20 addition: tool-call gating used to be a single hardcoded,
+  server-wide policy — `classify_tool_call_risk()` decides everything, with
+  no way for the operator to see or change it. `ChatRecord` (`src/
+  masterai.hpp`) gained a `tool_execution_mode` field (`ChatToolExecutionMode`:
+  `auto_mode` / `confirm_all` / `off`), persisted per chat (`ChatStore::
+  persist_header()`/`restore()`, `src/workflows.cpp`, a 9→10-field header
+  extension following the same explicit-size-list pattern the 8→9 `is_shared_
+  template` bump used) and settable via the new `POST /api/v1/chats/{id}/
+  tool-mode` (`set_chat_tool_execution_mode()`, `src/server.cpp`). `auto_mode`
+  is exactly today's behavior; `confirm_all` routes every tool call — safe or
+  not — through the existing `PendingToolApproval` Approve/Deny path instead
+  of only destructive ones; `off` makes `tools_available` false for that chat
+  (`send_chat_message()`), so the tool-call directive is never sent and the
+  model has nothing to hallucinate a call against. None of the three modes
+  can ever downgrade a genuinely destructive call (`delete_file`, a
+  destructive `run_command`) below the mandatory Approve/Deny pause —
+  `classify_tool_call_risk()` itself is untouched by this setting, and
+  `confirm_all` only ever adds confirmation on top of it, never removes it.
+  The composer's "Model settings" panel (`src/web_ui.cpp`) gained a per-chat
+  "Tool execution" selector (Auto / Confirm every action / Off) with a live
+  one-line explanation of the selected mode, alongside the existing per-model
+  Effort/Thinking controls — but server-owned rather than `localStorage`, so
+  it stays correct across devices and actually changes what the server does.
+- 2026-08-20 fix: neither `detect_and_strip_tool_call()` pass (the
+  `[[TOOL_CALL]]...[[/TOOL_CALL]]` marker pass, nor the marker-less
+  brace-balanced-JSON fallback added earlier the same day, see above) caught
+  a third hallucination shape a small local model can blend the two
+  conventions into — e.g. `[[read_file{path:"x"}}]`, syntactically neither a
+  real marker pair nor valid JSON — which then leaked straight into the chat
+  bubble as raw, unexecuted pseudo-syntax. `find_stray_pseudo_tool_call_span()`
+  (`src/server.cpp`) adds a third, purely defensive pass: it scans for `[[`
+  immediately followed by one of the six known tool names and a `{`/`(`, then
+  strips through the matching balanced close (absorbing a stray trailing
+  `]]`/extra brace too) — never contributing an executable call, since
+  anything only this pass catches is malformed by definition, purely so nothing
+  tool-call-shaped ever renders raw to the user.
+
+- 2026-08-20 fix: `find_stray_pseudo_tool_call_span()`'s detection (the
+  `[[read_file{...}}]`-style blended-hallucination pass, see above) was
+  never wired into `apply_streaming_marker_holdback()`'s hold-back window
+  (`kStreamingHoldbackMarkers` only listed the three exact literal marker
+  strings, not "`[[` + one of six tool names"), so a streaming reply that
+  hallucinated this shape flashed raw onto the live chat bubble even though
+  the persisted/re-rendered transcript was already clean — reloading the
+  chat then looked fine, which made the bug read as history-only when it
+  was really a live-stream-only leak. `apply_streaming_marker_holdback()`
+  now also holds back on `stray_pseudo_tool_call_prefixes()` (`src/
+  server.cpp`): one literal `"[[" + toolname + "{"/"("` prefix per known
+  tool, built once from `kKnownToolNames` — the same list `find_stray_
+  pseudo_tool_call_span()` already used. Once one of those prefixes is
+  confirmed, nothing further streams raw for the rest of the turn, matching
+  the real-marker behavior above.
+- 2026-08-20 fix: the marker-less bare-JSON hallucination shape (a model
+  emitting a raw `{"tool":...}` object, "often inside a ```json fence" —
+  see `find_bare_tool_call_span()`'s comment) had the same live-stream leak,
+  and it couldn't be closed the same cheap way: holding back on every raw
+  `{` would also delay every legitimate JSON code sample a reply shows the
+  user. `apply_streaming_json_fence_holdback()` (`src/server.cpp`) instead
+  holds back specifically on a `` ```json `` fence opening — rare and
+  specific enough to be safe — buffering the whole fence until its closing
+  `` ``` ``, then either dropping it entirely (it parsed into a real tool
+  call — same "nothing further streams this turn" contract as a genuine
+  marker match) or flushing it to the client as one chunk (an ordinary JSON
+  example) with normal streaming resuming right after. A fenceless bare
+  JSON tool call remains a residual, accepted gap: still caught and
+  stripped before persistence by `detect_and_strip_tool_call()`, just not
+  from the live view, since there is no safe literal prefix to hold back on
+  for it without also delaying ordinary JSON examples.
+- 2026-08-20 addition: `AllowedCommandStore` management now has real
+  surfaces — `GET`/`POST /api/v1/chat-tools/allowed-commands` and `POST
+  .../allowed-commands/remove` (`src/server.cpp`, administrator-only, same
+  gate as the `/api/v1/system/storage/*` routes), plus a `Run-command
+  allow-list` admin settings page (`/app/settings/allowed-commands`, `src/
+  web_ui.cpp`) to register/revoke an executable without ever touching the
+  `RecordStore` directly. Found and closed while auditing the whole chat
+  tool pipeline for gaps ahead of exposing any Machine Learning tool
+  through the same `run_command` path — before this, the store's `register_
+  command()`/`remove()`/`list()` methods existed but had no caller anywhere
+  outside their own definitions, so `run_command` could never succeed on
+  any install. Both new routes operate on the exact same `allowed_commands`
+  singleton `execute_chat_tool()` already checks at call time (constructed
+  once in `HttpServer`'s startup, see the Phase 84 comment there), so an
+  approval or revocation takes effect on the very next tool call — no
+  restart, no separate relay step.
+- 2026-08-20 addition: MCP inbound tool exposure. `masterai.project.
+  list_directory`, `masterai.project.write_file`, `masterai.project.
+  delete_file`, and `masterai.project.run_command` join the existing
+  `masterai.project.read_file`/`masterai.project.search` in the `tools/list`
+  catalogue (`src/mcp.cpp`), and all six now dispatch through
+  `handle_project_tool_call()` -> `execute_chat_tool()` — the exact function
+  the chat tool loop calls (`src/tool_exec.cpp`), so the two surfaces cannot
+  behave differently by accident. `read_file`/`list_directory`/`search`
+  still only need the `projects.read` scope a token already carried;
+  `write_file`/`delete_file`/`run_command` require the stronger
+  `projects.write` scope (mirroring the same name HTTP project-mutation
+  routes already gate behind, `integration_http.cpp`/`workload_http.cpp`).
+  Risk classification is not weakened for this surface: `classify_tool_call_
+  risk()` (the same fixed destructive-pattern table chat uses) still decides
+  per call, but MCP's `tools/call` is one synchronous JSON-RPC round trip
+  with no Approve/Deny UI of its own — unlike chat, which pauses on a
+  `PendingToolApproval` and resumes on a human's click, MCP refuses a
+  high-risk call outright (`"error":"approval_required"`, `isError:true`)
+  rather than executing it unattended or silently downgrading it to safe;
+  the tool's own `tools/list` description says as much, and the refusal
+  message points the operator at the web chat's Approve/Deny flow instead.
+  This is a deliberate, disclosed asymmetry between the two surfaces (not a
+  gap hidden as parity) given MCP's request/response shape has nowhere to
+  put an interactive approval step yet. `read_project_text_file()`'s bespoke
+  MCP-only reimplementation and its private `search_project()`/
+  `append_file_matches()`/`search_candidate()`/`searchable_extension()`
+  helpers are removed — before this fix `masterai.project.read_file`/
+  `masterai.project.search` used their own byte ceilings and a
+  searchable-extension allow-list chat's own `search` never applied, a
+  drift the shared-dispatch design was already supposed to prevent
+  (`execute_chat_tool()`'s own comment in `masterai.hpp` said as much) but
+  nothing before this fix actually routed MCP through it.
 
 Explicitly out of scope this pass:
 
-- Admin allow-list management routes/UI (see above).
-- MCP inbound exposure (`src/mcp.cpp` still lists only the four Phase 8
-  tools) — `execute_chat_tool()` is written to be shared by both surfaces,
-  but the MCP dispatch itself hasn't been extended yet.
 - A standalone VS Code/Visual Studio extension surfacing these tools (the
   existing IDE integrations, Phase 10, are unchanged); full Claude-Code
   tool parity (persistent shell sessions, web fetch/search, image tools); a
   real line-level diff for `write_file`.
+- A generic interactive-approval channel for MCP itself (e.g. wiring
+  `PendingToolApproval` through MCP elicitation, or a second polling
+  endpoint an MCP client could resume from) — today a high-risk call
+  through MCP is refused, not paused; building a real pause/resume path for
+  a stateless JSON-RPC transport is a materially bigger feature than this
+  pass's tool-exposure work and is better scoped on its own once there is a
+  concrete MCP client that needs it.
+- The live-host validation below — it requires an administrator to build
+  and run the actual binary and click through the UI, which this session
+  cannot do (per this project's own build/test discipline: builds and test
+  runs are the administrator's action, not this assistant's, the same
+  discipline every other performance/validation phase in this plan already
+  follows).
 
-Exit criteria (not yet met — tracked for the follow-up pass):
+Exit criteria:
 
-- The allow-list is administrable from the web UI; the six tools are
-  callable identically through MCP `tools/call` as through chat; a live
-  host validation exercises a full confirm → tool calls → approval →
-  completion cycle end to end.
+- The allow-list is administrable from the web UI. Met (2026-08-20): `GET`/
+  `POST /api/v1/chat-tools/allowed-commands` and the `/app/settings/
+  allowed-commands` admin page, see Deliverables above.
+- The six tools are callable identically through MCP `tools/call` as
+  through chat. Met with one disclosed, deliberate exception (2026-08-20):
+  all six route through the same `execute_chat_tool()` dispatch chat uses,
+  under the same `classify_tool_call_risk()` policy; the one difference is
+  that MCP *refuses* a high-risk call (no interactive approval channel of
+  its own yet) where chat *pauses for approval* — never executes one
+  unattended, in either surface. Closing that difference fully is the
+  explicit out-of-scope item above.
+- A live host validation exercises a full confirm → tool calls → approval →
+  completion cycle end to end. Not yet met — requires an administrator to
+  build the binary and run it, which this session does not do (see
+  Explicitly out of scope this pass). Tracked for whenever that build/test
+  pass happens; nothing in this entry should be read as claiming that
+  validation has occurred.
+
+### Phase 86 — OpenAI-compatible chat completions, model catalog API, and optional no-auth mode
+
+Status: Implemented (2026-08-20), built and validated on a live Windows
+host this pass (this project's build/test discipline — `scripts/build.ps1`
+and running `masterai_tests.exe` from its own build output directory — was
+followed for real, not deferred).
+
+Purpose:
+
+- A separate, independently developed VS Code extension ("Agent-Coder")
+  needs to use a running MasterAI instance as its local LLM backend over an
+  OpenAI-compatible wire format, and needs to read the same curated
+  "downloadable model" suggestion list the web UI's Settings → Models →
+  Download page already offers, without scraping that page's script. A
+  developer running MasterAI purely as that kind of local backend — no
+  browser session, no interest in MasterAI's own accounts — also should not
+  be forced to mint a login just to let a trusted, loopback-only client
+  connect.
+
+Deliverables:
+
+- `ModelCatalogEntry` / `model_catalog()` (`src/model_catalog.hpp`,
+  `src/model_catalog.cpp`): the single source of truth for the curated,
+  size-tiered GGUF download suggestions, ported field-for-field and
+  byte-for-byte (every `sourceUrl`/`revision`/`sha256`) from the JS
+  `PRESETS` array literal `src/web_ui.cpp` used to hardcode. `src/web_ui.cpp`
+  now builds that same `const PRESETS=[...]` JS text at serve time from this
+  one C++ structure (`model_catalog_presets_js()`), so the web UI and the
+  new API below can never silently drift apart again.
+- `GET /api/v1/model-catalog` (`WorkloadHttpController::model_catalog()`,
+  `src/workload_http.cpp`): the same catalog as JSON, `{"models":[...]}`,
+  sorted by `displayName` ascending (case-insensitive). Requires the exact
+  same `"models.read"` scope `GET /api/v1/models` already requires — a
+  bearer token that can already list locally scanned models needs no new
+  grant to read this route too.
+- `POST /v1/chat/completions` (`chat_completions_openai()`, `src/server.cpp`):
+  a stateless, non-streaming, OpenAI Chat Completions-shaped route on the
+  main server (top-level, not under `/api/v1`, to mirror OpenAI's own URL
+  shape) — distinct from Phase 77's per-`InferenceEndpoint` `/v1/completions`
+  listener, which is a separate feature on a separate, per-endpoint port.
+  Reads only `model` and `messages` from the request body (every other
+  OpenAI field, including `stream`, is accepted and ignored rather than
+  rejected); flattens the `messages` array into one role-labeled prompt
+  string and generates through the exact same `execute_rag_generation()`
+  path Phase 76's RAG route and Phase 77's listener already share, so a
+  request here cannot bypass the same memory-lease/scheduler-ticket
+  admission contract every other real generation call site enforces.
+  Returns `404 {"error":{"type":"invalid_request_error", ...}}` for an
+  unknown model id, `503 {"error":{"type":"model_not_ready", ...}}` for a
+  real, discovered-but-not-yet-verified model, or `500
+  {"error":{"type":"server_error", ...}}` on a generation failure. Requires
+  the same `"chats.write"` scope `POST /api/v1/chats` message-sending
+  already requires — the same "generate a reply" capability in a different
+  wire format, not a new one.
+- Optional no-auth mode: `AppConfig::authentication_enabled` (parsed from
+  `auth.enabled` in `settings.json`, defaulting `true`) was already present
+  but `ConfigurationManager::validate()` unconditionally refused to start
+  with it `false` at all. That unconditional refusal is now scoped to the
+  case that actually matters: authentication may be disabled only when the
+  server binds to loopback (mirrors `tls.mode`'s
+  `"disabled-loopback-only"` contract — a relaxed posture is trusted only
+  because the socket itself is unreachable from the network); a
+  non-loopback host with `auth.enabled:false` still fails loudly at
+  startup, exactly as before. When active, `State::handle()`'s auth gate
+  (`src/server.cpp`) resolves every request to a fixed, full-permission
+  built-in identity with no cookie, session, or bearer token consulted at
+  all — no setup/first-administrator step is required for this mode to
+  work. `GET "/"` redirects straight to `/app` instead of serving the login
+  page. Exposed in the admin Settings panel as a labeled "Require sign-in"
+  checkbox (`auth.enabled` in the existing `data-path`-driven config form)
+  with an inline note explaining the loopback-only restriction, alongside
+  the pre-existing local-password/OS-identity sign-in toggles it now sits
+  next to; also surfaced as a read-only `authenticationEnabled` field in the
+  System Report's Enabled Features section. A client (the Agent-Coder
+  integration included) can call both routes above with zero
+  `Authorization` header when this mode is on.
+
+Explicitly out of scope this pass:
+
+- Streaming responses (`stream:true` is accepted but always answers
+  non-streaming) — Phase 77's own `/v1/completions` listener is
+  non-streaming for the same reason, and nothing about this route's
+  contract requires it yet.
+- Multi-turn OpenAI `messages` history is flattened into one prompt string,
+  not passed through a second, parallel history mechanism — the shared
+  `assemble_chat_prompt()`/`execute_rag_generation()` path this route
+  deliberately reuses only ever wraps a single "latest user content"
+  string in the target model's chat template, exactly as Phase 76's RAG
+  route already does.
+- No new scope or role-table entry was added anywhere in this pass — both
+  new routes deliberately reuse an existing scope string end to end.
+
+Exit criteria:
+
+- Both routes are reachable, authenticated the same way as their nearest
+  existing counterpart, and covered by real tests exercising a live
+  `HttpServer` over loopback sockets (auth-rejected-without-token,
+  catalog sorted-and-shaped, chat-completions happy path against the real
+  fake-llama.cpp test fixture, 404 model-not-found, 503 model-not-ready).
+  Met (2026-08-20): `test/tests.cpp`,
+  `test_phase_eightysix_model_catalog_route`,
+  `test_phase_eightysix_chat_completions_route`.
+- No-auth mode is refused on any non-loopback host and works end to end
+  (zero `Authorization` header reaching an ordinarily-protected route) on
+  loopback. Met (2026-08-20): `test_phase_eightysix_no_auth_mode`.
 
 ## Machine Learning Abilities
 

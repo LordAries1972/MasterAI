@@ -10,19 +10,14 @@
 #include "json.hpp"
 
 #include <algorithm>
-#include <cctype>
-#include <fstream>
 #include <iostream>
-#include <sstream>
+#include <map>
 #include <stdexcept>
 
 namespace masterai {
 namespace {
 
 constexpr std::size_t maximum_mcp_message_bytes = 1024U * 1024U;
-constexpr std::size_t maximum_mcp_file_bytes = 1024U * 1024U;
-constexpr std::size_t maximum_search_files = 512U;
-constexpr std::size_t maximum_search_results = 50U;
 
 // Preserves a valid JSON-RPC string or integer identifier in the response.
 // Notifications have no identifier and therefore use null only for errors.
@@ -69,21 +64,6 @@ bool has_only_fields(const JsonValue::Object& object,
         });
 }
 
-// Restricts search to source-like text formats already approved for MasterAI
-// attachments. Binary and ambiguous files are not read through MCP.
-bool searchable_extension(std::string extension) {
-    std::transform(extension.begin(), extension.end(), extension.begin(),
-                   [](const unsigned char character) {
-                       return static_cast<char>(std::tolower(character));
-                   });
-    static const std::set<std::string> approved{
-        ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
-        ".asm", ".s", ".md", ".txt", ".json", ".jsonl", ".xml",
-        ".yaml", ".yml", ".toml", ".ini", ".cmake", ".py", ".rs",
-        ".go", ".java", ".cs", ".pas", ".sql", ".sh", ".ps1"};
-    return approved.find(extension) != approved.end();
-}
-
 // Confirms that a call carries both its named scope and, for project tools, an
 // explicit binding to the requested registered project.
 bool authorized(const McpIdentity& identity, const std::string& scope,
@@ -120,6 +100,45 @@ std::string tools_catalogue() {
         "\"type\":\"string\"}},\"required\":[\"projectId\",\"query\"],"
         "\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,"
         "\"destructiveHint\":false}},"
+        "{\"name\":\"masterai.project.list_directory\",\"title\":\"List "
+        "project directory\",\"description\":\"List one bounded directory's "
+        "immediate entries inside an authorized project.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"projectId\":{"
+        "\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":["
+        "\"projectId\"],\"additionalProperties\":false},\"annotations\":{"
+        "\"readOnlyHint\":true,\"destructiveHint\":false}},"
+        "{\"name\":\"masterai.project.write_file\",\"title\":\"Write "
+        "project file\",\"description\":\"Create or overwrite one bounded "
+        "UTF-8 file inside an authorized project. Blanking an existing "
+        "file's content is classified high-risk and refused through MCP; "
+        "complete that specific call from the MasterAI web chat instead, "
+        "where it pauses for a human Approve/Deny decision.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"projectId\":{"
+        "\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"content\":{"
+        "\"type\":\"string\"}},\"required\":[\"projectId\",\"path\","
+        "\"content\"],\"additionalProperties\":false},\"annotations\":{"
+        "\"readOnlyHint\":false,\"destructiveHint\":false}},"
+        "{\"name\":\"masterai.project.delete_file\",\"title\":\"Delete "
+        "project file\",\"description\":\"Delete one file inside an "
+        "authorized project. Always classified high-risk and always "
+        "refused through MCP; complete it from the MasterAI web chat "
+        "instead, where it pauses for a human Approve/Deny decision.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"projectId\":{"
+        "\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":["
+        "\"projectId\",\"path\"],\"additionalProperties\":false},"
+        "\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":true}},"
+        "{\"name\":\"masterai.project.run_command\",\"title\":\"Run "
+        "allow-listed command\",\"description\":\"Run one admin-approved "
+        "external executable bounded to an authorized project. A command "
+        "matching the destructive-pattern table is classified high-risk "
+        "and always refused through MCP; complete it from the MasterAI web "
+        "chat instead, where it pauses for a human Approve/Deny decision.\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"projectId\":{"
+        "\"type\":\"string\"},\"executable\":{\"type\":\"string\"},"
+        "\"arguments\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},"
+        "\"required\":[\"projectId\",\"executable\"],\"additionalProperties\":"
+        "false},\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":"
+        "true}},"
         "{\"name\":\"masterai.models.list\",\"title\":\"List local models\","
         "\"description\":\"List verified local model inventory and readiness.\","
         "\"inputSchema\":{\"type\":\"object\",\"additionalProperties\":false},"
@@ -176,85 +195,6 @@ std::string list_resources(ProjectCatalog& projects,
     return result + "]}";
 }
 
-// Appends bounded literal matches from one approved source file.
-void append_file_matches(const std::filesystem::path& path,
-                         const std::filesystem::path& project_root,
-                         const std::string& query, std::string& structured,
-                         std::size_t& matches) {
-    std::ifstream input(path, std::ios::binary);
-    std::string line;
-    std::size_t line_number = 0U;
-    while (std::getline(input, line) &&
-           matches < maximum_search_results) {
-        ++line_number;
-        if (line.find(query) == std::string::npos ||
-            !valid_utf8_text(line)) {
-            continue;
-        }
-        std::error_code error;
-        const auto relative =
-            std::filesystem::relative(path, project_root, error);
-        if (error) continue;
-        if (matches != 0U) structured += ",";
-        structured += "{\"path\":" +
-                      json_string(relative.generic_string()) +
-                      ",\"line\":" + std::to_string(line_number) +
-                      ",\"text\":" + json_string(line) + "}";
-        ++matches;
-    }
-}
-
-// Reads one search candidate only when its type and size are approved.
-bool search_candidate(const std::filesystem::directory_entry& entry,
-                      const ProjectRecord& project,
-                      const std::string& query, std::string& structured,
-                      std::size_t& matches, std::error_code& error) {
-    if (!entry.is_regular_file(error) ||
-        !searchable_extension(entry.path().extension().string())) {
-        return false;
-    }
-    const auto size = entry.file_size(error);
-    if (!error && size <= maximum_mcp_file_bytes) {
-        append_file_matches(entry.path(), project.root, query, structured,
-                            matches);
-    }
-    return true;
-}
-
-// Scans a bounded number of regular source files and returns literal,
-// line-oriented matches. Symlink directories are never followed.
-std::string search_project(const ProjectRecord& project,
-                           const std::string& query) {
-    if (query.empty() || query.size() > 256U ||
-        !valid_utf8_text(query)) {
-        throw std::invalid_argument("search query is outside policy");
-    }
-    std::string structured{"{\"matches\":["};
-    std::size_t visited = 0U;
-    std::size_t matches = 0U;
-    std::error_code error;
-    std::filesystem::recursive_directory_iterator iterator(
-        project.root, std::filesystem::directory_options::skip_permission_denied,
-        error);
-    const std::filesystem::recursive_directory_iterator end;
-    while (!error && iterator != end && visited < maximum_search_files &&
-           matches < maximum_search_results) {
-        const auto entry = *iterator;
-        if (entry.is_symlink(error)) {
-            if (entry.is_directory(error)) iterator.disable_recursion_pending();
-            iterator.increment(error);
-            continue;
-        }
-        if (search_candidate(entry, project, query, structured, matches,
-                             error)) {
-            ++visited;
-        }
-        error.clear();
-        iterator.increment(error);
-    }
-    return structured + "]}";
-}
-
 // Converts current model-registry evidence into an MCP-safe inventory without
 // exposing local absolute model paths.
 std::string list_models(const std::filesystem::path& models_root,
@@ -278,6 +218,103 @@ std::string list_models(const std::filesystem::path& models_root,
     return result + "]}";
 }
 
+// Dispatches one "masterai.project.<tool>" call to the shared
+// execute_chat_tool() (tool_exec.cpp), returning nullopt when `name` does not
+// carry the project-tool prefix at all so the caller falls through to its own
+// "Unknown tool" response. Split out of McpInboundServer::handle() purely to
+// keep that function's nesting shallow -- the six execute_chat_tool() names,
+// field schemas, scope, and risk-classification behavior are unchanged.
+std::optional<std::string> handle_project_tool_call(
+    const std::string& id, const std::string& name, const JsonValue& arguments,
+    const JsonValue::Object& argument_object, const McpIdentity& identity,
+    ProjectCatalog& projects, AllowedCommandStore& allowed_commands,
+    std::atomic_bool& cancellation) {
+    static const std::string project_tool_prefix{"masterai.project."};
+    if (name.compare(0U, project_tool_prefix.size(), project_tool_prefix) !=
+        0) {
+        return std::nullopt;
+    }
+    // The suffix after "masterai.project." is exactly one of the six
+    // execute_chat_tool() names (tool_exec.cpp) -- MCP calls the same
+    // dispatch function chat's own tool loop calls, so behavior can never
+    // drift between the two surfaces (masterai.hpp's execute_chat_tool()
+    // comment).
+    const auto tool_name = name.substr(project_tool_prefix.size());
+    static const std::map<std::string, std::set<std::string>> kAllowedFields{
+        {"read_file", {"projectId", "path"}},
+        {"list_directory", {"projectId", "path"}},
+        {"search", {"projectId", "query"}},
+        {"write_file", {"projectId", "path", "content"}},
+        {"delete_file", {"projectId", "path"}},
+        {"run_command", {"projectId", "executable", "arguments"}},
+    };
+    static const std::map<std::string, std::set<std::string>> kRequiredFields{
+        {"read_file", {"projectId", "path"}},
+        {"list_directory", {"projectId"}},
+        {"search", {"projectId", "query"}},
+        {"write_file", {"projectId", "path", "content"}},
+        {"delete_file", {"projectId", "path"}},
+        {"run_command", {"projectId", "executable"}},
+    };
+    const auto allowed_it = kAllowedFields.find(tool_name);
+    if (allowed_it == kAllowedFields.end()) {
+        return rpc_error(id, -32602, "Unknown tool");
+    }
+    if (!has_only_fields(argument_object, allowed_it->second)) {
+        return rpc_error(id, -32602, "Invalid project tool arguments");
+    }
+    for (const auto& field : kRequiredFields.at(tool_name)) {
+        if (argument_object.find(field) == argument_object.end()) {
+            return rpc_error(id, -32602, "Invalid project tool arguments");
+        }
+    }
+    // Everything but read_file/list_directory/search can mutate the project,
+    // so it needs the stronger write scope -- the same "projects.write" name
+    // integration_http.cpp/workload_http.cpp already gate real project
+    // mutation behind for HTTP callers.
+    const bool is_write_tool = tool_name == "write_file" ||
+                               tool_name == "delete_file" ||
+                               tool_name == "run_command";
+    const auto& project_id = arguments.required("projectId").as_string();
+    const auto project = projects.find(project_id);
+    if (!project || !authorized(identity,
+                                is_write_tool ? "projects.write"
+                                             : "projects.read",
+                                project_id)) {
+        return tool_result(id, "Project access denied.",
+                           "{\"error\":\"permission_denied\"}", true);
+    }
+    try {
+        // classify_tool_call_risk() is the single enforcement point for "a
+        // destructive action always needs a human's explicit approval"
+        // (masterai.hpp). MCP's tools/call is one synchronous round trip
+        // with no Approve/Deny channel of its own yet, so -- unlike the chat
+        // tool loop, which pauses on a PendingToolApproval -- a high-risk
+        // call is refused outright here rather than silently downgraded to
+        // safe or executed without a human decision.
+        if (classify_tool_call_risk(tool_name, arguments) ==
+            ChatToolRisk::high_risk) {
+            return tool_result(
+                id,
+                "This call was classified high-risk (destructive). MCP has "
+                "no interactive approval channel yet, so it was not "
+                "executed -- complete it from the MasterAI web chat "
+                "instead, where it pauses for a human Approve/Deny "
+                "decision.",
+                "{\"error\":\"approval_required\"}", true);
+        }
+        const auto result = execute_chat_tool(
+            tool_name, arguments, *project, allowed_commands, cancellation);
+        const std::string structured =
+            result.structured_json.empty() ? "{}" : result.structured_json;
+        return tool_result(id, result.result_text, structured,
+                           !result.succeeded);
+    } catch (const std::exception&) {
+        return tool_result(id, "Project input was rejected by policy.",
+                           "{\"error\":\"invalid_project_input\"}", true);
+    }
+}
+
 }  // namespace
 
 const char* mcp_protocol_version() noexcept { return "2025-11-25"; }
@@ -286,9 +323,11 @@ const char* mcp_protocol_version() noexcept { return "2025-11-25"; }
 // referenced catalogue while the model root and memory reserve are immutable.
 McpInboundServer::McpInboundServer(ProjectCatalog& projects,
                                    std::filesystem::path models_root,
-                                   const std::uint64_t memory_reserve_mib)
+                                   const std::uint64_t memory_reserve_mib,
+                                   AllowedCommandStore& allowed_commands)
     : projects_(projects), models_root_(std::move(models_root)),
-      memory_reserve_mib_(memory_reserve_mib) {
+      memory_reserve_mib_(memory_reserve_mib),
+      allowed_commands_(allowed_commands) {
     if (models_root_.empty()) {
         throw std::invalid_argument("MCP model root is required");
     }
@@ -432,44 +471,10 @@ std::string McpInboundServer::handle(const std::string& request_json,
             const auto value = list_models(models_root_, memory_reserve_mib_);
             return tool_result(id, value, value);
         }
-        if (name == "masterai.project.read_file" ||
-            name == "masterai.project.search") {
-            const std::set<std::string> allowed =
-                name == "masterai.project.read_file"
-                    ? std::set<std::string>{"projectId", "path"}
-                    : std::set<std::string>{"projectId", "query"};
-            if (!has_only_fields(argument_object, allowed) ||
-                argument_object.size() != 2U) {
-                return rpc_error(id, -32602, "Invalid project tool arguments");
-            }
-            const auto& project_id =
-                arguments.required("projectId").as_string();
-            const auto project = projects_.find(project_id);
-            if (!project ||
-                !authorized(identity, "projects.read", project_id)) {
-                return tool_result(id, "Project access denied.",
-                                   "{\"error\":\"permission_denied\"}", true);
-            }
-            try {
-                if (name == "masterai.project.read_file") {
-                    const auto& path = arguments.required("path").as_string();
-                    const auto content = read_project_text_file(
-                                             *project, path,
-                                             maximum_mcp_file_bytes)
-                                             .content;
-                    const std::string structured =
-                        "{\"projectId\":" + json_string(project_id) +
-                        ",\"path\":" + json_string(path) +
-                        ",\"content\":" + json_string(content) + "}";
-                    return tool_result(id, content, structured);
-                }
-                const auto value = search_project(
-                    *project, arguments.required("query").as_string());
-                return tool_result(id, value, value);
-            } catch (const std::exception&) {
-                return tool_result(id, "Project input was rejected by policy.",
-                                   "{\"error\":\"invalid_project_input\"}", true);
-            }
+        if (const auto response = handle_project_tool_call(
+                id, name, arguments, argument_object, identity, projects_,
+                allowed_commands_, cancellation)) {
+            return *response;
         }
         return rpc_error(id, -32602, "Unknown tool");
     } catch (const std::exception&) {

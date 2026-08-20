@@ -323,9 +323,10 @@ int main(int argc, char* argv[]) {
                 configuration.runtime_root / "projects";
             std::filesystem::create_directories(projects_root);
             masterai::ProjectCatalog projects(projects_root, records);
+            masterai::AllowedCommandStore allowed_commands(records);
             masterai::McpInboundServer mcp(
                 projects, configuration.models_root,
-                configuration.memory_reserve_mib);
+                configuration.memory_reserve_mib, allowed_commands);
             std::signal(SIGINT, handle_signal);
             std::signal(SIGTERM, handle_signal);
             return masterai::run_mcp_stdio(

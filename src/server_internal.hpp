@@ -113,6 +113,15 @@ public:
 
     std::string model_inventory() const;
     std::string model_inventory_page() const;
+    // GET /api/v1/model-catalog (Agent-Coder integration): the same curated
+    // suggestion list the web download page's PRESETS JS array now renders
+    // from (see model_catalog.hpp), exposed as its own JSON route so a
+    // non-browser client (e.g. a VS Code extension) can read it without
+    // scraping page script. Deliberately independent of model_inventory()
+    // above -- that route reports locally scanned/verified state for models
+    // already on disk, while this one reports the static, code-shipped list
+    // of models available to download in the first place.
+    std::string model_catalog() const;
     std::string list_projects() const;
     std::string create_project(Request& request, const UserRecord& user);
     std::string index_status(

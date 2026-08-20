@@ -22,6 +22,7 @@ add_library(masterai_core STATIC
     ../src/storage.cpp
     ../src/identity.cpp
     ../src/models.cpp
+    ../src/model_catalog.cpp
     ../src/workflows.cpp
     ../src/inference.cpp
     ../src/downloads.cpp

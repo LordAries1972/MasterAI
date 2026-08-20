@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -39,6 +40,7 @@ using masterai_test::McpHttpFixture;
 using masterai_test::fake_curl_executable;
 using masterai_test::fake_duckdb_executable;
 using masterai_test::fake_llama_executable;
+using masterai_test::read_text;
 using masterai_test::require;
 using masterai_test::TemporaryDirectory;
 using masterai_test::test_executable;
@@ -212,6 +214,420 @@ void test_record_recovery_users_and_persistent_sessions() {
     const auto backup = recovered.backup(temporary.path() / "backups");
     require(std::filesystem::is_directory(backup),
             "record-store backup was not created");
+}
+
+// Phase 86 (Agent-Coder integration): builds the minimal AppConfig every
+// route-level HTTP test below shares -- loopback host, isolated temp
+// runtime/models roots, and the fake llama.cpp backend fixture already used
+// throughout this file (see fake_llama_executable()), pointed at whatever
+// port the caller picks so the route tests below never collide with each
+// other or with a real running instance.
+masterai::AppConfig phase_eightysix_base_config(const TemporaryDirectory& temporary,
+                                                const std::uint16_t port) {
+    auto configuration = masterai::ConfigurationManager::safe_defaults();
+    configuration.host = "127.0.0.1";
+    configuration.port = port;
+    configuration.runtime_root = temporary.path() / "runtime";
+    configuration.models_root = temporary.path() / "models";
+    configuration.llama_server_executable = fake_llama_executable();
+    // A real generation request (chat_completions_openai() ->
+    // execute_rag_generation() -> MemoryBudgetManager::reserve()) is
+    // admitted only if it fits under live probed available RAM minus this
+    // configured OS safety reserve (default 2048 MiB) -- on a constrained
+    // test/CI machine that reserve alone can already exceed what
+    // probe_hardware() reports as available, failing every request
+    // regardless of how tiny it is. The tests below only ever generate a
+    // few tokens against the tiny fake_llama_executable() fixture, so a
+    // minimal reserve here is enough to admit them without depending on how
+    // much real RAM happens to be free wherever this test runs.
+    configuration.memory_reserve_mib = 1U;
+    return configuration;
+}
+
+// A require() failure (or any other exception) thrown between starting the
+// background accept-loop thread and this test function's own normal
+// `server_thread.join()` at the end must not leave that std::thread object
+// destructed while still joinable -- std::thread's destructor calls
+// std::terminate() in that case, which would abort the whole test process
+// (with no diagnostic at all) instead of surfacing as an ordinary, readable
+// test failure. This tiny RAII wrapper is the backstop: it joins in its own
+// destructor if nobody already did, on every exit path including a thrown
+// exception unwinding the stack.
+struct JoiningThread {
+    std::thread thread;
+    ~JoiningThread() {
+        if (thread.joinable()) thread.join();
+    }
+};
+
+// Shared by every route test below: polls /health/live instead of a fixed
+// sleep, since that is the only real signal for "the background server
+// thread has actually reached listen()/accept()" -- a fixed sleep would
+// either be needlessly slow or occasionally too short on a loaded machine.
+void phase_eightysix_wait_until_ready(const std::uint16_t port) {
+    bool ready = false;
+    for (int attempt = 0; attempt < 100 && !ready; ++attempt) {
+        try {
+            ready = masterai_test::http_request(port, "GET", "/health/live")
+                        .status == 200;
+        } catch (const std::exception&) {
+        }
+        if (!ready) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    require(ready, "test HTTP server did not become ready in time");
+}
+
+// Real epoch seconds (server.cpp's own epoch_seconds() is file-local, not
+// exported) -- ApiTokenStore::validate() checks a minted token's expiry
+// against the same wall clock the running server's request handler reads,
+// so a token created here has to be anchored to real "now", not an
+// arbitrary fixture timestamp like the lower-level ApiTokenStore unit test
+// above uses.
+std::uint64_t phase_eightysix_now_epoch_seconds() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+}
+
+// GET /api/v1/model-catalog: covers auth-rejection with no bearer token,
+// and (with a valid "models.read"-scoped token) that the response is
+// shaped and sorted exactly as the Agent-Coder integration's API contract
+// requires -- every field the ModelCatalogEntry/model_catalog_presets_js()
+// pass ported present, and displayName ascending, case-insensitively.
+void test_phase_eightysix_model_catalog_route() {
+    TemporaryDirectory temporary;
+    const std::uint16_t port = 18471U;
+    const auto configuration = phase_eightysix_base_config(temporary, port);
+
+    std::string token;
+    {
+        masterai::RecordStore records(configuration.runtime_root / "database");
+        records.open();
+        masterai::UserStore users(records);
+        const auto administrator = users.create_first_administrator(
+            "TEST\\catalog-admin", "Catalog Admin");
+        masterai::ApiTokenStore api_tokens(records);
+        token = api_tokens.create(administrator.id, {"models.read"},
+                                  phase_eightysix_now_epoch_seconds(), 3600U);
+        records.checkpoint();
+    }
+
+    masterai::HttpServer server(configuration);
+    std::atomic_bool stop{false};
+    JoiningThread server_thread{std::thread([&] {
+        try {
+            server.run(stop);
+        } catch (const std::exception& error) {
+            // A real exception escaping HttpServer::run() would otherwise
+            // call std::terminate() on this thread and abort the whole test
+            // process with no diagnostic at all -- surfacing it here first
+            // turns that into a normal, readable test failure instead.
+            std::clog << "  server thread exception: " << error.what() << '\n';
+        }
+    })};
+    phase_eightysix_wait_until_ready(port);
+
+    const auto unauthenticated =
+        masterai_test::http_request(port, "GET", "/api/v1/model-catalog");
+    require(unauthenticated.status == 401,
+            "GET /api/v1/model-catalog accepted a request with no bearer "
+            "token");
+
+    const auto authenticated = masterai_test::http_request(
+        port, "GET", "/api/v1/model-catalog",
+        {"Authorization: Bearer " + token});
+    require(authenticated.status == 200,
+            "GET /api/v1/model-catalog rejected a validly scoped bearer "
+            "token");
+    const auto root = masterai::parse_json(authenticated.body);
+    const auto& models = root.required("models").as_array();
+    require(!models.empty(), "model-catalog route returned an empty catalog");
+    const auto lower = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](const unsigned char ch) {
+                           return static_cast<char>(std::tolower(ch));
+                       });
+        return value;
+    };
+    std::string previous;
+    bool first_entry = true;
+    for (const auto& entry : models) {
+        require(!entry.required("id").as_string().empty() &&
+                    entry.optional("sourceUrl") != nullptr &&
+                    entry.optional("sha256") != nullptr &&
+                    entry.optional("minRam") != nullptr &&
+                    entry.optional("recRam") != nullptr &&
+                    entry.optional("sizeBytes") != nullptr &&
+                    entry.optional("architecture") != nullptr &&
+                    entry.optional("quantization") != nullptr &&
+                    entry.optional("licenseSpdx") != nullptr &&
+                    entry.optional("displayName") != nullptr,
+                "a model-catalog entry was missing an expected field");
+        const auto current = lower(entry.required("displayName").as_string());
+        if (!first_entry) {
+            require(previous <= current,
+                    "model-catalog entries were not sorted by displayName "
+                    "ascending, case-insensitively");
+        }
+        previous = current;
+        first_entry = false;
+    }
+
+    stop.store(true);
+    server.stop();
+    server_thread.thread.join();
+}
+
+// POST /v1/chat/completions: auth rejection with no bearer token, the
+// OpenAI-shaped happy path against the fake llama.cpp backend's real
+// (deterministic) generated text, an unknown model id (404), and a real,
+// discovered-but-not-yet-verified model (503) -- the two documented error
+// cases the Agent-Coder integration's API contract specifies.
+void test_phase_eightysix_chat_completions_route() {
+    TemporaryDirectory temporary;
+    const std::uint16_t port = 18472U;
+    const auto configuration = phase_eightysix_base_config(temporary, port);
+
+    // Ready model: written and verified *before* the not-ready model exists
+    // below, so ModelRegistry::verify()'s one sweep (the identical fixture
+    // pattern test_verified_model_promotion_and_load_recheck() above uses)
+    // only ever caches this one model as trusted.
+    const auto ready_directory =
+        configuration.models_root / "general-programming" / "chat-ready";
+    const std::string ready_contents = "GGUF-chat-completions-fixture";
+    write_text(ready_directory / "model.gguf", ready_contents);
+    const auto ready_digest =
+        masterai::sha256_file_hex(ready_directory / "model.gguf");
+    write_text(
+        ready_directory / "manifest.json",
+        "{\"schemaVersion\":1,\"id\":\"chat-ready\","
+        "\"displayName\":\"Chat Ready Fixture\","
+        "\"category\":\"general-programming\","
+        "\"model\":{\"format\":\"gguf\",\"architecture\":\"test\","
+        "\"quantization\":\"q4\"},"
+        "\"requirements\":{\"minimumRamMiB\":1,\"recommendedRamMiB\":1,"
+        "\"estimatedDiskMiB\":1},"
+        "\"files\":[{\"path\":\"model.gguf\",\"sizeBytes\":" +
+        std::to_string(ready_contents.size()) + ",\"sha256\":\"" +
+        ready_digest +
+        "\"}],"
+        "\"backends\":[\"llama-cpp\"],"
+        "\"provenance\":{\"sourceUrl\":\"https://github.com/example/model\","
+        "\"revision\":\"0123456789abcdef\"},"
+        "\"license\":{\"spdx\":\"MIT\",\"accepted\":true},"
+        "\"hardware\":{\"cpuFeatures\":[],\"gpuBackend\":\"\"}}");
+    masterai::HardwareInfo hardware;
+    hardware.available_ram_mib = 8192U;
+    const masterai::ModelRegistry registry(configuration.models_root, hardware, 1U);
+    registry.verify([](const std::string&, bool, const std::string&) {});
+
+    // Not-ready model: written *after* the verify() sweep above, so it has
+    // no verification-cache entry and stays in ModelState::unverified --
+    // find_model() still returns it (a real, discovered model on disk), but
+    // is_model_ready() is false, exercising the 503 path a genuinely
+    // not-yet-downloaded/verified model produces.
+    const auto not_ready_directory =
+        configuration.models_root / "general-programming" / "chat-not-ready";
+    const std::string not_ready_contents = "GGUF-not-ready-fixture";
+    write_text(not_ready_directory / "model.gguf", not_ready_contents);
+    write_text(
+        not_ready_directory / "manifest.json",
+        "{\"schemaVersion\":1,\"id\":\"chat-not-ready\","
+        "\"displayName\":\"Chat Not Ready Fixture\","
+        "\"category\":\"general-programming\","
+        "\"model\":{\"format\":\"gguf\",\"architecture\":\"test\","
+        "\"quantization\":\"q4\"},"
+        "\"requirements\":{\"minimumRamMiB\":1,\"recommendedRamMiB\":1,"
+        "\"estimatedDiskMiB\":1},"
+        "\"files\":[{\"path\":\"model.gguf\",\"sizeBytes\":" +
+        std::to_string(not_ready_contents.size()) + ",\"sha256\":\"" +
+        masterai::sha256_file_hex(not_ready_directory / "model.gguf") +
+        "\"}],"
+        "\"backends\":[\"llama-cpp\"],"
+        "\"provenance\":{\"sourceUrl\":\"https://github.com/example/model\","
+        "\"revision\":\"0123456789abcdef\"},"
+        "\"license\":{\"spdx\":\"MIT\",\"accepted\":true},"
+        "\"hardware\":{\"cpuFeatures\":[],\"gpuBackend\":\"\"}}");
+
+    std::string token;
+    {
+        masterai::RecordStore records(configuration.runtime_root / "database");
+        records.open();
+        masterai::UserStore users(records);
+        const auto administrator =
+            users.create_first_administrator("TEST\\chat-admin", "Chat Admin");
+        masterai::ApiTokenStore api_tokens(records);
+        token = api_tokens.create(administrator.id, {"chats.write"},
+                                  phase_eightysix_now_epoch_seconds(), 3600U);
+        records.checkpoint();
+    }
+
+    masterai::HttpServer server(configuration);
+    std::atomic_bool stop{false};
+    JoiningThread server_thread{std::thread([&] {
+        try {
+            server.run(stop);
+        } catch (const std::exception& error) {
+            // A real exception escaping HttpServer::run() would otherwise
+            // call std::terminate() on this thread and abort the whole test
+            // process with no diagnostic at all -- surfacing it here first
+            // turns that into a normal, readable test failure instead.
+            std::clog << "  server thread exception: " << error.what() << '\n';
+        }
+    })};
+    phase_eightysix_wait_until_ready(port);
+
+    const std::string happy_body =
+        "{\"model\":\"chat-ready\",\"messages\":[{\"role\":\"user\","
+        "\"content\":\"Hello\"}]}";
+    const auto unauthenticated = masterai_test::http_request(
+        port, "POST", "/v1/chat/completions", {}, happy_body);
+    require(unauthenticated.status == 401,
+            "POST /v1/chat/completions accepted a request with no bearer "
+            "token");
+
+    const auto happy_path = masterai_test::http_request(
+        port, "POST", "/v1/chat/completions",
+        {"Authorization: Bearer " + token}, happy_body);
+    require(happy_path.status == 200,
+            "POST /v1/chat/completions happy path did not return 200");
+    const auto happy_json = masterai::parse_json(happy_path.body);
+    require(happy_json.required("object").as_string() == "chat.completion" &&
+                happy_json.required("model").as_string() == "chat-ready" &&
+                happy_json.required("id").as_string().rfind("chatcmpl-", 0U) ==
+                    0U,
+            "chat completion response envelope was malformed");
+    const auto& choices = happy_json.required("choices").as_array();
+    require(
+        choices.size() == 1U &&
+            choices.front()
+                    .required("message")
+                    .required("role")
+                    .as_string() == "assistant" &&
+            choices.front()
+                    .required("message")
+                    .required("content")
+                    .as_string()
+                    .find("return value;") != std::string::npos &&
+            choices.front().required("finish_reason").as_string() == "stop",
+        "chat completion did not return the fake runner's real generated "
+        "text");
+    const auto& usage = happy_json.required("usage");
+    require(usage.required("total_tokens").as_integer() ==
+                usage.required("prompt_tokens").as_integer() +
+                    usage.required("completion_tokens").as_integer(),
+            "chat completion usage totals did not add up");
+
+    const auto not_found = masterai_test::http_request(
+        port, "POST", "/v1/chat/completions",
+        {"Authorization: Bearer " + token},
+        "{\"model\":\"does-not-exist\",\"messages\":[{\"role\":\"user\","
+        "\"content\":\"hi\"}]}");
+    require(not_found.status == 404,
+            "POST /v1/chat/completions did not 404 an unknown model id");
+    require(masterai::parse_json(not_found.body)
+                    .required("error")
+                    .required("type")
+                    .as_string() == "invalid_request_error",
+            "404 response did not carry the documented error envelope");
+
+    const auto not_ready = masterai_test::http_request(
+        port, "POST", "/v1/chat/completions",
+        {"Authorization: Bearer " + token},
+        "{\"model\":\"chat-not-ready\",\"messages\":[{\"role\":\"user\","
+        "\"content\":\"hi\"}]}");
+    require(not_ready.status == 503,
+            "POST /v1/chat/completions did not 503 a not-yet-verified model");
+    require(masterai::parse_json(not_ready.body)
+                    .required("error")
+                    .required("type")
+                    .as_string() == "model_not_ready",
+            "503 response did not carry the documented error envelope");
+
+    stop.store(true);
+    server.stop();
+    server_thread.thread.join();
+}
+
+// Phase 86 no-auth mode: the ConfigurationManager::validate() loopback-only
+// guard, and a real end-to-end request reaching an ordinarily-protected
+// route with zero Authorization header when authentication is disabled.
+void test_phase_eightysix_no_auth_mode() {
+    {
+        auto configuration = masterai::ConfigurationManager::safe_defaults();
+        configuration.host = "203.0.113.5";
+        configuration.authentication_enabled = false;
+        bool rejected = false;
+        try {
+            masterai::ConfigurationManager::validate(configuration);
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        require(rejected,
+                "authentication_enabled=false was accepted on a "
+                "non-loopback host");
+    }
+    {
+        auto configuration = masterai::ConfigurationManager::safe_defaults();
+        configuration.host = "127.0.0.1";
+        configuration.authentication_enabled = false;
+        bool accepted = true;
+        try {
+            masterai::ConfigurationManager::validate(configuration);
+        } catch (const std::exception&) {
+            accepted = false;
+        }
+        require(accepted,
+                "authentication_enabled=false was refused on a loopback "
+                "host");
+    }
+
+    TemporaryDirectory temporary;
+    const std::uint16_t port = 18473U;
+    auto configuration = phase_eightysix_base_config(temporary, port);
+    configuration.authentication_enabled = false;
+
+    masterai::HttpServer server(configuration);
+    std::atomic_bool stop{false};
+    JoiningThread server_thread{std::thread([&] {
+        try {
+            server.run(stop);
+        } catch (const std::exception& error) {
+            // A real exception escaping HttpServer::run() would otherwise
+            // call std::terminate() on this thread and abort the whole test
+            // process with no diagnostic at all -- surfacing it here first
+            // turns that into a normal, readable test failure instead.
+            std::clog << "  server thread exception: " << error.what() << '\n';
+        }
+    })};
+    phase_eightysix_wait_until_ready(port);
+
+    const auto catalog_without_auth =
+        masterai_test::http_request(port, "GET", "/api/v1/model-catalog");
+    require(catalog_without_auth.status == 200,
+            "no-auth mode did not let an ordinarily-protected route through "
+            "with zero Authorization header");
+
+    // 404 (not 401) is the meaningful assertion here: it proves the request
+    // reached chat_completions_openai()'s find_model() check at all with no
+    // bearer token presented -- exactly the contract a no-auth MasterAI
+    // instance needs to offer the Agent-Coder integration.
+    const auto chat_without_auth = masterai_test::http_request(
+        port, "POST", "/v1/chat/completions", {},
+        "{\"model\":\"does-not-exist\",\"messages\":[]}");
+    require(chat_without_auth.status == 404,
+            "no-auth mode did not let POST /v1/chat/completions through "
+            "with zero Authorization header");
+
+    const auto root_page = masterai_test::http_request(port, "GET", "/");
+    require(root_page.status == 302,
+            "GET / did not redirect away from the login page under no-auth "
+            "mode");
+
+    stop.store(true);
+    server.stop();
+    server_thread.thread.join();
 }
 
 void test_os_secret_store() {
@@ -429,6 +845,24 @@ void test_phase_five_chat_and_projects() {
     require(chats.find_for_owner(chat.id, "operator")->is_shared_template,
             "set_shared_template did not persist the flag in memory");
 
+    // Phase 84 follow-up (2026-08-20): tool execution mode is owner-scoped
+    // like set_model()/set_shared_template() above, defaults to auto_mode,
+    // and survives the 10-field split header persistence format across
+    // service reconstruction.
+    require(chats.find_for_owner(chat.id, "operator")->tool_execution_mode ==
+                masterai::ChatToolExecutionMode::auto_mode,
+            "a newly created chat must default to auto_mode tool execution");
+    require(!chats.set_tool_execution_mode(
+                chat.id, "another-user",
+                masterai::ChatToolExecutionMode::confirm_all),
+            "set_tool_execution_mode bypassed the chat ownership boundary");
+    require(chats.set_tool_execution_mode(
+                chat.id, "operator", masterai::ChatToolExecutionMode::off),
+            "set_tool_execution_mode failed for the chat's own owner");
+    require(chats.find_for_owner(chat.id, "operator")->tool_execution_mode ==
+                masterai::ChatToolExecutionMode::off,
+            "set_tool_execution_mode did not persist the mode in memory");
+
     masterai::AttachmentStore attachments(temporary.path() / "attachments",
                                           records);
     const auto attachment = attachments.add_text(
@@ -452,10 +886,12 @@ void test_phase_five_chat_and_projects() {
                 restored_chat->messages[1].content ==
                     "Line one.\nLine two.\n\tIndented." &&
                 restored_chat->model_id == "other-model" &&
-                restored_chat->is_shared_template,
-            "chat messages/model/shared-template flag did not survive the "
-            "split header/message persistence scheme across service "
-            "reconstruction");
+                restored_chat->is_shared_template &&
+                restored_chat->tool_execution_mode ==
+                    masterai::ChatToolExecutionMode::off,
+            "chat messages/model/shared-template flag/tool execution mode "
+            "did not survive the split header/message persistence scheme "
+            "across service reconstruction");
 }
 
 // Chat memory is deterministic server-side behavior rather than a model
@@ -766,10 +1202,12 @@ void test_phase_eight_mcp_inbound() {
     records.open();
     masterai::ProjectCatalog projects(workspace, records);
     projects.add("demo", "Demonstration", project_root);
-    masterai::McpInboundServer server(projects, models_root, 512U);
+    masterai::AllowedCommandStore allowed_commands(records);
+    masterai::McpInboundServer server(projects, models_root, 512U,
+                                      allowed_commands);
     masterai::McpIdentity identity{
         "developer",
-        {"mcp.connect", "projects.read", "models.read"},
+        {"mcp.connect", "projects.read", "projects.write", "models.read"},
         {"demo"}};
     std::atomic_bool cancellation{false};
 
@@ -809,6 +1247,71 @@ void test_phase_eight_mcp_inbound() {
         identity, cancellation);
     require(search.find("answer.cpp") != std::string::npos,
             "bounded MCP project search failed");
+
+    // Phase 84 exit criterion: the same six built-in tools chat can call
+    // (tool_exec.cpp's execute_chat_tool()) are callable identically
+    // through MCP tools/call, sharing that one dispatch function.
+    const auto listing = server.handle(
+        "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"masterai.project.list_directory\","
+        "\"arguments\":{\"projectId\":\"demo\",\"path\":\"src\"}}}",
+        identity, cancellation);
+    require(listing.find("answer.cpp") != std::string::npos &&
+                listing.find("\"isError\":true") == std::string::npos,
+            "MCP list_directory did not surface the project's src entries");
+
+    const auto write = server.handle(
+        "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"masterai.project.write_file\","
+        "\"arguments\":{\"projectId\":\"demo\",\"path\":\"src/new.txt\","
+        "\"content\":\"mcp wrote this\"}}}",
+        identity, cancellation);
+    require(write.find("\"isError\":true") == std::string::npos &&
+                read_text(project_root / "src" / "new.txt") ==
+                    "mcp wrote this",
+            "MCP write_file did not create the requested project file");
+
+    const auto write_without_scope = server.handle(
+        "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"masterai.project.write_file\","
+        "\"arguments\":{\"projectId\":\"demo\",\"path\":\"src/blocked.txt\","
+        "\"content\":\"should never land\"}}}",
+        {"developer", {"mcp.connect", "projects.read"}, {"demo"}},
+        cancellation);
+    require(write_without_scope.find("\"isError\":true") != std::string::npos &&
+                !std::filesystem::exists(project_root / "src" /
+                                         "blocked.txt"),
+            "MCP write_file executed for an identity without projects.write");
+
+    const auto blocked_delete = server.handle(
+        "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"masterai.project.delete_file\","
+        "\"arguments\":{\"projectId\":\"demo\","
+        "\"path\":\"src/answer.cpp\"}}}",
+        identity, cancellation);
+    require(blocked_delete.find("\"approval_required\"") != std::string::npos &&
+                std::filesystem::exists(project_root / "src" / "answer.cpp"),
+            "MCP delete_file executed a high-risk call without human approval");
+
+    const auto blocked_command = server.handle(
+        "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"masterai.project.run_command\","
+        "\"arguments\":{\"projectId\":\"demo\",\"executable\":\"git\","
+        "\"arguments\":[\"push\",\"--force\"]}}}",
+        identity, cancellation);
+    require(blocked_command.find("\"approval_required\"") != std::string::npos,
+            "MCP run_command executed a destructive-pattern call without "
+            "human approval");
+
+    const auto command_not_allowed = server.handle(
+        "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"masterai.project.run_command\","
+        "\"arguments\":{\"projectId\":\"demo\",\"executable\":\"notregistered\","
+        "\"arguments\":[]}}}",
+        identity, cancellation);
+    require(command_not_allowed.find("admin allow-list") != std::string::npos,
+            "MCP run_command ran an executable absent from the admin "
+            "allow-list");
 
     const auto denied = server.handle(
         "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
@@ -9415,6 +9918,9 @@ int main() {
         run("sessions", test_sessions);
         run("configuration", test_configuration_and_intranet_policy);
         run("record recovery and identity", test_record_recovery_users_and_persistent_sessions);
+        run("model catalog route", test_phase_eightysix_model_catalog_route);
+        run("chat completions route", test_phase_eightysix_chat_completions_route);
+        run("no-auth mode", test_phase_eightysix_no_auth_mode);
         run("OS secret store", test_os_secret_store);
         run("OS identity boundary", test_os_identity_boundary);
         run("model suitability", test_suitability);

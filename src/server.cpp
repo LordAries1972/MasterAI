@@ -712,7 +712,8 @@ public:
         std::filesystem::create_directories(projects_root);
         projects = std::make_unique<ProjectCatalog>(projects_root, records);
         mcp = std::make_unique<McpInboundServer>(
-            *projects, value.models_root, value.memory_reserve_mib);
+            *projects, value.models_root, value.memory_reserve_mib,
+            *allowed_commands);
         ide = std::make_unique<IdeIntegrationService>(*projects);
         integrations =
             std::make_unique<server_internal::IntegrationHttpController>(
@@ -1016,6 +1017,17 @@ public:
             return response(200, "OK", "{\"status\":\"live\"}");
         }
         if (request.method == "GET" && request.target == "/") {
+            // Phase 86: under no-auth mode there is no login step at all --
+            // every request past this point already resolves to the
+            // built-in full-permission identity (see the auth gate below),
+            // so sending a browser to the login form here would be a dead
+            // end (it has no working credentials to submit and doesn't
+            // need any). A server-side redirect straight to /app is more
+            // robust than a client-side JS check on this same page (no
+            // login-page flash, and it degrades safely if JS is disabled).
+            if (!configuration.authentication_enabled) {
+                return response(302, "Found", "", {"Location: /app"});
+            }
             return login_page();
         }
         if (request.method == "GET" && request.target == "/assets/app.js") {
@@ -1060,7 +1072,29 @@ public:
         std::set<std::string> authenticated_scopes;
         std::set<std::string> authenticated_project_ids;
         bool cookie_authenticated = false;
-        if (session) {
+        // Phase 86: an operator can opt out of authentication entirely
+        // (auth.enabled:false in settings.json). ConfigurationManager::
+        // validate() already refuses to start with authentication disabled
+        // unless the server is bound to loopback (mirroring tls.mode's
+        // "disabled-loopback-only" contract), so reaching this branch at
+        // all is proof the socket is unreachable from the network -- every
+        // request is then treated as already authenticated against a
+        // fixed, full-permission built-in identity, with no cookie,
+        // session, or bearer token consulted at all (no Authorization
+        // header is required, which matters for a client like the
+        // Agent-Coder integration's /v1/chat/completions and
+        // /api/v1/model-catalog calls). `cookie_authenticated = true`
+        // grants this identity the same unrestricted (not project-scoped)
+        // access a real cookie session has, rather than the narrower access
+        // an API token can be scoped to; `session` stays unset (nullopt) on
+        // this path, which is why the CSRF check and the auth/logout|
+        // refresh routes below are guarded with `session`/`cookie_
+        // authenticated` checks that already treat "no real session" as
+        // "nothing to do" rather than a null-dereference.
+        if (!configuration.authentication_enabled) {
+            user_id = "no-auth-system";
+            cookie_authenticated = true;
+        } else if (session) {
             user_id = session->user_id;
             cookie_authenticated = true;
         } else {
@@ -1070,6 +1104,23 @@ public:
                 (request.target == "/api/v1/models" ||
                  request.target == "/models")) {
                 required_scope = "models.read";
+            } else if (request.method == "GET" &&
+                       request.target == "/api/v1/model-catalog") {
+                // Phase 86 (Agent-Coder integration): the same auth scope
+                // GET /api/v1/models already uses -- any bearer token that
+                // can already list locally scanned models can equally read
+                // the static, code-shipped catalog of models available to
+                // download, so no new scope/role-table entry is needed.
+                required_scope = "models.read";
+            } else if (request.method == "POST" &&
+                       request.target == "/v1/chat/completions") {
+                // Phase 86: the same scope POST /api/v1/chats message-
+                // sending already requires -- this route is a stateless,
+                // OpenAI-wire-format alternative to that same "generate a
+                // reply" capability, not a new capability, so it reuses
+                // "chats.write" rather than growing a parallel scope/role-
+                // table entry a token would separately need to be granted.
+                required_scope = "chats.write";
             } else if (request.method == "GET" &&
                        request.target == "/api/v1/users/me") {
                 required_scope = "identity.read";
@@ -1173,14 +1224,32 @@ public:
         if (user_id.empty()) {
             return response(401, "Unauthorized", "{\"error\":\"authentication_required\"}");
         }
-        if (unsafe && cookie_authenticated) {
+        // `session` is only ever set on the real cookie-session path above
+        // (the no-auth bypass sets cookie_authenticated without a session
+        // at all) -- checking `session` here as well as `cookie_
+        // authenticated` is what keeps this from dereferencing a null
+        // optional under no-auth mode, since there is no cookie to forge a
+        // CSRF token against in the first place.
+        if (unsafe && cookie_authenticated && session) {
             const auto csrf = request.headers.find("x-csrf-token");
             if (csrf == request.headers.end() ||
                 !constant_time_equal(csrf->second, session->csrf_secret)) {
                 return response(403, "Forbidden", "{\"error\":\"csrf_rejected\"}");
             }
         }
-        const auto user = users->find_by_id(user_id);
+        // Phase 86: under no-auth mode user_id is the fixed "no-auth-system"
+        // sentinel set above, which deliberately does not correspond to any
+        // real UserStore record (no setup, and therefore no administrator
+        // account, needs to exist yet for no-auth mode to work) -- resolve
+        // it to a synthetic, full-permission UserRecord instead of looking
+        // it up, rather than requiring an operator to first create a real
+        // account purely so this mode has something to point at.
+        const auto user =
+            configuration.authentication_enabled
+                ? users->find_by_id(user_id)
+                : std::optional<UserRecord>{UserRecord{
+                      user_id, "system", "System (authentication disabled)",
+                      UserRole::administrator, true, std::string{}}};
         if (!user || !user->enabled) {
             return response(403, "Forbidden", "{\"error\":\"user_disabled\"}");
         }
@@ -1239,6 +1308,16 @@ public:
         }
         if (request.method == "GET" && request.target == "/api/v1/models") {
             return workloads->model_inventory();
+        }
+        // Phase 86 (Agent-Coder integration): the same curated download
+        // catalog the web UI's PRESETS array now renders from (see
+        // model_catalog.hpp) exposed as its own authenticated JSON route --
+        // distinct from GET /api/v1/models just above, which reports the
+        // locally scanned/verified state of models already on disk, not
+        // what could be downloaded.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/model-catalog") {
+            return workloads->model_catalog();
         }
         if (request.method == "GET" &&
             request.target == "/api/v1/models/usage-signals") {
@@ -1434,6 +1513,13 @@ public:
                                                               : "false") +
                 ",\"allowOsIdentityAccounts\":" +
                 (configuration.allow_os_identity_accounts ? "true" : "false") +
+                // Phase 86: surfaces the no-auth toggle in the same report an
+                // administrator already reads every other sign-in setting
+                // from, so "is this instance currently reachable without
+                // signing in" is visible without cross-referencing
+                // settings.json directly.
+                ",\"authenticationEnabled\":" +
+                (configuration.authentication_enabled ? "true" : "false") +
                 ",\"tlsMode\":\"" + json_escape(configuration.tls_mode) +
                 "\"}"
                 "}";
@@ -2466,6 +2552,122 @@ public:
                 return response(400, "Bad Request",
                                 "{\"error\":\"migration_failed\",\"detail\":\"" +
                                     json_escape(error.what()) + "\"}");
+            }
+        }
+        // Phase 84 follow-up: admin management for the run_command tool's
+        // allow-list (AllowedCommandStore/tool_exec.cpp). This registry
+        // previously had register_command()/remove()/list() implemented but
+        // no HTTP route anywhere calling them, so no admin could ever
+        // approve an executable and every run_command tool call failed
+        // closed with "not on the admin allow-list" forever -- discovered
+        // while auditing the chat tool pipeline for gaps ahead of exposing
+        // any Machine Learning tool through the same run_command path.
+        // Administrator-only, the same gate as the system/storage routes
+        // above: approving an executable the model may invoke deserves the
+        // same privilege bar as migrating durable files or purging system
+        // memory.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/chat-tools/allowed-commands") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            std::string body{"{\"commands\":["};
+            bool first = true;
+            for (const auto& command : allowed_commands->list()) {
+                if (!first) body += ",";
+                first = false;
+                body += "{\"id\":" + json_string(command.id) +
+                        ",\"executable\":" + json_string(command.executable) +
+                        ",\"description\":" +
+                        json_string(command.description) +
+                        ",\"riskDefault\":\"" +
+                        std::string(command.risk_default ==
+                                            ChatToolRisk::high_risk
+                                        ? "high_risk"
+                                        : "safe") +
+                        "\",\"allowedProjectIds\":[";
+                bool first_project = true;
+                for (const auto& project_id : command.allowed_project_ids) {
+                    if (!first_project) body += ",";
+                    first_project = false;
+                    body += json_string(project_id);
+                }
+                body += "],\"enabled\":" +
+                        std::string(command.enabled ? "true" : "false") + "}";
+            }
+            return response(200, "OK", body + "]}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/chat-tools/allowed-commands") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                const auto root = parse_json(request.body);
+                AllowedCommandRecord command;
+                command.id = generate_tool_approval_id();
+                command.executable = root.required("executable").as_string();
+                if (command.executable.empty()) {
+                    throw std::runtime_error("executable is required");
+                }
+                if (const auto* value = root.optional("description")) {
+                    command.description = value->as_string();
+                }
+                if (const auto* value = root.optional("riskDefault")) {
+                    const auto risk_text = value->as_string();
+                    if (risk_text == "high_risk") {
+                        command.risk_default = ChatToolRisk::high_risk;
+                    } else if (risk_text == "safe") {
+                        command.risk_default = ChatToolRisk::safe;
+                    } else {
+                        throw std::runtime_error("invalid risk default");
+                    }
+                }
+                if (const auto* values = root.optional("allowedProjectIds")) {
+                    for (const auto& value : values->as_array()) {
+                        const auto& project_id = value.as_string();
+                        if (!projects->find(project_id)) {
+                            throw std::runtime_error("invalid project id");
+                        }
+                        command.allowed_project_ids.insert(project_id);
+                    }
+                }
+                command.enabled = true;
+                if (const auto* value = root.optional("enabled")) {
+                    command.enabled = value->as_boolean();
+                }
+                const auto registered =
+                    allowed_commands->register_command(command);
+                audit.append("chat_tools.allowed_command.add", user->id,
+                            "success",
+                            registered.id + " " + registered.executable);
+                return response(201, "Created",
+                                "{\"id\":" + json_string(registered.id) + "}");
+            } catch (const std::exception&) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_allowed_command_registration\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/chat-tools/allowed-commands/remove") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                const auto root = parse_json(request.body);
+                const auto id = root.required("id").as_string();
+                allowed_commands->remove(id);
+                audit.append("chat_tools.allowed_command.remove", user->id,
+                            "success", id);
+                return response(204, "No Content", "");
+            } catch (const std::exception&) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_allowed_command_removal\"}");
             }
         }
         // Machine Learning foundation phase: Dashboard is the only real
@@ -7104,6 +7306,15 @@ public:
                            ? application_page(*user, "settings-api-reference")
                            : response(302, "Found", "", {"Location: /app"});
             }
+            // Admin UI for AllowedCommandStore (tool_exec.cpp) -- see the
+            // Phase 84 follow-up comment on the /api/v1/chat-tools/
+            // allowed-commands routes above for why this page needed to
+            // exist at all.
+            if (target == "/app/settings/allowed-commands") {
+                return is_administrator
+                           ? application_page(*user, "settings-allowed-commands")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
             if (target == "/app/admin/create") {
                 return is_administrator
                            ? application_page(*user, "admin-create")
@@ -7207,6 +7418,21 @@ public:
             if (auto denied = forbidden_unless(user->role, "chats.write")) return *denied;
             return create_chat(request, *user);
         }
+        // Phase 86 (Agent-Coder integration): a stateless, OpenAI Chat
+        // Completions-wire-format-compatible route, top-level rather than
+        // under /api/v1 since it deliberately mirrors the OpenAI API's own
+        // URL shape for maximum client compatibility. Reuses the exact
+        // "chats.write" scope POST /api/v1/chats above already requires --
+        // this is the same "generate a reply" capability in a different
+        // wire format, not a new one, so no new scope/role-table entry was
+        // added for it.
+        if (request.method == "POST" &&
+            request.target == "/v1/chat/completions") {
+            if (auto denied = forbidden_unless(user->role, "chats.write")) {
+                return *denied;
+            }
+            return chat_completions_openai(request);
+        }
         // Client-driven warm trigger -- see the comment on warm_runner()
         // above for why this replaced get_chat_messages() firing it as a
         // side effect of merely opening a chat.
@@ -7255,6 +7481,16 @@ public:
                                    "/shared-template") == 0) {
             if (auto denied = forbidden_unless(user->role, "chats.write")) return *denied;
             return set_chat_shared_template(request, *user);
+        }
+        // Phase 84 follow-up: user-facing control over how this chat's tool
+        // calls get gated -- see set_chat_tool_execution_mode()'s comment.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/chats/", 0U) == 0U &&
+            request.target.size() > 24U &&
+            request.target.compare(request.target.size() - 10U, 10U,
+                                   "/tool-mode") == 0) {
+            if (auto denied = forbidden_unless(user->role, "chats.write")) return *denied;
+            return set_chat_tool_execution_mode(request, *user);
         }
         // Deletes a chat and its full message history. A POST-with-suffix
         // action (matching /model, /messages above) rather than the DELETE
@@ -8814,6 +9050,14 @@ private:
             incoming.allow_local_password_accounts;
         configuration.allow_os_identity_accounts =
             incoming.allow_os_identity_accounts;
+        // Phase 86: applied live like the two sign-in toggles just above --
+        // ConfigurationManager::load() (called on `incoming` above, before
+        // this point) already re-validated the submitted document via the
+        // same ConfigurationManager::validate() the process itself starts
+        // under, so a submission that disables authentication while bound
+        // to a non-loopback host was already rejected with 400 before
+        // reaching here; whatever survived is safe to apply immediately.
+        configuration.authentication_enabled = incoming.authentication_enabled;
         configuration.rate_limit_per_minute = incoming.rate_limit_per_minute;
         configuration.max_request_bytes = incoming.max_request_bytes;
         configuration.allowed_hosts = incoming.allowed_hosts;
@@ -8894,7 +9138,10 @@ private:
                     ",\"messageCount\":" +
                     std::to_string(chat.messages.size()) +
                     ",\"isSharedTemplate\":" +
-                    (chat.is_shared_template ? "true" : "false") + "}";
+                    (chat.is_shared_template ? "true" : "false") +
+                    ",\"toolExecutionMode\":\"" +
+                    tool_execution_mode_json_name(chat.tool_execution_mode) +
+                    "\"}";
         }
         return response(200, "OK", body + "]}");
     }
@@ -8977,6 +9224,9 @@ private:
         std::string body{"{\"id\":\"" + json_escape(chat->id) +
                          "\",\"projectId\":\"" + json_escape(chat->project_id) +
                          "\",\"modelId\":\"" + json_escape(chat->model_id) +
+                         "\",\"toolExecutionMode\":\"" +
+                         tool_execution_mode_json_name(
+                             chat->tool_execution_mode) +
                          "\",\"messages\":["};
         bool first = true;
         for (const auto& message : chat->messages) {
@@ -9020,14 +9270,43 @@ private:
         return response(202, "Accepted", "{}");
     }
 
+    // Client-facing string<->enum mapping for ChatToolExecutionMode, kept
+    // local to server.cpp (matching how BenchmarkProfile's own JSON mapping
+    // below is spelled out locally rather than reusing ChatStore's internal
+    // workflows.cpp helper of the same purpose).
+    static const char* tool_execution_mode_json_name(
+        const ChatToolExecutionMode mode) {
+        switch (mode) {
+            case ChatToolExecutionMode::confirm_all: return "confirm_all";
+            case ChatToolExecutionMode::off: return "off";
+            case ChatToolExecutionMode::auto_mode: return "auto";
+        }
+        return "auto";
+    }
+
+    static ChatToolExecutionMode parse_tool_execution_mode_field(
+        const std::string& mode) {
+        if (mode == "confirm_all") return ChatToolExecutionMode::confirm_all;
+        if (mode == "off") return ChatToolExecutionMode::off;
+        if (mode == "auto") return ChatToolExecutionMode::auto_mode;
+        throw std::runtime_error("unknown tool execution mode");
+    }
+
     std::string create_chat(Request& request, const UserRecord& user) {
         try {
             const auto root = parse_json(request.body);
-            if (root.as_object().size() != 2U) {
+            // toolExecutionMode is optional (defaults to "auto") so existing
+            // clients that don't yet know about it keep working unchanged.
+            const auto* tool_mode_field = root.optional("toolExecutionMode");
+            if (root.as_object().size() != (tool_mode_field ? 3U : 2U)) {
                 throw std::runtime_error("unexpected chat field");
             }
             const auto project_id = root.required("projectId").as_string();
             const auto model_id = root.required("modelId").as_string();
+            const auto tool_execution_mode =
+                tool_mode_field
+                    ? parse_tool_execution_mode_field(tool_mode_field->as_string())
+                    : ChatToolExecutionMode::auto_mode;
             if (!projects->find(project_id)) {
                 return response(404, "Not Found",
                                 "{\"error\":\"project_not_found\"}");
@@ -9042,8 +9321,9 @@ private:
             // chats instead of repeatedly changing an active conversation.
             const auto memory_context =
                 user_memories->recall_context(user.id, 4096U);
-            const auto chat = chats->create(
-                user.id, project_id, model_id, memory_context);
+            const auto chat = chats->create(user.id, project_id, model_id,
+                                            memory_context,
+                                            tool_execution_mode);
             audit.append("chat.create", user.id, "success", chat.id);
             warm_model_async(model_id);
             return response(201, "Created",
@@ -9109,6 +9389,39 @@ private:
                 200, "OK",
                 "{\"sharedTemplate\":" + std::string(shared ? "true" : "false") +
                     "}");
+        } catch (const std::exception&) {
+            return response(400, "Bad Request",
+                            "{\"error\":\"invalid_chat_request\"}");
+        }
+    }
+
+    // Phase 84 follow-up: lets the composer's "Model settings" panel change
+    // how this chat's future tool calls are gated -- auto (today's
+    // classify_tool_call_risk()-driven policy), confirm_all (every call,
+    // safe or not, pauses for a human Approve/Deny decision), or off (tools
+    // are unavailable for this chat entirely; see tools_available in
+    // send_chat_message()). This can never weaken the always-on protection
+    // destructive calls (delete_file, a destructive run_command) get --
+    // classify_tool_call_risk() itself is untouched by this setting, and
+    // confirm_all only ever adds confirmation, never removes it.
+    std::string set_chat_tool_execution_mode(Request& request,
+                                             const UserRecord& user) {
+        const std::string prefix{"/api/v1/chats/"};
+        const auto chat_id = request.target.substr(
+            prefix.size(), request.target.size() - prefix.size() - 10U);
+        try {
+            const auto root = parse_json(request.body);
+            const auto mode = parse_tool_execution_mode_field(
+                root.required("toolExecutionMode").as_string());
+            if (!chats->set_tool_execution_mode(chat_id, user.id, mode)) {
+                return response(404, "Not Found", "{\"error\":\"chat_not_found\"}");
+            }
+            audit.append("chat.tool_execution_mode", user.id, "success",
+                        chat_id);
+            return response(
+                200, "OK",
+                "{\"toolExecutionMode\":\"" +
+                    std::string(tool_execution_mode_json_name(mode)) + "\"}");
         } catch (const std::exception&) {
             return response(400, "Bad Request",
                             "{\"error\":\"invalid_chat_request\"}");
@@ -9993,6 +10306,79 @@ private:
         }
     }
 
+    // A third hallucination shape neither detector above catches: a small
+    // local model blending the "[[TOOL_CALL]]...[[/TOOL_CALL]]" marker
+    // convention it was told about with a "name{args}"/"name(args)"-style
+    // call syntax it saw in training, e.g. "[[read_file{path:\"x\"}}]" --
+    // not valid JSON (so find_bare_tool_call_span()'s parse_json() throws
+    // and skips it) and not the real marker pair either. This never yields
+    // an executable ToolCallRequest -- by definition, anything matching only
+    // this pass is malformed -- it exists purely so such text is stripped
+    // rather than rendered raw to the user, the same defensive purpose
+    // find_bare_tool_call_span() serves for well-formed-JSON attempts.
+    // Scans for "[[" immediately followed by a known tool name and a "{" or
+    // "(", then returns the span up to the matching "]]" close (or, if the
+    // model never emitted one, the end of a brace/paren-balanced argument
+    // list) so a truncated or malformed attempt is still fully removed.
+    static std::optional<std::pair<std::size_t, std::size_t>>
+    find_stray_pseudo_tool_call_span(const std::string& text) {
+        std::size_t search_from = 0U;
+        while (true) {
+            const auto open_pos = text.find("[[", search_from);
+            if (open_pos == std::string::npos) return std::nullopt;
+            const auto name_start = open_pos + 2U;
+            const char* matched_name = nullptr;
+            for (const char* known : kKnownToolNames) {
+                const std::string_view name_view{known};
+                if (text.compare(name_start, name_view.size(), name_view) ==
+                    0) {
+                    matched_name = known;
+                    break;
+                }
+            }
+            if (matched_name == nullptr) {
+                search_from = open_pos + 2U;
+                continue;
+            }
+            const auto args_pos = name_start + std::strlen(matched_name);
+            if (args_pos >= text.size() ||
+                (text[args_pos] != '{' && text[args_pos] != '(')) {
+                search_from = open_pos + 2U;
+                continue;
+            }
+            const char open_char = text[args_pos];
+            const char close_char = open_char == '{' ? '}' : ')';
+            int depth = 0;
+            std::size_t args_end = std::string::npos;
+            for (std::size_t i = args_pos; i < text.size(); ++i) {
+                if (text[i] == open_char) {
+                    ++depth;
+                } else if (text[i] == close_char) {
+                    --depth;
+                    if (depth == 0) {
+                        args_end = i + 1U;
+                        break;
+                    }
+                }
+            }
+            if (args_end == std::string::npos) {
+                // Unterminated argument list -- strip to the end of the
+                // text rather than leave a dangling fragment visible.
+                return std::make_pair(open_pos, text.size());
+            }
+            // Absorb a stray closing "]]" (or a lone extra "}"/")" a model
+            // sometimes tacks on, e.g. "...}}]") immediately after the
+            // balanced argument list, so no orphaned bracket debris is left
+            // behind either.
+            auto span_end = args_end;
+            while (span_end < text.size() &&
+                  (text[span_end] == close_char || text[span_end] == ']')) {
+                ++span_end;
+            }
+            return std::make_pair(open_pos, span_end);
+        }
+    }
+
     // Shared by both passes of detect_and_strip_tool_call() below (the
     // marker-delimited body and the marker-less fallback span) so the parse
     // logic exists in exactly one place.
@@ -10051,6 +10437,13 @@ private:
             }
             text.erase(span->first, span->second - span->first);
         }
+        // Final defensive pass: strip any remaining stray "[[name{...}]]"
+        // pseudo-call attempt neither pass above recognized. Never
+        // contributes to `result` -- see find_stray_pseudo_tool_call_span()'s
+        // comment on why it can't (and shouldn't) be executable.
+        while (const auto span = find_stray_pseudo_tool_call_span(text)) {
+            text.erase(span->first, span->second - span->first);
+        }
         while (!text.empty() &&
               (text.back() == '\n' || text.back() == '\r' ||
                text.back() == ' ' || text.back() == '\t')) {
@@ -10087,23 +10480,57 @@ private:
         return 0U;
     }
 
+    // Streaming counterpart to find_stray_pseudo_tool_call_span(): that
+    // function only cleans the *completed* reply before it's persisted, so
+    // without this, a small local model's "[[read_file{...}" hallucination
+    // (see that function's comment) flashes raw onto the live chat bubble --
+    // apply_streaming_marker_holdback() below only guarded the real
+    // "[[TOOL_CALL]]" marker, so as soon as the streamed text diverged from
+    // that exact string (e.g. after "[[r", which isn't a prefix of
+    // "[[TOOL_CALL]]"), the hold-back released it as ordinary prose. Once
+    // reloaded from history the stray block is already gone (persistence
+    // runs the full-text cleanup), which made the bug look history-only when
+    // it was really a live-stream-only leak. Built once from the same
+    // kKnownToolNames list: "[[read_file{", "[[read_file(",
+    // "[[list_directory{", ... one literal open-bracket prefix per tool name
+    // per call-syntax variant a model might hallucinate.
+    static const std::vector<std::string>& stray_pseudo_tool_call_prefixes() {
+        static const std::vector<std::string> prefixes = [] {
+            std::vector<std::string> result;
+            for (const char* name : kKnownToolNames) {
+                result.push_back(std::string("[[") + name + "{");
+                result.push_back(std::string("[[") + name + "(");
+            }
+            return result;
+        }();
+        return prefixes;
+    }
+
     // Feeds one newly generated chunk through the hold-back window: appends
     // it to `pending_hold` and returns the prefix of the combined buffer
     // that is now provably safe to stream on to the client (not the start of
-    // any marker in kStreamingHoldbackMarkers). `pending_hold` is left
-    // holding whatever must still wait on more input to be resolved either
-    // way. If a marker is found to have fully started, everything from its
-    // start onward -- this chunk's remainder and, since the caller stops
-    // invoking this once `marker_seen` is set, every later chunk too -- is
-    // withheld rather than streamed, matching what detect_and_strip_tool_
-    // call()/detect_and_strip_auto_drive_marker() will remove from the
-    // persisted text anyway.
+    // any marker in kStreamingHoldbackMarkers, nor of a stray pseudo-tool-
+    // call prefix above). `pending_hold` is left holding whatever must still
+    // wait on more input to be resolved either way. If a marker (or stray
+    // prefix) is found to have fully started, everything from its start
+    // onward -- this chunk's remainder and, since the caller stops invoking
+    // this once `marker_seen` is set, every later chunk too -- is withheld
+    // rather than streamed, matching what detect_and_strip_tool_call()/
+    // detect_and_strip_auto_drive_marker() will remove from the persisted
+    // text anyway.
     static std::string apply_streaming_marker_holdback(
         std::string& pending_hold, const std::string& chunk,
         bool& marker_seen) {
         std::string candidate = pending_hold + chunk;
         std::size_t earliest = std::string::npos;
         for (const char* marker : kStreamingHoldbackMarkers) {
+            const auto pos = candidate.find(marker);
+            if (pos != std::string::npos &&
+                (earliest == std::string::npos || pos < earliest)) {
+                earliest = pos;
+            }
+        }
+        for (const auto& marker : stray_pseudo_tool_call_prefixes()) {
             const auto pos = candidate.find(marker);
             if (pos != std::string::npos &&
                 (earliest == std::string::npos || pos < earliest)) {
@@ -10121,9 +10548,81 @@ private:
             hold_len = std::max(hold_len,
                                 marker_suffix_overlap(candidate, marker));
         }
+        for (const auto& marker : stray_pseudo_tool_call_prefixes()) {
+            hold_len = std::max(hold_len,
+                                marker_suffix_overlap(candidate, marker));
+        }
         std::string safe = candidate.substr(0U, candidate.size() - hold_len);
         pending_hold = candidate.substr(candidate.size() - hold_len);
         return safe;
+    }
+
+    // Streaming counterpart to find_bare_tool_call_span()'s "often wrapped
+    // in a ```json fence" case: a model can hallucinate a tool call as a
+    // bare {"tool":...} JSON object with no [[TOOL_CALL]] marker at all.
+    // apply_streaming_marker_holdback() above cannot guard this the same
+    // way it guards fixed literal markers -- holding back on every raw '{'
+    // would also delay every legitimate JSON code sample a reply shows the
+    // user. A "```json" fence is rare and specific enough to hold back on
+    // safely instead: once one starts, everything is buffered (nothing
+    // streamed) until the closing "```", at which point the buffered block
+    // is either dropped entirely (it parsed into a real {tool,arguments}
+    // call -- same live-view contract as a genuine [[TOOL_CALL]] match:
+    // `marker_seen` is set and nothing further streams this turn either) or
+    // flushed to the client as one chunk (an ordinary JSON example) with
+    // normal streaming resuming right after. A fence a model never closes
+    // is left buffered and, like an unresolved literal-marker holdback,
+    // flushed as-is by the caller's own end-of-turn pass. A genuinely
+    // fenceless bare JSON tool call remains a residual gap here (as it was
+    // before this function existed) -- already caught and stripped before
+    // persistence by detect_and_strip_tool_call(), just not from the live
+    // view, since there is no safe literal prefix to hold back on for it.
+    static constexpr const char* kJsonFenceOpenMarker = "```json";
+
+    static std::string apply_streaming_json_fence_holdback(
+        bool& fence_active, std::string& fence_buffer, std::string text,
+        bool& marker_seen) {
+        std::string result;
+        while (true) {
+            if (!fence_active) {
+                const auto fence_pos = text.find(kJsonFenceOpenMarker);
+                if (fence_pos == std::string::npos) {
+                    const auto overlap =
+                        marker_suffix_overlap(text, kJsonFenceOpenMarker);
+                    result += text.substr(0U, text.size() - overlap);
+                    fence_buffer = text.substr(text.size() - overlap);
+                    return result;
+                }
+                fence_active = true;
+                result += text.substr(0U, fence_pos);
+                fence_buffer = text.substr(fence_pos);
+                text.clear();
+                continue;
+            }
+            fence_buffer += text;
+            text.clear();
+            const auto close_pos = fence_buffer.find(
+                "```", std::strlen(kJsonFenceOpenMarker));
+            if (close_pos == std::string::npos) return result;
+            const auto fenced_end = close_pos + 3U;
+            const std::string fenced_block =
+                fence_buffer.substr(0U, fenced_end);
+            const std::string remainder = fence_buffer.substr(fenced_end);
+            fence_active = false;
+            fence_buffer.clear();
+            if (find_bare_tool_call_span(fenced_block).has_value()) {
+                // A real tool call attempt -- drop the whole fence (and any
+                // already-buffered remainder) from the live view and stop
+                // streaming raw text for the rest of the turn, exactly like
+                // a genuine [[TOOL_CALL]] match. detect_and_strip_tool_
+                // call() still parses and executes it from the completed
+                // reply as usual -- only the live view is affected here.
+                marker_seen = true;
+                return result;
+            }
+            result += fenced_block;
+            text = remainder;
+        }
     }
 
     ChatTemplate chat_template_for_architecture(
@@ -10288,6 +10787,119 @@ private:
             record_end();
             throw;
         }
+    }
+
+    // Matches the random_id() pattern every other durable-record unit in
+    // this codebase defines locally for itself (see generate_tool_
+    // approval_id() above) rather than reusing another unit's helper just
+    // because it happens to do the same hex-encoding.
+    static std::string generate_chat_completion_id() {
+        const auto random = secure_random(16U);
+        static constexpr char digits[] = "0123456789abcdef";
+        std::string id(random.size() * 2U, '0');
+        for (std::size_t index = 0U; index < random.size(); ++index) {
+            id[index * 2U] = digits[random[index] >> 4U];
+            id[index * 2U + 1U] = digits[random[index] & 0x0fU];
+        }
+        return id;
+    }
+
+    // Phase 86 (Agent-Coder integration): POST /v1/chat/completions, an
+    // OpenAI Chat Completions-wire-format-compatible route so a generic
+    // OpenAI-style client (the Agent-Coder VS Code extension in particular)
+    // can use this MasterAI instance as its local LLM backend without
+    // learning a MasterAI-specific request/response shape. Deliberately
+    // stateless -- unlike the real chat handler (send_chat_message()),
+    // no project/chat/memory record is read or written; every request
+    // stands alone, exactly like Phase 77's /v1/completions listener and
+    // the RAG "generate" route before it. Reuses execute_rag_generation()
+    // just above (the same memory-lease/scheduler-ticket admission
+    // contract every other real generation call site in this codebase
+    // already shares) as its one and only inference call, so a chat-
+    // completions request cannot bypass the same concurrency/memory limits
+    // chat generation is careful to enforce. Only "model" and "messages"
+    // are read from the request body; every other OpenAI field
+    // (temperature, stream, ...) is silently ignored rather than rejected,
+    // and "stream":true is treated exactly like its absence -- this route
+    // only ever generates once, non-streaming.
+    std::string chat_completions_openai(Request& request) {
+        std::string model_id;
+        std::string prompt_text;
+        try {
+            const auto root = parse_json(request.body);
+            model_id = root.required("model").as_string();
+            const auto& messages = root.required("messages").as_array();
+            // Flattens the OpenAI multi-turn `messages` array into the one
+            // prompt string execute_rag_generation()/assemble_chat_prompt()
+            // accept. assemble_chat_prompt() only ever wraps a *single*
+            // "latest_user_content" string in the target model's own chat
+            // template (see its call inside execute_rag_generation(), which
+            // always passes an empty history) -- there is no second,
+            // parallel history mechanism this stateless route could feed
+            // instead, so a real multi-turn transcript has to arrive as
+            // role-labeled plain text inside that one string, exactly the
+            // way a hand-written multi-turn prompt would.
+            for (const auto& message : messages) {
+                std::string role = "user";
+                if (const auto* role_field = message.optional("role")) {
+                    role = role_field->as_string();
+                }
+                std::string content;
+                if (const auto* content_field = message.optional("content")) {
+                    content = content_field->as_string();
+                }
+                const std::string label =
+                    role == "assistant" ? "Assistant"
+                    : role == "system"  ? "System"
+                                        : "User";
+                if (!prompt_text.empty()) prompt_text += "\n\n";
+                prompt_text += label + ": " + content;
+            }
+        } catch (const std::exception&) {
+            return response(
+                400, "Bad Request",
+                "{\"error\":{\"message\":\"\\\"model\\\" (string) and "
+                "\\\"messages\\\" (array of {role,content}) are required\","
+                "\"type\":\"invalid_request_error\"}}");
+        }
+        if (!find_model(model_id).has_value()) {
+            return response(404, "Not Found",
+                            "{\"error\":{\"message\":\"model not found\","
+                            "\"type\":\"invalid_request_error\"}}");
+        }
+        if (!is_model_ready(model_id)) {
+            return response(
+                503, "Service Unavailable",
+                "{\"error\":{\"message\":\"model is not downloaded or "
+                "ready yet\",\"type\":\"model_not_ready\"}}");
+        }
+        GenerationResult generated;
+        try {
+            generated = execute_rag_generation(model_id, prompt_text);
+        } catch (const std::exception& error) {
+            return response(500, "Internal Server Error",
+                            "{\"error\":{\"message\":\"" +
+                                json_escape(error.what()) +
+                                "\",\"type\":\"server_error\"}}");
+        }
+        return response(
+            200, "OK",
+            "{\"id\":\"chatcmpl-" + generate_chat_completion_id() +
+                "\",\"object\":\"chat.completion\",\"created\":" +
+                std::to_string(epoch_seconds()) + ",\"model\":\"" +
+                json_escape(model_id) +
+                "\",\"choices\":[{\"index\":0,\"message\":{\"role\":"
+                "\"assistant\",\"content\":\"" +
+                json_escape(generated.text) +
+                "\"},\"finish_reason\":\"stop\"}],\"usage\":{"
+                "\"prompt_tokens\":" +
+                std::to_string(generated.prompt_tokens) +
+                ",\"completion_tokens\":" +
+                std::to_string(generated.generated_tokens) +
+                ",\"total_tokens\":" +
+                std::to_string(generated.prompt_tokens +
+                               generated.generated_tokens) +
+                "}}");
     }
 
     // Phase 51: docs/PLAN.md "Machine Learning Abilities" section 24
@@ -10891,6 +11503,11 @@ private:
         // on nothing further this turn is streamed raw (it's either the
         // rest of the marker or, for TOOL_CALL, its JSON body/close tag).
         bool streaming_marker_seen = false;
+        // State for apply_streaming_json_fence_holdback() -- whether a
+        // "```json" fence is currently open, and whatever of it has been
+        // buffered so far while waiting for the closing "```".
+        bool streaming_json_fence_active = false;
+        std::string streaming_json_fence_buffer;
         try {
             query_id = queries.begin(user.id, chat->project_id, chat->model_id);
             queries.transition(query_id, QueryStage::authentication,
@@ -10994,7 +11611,15 @@ private:
             // Tools operate against a project's files, so they're only ever
             // meaningful for a chat that has one bound -- see
             // execute_chat_tool()'s own "no project bound" fallback below.
-            const bool tools_available = !chat->project_id.empty();
+            // Phase 84 follow-up: a chat set to ChatToolExecutionMode::off
+            // (see the composer's Model settings panel) never even gets the
+            // tool-call directive below, so there is nothing for the model
+            // to hallucinate a call against in the first place -- the
+            // defensive strays detect_and_strip_tool_call() removes still
+            // guard the reply text either way.
+            const bool tools_available =
+                !chat->project_id.empty() &&
+                chat->tool_execution_mode != ChatToolExecutionMode::off;
             if (auto_drive) {
                 inference_prompt = apply_auto_drive_directive(inference_prompt);
                 if (inference_prompt.size() > configuration.max_request_bytes) {
@@ -11310,10 +11935,19 @@ private:
                         // [[TOOL_CALL]]/[[TASK_CONTINUE]]/[[TASK_COMPLETE]]
                         // marker rather than forwarding this chunk verbatim
                         // -- see apply_streaming_marker_holdback().
-                        const std::string safe_to_send =
+                        std::string safe_to_send =
                             apply_streaming_marker_holdback(
                                 pending_stream_holdback, chunk,
                                 streaming_marker_seen);
+                        // Second pass: withhold a "```json" fence the same
+                        // way, in case it hides a marker-less bare tool-call
+                        // attempt -- see apply_streaming_json_fence_holdback().
+                        if (!streaming_marker_seen) {
+                            safe_to_send = apply_streaming_json_fence_holdback(
+                                streaming_json_fence_active,
+                                streaming_json_fence_buffer, safe_to_send,
+                                streaming_marker_seen);
+                        }
                         if (!safe_to_send.empty()) {
                             // Phase 30: escape straight into a byte vector
                             // and move it (no copy -- SharedBuffer's vector
@@ -11507,6 +12141,17 @@ private:
             // exactly what generated.text/streamed_text hold. If a marker
             // *was* found, streaming_marker_seen is already true and this
             // buffer was cleared when it was found -- nothing to flush.
+            // A "```json" fence apply_streaming_json_fence_holdback() never
+            // saw close (the model's generation simply ended inside a real
+            // JSON example, or a truncated hallucination) is flushed here
+            // too, same reasoning as pending_stream_holdback just below: it
+            // can no longer grow into anything, so show exactly what
+            // streamed_text already holds rather than silently dropping the
+            // tail of the reply from the live view.
+            if (streaming && !streaming_json_fence_buffer.empty()) {
+                pending_stream_holdback += streaming_json_fence_buffer;
+                streaming_json_fence_buffer.clear();
+            }
             if (streaming && !pending_stream_holdback.empty()) {
                 SharedBuffer escaped_buffer(
                     json_escape_bytes(pending_stream_holdback));
@@ -11607,9 +12252,23 @@ private:
             // for why the loop lives client-side, one ordinary HTTP
             // request per turn, rather than inside this function.
             if (tool_call.has_value()) {
-                const auto risk =
-                    classify_tool_call_risk(tool_call->tool_name,
-                                            tool_call->arguments);
+                // Phase 84 follow-up: ChatToolExecutionMode::confirm_all
+                // forces every call through the same Approve/Deny path
+                // classify_tool_call_risk() already reserves for destructive
+                // ones, without ever touching that function -- so a
+                // destructive call is always high_risk regardless of mode,
+                // and confirm_all can only ever add confirmation on top of
+                // that, never remove it. auto_mode is exactly today's
+                // classify_tool_call_risk()-only behavior; a tool call can
+                // only reach this point at all when tools_available was true
+                // for this turn, which off already prevented above.
+                const auto classified_risk = classify_tool_call_risk(
+                    tool_call->tool_name, tool_call->arguments);
+                const bool confirm_all_mode =
+                    chat->tool_execution_mode ==
+                    ChatToolExecutionMode::confirm_all;
+                const auto risk = confirm_all_mode ? ChatToolRisk::high_risk
+                                                   : classified_risk;
                 if (risk == ChatToolRisk::high_risk) {
                     PendingToolApproval approval;
                     approval.id = generate_tool_approval_id();
@@ -11619,9 +12278,14 @@ private:
                     approval.arguments_json =
                         json_stringify(tool_call->arguments);
                     approval.reason =
-                        "This action (" + tool_call->tool_name +
-                        ") was classified high-risk and needs your explicit "
-                        "approval before it runs.";
+                        classified_risk == ChatToolRisk::high_risk
+                            ? ("This action (" + tool_call->tool_name +
+                               ") was classified high-risk and needs your "
+                               "explicit approval before it runs.")
+                            : ("This chat is set to confirm every tool "
+                               "action -- " + tool_call->tool_name +
+                               " needs your explicit approval before it "
+                               "runs.");
                     approval.created_epoch_seconds = epoch_seconds();
                     pending_tool_approvals->create(approval);
                     audit.append("chat.tool_call", user.id, "pending_approval",
