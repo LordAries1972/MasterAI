@@ -250,6 +250,13 @@ int main(int argc, char* argv[]) {
             const auto configuration = load_operational_configuration(settings);
             std::signal(SIGINT, handle_signal);
             std::signal(SIGTERM, handle_signal);
+            // The long-running server, not a one-off CLI subcommand the
+            // operator is actively waiting on -- see
+            // lower_process_priority_for_background_work()'s comment in
+            // masterai.hpp for why every thread this process ever spawns
+            // (request handlers, indexing, retrieval scoring, calibration)
+            // should inherit a background-friendly priority from the start.
+            masterai::lower_process_priority_for_background_work();
             masterai::HttpServer server(configuration, settings);
             return server.run(stop_requested) ? 0 : 1;
         }

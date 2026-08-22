@@ -2637,11 +2637,20 @@ verification, `WorkerListener`/`IntranetWorkerPool`); **automatic
 remote-worker failover on the live chat-generation dispatch path is also now
 wired in (2026-08-13, this pass)**, closing the one honest scope note that
 remained -- see its own status note for `try_remote_worker_failover()`.
-**Phase 34 is now implemented at a scoped-down level (2026-08-13)** -- a
-real, bounded, hysteresis-guarded `AdaptiveController` with every stability
-control the plan requires, applying live to the one genuinely mutable target
-(`MemoryBudgetManager::set_policy()`) and disclosing every other knob as a
-recommendation; see its own status note. **Phase 35 is now implemented at a
+**Phase 34 is now fully implemented (2026-08-22, extending the 2026-08-13
+scoped-down pass)** -- every plan-listed knob now has a real target computed
+and genuinely consumed, not merely disclosed; see its own status note for the
+three shapes ("instantly live", "applied at next natural model load",
+"disclosed-only by permanent design") each knob falls into. **Phase 28's
+NUMA-placement setting is now wired into `admin_config_put()`'s live-copy
+path and exposed on the Settings page (2026-08-22)** -- previously the
+setting saved to disk but silently never took effect until a restart; see
+its own status note. **Phase 29's model tiering now drives live chat
+routing (2026-08-22)** -- a chat set to the new "Auto (Tiered)" model-picker
+entry is routed through `ModelRouter`, with a real buffered cascade
+(confidence-checked, escalated at most once) for any tier below the largest;
+see its own status note for why a genuine cascade cannot stream tokens live,
+and the accompanying `MemorySweeper` pool-awareness fix under Phase 26. **Phase 35 is now implemented at a
 scoped-down level (2026-08-13; extended 2026-08-13, this pass)** -- one
 consolidated, fully real Performance administration page, now covering
 Memory, Caches, Storage (including the Phase 31 migration manifest),
@@ -6015,7 +6024,12 @@ Exit criteria:
 
 ### Phase 26 — Model loading, mapping, pre-touch, and warm-state management
 
-Status: Implementation complete (2026-08-05). `masterai.hpp`/
+Status: Implementation complete (2026-08-05); extended 2026-08-22 —
+`MemorySweeper` (`src/memory.cpp`) previously idle-timeout-checked only the
+single default `inference` `RunnerSupervisor`, never a `LocalRunnerPool`
+entry, so a Phase 29 tiering cascade keeping a second tier warm had nothing
+sweeping it. `MemorySweeper` now optionally takes a `LocalRunnerPool*` and
+applies the identical idle-timeout check to every pool runner each sweep. `masterai.hpp`/
 `calibration.cpp` add an explicit `ModelLoadMode` (streamed/mapped/resident/
 auto) selected by `CalibrationService::resolve()` from a Phase 21
 `StorageLatencyProfile` plus available-RAM evidence via `select_load_mode()`,
@@ -6177,11 +6191,19 @@ Exit criteria:
 
 ### Phase 28 — NUMA, processor-group, and topology-aware execution
 
-Status: Implemented at a scoped-down level (2026-08-01) — see the summary
+Status: Implemented at a scoped-down level (2026-08-22) — see the summary
 entry above (`src/topology.cpp`, `probe_hardware_topology()`/
 `recommend_thread_placement()`) for the real topology probing and pure
-placement-recommendation logic that shipped, and why it is not yet applied
-to any real worker thread. Priority C; superset of the Phase 20 NUMA
+placement-recommendation logic, applied to the HTTP worker thread and gated
+on the Phase 20 `numa_affinity` admission exactly as before. This pass fixed
+a real bug and added administrator control: `admin_config_put()`
+(`src/server.cpp`) never copied `topology.numaLocalPlacementEnabled` onto the
+live `configuration` object it mutates, so toggling the setting silently
+saved to disk and did nothing until a full restart, with `restartRequired`
+never reflecting that. Now copied live (no restart needed — the pinning call
+site reads `configuration.numa_local_placement_enabled` fresh on every new
+connection thread) and exposed as a labelled checkbox on the Settings page
+under a new "Topology" section. Priority C; superset of the Phase 20 NUMA
 candidate, and only relevant on multi-socket/high-core-count hosts.
 
 Purpose:
@@ -6219,10 +6241,32 @@ Exit criteria:
 
 ### Phase 29 — Model tiering, routing, and cascade inference
 
-Status: Implemented at a scoped-down level (2026-08-01) — see the summary
-entry above (`src/model_routing.cpp`, `ModelRouter`) for the tier-selection,
-cascade-escalation, and resident-profile-validation logic that shipped, and
-why live chat-pipeline wiring did not. Priority B.
+Status: Implemented (2026-08-22). `src/model_routing.cpp`'s tier-selection,
+cascade-escalation, and resident-profile-validation logic is now genuinely
+wired into the live chat pipeline: a chat set to the "Auto (Tiered)" model
+picker entry (shown only once an administrator has enabled
+`modelRouting.enabled` and assigned at least one model to a tier via the
+new Settings → Model tiering editor) has each message routed through
+`ModelRouter::select_initial_tier()` in `HttpServer::State::
+resolve_and_generate_routed()` (`src/server.cpp`). A genuine cascade cannot
+stream tokens live — escalation must be decided before the client sees
+anything — so any tier below `large_specialist` is generated fully,
+buffered, non-streaming (reusing the same admission/scheduler contract as
+every other real generation call site via the new
+`run_admitted_generation()` helper), confidence-checked via a real, honestly
+simple heuristic (natural stop vs. hit the token budget vs. cancelled/empty
+— no fabricated AI judgment), and escalated once (bounded to a single hop)
+via `ModelRouter::evaluate_cascade()` before the final answer streams to the
+client exactly like any other reply. `large_specialist`-routed chats stream
+live immediately, same as before, since there is nowhere higher to escalate
+to. Which tier/model actually served, and whether it escalated, is disclosed
+on the query trace (`queries.record_runner()`, `"tier:<name>[:escalated]"`).
+Session/KV-slot reuse is deliberately skipped for a routed turn (no single
+stable model identity for a prefix-match to key off). Support gap closed
+alongside this: `MemorySweeper` (`src/memory.cpp`) previously only
+idle-unloaded the single default `inference` supervisor, never a
+`LocalRunnerPool` entry — a cascade that leaves two tiers warm at once now
+has both swept for real. Priority B.
 
 Purpose:
 
@@ -6736,12 +6780,30 @@ Exit criteria:
 
 ### Phase 34 — Adaptive performance controller
 
-Status: **Implemented at a scoped-down level (2026-08-13)** — see the
-Phase 34 entry in the status summary above for the full breakdown. Priority
-B; every stability control is real and tested, applied live to the one
-genuinely mutable target (`MemoryBudgetManager::set_policy()`) with every
-other named knob computed and disclosed as a recommendation rather than
-applied.
+Status: **Implemented (2026-08-22)** — every plan-listed knob now has a real,
+genuinely-consumed target; see `AdaptiveController`'s updated class comment
+in `masterai.hpp` for the full per-knob breakdown. Three shapes of "applied"
+now exist: instantly live via `MemoryBudgetManager::set_policy()` (inference
+concurrency, index workers, default context tokens, and now
+`idle_unload_seconds`) or `CacheManager::set_policy()` (cache byte quota,
+new this pass); applied at the *next natural model load* rather than
+instantly, since thread count/GPU offload/batch size/NUMA placement are
+launch-time arguments to a separate llama.cpp process with no live-reload
+primitive and forcing a disruptive unload+reload was explicitly rejected
+(`AdaptiveLaunchRecommendation`, consumed by `ensure_model_loaded()`'s
+calibration-tuning overlay in `src/server.cpp`); and read queue depth/KV
+placement, which remain disclosed-only (no live setter exists for either).
+Prefetch distance and warm-up policy are a permanent, documented scope
+limit (matching Phase 53's own precedent) — no subsystem exists in this
+codebase to apply a computed value to, and background-job rate is not a
+separate knob at all: it is the existing `maximum_index_workers` knob under
+its plan-listed name, background indexing being what "background job" means
+here. The Settings page's Performance section gained a ceilings editor
+(every `PerformanceCeilings` field, plain-language labelled) alongside the
+pre-existing mode selector and applied/recommended report, which now
+surfaces every one of these knobs generically (no per-parameter UI code
+needed — the report renderer already displays whatever `evaluate()`
+returns).
 
 Purpose:
 
@@ -7326,6 +7388,30 @@ Deliverables:
   once in `HttpServer`'s startup, see the Phase 84 comment there), so an
   approval or revocation takes effect on the very next tool call — no
   restart, no separate relay step.
+- 2026-08-22 addition: `AllowedCommandRecord` gained an `os` column
+  (`windows`/`linux`/`both`, `CommandOs` in `masterai.hpp`), and
+  `AllowedCommandStore` gained `update_command()` alongside the existing
+  `register_command()`/`remove()`/`list()` (`src/tool_exec.cpp`) so an
+  admin can correct a record in place instead of revoking and re-approving
+  under a new id. `ensure_default_catalog()` seeds a built-in catalog of
+  common Windows, Linux, and cross-platform developer-tooling executables
+  (`cmd.exe`/`powershell.exe`, coreutils like `ls`/`cp`/`rm`, package
+  managers, compilers, `git`, `docker`, ...) on every startup, tagged with
+  the OS they apply to and a baseline risk, seeded `enabled: true` so
+  `run_command` works against the whole catalog immediately after install;
+  an administrator reviews the list and disables (via Edit) anything not
+  warranted for their install, rather than opting each one in individually.
+  An executable already present under any case (an admin's own prior
+  entry) is never duplicated or re-enabled by the seed pass. The admin page
+  (`/app/settings/allowed-commands`, `src/web_ui.cpp`) now shows each
+  record's OS, offers an OS filter, and gives every row icon-only Edit
+  (pencil) and Revoke (trash) buttons — matching the row-toolbar icon-button
+  convention every other admin list on this page already uses, rather than
+  full-width text buttons. Edit loads the record back into the form
+  (backed by the new `POST /api/v1/chat-tools/allowed-commands/update`
+  route, `src/server.cpp`, administrator-only, same gate as the existing
+  create/remove routes)
+  rather than only ever creating new entries.
 - 2026-08-20 addition: MCP inbound tool exposure. `masterai.project.
   list_directory`, `masterai.project.write_file`, `masterai.project.
   delete_file`, and `masterai.project.run_command` join the existing
@@ -7505,7 +7591,58 @@ Exit criteria:
   (zero `Authorization` header reaching an ordinarily-protected route) on
   loopback. Met (2026-08-20): `test_phase_eightysix_no_auth_mode`.
 
-## Machine Learning Abilities
+### Phase 87 — Alphabetical model listing, quantization tags, and empty-entry fix
+
+Status: Implemented (2026-08-22).
+
+Purpose:
+
+- Every consumer of the model inventory (web UI chat picker, Model Inventory
+  admin table and HTML page, `GET /api/v1/models`, and the MCP `list_models`
+  resource) rendered models in raw filesystem directory-iteration order
+  rather than a predictable one, never surfaced a model's quantization
+  (`Q3`/`Q4`/`Q5`/etc.), and — for a model directory whose manifest failed
+  to parse — pushed a record with every field (`id`, `displayName`,
+  `category`, `architecture`) left as an empty string, which showed up as a
+  blank, unidentifiable row wherever that inventory was rendered or listed.
+
+Deliverables:
+
+- `ModelRegistry::scan()` (`src/models.cpp`) now sorts its returned
+  `std::vector<ModelRecord>` by `displayName` ascending, case-insensitive,
+  once, centrally — every consumer (`GET /api/v1/models`, the MCP
+  `list_models` resource, the web UI's chat model dropdown and admin
+  tables, `masterai scan-models`) inherits the same order for free instead
+  of each needing its own sort.
+- The generic-exception branch in `scan()` that produces `ModelState::invalid`
+  no longer leaves `record.manifest` fully empty: it now falls back to the
+  model's own directory name for `id`/`displayName`, matching the existing
+  `ModelFileIncomplete` branch's already-established reasoning (a
+  not-yet-finished download still carries its parsed manifest forward for
+  the same reason). No blank/nameless row can reach any API, MCP resource,
+  or web UI list any more.
+- `model_catalog_presets_js()` (`src/web_ui.cpp`) — the Settings → Models →
+  Download page's own preset list — is now sorted the same way (`displayName`
+  ascending, case-insensitive) as `GET /api/v1/model-catalog` serving the
+  same underlying `model_catalog()` data, removing a pre-existing ordering
+  mismatch between the two.
+- `quantization` is now included in `GET /api/v1/models`'
+  (`WorkloadHttpController::model_inventory()`, `src/workload_http.cpp`),
+  the MCP `list_models()` (`src/mcp.cpp`), and the plain-HTML
+  `/app/models-inventory`-style inventory page
+  (`WorkloadHttpController::model_inventory_page()`) — previously only the
+  curated `GET /api/v1/model-catalog` route exposed it.
+- Web UI: a `quantTag()` helper (`src/web_ui.cpp`) reduces a manifest's
+  free-text `quantization` string (`Q4_K_M`, `Q5_K_S`, `Q8_0`, ...) to a
+  short bracketed tag (`[Q4]`, `[Q5]`, `[Q8]`) prefixed onto each model's
+  name in the chat model picker; the Model Inventory admin table
+  (`renderModels()`) gained its own explicit Quantization column instead.
+
+Exit criteria:
+
+- `GET /api/v1/models`, the MCP model resource, and the web UI's model
+  lists are alphabetically ordered and show quantization; no entry with an
+  empty name can appear in any of them.
 
 Implementation status: Phase 37 (see the phase list above) implements the
 Dashboard interface below at a foundation level — real, zero-valued counts

@@ -1,7 +1,10 @@
 # To-Do
 
-Current outstanding work only, derived from docs/PLAN.md status notes (2026-08-18 pass).
-Completed phases are not listed here — see docs/PLAN.md for the full status record.
+Current outstanding work only, derived from docs/PLAN.md status notes
+(2026-08-22 pass). Completed phases are not listed here — see docs/PLAN.md
+for the full status record. Phase 24 (retrieval strategy mislabeling) and
+Phase 29/34 (model tiering live routing; adaptive controller full
+completion) closed since the prior pass and removed from this list.
 
 ## Real-hardware / manual validation gates (implementation done, needs a human run)
 
@@ -13,13 +16,14 @@ Completed phases are not listed here — see docs/PLAN.md for the full status re
   runs are recorded on this host via `scripts/run-certification.ps1`
   (see `docs/validation/phase-36-certification-runbook.md`); only running
   that same runbook on further physical hosts/storage media remains.
-- Phase 28 — NUMA/topology: the real thread-pinning primitive is now wired
-  into every per-connection worker thread (2026-08-19), gated on both a new
-  `AppConfig::numa_local_placement_enabled` configuration flag (off by
-  default) and the Phase 20 `numa_affinity` admission -- so this is code-
-  complete but stays inert until an administrator both enables the flag and
-  records the Phase 36 benchmark-matrix evidence needed to justify it on
-  their host.
+- Phase 28 — NUMA/topology: the real thread-pinning primitive is wired into
+  every per-connection worker thread, gated on both
+  `AppConfig::numa_local_placement_enabled` (off by default, now a working
+  checkbox on Settings under "Topology" -- 2026-08-22 fixed a real bug where
+  toggling it saved to disk but silently never took effect until a restart)
+  and the Phase 20 `numa_affinity` admission -- so this is code-complete but
+  stays inert until an administrator both enables the flag and records the
+  Phase 36 benchmark-matrix evidence needed to justify it on their host.
 
 ## In progress (partially wired, not fully live)
 
@@ -30,20 +34,6 @@ Completed phases are not listed here — see docs/PLAN.md for the full status re
   by default (gate intentionally not tripped) -- an administrator must
   record real per-host evidence and call `admit()`. `multiple_warm_runners`
   remains the one candidate with no implementation at all.
-- Phase 29 — model tiering/routing: `ModelRouter` is now consulted by a
-  live, advisory `POST /api/v1/models/route` endpoint (2026-08-19, gated on
-  a new `AppConfig::model_tier_assignments` / `modelRouting.tiers`
-  configuration section, empty and inert by default) but still does not
-  drive `send_chat_message()` itself -- no automatic tier selection or
-  `evaluate_cascade()`-triggered escalation-with-rerun on the live chat
-  path yet. Still blocked on Phase 26 warm-state management for the
-  escalation-rerun half.
-- Phase 34 — adaptive controller: only the MemoryBudgetManager knobs are
-  live-applied. `thread_count`/`gpu_offload` are now also computed and
-  disclosed (2026-08-19, gated on real battery-power/pressure signals) but
-  have no live setter. Prefetch distance, cache quotas, batch size, warm-up
-  policy, NUMA policy, KV placement, and background-job rate remain
-  entirely uncomputed, not merely unapplied.
 - Phase 46 — Model Builder: submission now hands off to a real
   `TrainingJob` run against the existing tabular trainer
   (`run_model_builder_config()`, `src/server.cpp`, 2026-08-19) instead of

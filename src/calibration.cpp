@@ -651,6 +651,20 @@ TuningProfile CalibrationService::resolve(
                 "hardware.acceleratorPolicy is cpu_only; recalibrate or "
                 "delete the stale profile before loading this model");
         }
+        // A profile persisted before Phase 85 has recommended_thread_count
+        // still at its 0 sentinel, which build_launch_spec() reads as "no
+        // --threads override" -- the backend then defaults to every logical
+        // core with none held back for the OS/UI, which is exactly the
+        // whole-system stutter select_thread_count() was written to prevent.
+        // Backfilling it here (without touching the persisted record) means
+        // a host that calibrated once before this fix existed still gets
+        // the core reserved on every load from now on, the same as a host
+        // calibrating fresh.
+        if (found->recommended_thread_count == 0U) {
+            TuningProfile backfilled = *found;
+            backfilled.recommended_thread_count = select_thread_count(hardware_);
+            return backfilled;
+        }
         return *found;
     }
     TuningProfile profile = safe_default_profile(requested_profile);

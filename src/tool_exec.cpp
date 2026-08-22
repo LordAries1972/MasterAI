@@ -93,6 +93,38 @@ std::set<std::string> unpack_set(const std::string& value) {
     return result;
 }
 
+// CommandOs <-> single-character persistence tag, kept distinct from the
+// HTTP layer's "windows"/"linux"/"both" JSON strings (server.cpp) so this
+// file's on-disk record shape never has to change if the wire format does.
+std::string os_to_tag(CommandOs os) {
+    switch (os) {
+        case CommandOs::windows: return "w";
+        case CommandOs::linux: return "l";
+        case CommandOs::both: default: return "b";
+    }
+}
+
+CommandOs os_from_tag(const std::string& tag) {
+    if (tag == "w") return CommandOs::windows;
+    if (tag == "l") return CommandOs::linux;
+    return CommandOs::both;
+}
+
+// Matches the random_id() pattern every other durable-record unit in this
+// codebase defines locally for itself (see e.g. server.cpp's
+// generate_tool_approval_id()) rather than sharing one across module
+// boundaries.
+std::string generate_allowed_command_id() {
+    const auto random = secure_random(16U);
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string id(random.size() * 2U, '0');
+    for (std::size_t index = 0U; index < random.size(); ++index) {
+        id[index * 2U] = digits[random[index] >> 4U];
+        id[index * 2U + 1U] = digits[random[index] & 0x0fU];
+    }
+    return id;
+}
+
 // Case-insensitive ASCII lowering, used only to compare executable names on
 // Windows (where "Git.exe" and "git.exe" name the same allow-list entry).
 std::string to_lower_ascii(const std::string& value) {
@@ -111,13 +143,21 @@ std::string to_lower_ascii(const std::string& value) {
 AllowedCommandStore::AllowedCommandStore(RecordStore& records)
     : records_(records) {
     restore();
+    ensure_default_catalog();
 }
 
 void AllowedCommandStore::restore() {
     for (const auto& item : records_.list("chat_tool_allowed_commands")) {
         try {
             const auto fields = unpack(item.second);
-            if (fields.size() != 5U || item.first.empty()) continue;
+            // 5 fields is the pre-OS-column record shape written before
+            // this admin allow-list gained an "os" field; treat missing os
+            // as "both" rather than rejecting every record written by an
+            // older build.
+            if ((fields.size() != 5U && fields.size() != 6U) ||
+                item.first.empty()) {
+                continue;
+            }
             AllowedCommandRecord command;
             command.id = item.first;
             command.executable = fields[0];
@@ -126,6 +166,8 @@ void AllowedCommandStore::restore() {
                 fields[2] == "1" ? ChatToolRisk::high_risk : ChatToolRisk::safe;
             command.allowed_project_ids = unpack_set(fields[3]);
             command.enabled = fields[4] == "1";
+            command.os = fields.size() == 6U ? os_from_tag(fields[5])
+                                              : CommandOs::both;
             commands_.emplace(command.id, std::move(command));
         } catch (const std::exception&) {
             // A corrupt allow-list entry fails closed (simply omitted)
@@ -140,7 +182,7 @@ void AllowedCommandStore::persist(const AllowedCommandRecord& command) {
         pack({command.executable, command.description,
               command.risk_default == ChatToolRisk::high_risk ? "1" : "0",
               pack_set(command.allowed_project_ids),
-              command.enabled ? "1" : "0"}));
+              command.enabled ? "1" : "0", os_to_tag(command.os)}));
 }
 
 AllowedCommandRecord AllowedCommandStore::register_command(
@@ -155,6 +197,203 @@ AllowedCommandRecord AllowedCommandStore::register_command(
     commands_[command.id] = command;
     persist(command);
     return command;
+}
+
+AllowedCommandRecord AllowedCommandStore::update_command(
+    AllowedCommandRecord command) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (command.executable.empty()) {
+        throw std::invalid_argument("allowed-command executable is required");
+    }
+    if (commands_.find(command.id) == commands_.end()) {
+        throw std::invalid_argument("allowed command does not exist");
+    }
+    commands_[command.id] = command;
+    persist(command);
+    return command;
+}
+
+namespace {
+
+// One entry in the built-in catalog seeded by ensure_default_catalog():
+// executable, human-readable description, which OS(es) it applies to, and
+// its baseline risk classification. Every seeded entry starts enabled, so
+// run_command works against the whole catalog immediately after install;
+// an admin reviews the list from the allowed-commands admin page
+// (server.cpp/web_ui.cpp) and disables (via Edit) anything not warranted
+// for this install rather than opting each one in individually.
+struct CatalogEntry {
+    const char* executable;
+    const char* description;
+    CommandOs os;
+    ChatToolRisk risk;
+};
+
+constexpr CatalogEntry kDefaultCommandCatalog[] = {
+    // --- Windows shells and core cmd.exe/PowerShell utilities ---
+    {"cmd.exe", "Windows command shell -- full shell access", CommandOs::windows, ChatToolRisk::high_risk},
+    {"powershell.exe", "Windows PowerShell -- full shell access", CommandOs::windows, ChatToolRisk::high_risk},
+    {"pwsh.exe", "PowerShell 7+ -- full shell access", CommandOs::windows, ChatToolRisk::high_risk},
+    {"dir", "List directory contents", CommandOs::windows, ChatToolRisk::safe},
+    {"type", "Print a file's contents", CommandOs::windows, ChatToolRisk::safe},
+    {"copy", "Copy files", CommandOs::windows, ChatToolRisk::safe},
+    {"xcopy", "Copy files/directory trees", CommandOs::windows, ChatToolRisk::safe},
+    {"robocopy", "Robust file/directory copy", CommandOs::windows, ChatToolRisk::safe},
+    {"move", "Move/rename files", CommandOs::windows, ChatToolRisk::safe},
+    {"ren", "Rename files", CommandOs::windows, ChatToolRisk::safe},
+    {"del", "Delete files", CommandOs::windows, ChatToolRisk::high_risk},
+    {"erase", "Delete files", CommandOs::windows, ChatToolRisk::high_risk},
+    {"rmdir", "Remove a directory tree", CommandOs::windows, ChatToolRisk::high_risk},
+    {"rd", "Remove a directory tree", CommandOs::windows, ChatToolRisk::high_risk},
+    {"mkdir", "Create a directory", CommandOs::windows, ChatToolRisk::safe},
+    {"md", "Create a directory", CommandOs::windows, ChatToolRisk::safe},
+    {"findstr", "Search text using patterns", CommandOs::windows, ChatToolRisk::safe},
+    {"where", "Locate an executable on PATH", CommandOs::windows, ChatToolRisk::safe},
+    {"more", "Page through text output", CommandOs::windows, ChatToolRisk::safe},
+    {"fc", "Compare two files", CommandOs::windows, ChatToolRisk::safe},
+    {"attrib", "View/change file attributes", CommandOs::windows, ChatToolRisk::safe},
+    {"tasklist", "List running processes", CommandOs::windows, ChatToolRisk::safe},
+    {"taskkill", "Terminate a process", CommandOs::windows, ChatToolRisk::high_risk},
+    {"ipconfig", "Show network configuration", CommandOs::windows, ChatToolRisk::safe},
+    {"netstat", "Show network connections", CommandOs::windows, ChatToolRisk::safe},
+    {"systeminfo", "Show system configuration summary", CommandOs::windows, ChatToolRisk::safe},
+    {"whoami", "Show the current user identity", CommandOs::windows, ChatToolRisk::safe},
+    {"hostname", "Show the machine's hostname", CommandOs::windows, ChatToolRisk::safe},
+    {"powercfg", "View/change power settings", CommandOs::windows, ChatToolRisk::safe},
+    {"format", "Format a disk volume -- destroys its contents", CommandOs::windows, ChatToolRisk::high_risk},
+    {"diskpart", "Partition/format disks", CommandOs::windows, ChatToolRisk::high_risk},
+    {"reg", "Read/write the Windows registry", CommandOs::windows, ChatToolRisk::high_risk},
+    {"sc", "Control Windows services", CommandOs::windows, ChatToolRisk::high_risk},
+    {"net", "Manage users, shares and network services", CommandOs::windows, ChatToolRisk::high_risk},
+    {"shutdown", "Shut down or restart the machine", CommandOs::windows, ChatToolRisk::high_risk},
+    {"wmic", "WMI command-line management", CommandOs::windows, ChatToolRisk::high_risk},
+    {"certutil", "Certificate/encoding utility", CommandOs::windows, ChatToolRisk::high_risk},
+    {"msbuild.exe", "Build .NET/C++ projects and solutions", CommandOs::windows, ChatToolRisk::safe},
+    {"nuget.exe", "NuGet package manager", CommandOs::windows, ChatToolRisk::safe},
+
+    // --- Linux/POSIX shells and core coreutils ---
+    {"bash", "Bourne Again shell -- full shell access", CommandOs::linux, ChatToolRisk::high_risk},
+    {"sh", "POSIX shell -- full shell access", CommandOs::linux, ChatToolRisk::high_risk},
+    {"zsh", "Z shell -- full shell access", CommandOs::linux, ChatToolRisk::high_risk},
+    {"ls", "List directory contents", CommandOs::linux, ChatToolRisk::safe},
+    {"cat", "Print a file's contents", CommandOs::linux, ChatToolRisk::safe},
+    {"cp", "Copy files", CommandOs::linux, ChatToolRisk::safe},
+    {"mv", "Move/rename files", CommandOs::linux, ChatToolRisk::safe},
+    {"rm", "Delete files", CommandOs::linux, ChatToolRisk::high_risk},
+    {"rmdir", "Remove an empty directory", CommandOs::linux, ChatToolRisk::high_risk},
+    {"mkdir", "Create a directory", CommandOs::linux, ChatToolRisk::safe},
+    {"touch", "Create/update a file's timestamp", CommandOs::linux, ChatToolRisk::safe},
+    {"chmod", "Change file permissions", CommandOs::linux, ChatToolRisk::high_risk},
+    {"chown", "Change file ownership", CommandOs::linux, ChatToolRisk::high_risk},
+    {"ln", "Create links between files", CommandOs::linux, ChatToolRisk::safe},
+    {"grep", "Search text using patterns", CommandOs::linux, ChatToolRisk::safe},
+    {"find", "Search for files/directories", CommandOs::linux, ChatToolRisk::safe},
+    {"sed", "Stream text editor", CommandOs::linux, ChatToolRisk::safe},
+    {"awk", "Pattern-directed text processing", CommandOs::linux, ChatToolRisk::safe},
+    {"head", "Print the first lines of a file", CommandOs::linux, ChatToolRisk::safe},
+    {"tail", "Print the last lines of a file", CommandOs::linux, ChatToolRisk::safe},
+    {"wc", "Count lines/words/bytes", CommandOs::linux, ChatToolRisk::safe},
+    {"sort", "Sort lines of text", CommandOs::linux, ChatToolRisk::safe},
+    {"uniq", "Filter repeated lines", CommandOs::linux, ChatToolRisk::safe},
+    {"diff", "Compare two files", CommandOs::linux, ChatToolRisk::safe},
+    {"tar", "Archive/extract files", CommandOs::linux, ChatToolRisk::safe},
+    {"gzip", "Compress a file", CommandOs::linux, ChatToolRisk::safe},
+    {"gunzip", "Decompress a .gz file", CommandOs::linux, ChatToolRisk::safe},
+    {"stat", "Show file/filesystem status", CommandOs::linux, ChatToolRisk::safe},
+    {"file", "Identify a file's type", CommandOs::linux, ChatToolRisk::safe},
+    {"readlink", "Print a symlink's target", CommandOs::linux, ChatToolRisk::safe},
+    {"ps", "List running processes", CommandOs::linux, ChatToolRisk::safe},
+    {"top", "Show live process/resource usage", CommandOs::linux, ChatToolRisk::safe},
+    {"kill", "Send a signal to a process", CommandOs::linux, ChatToolRisk::high_risk},
+    {"killall", "Send a signal to processes by name", CommandOs::linux, ChatToolRisk::high_risk},
+    {"df", "Show disk space usage", CommandOs::linux, ChatToolRisk::safe},
+    {"du", "Show directory/file space usage", CommandOs::linux, ChatToolRisk::safe},
+    {"free", "Show memory usage", CommandOs::linux, ChatToolRisk::safe},
+    {"uname", "Show system/kernel information", CommandOs::linux, ChatToolRisk::safe},
+    {"env", "Show/run with environment variables", CommandOs::linux, ChatToolRisk::safe},
+    {"ifconfig", "Show/configure network interfaces", CommandOs::linux, ChatToolRisk::safe},
+    {"ip", "Show/configure network interfaces and routes", CommandOs::linux, ChatToolRisk::safe},
+    {"ss", "Show socket statistics", CommandOs::linux, ChatToolRisk::safe},
+    {"systemctl", "Control systemd services", CommandOs::linux, ChatToolRisk::high_risk},
+    {"service", "Control system services", CommandOs::linux, ChatToolRisk::high_risk},
+    {"sudo", "Run a command as another user -- privilege escalation", CommandOs::linux, ChatToolRisk::high_risk},
+    {"su", "Switch user", CommandOs::linux, ChatToolRisk::high_risk},
+    {"useradd", "Create a user account", CommandOs::linux, ChatToolRisk::high_risk},
+    {"userdel", "Delete a user account", CommandOs::linux, ChatToolRisk::high_risk},
+    {"passwd", "Change a user's password", CommandOs::linux, ChatToolRisk::high_risk},
+    {"apt", "Debian/Ubuntu package manager", CommandOs::linux, ChatToolRisk::high_risk},
+    {"apt-get", "Debian/Ubuntu package manager", CommandOs::linux, ChatToolRisk::high_risk},
+    {"dpkg", "Debian package tool", CommandOs::linux, ChatToolRisk::high_risk},
+    {"yum", "RHEL/CentOS package manager", CommandOs::linux, ChatToolRisk::high_risk},
+    {"dnf", "Fedora package manager", CommandOs::linux, ChatToolRisk::high_risk},
+    {"mount", "Mount a filesystem", CommandOs::linux, ChatToolRisk::high_risk},
+    {"umount", "Unmount a filesystem", CommandOs::linux, ChatToolRisk::high_risk},
+    {"chroot", "Change the apparent root filesystem", CommandOs::linux, ChatToolRisk::high_risk},
+    {"crontab", "Manage scheduled cron jobs", CommandOs::linux, ChatToolRisk::high_risk},
+    {"man", "Show a command's manual page", CommandOs::linux, ChatToolRisk::safe},
+    {"which", "Locate an executable on PATH", CommandOs::linux, ChatToolRisk::safe},
+
+    // --- Cross-platform developer tooling ---
+    {"git", "Git version control", CommandOs::both, ChatToolRisk::safe},
+    {"python", "Python interpreter", CommandOs::both, ChatToolRisk::safe},
+    {"python3", "Python 3 interpreter", CommandOs::both, ChatToolRisk::safe},
+    {"pip", "Python package installer", CommandOs::both, ChatToolRisk::safe},
+    {"pip3", "Python 3 package installer", CommandOs::both, ChatToolRisk::safe},
+    {"node", "Node.js runtime", CommandOs::both, ChatToolRisk::safe},
+    {"npm", "Node package manager", CommandOs::both, ChatToolRisk::safe},
+    {"npx", "Run a Node package binary", CommandOs::both, ChatToolRisk::safe},
+    {"yarn", "Yarn package manager", CommandOs::both, ChatToolRisk::safe},
+    {"pnpm", "pnpm package manager", CommandOs::both, ChatToolRisk::safe},
+    {"docker", "Container build/run engine", CommandOs::both, ChatToolRisk::high_risk},
+    {"docker-compose", "Multi-container orchestration", CommandOs::both, ChatToolRisk::high_risk},
+    {"cmake", "Cross-platform build system generator", CommandOs::both, ChatToolRisk::safe},
+    {"ninja", "Fast build-file executor", CommandOs::both, ChatToolRisk::safe},
+    {"make", "Build automation tool", CommandOs::both, ChatToolRisk::safe},
+    {"gcc", "GNU C compiler", CommandOs::both, ChatToolRisk::safe},
+    {"g++", "GNU C++ compiler", CommandOs::both, ChatToolRisk::safe},
+    {"clang", "LLVM C compiler", CommandOs::both, ChatToolRisk::safe},
+    {"clang++", "LLVM C++ compiler", CommandOs::both, ChatToolRisk::safe},
+    {"curl", "Transfer data with a URL", CommandOs::both, ChatToolRisk::safe},
+    {"wget", "Download files from the web", CommandOs::both, ChatToolRisk::safe},
+    {"ping", "Test network reachability", CommandOs::both, ChatToolRisk::safe},
+    {"ssh", "Remote shell access to another host", CommandOs::both, ChatToolRisk::high_risk},
+    {"scp", "Copy files over SSH", CommandOs::both, ChatToolRisk::high_risk},
+    {"rsync", "Sync files/directories", CommandOs::both, ChatToolRisk::safe},
+    {"java", "Java runtime", CommandOs::both, ChatToolRisk::safe},
+    {"javac", "Java compiler", CommandOs::both, ChatToolRisk::safe},
+    {"go", "Go compiler/toolchain", CommandOs::both, ChatToolRisk::safe},
+    {"cargo", "Rust package manager/build tool", CommandOs::both, ChatToolRisk::safe},
+    {"rustc", "Rust compiler", CommandOs::both, ChatToolRisk::safe},
+    {"dotnet", ".NET SDK/CLI", CommandOs::both, ChatToolRisk::safe},
+    {"ctest", "CMake test driver", CommandOs::both, ChatToolRisk::safe},
+    {"gdb", "GNU debugger", CommandOs::both, ChatToolRisk::safe},
+};
+
+}  // namespace
+
+void AllowedCommandStore::ensure_default_catalog() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& entry : kDefaultCommandCatalog) {
+        const auto wanted = to_lower_ascii(entry.executable);
+        bool already_present = false;
+        for (const auto& [id, command] : commands_) {
+            static_cast<void>(id);
+            if (to_lower_ascii(command.executable) == wanted) {
+                already_present = true;
+                break;
+            }
+        }
+        if (already_present) continue;
+        AllowedCommandRecord command;
+        command.id = generate_allowed_command_id();
+        command.executable = entry.executable;
+        command.description = entry.description;
+        command.risk_default = entry.risk;
+        command.os = entry.os;
+        command.enabled = true;
+        commands_.emplace(command.id, command);
+        persist(command);
+    }
 }
 
 void AllowedCommandStore::remove(const std::string& command_id) {
@@ -442,9 +681,15 @@ ToolProcessResult run_sandboxed_process(
     PROCESS_INFORMATION process{};
     const auto executable_wide = wide(executable.string());
     const auto working_wide = wide(working_directory.string());
+    // BELOW_NORMAL_PRIORITY_CLASS mirrors the same reasoning as the model
+    // runner process (see inference.cpp): a model-issued tool call can be a
+    // real build/test/git command with no bound on how CPU-heavy it gets,
+    // and running it at the default priority is what previously let a single
+    // tool call stall the rest of the OS's scheduler, not just this app.
     if (!CreateProcessW(executable_wide.c_str(), mutable_command.data(),
                         nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW | CREATE_SUSPENDED,
+                        CREATE_NO_WINDOW | CREATE_SUSPENDED |
+                            BELOW_NORMAL_PRIORITY_CLASS,
                         nullptr, working_wide.c_str(), &startup, &process)) {
         return {false, false, false, -1, {}, {}, "tool process launch failed"};
     }
@@ -583,6 +828,11 @@ ToolProcessResult run_sandboxed_process(
         close(output_pipe[0]);
         close(output_pipe[1]);
         if (chdir(working_directory.c_str()) != 0) _exit(126);
+        // Same reasoning as the Windows BELOW_NORMAL_PRIORITY_CLASS above:
+        // an unbounded model-issued command should never contend for CPU on
+        // equal footing with the rest of the system. Best-effort -- ignore
+        // failure and keep launching.
+        [[maybe_unused]] const int nice_result = nice(5);
         const rlimit cpu_limit{timeout_seconds + 1U, timeout_seconds + 1U};
         const rlimit file_limit{maximum_output_bytes, maximum_output_bytes};
         const rlimit memory_limit{512ULL * 1024ULL * 1024ULL,

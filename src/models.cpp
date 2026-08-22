@@ -2,6 +2,7 @@
 #include "json.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <limits>
 #include <set>
@@ -483,9 +484,32 @@ std::vector<ModelRecord> ModelRegistry::scan() const {
             } catch (const std::exception& exception) {
                 record.state = ModelState::invalid;
                 record.diagnostic = exception.what();
+                // load_manifest() threw before returning anything, so
+                // record.manifest is still default-constructed (every field
+                // empty). Fall back to the directory name so this shows up
+                // as a nameable, diagnosable entry rather than a blank row
+                // that API/UI consumers can't tell apart from "no model".
+                record.manifest.id = model_entry.path().filename().string();
+                record.manifest.display_name = record.manifest.id;
             }
             records.push_back(std::move(record));
         });
+    // Sorted alphabetically (case-insensitive) by display name so every
+    // consumer (REST API, MCP resource, web UI dropdowns/tables, CLI) gets a
+    // consistent, predictable order without each having to sort it again.
+    std::sort(records.begin(), records.end(),
+              [](const ModelRecord& lhs, const ModelRecord& rhs) {
+                  const auto lower = [](const std::string& value) {
+                      std::string result = value;
+                      std::transform(result.begin(), result.end(), result.begin(),
+                                      [](const unsigned char ch) {
+                                          return static_cast<char>(std::tolower(ch));
+                                      });
+                      return result;
+                  };
+                  return lower(lhs.manifest.display_name) <
+                         lower(rhs.manifest.display_name);
+              });
     return records;
 }
 

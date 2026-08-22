@@ -1,0 +1,15 @@
+{
+  "id": "149861f0-4e1c-4e27-a597-5d6cc67d4540",
+  "capturedAtMs": 1787249664959,
+  "gitCommit": "cef2cdc2319b4ccc80c2a881072eec696ca0835e",
+  "gitBranch": "main",
+  "workingTreeClean": false,
+  "languageId": "markdown",
+  "snapshot": {
+    "buildSucceeded": true,
+    "errorCount": 0,
+    "warningCount": 0,
+    "testsPassed": 0,
+    "testsFailed": 0
+  }
+}

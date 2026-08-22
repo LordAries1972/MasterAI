@@ -253,7 +253,17 @@ WorkloadHttpController::~WorkloadHttpController() = default;
 // Returns the verified model inventory as bounded JSON.
 std::string WorkloadHttpController::model_inventory() const {
     try {
-        std::string body{"{\"models\":["};
+        // Phase 29: lets the chat UI show an "Auto (Tiered)" model-picker
+        // entry only when routing could actually do something -- false when
+        // the administrator hasn't turned it on, or has turned it on but not
+        // yet assigned any model to any tier (ModelRouter would have nothing
+        // to select from either way).
+        const bool tiered_routing_available =
+            state_->configuration.model_routing_enabled &&
+            !state_->configuration.model_tier_assignments.empty();
+        std::string body{"{\"tieredRoutingAvailable\":"};
+        body += tiered_routing_available ? "true" : "false";
+        body += ",\"models\":[";
         bool first = true;
         for (const auto& model : state_->scan_models()) {
             if (!first) body += ",";
@@ -265,6 +275,8 @@ std::string WorkloadHttpController::model_inventory() const {
                     json_escape(model.manifest.category) +
                     "\",\"architecture\":\"" +
                     json_escape(model.manifest.architecture) +
+                    "\",\"quantization\":\"" +
+                    json_escape(model.manifest.quantization) +
                     "\",\"state\":\"" + model_state(model.state) +
                     "\",\"diagnostic\":\"" +
                     json_escape(model.diagnostic) +
@@ -337,10 +349,13 @@ std::string WorkloadHttpController::model_inventory_page() const {
             "solid #ccc;text-align:left}.ready{color:#087830}</style></head>"
             "<body><h1>Model inventory</h1><p>Only models marked Ready are "
             "eligible to load.</p><table><thead><tr><th>Model</th><th>Category"
-            "</th><th>State</th><th>Verification</th></tr></thead><tbody>";
+            "</th><th>Quantization</th><th>State</th><th>Verification</th></tr>"
+            "</thead><tbody>";
         for (const auto& model : state_->scan_models()) {
             body += "<tr><td>" + html_escape(model.manifest.display_name) +
                     "</td><td>" + html_escape(model.manifest.category) +
+                    "</td><td>" +
+                    html_escape(model.manifest.quantization) +
                     "</td><td class=\"" +
                     std::string(model.state == ModelState::ready ? "ready" : "") +
                     "\">" + model_state(model.state) + "</td><td>" +

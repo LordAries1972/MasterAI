@@ -490,12 +490,24 @@ public:
     State(MemoryBudgetManager& memory, RunnerSupervisor* inference,
          CacheManager* cache, PromptSessionManager* prompt_sessions,
          std::uint32_t idle_unload_seconds,
-         std::function<void()> on_idle_unload)
+         std::function<void()> on_idle_unload,
+         LocalRunnerPool* runner_pool)
         : memory_(memory), inference_(inference), cache_(cache),
           prompt_sessions_(prompt_sessions),
-          idle_unload_seconds_(idle_unload_seconds),
           on_idle_unload_(std::move(on_idle_unload)),
-          worker_([this]() { run(); }) {}
+          runner_pool_(runner_pool),
+          worker_([this]() { run(); }) {
+        // Phase 34 (full completion pass): seeds the live policy's
+        // idle_unload_seconds from this constructor argument once, at
+        // startup -- the resource-profile-derived default server.cpp
+        // computes (see runner_idle_unload_seconds). From here on this is a
+        // live field AdaptiveController can adjust via set_policy(); this
+        // sweeper always reads the current policy, never this argument
+        // again.
+        auto seeded_policy = memory_.policy();
+        seeded_policy.idle_unload_seconds = idle_unload_seconds;
+        memory_.set_policy(seeded_policy);
+    }
 
     ~State() {
         stopping_.store(true);
@@ -520,17 +532,42 @@ private:
     // runner never outlives actual contention for the RAM it's holding.
     void apply_idle_unload(const MemoryPolicy& policy,
                            const MemoryStatus& status) {
-        if (inference_ == nullptr) return;
         if (policy.keep_idle_model && status.pressure < MemoryPressure::elevated) {
             return;
         }
-        if (!inference_->apply_idle_timeout(sweeper_epoch_seconds(),
-                                            idle_unload_seconds_)) {
-            return;
+        // Phase 34 (full completion pass): read live -- AdaptiveController
+        // can now shrink this under memory pressure via MemoryBudgetManager::
+        // set_policy(), and this sweeper must see that change on its very
+        // next poll, not only at construction time.
+        if (inference_ != nullptr &&
+            inference_->apply_idle_timeout(sweeper_epoch_seconds(),
+                                           policy.idle_unload_seconds)) {
+            inference_->unload();
+            if (prompt_sessions_ != nullptr) prompt_sessions_->reset();
+            if (on_idle_unload_) on_idle_unload_();
         }
-        inference_->unload();
-        if (prompt_sessions_ != nullptr) prompt_sessions_->reset();
-        if (on_idle_unload_) on_idle_unload_();
+        apply_pool_idle_unload(policy);
+    }
+
+    // Phase 29/26: a tiering cascade can leave more than one pool runner
+    // warm (the smaller tier that answered plus, on escalation, the larger
+    // one) -- without this, nothing ever idle-unloads them, since the
+    // default `inference_` supervisor above is a completely separate
+    // instance from any LocalRunnerPool entry. Each pool runner is checked
+    // and unloaded independently, exactly like the default supervisor just
+    // above, using the same live policy.idle_unload_seconds threshold (no
+    // per-tier override exists this pass -- every pool runner shares one
+    // policy).
+    void apply_pool_idle_unload(const MemoryPolicy& policy) {
+        if (runner_pool_ == nullptr) return;
+        for (const auto& entry : runner_pool_->status()) {
+            auto& supervisor = runner_pool_->runner(entry.id);
+            if (!supervisor.apply_idle_timeout(sweeper_epoch_seconds(),
+                                               policy.idle_unload_seconds)) {
+                continue;
+            }
+            supervisor.unload();
+        }
     }
 
     void sleep_one_poll_interval() {
@@ -572,8 +609,8 @@ private:
     RunnerSupervisor* inference_;
     CacheManager* cache_;
     PromptSessionManager* prompt_sessions_;
-    std::uint32_t idle_unload_seconds_;
     std::function<void()> on_idle_unload_;
+    LocalRunnerPool* runner_pool_;
     std::atomic_bool stopping_{false};
     std::thread worker_;
 };
@@ -582,10 +619,11 @@ MemorySweeper::MemorySweeper(MemoryBudgetManager& memory,
                              RunnerSupervisor* inference, CacheManager* cache,
                              PromptSessionManager* prompt_sessions,
                              std::uint32_t idle_unload_seconds,
-                             std::function<void()> on_idle_unload)
+                             std::function<void()> on_idle_unload,
+                             LocalRunnerPool* runner_pool)
     : state_(std::make_unique<State>(memory, inference, cache,
                                      prompt_sessions, idle_unload_seconds,
-                                     std::move(on_idle_unload))) {}
+                                     std::move(on_idle_unload), runner_pool)) {}
 
 MemorySweeper::~MemorySweeper() = default;
 

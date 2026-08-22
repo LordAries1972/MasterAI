@@ -458,6 +458,19 @@ ProcessResourceSample probe_process_resources() {
     return sample;
 }
 
+// See masterai.hpp for why this exists: one process-wide priority drop so
+// every thread MasterAI spawns from here on inherits a background-friendly
+// base priority, instead of contending with the rest of the OS at the
+// default level. Mirrors the reasoning already applied per-child-process to
+// the model runner (inference.cpp) and sandboxed tool calls (tool_exec.cpp).
+void lower_process_priority_for_background_work() {
+#if defined(_WIN32)
+    SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+#elif defined(__linux__)
+    [[maybe_unused]] const int nice_result = nice(5);
+#endif
+}
+
 // Trims MasterAI's own working set back to the OS. Windows-only primitive
 // (EmptyWorkingSet) per this project's Windows-first build scope; elsewhere
 // this is a documented no-op returning 0, never a fabricated estimate.

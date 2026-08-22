@@ -417,6 +417,13 @@ struct AppConfig {
     // advisory routing/cascade-escalation surface stays fully inert --
     // every existing deployment that never sets this is unaffected.
     std::map<std::string, std::vector<std::string>> model_tier_assignments;
+    // Phase 29: top-level kill switch, independent of model_tier_assignments
+    // above -- lets an administrator declare tiers in advance without
+    // turning live chat routing on for users yet. send_chat_message() only
+    // ever consults ModelRouter when this is true AND at least one tier is
+    // assigned; false (the default) leaves every chat's explicit model_id
+    // selection completely unaffected, even if tiers are configured.
+    bool model_routing_enabled{false};
 };
 
 class ConfigurationManager final {
@@ -616,6 +623,21 @@ struct ProcessResourceSample {
 };
 
 ProcessResourceSample probe_process_resources();
+
+// Drops this whole process's own scheduling priority one notch below normal
+// (Windows: BELOW_NORMAL_PRIORITY_CLASS; Linux: nice(5)) so every thread it
+// ever spawns -- the HTTP request handlers, project indexing, semantic
+// retrieval scoring, calibration benchmarking, all of it -- inherits that
+// same background-friendly base priority automatically, rather than each
+// worker having to remember to lower itself individually. This is the
+// process-wide sibling of the per-child-process priority already applied to
+// the model runner (inference.cpp) and sandboxed tool calls (tool_exec.cpp):
+// together they mean nothing MasterAI does, in-process or out-of-process,
+// competes with the rest of the OS on equal footing. Best-effort and safe to
+// call more than once; a failure here just leaves the process at its
+// inherited default priority. Called once from the `serve` entry point, not
+// from short-lived CLI subcommands the operator is actively waiting on.
+void lower_process_priority_for_background_work();
 
 // Trims this process's own working set back to the OS and returns the
 // resident-memory delta freed (0 if the platform has no such primitive, or
@@ -6854,6 +6876,15 @@ struct MemoryPolicy {
     std::uint32_t default_context_tokens{4096U};
     bool keep_idle_model{true};
     bool pause_background_during_inference{true};
+    // Phase 34 (full completion pass): now a live, hot-swappable knob --
+    // AdaptiveController::evaluate() applies real reductions under pressure
+    // through the exact same set_policy() mechanism as the four fields
+    // above, instead of only ever disclosing a recommendation. Seeded from
+    // the same resource-profile default MemorySweeper's constructor argument
+    // used before this field existed (see server.cpp's runner_idle_unload_
+    // seconds); MemorySweeper reads this live field every sweep now, not a
+    // constructor-frozen value.
+    std::uint32_t idle_unload_seconds{600U};
 };
 
 struct MemoryEstimate {
@@ -7742,6 +7773,16 @@ public:
     // written under a prior generation becomes unreachable immediately.
     void invalidate_policy();
     std::uint64_t current_policy_generation() const;
+    // Phase 34 (full completion pass): a genuine live hot-swap of the byte
+    // quota -- unlike invalidate_policy() above (which only bumps the
+    // generation counter so old entries become unreachable), this actually
+    // changes maximum_bytes_per_category, mirroring MemoryBudgetManager::
+    // set_policy()'s shape so AdaptiveController can shrink/grow the cache
+    // quota under pressure the same way it already adjusts memory policy.
+    // Existing entries over the new (lower) quota are left for the next
+    // trim()/natural eviction rather than force-evicted synchronously here.
+    void set_policy(CachePolicy policy);
+    CachePolicy policy() const;
     CacheStatus status() const;
     // Administrative forced eviction down to each category's configured
     // capacity (a no-op for categories already within budget).
@@ -7830,6 +7871,18 @@ struct AdaptiveSignalSnapshot {
     std::optional<double> estimated_power_draw_watts;
     std::uint32_t active_user_count{0U};
     bool on_battery_power{false};
+    // Phase 34 (full completion pass): real, cheap inputs a caller already
+    // has to hand -- probe_hardware_topology()'s own core count, and
+    // whatever GPU-layer figure CalibrationService::resolve() most recently
+    // recommended for the model currently loaded -- so thread_count/
+    // gpu_offload below can compute a genuine bounded-reduction target
+    // instead of the placeholder direction-only value this struct's
+    // absence forced before. Left std::optional and unset when a caller has
+    // neither on hand (no live launch-tuning recommendation is computed
+    // that cycle, same honest-gap convention as thermal_headroom_percent).
+    std::optional<unsigned int> host_thread_count;
+    std::optional<unsigned int> calibrated_gpu_layers;
+    std::optional<unsigned int> calibrated_batch_tokens;
 };
 
 // One proposed or applied change to a single named parameter.
@@ -7858,6 +7911,11 @@ struct AdaptiveControllerReport {
     // Phase 35 administration UI can show it as a recommendation.
     std::vector<AdaptiveAdjustment> proposed_not_yet_applied;
     std::uint64_t evaluation_epoch_seconds{0U};
+    // Phase 34 (full completion pass): the ceilings this evaluation ran
+    // under, so the Performance settings page can pre-fill its ceilings
+    // editor with the administrator's current values instead of only ever
+    // showing blanks.
+    PerformanceCeilings ceilings;
 };
 
 // Phase 34: bounded, hysteresis-guarded automatic tuning extending Phase 19
@@ -7868,24 +7926,54 @@ struct AdaptiveControllerReport {
 // each a real, independently testable check in evaluate() below, not
 // asserted only in documentation.
 //
-// Honest scope note: evaluate() computes and returns a proposed value for
-// every parameter the plan lists (the "decide what should change"
-// engineering this phase's exit criteria are actually about), but only
-// ever *applies* the subset wired to a genuinely live-mutable target in
-// this codebase: MemoryBudgetManager::set_policy() (inference concurrency,
-// queued-inference ceiling, index worker count, default context tokens).
-// Every other named knob in the plan's deliverable list (read queue depth,
-// prefetch distance, cache quotas, batch size, idle-unload time, warm-up
-// policy, thread count, NUMA policy, GPU offload, KV placement,
-// background-job rate) has no live setter anywhere in this codebase yet to
-// apply to automatically -- evaluate() still computes and discloses a
-// proposed value for those on `proposed_not_yet_applied` (visible on the
-// Phase 35 administration UI as a recommendation), and an administrator
-// applies them manually via the existing Runner Configuration/Advanced
-// Optimizations surfaces. This is the same "computed, disclosed, not yet
-// wired to an automatic call site" pattern Phase 26/28 already established
-// elsewhere in this codebase (e.g. Phase 28's topology-aware thread-pinning
-// primitive, real but not yet called from a live worker thread's startup).
+// Honest scope note (updated for the full-completion pass): every plan-
+// listed knob now has a real, genuinely-consumed target computed by
+// evaluate() below. Three shapes of "applied" exist, and each knob is one
+// of them:
+//   - Instantly live via a mutable object's set_policy(): inference
+//     concurrency, queued-inference ceiling, index worker count (this is
+//     also "background-job rate" -- background indexing is what that name
+//     refers to in this codebase; there is no separate background-job
+//     subsystem), default context tokens, and now idle_unload_seconds and
+//     the cache byte quota (CacheManager::set_policy(), new this pass).
+//   - Applied at the *next natural load* rather than instantly, because the
+//     knob is a launch-time argument to a separate llama.cpp process with
+//     no live-reload primitive, and forcing an unload+reload of an
+//     in-flight model was explicitly rejected as too disruptive: thread
+//     count, GPU offload layers, batch size (prompt-processing batch
+//     tokens), and NUMA local placement. See AdaptiveLaunchRecommendation
+//     and ensure_model_loaded()'s overlay of it in server.cpp.
+//   - Read queue depth and KV placement remain disclosed-only: no live
+//     setter exists for either in this codebase (KV placement beyond the
+//     existing KvPrecision admission path Phase 27 already applies has no
+//     separate knob to compute a target for).
+// Prefetch distance and warm-up policy are a permanent, documented scope
+// limit rather than a temporarily-deferred gap (the same "documented scope
+// limit, not a gap" precedent Phase 53 established for its own unimplemented
+// operations): this codebase has no prefetch-distance or warm-up-policy
+// subsystem at all to apply a computed value to, and inventing one with no
+// real caller would be exactly the speculative machinery this project's own
+// engineering norms reject. evaluate() therefore never fabricates a
+// recommendation for either.
+// Phase 34 (full completion pass): thread_count/gpu_offload/numa_local_
+// placement/parallel_slots are launch-time arguments to a separate llama.cpp
+// process, not a live-mutable object like MemoryBudgetManager -- there is no
+// way to apply a changed recommendation to an already-running model without
+// forcibly unloading and reloading it (disruptive, and deliberately not done
+// automatically here; see ensure_model_loaded()'s overlay of this struct in
+// server.cpp). Unset fields mean "no override -- use calibration/manifest
+// defaults exactly as before this struct existed."
+struct AdaptiveLaunchRecommendation {
+    std::optional<unsigned int> thread_count;
+    std::optional<unsigned int> gpu_offload_layers;
+    std::optional<bool> numa_local_placement;
+    // Prompt-processing batch size (llama.cpp's --batch-size/-b,
+    // LaunchTuning::batch_tokens) -- the plan's "batch size" knob. Reduced
+    // under pressure to shrink the compute-buffer memory a launch reserves;
+    // never grown past whatever a calibration profile already recommended.
+    std::optional<unsigned int> batch_tokens;
+};
+
 class AdaptiveController final {
 public:
     explicit AdaptiveController(PerformanceCeilings ceilings = {});
@@ -7897,12 +7985,20 @@ public:
 
     // Runs one evaluation cycle against `signals` and `memory` (whose
     // set_policy() this may call when a due, confident, in-bounds
-    // memory-related adjustment exists). now_epoch_seconds drives dwell-
-    // time/cooldown/interval bookkeeping so this is deterministically
-    // testable without depending on a real wall clock.
+    // memory-related adjustment exists) and, when `cache` is supplied,
+    // `cache`'s own set_policy() for the cache-quota knob. now_epoch_seconds
+    // drives dwell-time/cooldown/interval bookkeeping so this is
+    // deterministically testable without depending on a real wall clock.
     AdaptiveControllerReport evaluate(const AdaptiveSignalSnapshot& signals,
                                       MemoryBudgetManager& memory,
-                                      std::uint64_t now_epoch_seconds);
+                                      std::uint64_t now_epoch_seconds,
+                                      CacheManager* cache = nullptr);
+
+    // The most recently computed launch-time overrides (thread_count,
+    // gpu_offload_layers, numa_local_placement, parallel_slots) -- see
+    // AdaptiveLaunchRecommendation's own comment for why these are consumed
+    // at the next natural model load rather than applied instantly.
+    AdaptiveLaunchRecommendation launch_recommendation() const noexcept;
 
     // Reverts the most recently applied change back to the MemoryPolicy
     // that was active immediately before it -- the plan's "failed
@@ -7924,6 +8020,7 @@ private:
     std::uint32_t changes_this_interval_{0U};
     std::uint64_t current_interval_epoch_seconds_{0U};
     std::optional<AppliedChange> last_applied_;
+    AdaptiveLaunchRecommendation launch_recommendation_;
     // Rolling agreement window over recent evaluate() calls' memory
     // pressure reading -- AdaptiveAdjustment::confidence for a memory-
     // related proposal is the fraction of this window agreeing with the
@@ -8624,10 +8721,18 @@ public:
     // (MemorySweeper itself has no visibility into that lease -- it lives in
     // HttpServer::State, see admit_runner_weights()/
     // release_runner_weights_lease()).
+    // Phase 29/26: `runner_pool` is nullable exactly like the others -- when
+    // absent (no multi-runner pool configured), sweeping behaves exactly as
+    // before this parameter existed. When present, every one of its warm
+    // runners is idle-timeout-checked the same way the single default
+    // `inference` supervisor already is, closing the gap where a tiering
+    // cascade could leave a smaller tier warm in the pool with nothing ever
+    // sweeping it (see docs/PLAN.md Phase 26's pool-awareness note).
     MemorySweeper(MemoryBudgetManager& memory, RunnerSupervisor* inference,
                  CacheManager* cache, PromptSessionManager* prompt_sessions,
                  std::uint32_t idle_unload_seconds,
-                 std::function<void()> on_idle_unload = {});
+                 std::function<void()> on_idle_unload = {},
+                 LocalRunnerPool* runner_pool = nullptr);
     ~MemorySweeper();
     MemorySweeper(const MemorySweeper&) = delete;
     MemorySweeper& operator=(const MemorySweeper&) = delete;
@@ -8917,6 +9022,12 @@ void remove_ide_token(IdeClientKind client, SecretStore& secrets,
 // executable, and the allow-list can never downgrade it back to safe.
 enum class ChatToolRisk { safe, high_risk };
 
+// Which operating system(s) an allow-listed executable applies to. This is
+// informational/filtering metadata for the admin UI -- it does not gate
+// run_command itself, since a record for the "wrong" OS simply never
+// resolves to an executable that exists on this machine.
+enum class CommandOs { windows, linux, both };
+
 // One admin-approved external executable a chat/MCP `run_command` tool call
 // is permitted to invoke, optionally restricted to specific projects. Tools
 // that never shell out (read_file, search, list_directory, write_file,
@@ -8934,6 +9045,10 @@ struct AllowedCommandRecord {
     // non-empty narrows this executable to only those projects.
     std::set<std::string> allowed_project_ids;
     bool enabled{false};
+    // Which OS this executable belongs to, shown as a column/badge in the
+    // admin UI and used to seed the built-in Windows/Linux command catalog
+    // (see AllowedCommandStore::ensure_default_catalog() in tool_exec.cpp).
+    CommandOs os{CommandOs::both};
 };
 
 // Durable admin allow-list, persisted the same way McpOutboundRegistry
@@ -8943,6 +9058,11 @@ class AllowedCommandStore final {
 public:
     explicit AllowedCommandStore(RecordStore& records);
     AllowedCommandRecord register_command(AllowedCommandRecord command);
+    // Updates an existing record in place (same id). Unlike
+    // register_command(), this throws if the id is not already present, so
+    // an edit can never accidentally create a fresh entry under a
+    // client-supplied id.
+    AllowedCommandRecord update_command(AllowedCommandRecord command);
     void remove(const std::string& command_id);
     std::optional<AllowedCommandRecord> find_by_executable(
         const std::string& executable) const;
@@ -8951,6 +9071,14 @@ public:
 private:
     void restore();
     void persist(const AllowedCommandRecord& command);
+    // Adds the built-in catalog of well-known Windows/Linux/cross-platform
+    // executables (enabled by default) for any entry whose executable
+    // isn't already present, so run_command works out of the box and an
+    // admin reviews/disables from a ready-made list instead of
+    // hand-typing every command. Safe to call on every startup: it never
+    // touches or duplicates an executable the admin already has a record
+    // for.
+    void ensure_default_catalog();
     RecordStore& records_;
     std::map<std::string, AllowedCommandRecord> commands_;
     // Guards commands_ against concurrent register/remove/find/list calls.

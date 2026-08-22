@@ -184,7 +184,12 @@ The current source includes native implementations for:
   Approve/Deny card first, regardless of mode — no execution mode can
   weaken that. Administrators manage the run-command allow-list from
   Settings -> Run-command allow-list (or GET/POST /api/v1/chat-tools/
-  allowed-commands). The same six tools are also reachable by a
+  allowed-commands, plus POST .../update to edit a record in place). The
+  page is pre-loaded with a built-in catalog of common Windows, Linux, and
+  cross-platform developer commands, each tagged with the OS(es) it applies
+  to and enabled by default -- disable anything not warranted for your
+  install, or add/edit/revoke your own entries via the icon-only Edit and
+  Revoke buttons on each row. The same six tools are also reachable by a
   connected MCP client (`masterai.project.read_file`/`list_directory`/
   `search`/`write_file`/`delete_file`/`run_command`), gated by the
   `projects.read`/`projects.write` token scopes; a call MCP classifies
@@ -356,15 +361,25 @@ The current source includes native implementations for:
   size, rolling-measurement, confidence-requirement, and safe-rollback
   stability controls, and all eight named modes (Minimal Memory, Balanced,
   Lowest Latency, Maximum Throughput, Battery Saver, Quiet/Thermal
-  Conservative, Administrator Custom, Automatic). Applies live to the one
-  genuinely mutable target in this codebase
-  (`MemoryBudgetManager::set_policy()` -- inference concurrency, queued-
-  inference ceiling, index worker count, default context tokens); every
-  other named knob (prefetch distance, batch size, NUMA/GPU offload, KV
-  placement, background-job rate, and others) is computed and disclosed as
-  a recommendation rather than applied, since no live setter exists for
-  them yet. Administrator-only routes: `GET /api/v1/performance/adaptive`,
-  `POST .../mode`, `POST .../ceilings`, `POST .../rollback`.
+  Conservative, Administrator Custom, Automatic). Every named knob now has a
+  real, genuinely-consumed target: inference concurrency, queued-inference
+  ceiling, index worker count (also "background-job rate" -- background
+  indexing is what that name means here), default context tokens, and idle-
+  unload time apply instantly via `MemoryBudgetManager::set_policy()`; the
+  cache byte quota applies instantly via `CacheManager::set_policy()`;
+  thread count, GPU offload layers, prompt-processing batch size, and NUMA
+  local placement are launch-time arguments to a separate llama.cpp process
+  with no live-reload primitive, so they apply at the next natural model
+  load rather than forcing a disruptive unload/reload of an in-flight
+  model. Read queue depth and KV placement beyond the existing KV-precision
+  admission remain disclosed-only (no live setter exists for either);
+  prefetch distance and warm-up policy are a permanent, documented scope
+  limit -- no subsystem exists in this codebase to apply a computed value
+  to. The Settings page's Performance section exposes a ceilings editor for
+  every `PerformanceCeilings` field alongside the mode selector and the
+  applied/recommended report. Administrator-only routes:
+  `GET /api/v1/performance/adaptive`, `POST .../mode`, `POST .../ceilings`,
+  `POST .../rollback`.
 - Phase 35: a "Performance" administration page (`/app/performance`)
   consolidating live visibility into the local runner pool, the intranet
   worker pool, the adaptive controller (mode selection, applied/
@@ -562,14 +577,14 @@ Status below reflects the evidence recorded in
 | 25 | Continuous inference batching and request scheduling | Implementation complete; backend activation remains calibrated and default-off |
 | 26 | Model loading, mapping, pre-touch, and warm-state management | Implementation complete; all selective pre-touch levels actionable |
 | 27 | KV-cache compression, placement, and lifecycle management | Accounting/placement/lifecycle, reduced-precision launch flags + quality-parity check, and cross-request prefix sharing all real; every admission stays explicit-administrator-gated (never self-enabling); chats can now be marked as shareable templates and `send_chat_message()` uses the shared-template reuse path in production once prefix sharing is admitted |
-| 28 | NUMA, processor-group, and topology-aware execution | Discovery and recommendation implemented; real thread-pinning now wired into every connection worker thread, gated on an off-by-default configuration flag plus the Phase 20 admission; live per-host benefit evidence (Phase 36) still pending |
-| 29 | Model tiering, routing, and cascade inference | Decision logic implemented; a live advisory `POST /api/v1/models/route` endpoint now consults it once tiers are configured; automatic chat-model routing/cascade execution still pending |
+| 28 | NUMA, processor-group, and topology-aware execution | Discovery and recommendation implemented; real thread-pinning wired into every connection worker thread, gated on an off-by-default configuration flag (now a working Settings checkbox) plus the Phase 20 admission; live per-host benefit evidence (Phase 36) still pending |
+| 29 | Model tiering, routing, and cascade inference | Complete; live chat routing via the "Auto (Tiered)" model-picker entry, with a real buffered cascade (confidence-checked, escalated once) for any tier below the largest |
 | 30 | Memory deduplication and immutable shared-data architecture | Implemented at a scoped-down level |
 | 30A | CPU-only and GPU-disabled low-memory operation | Implemented; matched real-model benchmark matrix recorded |
 | 31 | Storage tiering, virtual drives, and scratch-volume management | Implemented, including Priority B tier-migration tooling |
 | 32 | Speculative decoding and draft-model acceleration | Implemented; real dual-model launch path measured on real hardware (negative result on this low-VRAM host) |
 | 33 | Distributed local runners and multi-device orchestration | Implemented; local runner pool and intranet mTLS worker protocol |
-| 34 | Adaptive performance controller | Implemented at a scoped-down level |
+| 34 | Adaptive performance controller | Complete; every named knob has a real, genuinely-consumed target (instant, next-natural-load, or a documented permanent scope limit) |
 | 35 | Performance administration interfaces | Implemented at a scoped-down level; one consolidated Performance page |
 | 36 | Full performance certification and regression gates | Implemented at a scoped-down level; real quality-plus-five-regression-check-group certification with threshold-gated build comparison, real evidence recorded on this host via `scripts/run-certification.ps1`; physical cross-device matrix remains an administrator-run exercise on further hosts |
 | 37 | Machine Learning module foundation | Implemented at a scoped-down level |
@@ -1225,6 +1240,13 @@ as a local LLM backend without learning a MasterAI-specific request shape:
   as `{"models":[...]}`, sorted by `displayName` ascending
   (case-insensitive). Requires the same `models.read` bearer scope as
   `GET /api/v1/models`.
+- `GET /api/v1/models` -- the locally scanned/verified inventory of models
+  actually on disk, also sorted by `displayName` ascending
+  (case-insensitive) and including each model's `quantization` string (e.g.
+  `Q4_K_M`). A model directory whose manifest fails to parse still appears
+  (state `invalid`, with a diagnostic) but is never returned with a blank
+  name -- it falls back to its directory name so it can be identified and
+  fixed rather than showing up as an empty row.
 - `POST /v1/chat/completions` -- a stateless, non-streaming, OpenAI Chat
   Completions-shaped endpoint (top-level, not under `/api/v1`, to mirror
   OpenAI's own URL shape). Body: `{"model":"...","messages":[{"role":

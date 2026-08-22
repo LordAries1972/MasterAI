@@ -211,6 +211,8 @@ std::string list_models(const std::filesystem::path& models_root,
                   ",\"displayName\":" +
                   json_string(model.manifest.display_name) +
                   ",\"category\":" + json_string(model.manifest.category) +
+                  ",\"quantization\":" +
+                  json_string(model.manifest.quantization) +
                   ",\"state\":" +
                   std::to_string(static_cast<int>(model.state)) +
                   ",\"diagnostic\":" + json_string(model.diagnostic) + "}";

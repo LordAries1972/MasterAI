@@ -110,13 +110,20 @@ PerformanceCeilings AdaptiveController::ceilings() const noexcept {
     return ceilings_;
 }
 
+AdaptiveLaunchRecommendation AdaptiveController::launch_recommendation()
+    const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return launch_recommendation_;
+}
+
 AdaptiveControllerReport AdaptiveController::evaluate(
     const AdaptiveSignalSnapshot& signals, MemoryBudgetManager& memory,
-    const std::uint64_t now_epoch_seconds) {
+    const std::uint64_t now_epoch_seconds, CacheManager* cache) {
     std::lock_guard<std::mutex> lock(mutex_);
     AdaptiveControllerReport report;
     report.active_mode = mode_;
     report.evaluation_epoch_seconds = now_epoch_seconds;
+    report.ceilings = ceilings_;
 
     // Rolling measurement window (the plan's "rolling measurement"
     // stability control): the last 5 evaluate() calls' pressure reading.
@@ -278,6 +285,43 @@ AdaptiveControllerReport AdaptiveController::evaluate(
             });
     }
 
+    // idle_unload_seconds (full completion pass): a normal 4th
+    // MemoryBudgetManager-applied knob now that MemoryPolicy carries this
+    // field for real (see its own class comment) -- same two-direction,
+    // bounded-step shape as maximum_index_workers above: shrink toward the
+    // administrator's configured floor under pressure, grow back toward the
+    // configured ceiling once pressure is normal again with headroom.
+    if (signals.memory.pressure >= MemoryPressure::high) {
+        const auto step = bounded_step(current_policy.idle_unload_seconds,
+                                       ceilings_.max_step_percent);
+        const auto proposed = static_cast<std::uint32_t>(std::max<std::int64_t>(
+            static_cast<std::int64_t>(ceilings_.min_idle_unload_seconds),
+            static_cast<std::int64_t>(current_policy.idle_unload_seconds) -
+                static_cast<std::int64_t>(step)));
+        propose_and_maybe_apply(
+            "idle_unload_seconds", "memory pressure elevated -- unload idle models sooner",
+            static_cast<double>(current_policy.idle_unload_seconds),
+            static_cast<double>(proposed), &any_memory_field_changed,
+            [proposed](MemoryPolicy& policy) {
+                policy.idle_unload_seconds = proposed;
+            });
+    } else if (signals.memory.pressure == MemoryPressure::normal &&
+              current_policy.idle_unload_seconds <
+                  ceilings_.max_idle_unload_seconds) {
+        const auto step = bounded_step(current_policy.idle_unload_seconds,
+                                       ceilings_.max_step_percent);
+        const auto proposed = std::min(
+            ceilings_.max_idle_unload_seconds,
+            current_policy.idle_unload_seconds + step);
+        propose_and_maybe_apply(
+            "idle_unload_seconds", "normal pressure with ceiling headroom",
+            static_cast<double>(current_policy.idle_unload_seconds),
+            static_cast<double>(proposed), &any_memory_field_changed,
+            [proposed](MemoryPolicy& policy) {
+                policy.idle_unload_seconds = proposed;
+            });
+    }
+
     if (any_memory_field_changed) {
         last_applied_ = AppliedChange{now_epoch_seconds, current_policy};
         memory.set_policy(proposed_policy);
@@ -285,46 +329,155 @@ AdaptiveControllerReport AdaptiveController::evaluate(
         changes_this_interval_ += static_cast<std::uint32_t>(report.applied.size());
     }
 
-    // Every other plan-listed knob (see the class comment's honest scope
-    // note) has no live setter in this codebase yet -- computed and
-    // disclosed as a recommendation only, never applied.
-    if (signals.memory.pressure >= MemoryPressure::high) {
-        AdaptiveAdjustment idle_unload;
-        idle_unload.parameter = "idle_unload_seconds";
-        idle_unload.reason = "memory pressure elevated -- unload idle models sooner";
-        idle_unload.previous_value =
-            static_cast<double>(ceilings_.max_idle_unload_seconds);
-        idle_unload.proposed_value =
-            static_cast<double>(ceilings_.min_idle_unload_seconds);
-        idle_unload.confidence = confidence;
-        report.proposed_not_yet_applied.push_back(idle_unload);
+    // Cache quota (full completion pass): same shape as idle_unload_seconds
+    // just above, applied to CacheManager::set_policy() when a caller
+    // supplies one -- absent `cache` leaves this knob untouched exactly as
+    // every pre-existing caller that doesn't pass one experiences today.
+    if (cache != nullptr) {
+        const auto current_cache_policy = cache->policy();
+        constexpr std::uint64_t kMinimumCacheBytesPerCategory =
+            8ULL * 1024ULL * 1024ULL;
+        bool cache_changed = false;
+        auto proposed_cache_policy = current_cache_policy;
+        if (signals.memory.pressure >= MemoryPressure::high) {
+            const auto step = std::max<std::uint64_t>(
+                1ULL, current_cache_policy.maximum_bytes_per_category *
+                          ceilings_.max_step_percent / 100ULL);
+            const auto proposed = std::max(
+                kMinimumCacheBytesPerCategory,
+                current_cache_policy.maximum_bytes_per_category - step);
+            AdaptiveAdjustment adjustment;
+            adjustment.parameter = "cache_maximum_bytes_per_category";
+            adjustment.reason = "memory pressure elevated -- shrink cache quota";
+            adjustment.previous_value = static_cast<double>(
+                current_cache_policy.maximum_bytes_per_category);
+            adjustment.proposed_value = static_cast<double>(proposed);
+            adjustment.confidence = confidence;
+            const bool value_changed =
+                proposed != current_cache_policy.maximum_bytes_per_category;
+            if (value_changed && dwell_elapsed && interval_has_room &&
+                confidence >= 0.6) {
+                proposed_cache_policy.maximum_bytes_per_category = proposed;
+                cache_changed = true;
+                report.applied.push_back(adjustment);
+            } else if (value_changed) {
+                report.proposed_not_yet_applied.push_back(adjustment);
+            }
+        }
+        if (cache_changed) {
+            cache->set_policy(proposed_cache_policy);
+            last_change_epoch_seconds_ = now_epoch_seconds;
+            changes_this_interval_ += 1U;
+        }
     }
 
-    // Thread count and GPU offload: same "disclosed only, no live setter
-    // yet" honesty as idle_unload_seconds above -- battery power and
-    // sustained high/critical memory pressure are the two live signals this
-    // pass has that plausibly justify either knob, so both recommendations
-    // are gated on them rather than emitted unconditionally.
-    if (signals.on_battery_power || signals.memory.pressure >= MemoryPressure::high) {
-        AdaptiveAdjustment thread_count;
-        thread_count.parameter = "thread_count";
-        thread_count.reason = signals.on_battery_power
+    // Thread count / GPU offload / NUMA placement (full completion pass):
+    // real bounded-reduction targets computed from whatever real signals a
+    // caller supplied (host_thread_count/calibrated_gpu_layers) -- these are
+    // launch-time-only arguments to a separate llama.cpp process (see
+    // AdaptiveLaunchRecommendation's class comment), so "applied" here means
+    // stored for ensure_model_loaded() to consume at the next natural load,
+    // never a forced live reload of an already-running model. Silent (no
+    // recommendation emitted) when a caller has not supplied the relevant
+    // signal -- there is nothing real to compute a target from, and this
+    // pass would rather disclose nothing than a fabricated placeholder.
+    const bool reduce_pressure_knobs =
+        signals.on_battery_power || signals.memory.pressure >= MemoryPressure::high;
+    AdaptiveLaunchRecommendation proposed_launch = launch_recommendation_;
+    bool launch_changed = false;
+    if (reduce_pressure_knobs && signals.host_thread_count.has_value()) {
+        const auto host_threads = *signals.host_thread_count;
+        const auto step = bounded_step(host_threads, ceilings_.max_step_percent);
+        const auto proposed = static_cast<unsigned int>(std::max<std::int64_t>(
+            1, static_cast<std::int64_t>(host_threads) -
+                   static_cast<std::int64_t>(step)));
+        AdaptiveAdjustment adjustment;
+        adjustment.parameter = "thread_count";
+        adjustment.reason = signals.on_battery_power
             ? "on battery power -- reduce worker thread count for power draw"
             : "memory pressure elevated -- reduce worker thread count";
-        thread_count.previous_value = 0.0;
-        thread_count.proposed_value = -1.0;
-        thread_count.confidence = confidence;
-        report.proposed_not_yet_applied.push_back(thread_count);
-
-        AdaptiveAdjustment gpu_offload;
-        gpu_offload.parameter = "gpu_offload";
-        gpu_offload.reason = signals.on_battery_power
+        adjustment.previous_value = static_cast<double>(host_threads);
+        adjustment.proposed_value = static_cast<double>(proposed);
+        adjustment.confidence = confidence;
+        if (dwell_elapsed && interval_has_room && confidence >= 0.6) {
+            proposed_launch.thread_count = proposed;
+            launch_changed = true;
+            report.applied.push_back(adjustment);
+        } else {
+            report.proposed_not_yet_applied.push_back(adjustment);
+        }
+    }
+    if (reduce_pressure_knobs && signals.calibrated_gpu_layers.has_value()) {
+        const auto calibrated_layers = *signals.calibrated_gpu_layers;
+        const auto step =
+            bounded_step(calibrated_layers, ceilings_.max_step_percent);
+        const auto proposed = static_cast<unsigned int>(std::max<std::int64_t>(
+            0, static_cast<std::int64_t>(calibrated_layers) -
+                   static_cast<std::int64_t>(step)));
+        AdaptiveAdjustment adjustment;
+        adjustment.parameter = "gpu_offload";
+        adjustment.reason = signals.on_battery_power
             ? "on battery power -- reduce GPU layer offload"
             : "memory pressure elevated -- reduce GPU layer offload";
-        gpu_offload.previous_value = 0.0;
-        gpu_offload.proposed_value = -1.0;
-        gpu_offload.confidence = confidence;
-        report.proposed_not_yet_applied.push_back(gpu_offload);
+        adjustment.previous_value = static_cast<double>(calibrated_layers);
+        adjustment.proposed_value = static_cast<double>(proposed);
+        adjustment.confidence = confidence;
+        if (dwell_elapsed && interval_has_room && confidence >= 0.6) {
+            proposed_launch.gpu_offload_layers = proposed;
+            launch_changed = true;
+            report.applied.push_back(adjustment);
+        } else {
+            report.proposed_not_yet_applied.push_back(adjustment);
+        }
+    }
+    if (reduce_pressure_knobs && signals.calibrated_batch_tokens.has_value()) {
+        const auto calibrated_batch = *signals.calibrated_batch_tokens;
+        const auto step = bounded_step(calibrated_batch, ceilings_.max_step_percent);
+        const auto proposed = static_cast<unsigned int>(std::max<std::int64_t>(
+            32, static_cast<std::int64_t>(calibrated_batch) -
+                    static_cast<std::int64_t>(step)));
+        AdaptiveAdjustment adjustment;
+        adjustment.parameter = "batch_tokens";
+        adjustment.reason = signals.on_battery_power
+            ? "on battery power -- reduce prompt-processing batch size"
+            : "memory pressure elevated -- reduce prompt-processing batch size";
+        adjustment.previous_value = static_cast<double>(calibrated_batch);
+        adjustment.proposed_value = static_cast<double>(proposed);
+        adjustment.confidence = confidence;
+        if (dwell_elapsed && interval_has_room && confidence >= 0.6) {
+            proposed_launch.batch_tokens = proposed;
+            launch_changed = true;
+            report.applied.push_back(adjustment);
+        } else {
+            report.proposed_not_yet_applied.push_back(adjustment);
+        }
+    }
+    // NUMA placement: battery power is the one live signal this pass has
+    // that plausibly justifies giving up cross-node pinning (the complexity
+    // isn't worth it when the host is trying to conserve power) -- normal
+    // conditions never turn it back on by themselves, since that is an
+    // administrator's own topology.numaLocalPlacementEnabled setting to make.
+    if (signals.on_battery_power &&
+        launch_recommendation_.numa_local_placement != std::optional<bool>(false)) {
+        AdaptiveAdjustment adjustment;
+        adjustment.parameter = "numa_local_placement";
+        adjustment.reason = "on battery power -- cross-node pinning is not "
+                            "worth the complexity while conserving power";
+        adjustment.previous_value = 1.0;
+        adjustment.proposed_value = 0.0;
+        adjustment.confidence = confidence;
+        if (dwell_elapsed && interval_has_room && confidence >= 0.6) {
+            proposed_launch.numa_local_placement = false;
+            launch_changed = true;
+            report.applied.push_back(adjustment);
+        } else {
+            report.proposed_not_yet_applied.push_back(adjustment);
+        }
+    }
+    if (launch_changed) {
+        launch_recommendation_ = proposed_launch;
+        last_change_epoch_seconds_ = now_epoch_seconds;
+        changes_this_interval_ += 1U;
     }
 
     return report;
@@ -356,13 +509,30 @@ std::string AdaptiveController::to_json(const AdaptiveControllerReport& report) 
             }
             return body + "]";
         };
+    const auto& c = report.ceilings;
     return "{\"activeMode\":" + json_string(to_string(report.active_mode)) +
           ",\"selectedMode\":" + json_string(to_string(report.selected_mode)) +
           ",\"applied\":" + adjustments_json(report.applied) +
           ",\"proposedNotYetApplied\":" +
           adjustments_json(report.proposed_not_yet_applied) +
           ",\"evaluationEpochSeconds\":" +
-          std::to_string(report.evaluation_epoch_seconds) + "}";
+          std::to_string(report.evaluation_epoch_seconds) +
+          ",\"ceilings\":{"
+          "\"maxInferenceConcurrency\":" +
+          std::to_string(c.max_inference_concurrency) +
+          ",\"maxQueuedInference\":" + std::to_string(c.max_queued_inference) +
+          ",\"maxIndexWorkers\":" + std::to_string(c.max_index_workers) +
+          ",\"maxContextTokens\":" + std::to_string(c.max_context_tokens) +
+          ",\"minIdleUnloadSeconds\":" +
+          std::to_string(c.min_idle_unload_seconds) +
+          ",\"maxIdleUnloadSeconds\":" +
+          std::to_string(c.max_idle_unload_seconds) +
+          ",\"maxStepPercent\":" + std::to_string(c.max_step_percent) +
+          ",\"maxChangesPerInterval\":" +
+          std::to_string(c.max_changes_per_interval) +
+          ",\"intervalSeconds\":" + std::to_string(c.interval_seconds) +
+          ",\"minimumDwellSeconds\":" +
+          std::to_string(c.minimum_dwell_seconds) + "}}";
 }
 
 }  // namespace masterai

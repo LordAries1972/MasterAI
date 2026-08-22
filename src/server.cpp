@@ -928,7 +928,7 @@ public:
         memory_sweeper = std::make_unique<MemorySweeper>(
             *memory, inference.get(), cache.get(), prompt_sessions.get(),
             runner_idle_unload_seconds,
-            [this]() { release_runner_weights_lease(); });
+            [this]() { release_runner_weights_lease(); }, runner_pool.get());
         workloads = std::make_unique<
             server_internal::WorkloadHttpController>(
             configuration, *projects, *attachments, inference.get(),
@@ -2158,12 +2158,39 @@ public:
             signals.scheduler = request_scheduler->status();
             signals.cache = cache->status();
             signals.on_battery_power = probe_on_battery_power();
+            // Phase 34 (full completion pass): real, cheap inputs for the
+            // thread_count/gpu_offload targets -- the host's own logical
+            // core count (already probed once at startup, see
+            // hardware_topology), and whatever GPU-layer figure
+            // CalibrationService most recently recommended for the model
+            // currently loaded on the default runner. Left unset (no
+            // recommendation computed that cycle) when nothing is loaded or
+            // no calibration service is configured, matching every other
+            // optional signal's honest-gap convention.
+            if (hardware_topology.logical_core_count > 0U) {
+                signals.host_thread_count = hardware_topology.logical_core_count;
+            }
+            if (inference != nullptr && calibration != nullptr) {
+                const auto current_metrics = inference->metrics();
+                if (const auto loaded_model = find_model(current_metrics.model_id)) {
+                    const auto profile = calibration->resolve(
+                        loaded_model->manifest.model_sha256, "balanced", nullptr,
+                        0U, loaded_model->manifest.model_size_bytes,
+                        loaded_model->manifest.required_gpu_backend);
+                    signals.calibrated_gpu_layers =
+                        static_cast<unsigned int>(profile.recommended_gpu_layers);
+                    if (profile.recommended_batch_tokens > 0U) {
+                        signals.calibrated_batch_tokens = static_cast<unsigned int>(
+                            profile.recommended_batch_tokens);
+                    }
+                }
+            }
             const auto evaluate_now = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count());
-            const auto report =
-                adaptive_controller->evaluate(signals, *memory, evaluate_now);
+            const auto report = adaptive_controller->evaluate(
+                signals, *memory, evaluate_now, cache.get());
             return response(200, "OK", AdaptiveController::to_json(report));
         }
         // Phase 34: administrator mode selection -- one of the named
@@ -2586,6 +2613,7 @@ public:
                                             ChatToolRisk::high_risk
                                         ? "high_risk"
                                         : "safe") +
+                        "\",\"os\":\"" + command_os_to_string(command.os) +
                         "\",\"allowedProjectIds\":[";
                 bool first_project = true;
                 for (const auto& project_id : command.allowed_project_ids) {
@@ -2625,6 +2653,9 @@ public:
                         throw std::runtime_error("invalid risk default");
                     }
                 }
+                if (const auto* value = root.optional("os")) {
+                    command.os = command_os_from_string(value->as_string());
+                }
                 if (const auto* values = root.optional("allowedProjectIds")) {
                     for (const auto& value : values->as_array()) {
                         const auto& project_id = value.as_string();
@@ -2649,6 +2680,72 @@ public:
                 return response(
                     400, "Bad Request",
                     "{\"error\":\"invalid_allowed_command_registration\"}");
+            }
+        }
+        // Edits an existing allow-list entry in place (same id), so an
+        // admin correcting a description or flipping the OS tag doesn't
+        // have to revoke and re-approve under a brand-new id -- see
+        // AllowedCommandStore::update_command()'s comment in masterai.hpp
+        // for why this is a distinct route from the create route above
+        // rather than the same handler branching on whether "id" is
+        // present.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/chat-tools/allowed-commands/update") {
+            if (user->role != UserRole::administrator) {
+                return response(403, "Forbidden",
+                                "{\"error\":\"permission_denied\"}");
+            }
+            try {
+                const auto root = parse_json(request.body);
+                AllowedCommandRecord command;
+                command.id = root.required("id").as_string();
+                if (command.id.empty()) {
+                    throw std::runtime_error("id is required");
+                }
+                command.executable = root.required("executable").as_string();
+                if (command.executable.empty()) {
+                    throw std::runtime_error("executable is required");
+                }
+                if (const auto* value = root.optional("description")) {
+                    command.description = value->as_string();
+                }
+                if (const auto* value = root.optional("riskDefault")) {
+                    const auto risk_text = value->as_string();
+                    if (risk_text == "high_risk") {
+                        command.risk_default = ChatToolRisk::high_risk;
+                    } else if (risk_text == "safe") {
+                        command.risk_default = ChatToolRisk::safe;
+                    } else {
+                        throw std::runtime_error("invalid risk default");
+                    }
+                }
+                if (const auto* value = root.optional("os")) {
+                    command.os = command_os_from_string(value->as_string());
+                }
+                if (const auto* values = root.optional("allowedProjectIds")) {
+                    for (const auto& value : values->as_array()) {
+                        const auto& project_id = value.as_string();
+                        if (!projects->find(project_id)) {
+                            throw std::runtime_error("invalid project id");
+                        }
+                        command.allowed_project_ids.insert(project_id);
+                    }
+                }
+                command.enabled = true;
+                if (const auto* value = root.optional("enabled")) {
+                    command.enabled = value->as_boolean();
+                }
+                const auto updated =
+                    allowed_commands->update_command(command);
+                audit.append("chat_tools.allowed_command.update", user->id,
+                            "success",
+                            updated.id + " " + updated.executable);
+                return response(200, "OK",
+                                "{\"id\":" + json_string(updated.id) + "}");
+            } catch (const std::exception&) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_allowed_command_update\"}");
             }
         }
         if (request.method == "POST" &&
@@ -9046,6 +9143,18 @@ private:
         configuration.cache_enabled = incoming.cache_enabled;
         configuration.session_reuse_enabled = incoming.session_reuse_enabled;
         configuration.performance_auto_tune = incoming.performance_auto_tune;
+        // Phase 28: read fresh on every new HTTP worker thread at the pinning
+        // call site (see recommend_thread_placement()'s caller), so applying
+        // this live -- rather than leaving it in the previously-silent gap
+        // where it saved to disk but never took effect until a restart --
+        // needs no restart_required entry below.
+        configuration.numa_local_placement_enabled =
+            incoming.numa_local_placement_enabled;
+        // Phase 29: an empty map leaves ModelRouter unused (see model_router
+        // construction below); rebuilding it live here mirrors the
+        // accelerator-policy-change CalibrationService rebuild just below.
+        configuration.model_routing_enabled = incoming.model_routing_enabled;
+        configuration.model_tier_assignments = incoming.model_tier_assignments;
         configuration.allow_local_password_accounts =
             incoming.allow_local_password_accounts;
         configuration.allow_os_identity_accounts =
@@ -9818,6 +9927,27 @@ private:
                     }
                 }
             }
+            // Phase 34 (full completion pass): overlays whatever bounded
+            // reduction AdaptiveController::evaluate() most recently
+            // computed for this host under pressure/battery power -- unset
+            // fields (the common case: no pressure, no battery constraint)
+            // leave the calibration-derived tuning above completely
+            // unchanged. This is the "next natural load" this knob is
+            // documented to apply at -- an in-flight model is never
+            // force-reloaded just to pick up a new recommendation sooner.
+            if (adaptive_controller != nullptr) {
+                const auto launch_recommendation =
+                    adaptive_controller->launch_recommendation();
+                if (launch_recommendation.thread_count.has_value()) {
+                    tuning.thread_count = *launch_recommendation.thread_count;
+                }
+                if (launch_recommendation.gpu_offload_layers.has_value()) {
+                    tuning.gpu_layers = *launch_recommendation.gpu_offload_layers;
+                }
+                if (launch_recommendation.batch_tokens.has_value()) {
+                    tuning.batch_tokens = *launch_recommendation.batch_tokens;
+                }
+            }
             const unsigned int parallel_slots =
                 configuration.session_reuse_enabled
                     ? configuration.session_reuse_max_slots
@@ -9950,6 +10080,305 @@ private:
             return runner_pool->metrics(active_runner_id);
         }
         return inference->metrics();
+    }
+
+    // Phase 29: does its own memory/scheduler admission, pool-runner
+    // selection, and generation, then releases/completes on every exit path
+    // -- independent of send_chat_message()'s own admission (which a routed/
+    // buffered chat's cascade below bypasses entirely for the actual
+    // generation, though that function's own admission still runs to keep
+    // its concurrency/memory accounting honest for the turn as a whole; see
+    // resolve_and_generate_routed()). Deliberately does not touch
+    // PromptSessionManager/KvCacheManager session-reuse state: a routed chat
+    // has no single stable model identity for prefix-reuse to key off, and
+    // the runner this generates against is never the one send_chat_message()
+    // itself tracks reuse slots for.
+    GenerationResult run_admitted_generation(
+        const std::string& model_id, const std::string& project_id,
+        const std::string& generation_prompt, const GenerationOptions& options,
+        const std::function<void(const std::string&)>& chunk_callback,
+        std::atomic_bool& cancellation) {
+        if (inference == nullptr) {
+            throw std::runtime_error("inference backend is not configured");
+        }
+        if (!find_model(model_id)) {
+            throw std::runtime_error("model \"" + model_id + "\" was not found");
+        }
+        const auto active_runner_id =
+            select_and_warm_pool_runner(model_id, project_id);
+        if (active_runner_id.empty()) {
+            ensure_model_loaded(model_id);
+        }
+        MemoryEstimate memory_estimate;
+        memory_estimate.runtime_buffer_bytes = 64ULL * 1024ULL * 1024ULL;
+        memory_estimate.kv_bytes_per_sequence = 128ULL * 1024ULL * 1024ULL;
+        memory_estimate.transient_bytes =
+            static_cast<std::uint64_t>(generation_prompt.size()) * 3U;
+        memory_estimate.safety_margin_bytes = 32ULL * 1024ULL * 1024ULL;
+        const auto admission =
+            memory->reserve(MemoryCategory::compute_buffers, memory_estimate, true);
+        if (!admission.admitted) {
+            throw std::runtime_error(admission.diagnostic);
+        }
+        const std::string memory_lease_id = admission.lease_id;
+        const auto scheduling = request_scheduler->admit(
+            SchedulingClass::interactive_chat,
+            memory_estimate.runtime_buffer_bytes +
+                memory_estimate.kv_bytes_per_sequence +
+                memory_estimate.transient_bytes +
+                memory_estimate.safety_margin_bytes);
+        if (!scheduling.admitted || !scheduling.ticket.has_value()) {
+            memory->release(memory_lease_id);
+            throw std::runtime_error("inference queue admission failed: " +
+                                     scheduling.reason);
+        }
+        const auto scheduler_ticket = *scheduling.ticket;
+        model_usage->increment_waiting(model_id);
+        bool scheduler_running = false;
+        try {
+            if (!request_scheduler->wait_until_ready(scheduler_ticket,
+                                                     cancellation)) {
+                throw std::runtime_error(
+                    "inference request was cancelled or expired while queued");
+            }
+            model_usage->decrement_waiting(model_id);
+            scheduler_running = true;
+            GenerationResult generated;
+            if (active_runner_id.empty()) {
+                generated = inference->generate(
+                    generation_prompt, options, chunk_callback, cancellation,
+                    configuration.runner_stall_timeout_seconds);
+            } else {
+                generated = runner_pool->generate(
+                    active_runner_id, generation_prompt, options,
+                    chunk_callback, cancellation,
+                    configuration.runner_stall_timeout_seconds);
+            }
+            memory->release(memory_lease_id);
+            request_scheduler->complete(scheduler_ticket);
+            model_usage->record_use(model_id, epoch_seconds());
+            return generated;
+        } catch (...) {
+            memory->release(memory_lease_id);
+            if (scheduler_running) {
+                request_scheduler->complete(scheduler_ticket);
+            } else {
+                model_usage->decrement_waiting(model_id);
+                request_scheduler->cancel(scheduler_ticket);
+            }
+            throw;
+        }
+    }
+
+    struct PreparedGeneration {
+        std::string generation_prompt;
+        GenerationOptions options;
+    };
+
+    // Phase 29: the same per-model prompt-template/reasoning-directive/
+    // sampling-preset/context-budget logic send_chat_message() applies for
+    // its own (non-routed) path, factored out so the tiering cascade below
+    // can apply it once per tier attempted -- a routed chat may generate
+    // against two different models' architectures in one turn (the initial
+    // tier, then an escalated one), each needing its own chat-template
+    // wrapping and context-window budget.
+    PreparedGeneration prepare_generation_for_model(
+        const std::string& model_id, const ChatRecord& chat,
+        const std::string& inference_prompt, const std::string& effort,
+        const std::string& thinking) const {
+        const auto model = find_model(model_id);
+        const bool reasoning_capable =
+            model.has_value() &&
+            architecture_supports_reasoning_directives(
+                model->manifest.architecture);
+        std::string turn_text = inference_prompt;
+        if (reasoning_capable) {
+            turn_text = apply_reasoning_directive(
+                model->manifest.architecture, effort, thinking, turn_text);
+        }
+        std::string stop_sequence;
+        PreparedGeneration prepared;
+        prepared.generation_prompt = assemble_chat_prompt(
+            model ? model->manifest.architecture : std::string(),
+            chat.messages, turn_text, stop_sequence);
+        prepared.options.max_tokens = configuration.chat_max_reply_tokens;
+        if (!reasoning_capable) {
+            apply_sampling_preset(prepared.options, effort, thinking);
+        }
+        if (!stop_sequence.empty()) {
+            prepared.options.stop_sequences.push_back(stop_sequence);
+        }
+        if (model && model->manifest.architecture == "gemma") {
+            prepared.options.stop_sequences.push_back("<|file_separator|>");
+            prepared.options.stop_sequences.push_back("<|fim_prefix|>");
+            prepared.options.stop_sequences.push_back("<|fim_suffix|>");
+            prepared.options.stop_sequences.push_back("<|fim_middle|>");
+            prepared.options.stop_sequences.push_back("<start_of_turn>");
+        }
+        try {
+            const auto prompt_token_count =
+                inference->tokenize(prepared.generation_prompt);
+            constexpr std::uint64_t kContextMarginTokens = 32U;
+            constexpr std::uint64_t kMinimumReplyTokens = 16U;
+            const std::uint64_t context_tokens = configuration.chat_context_length;
+            if (prompt_token_count + kContextMarginTokens + kMinimumReplyTokens >
+                context_tokens) {
+                throw std::runtime_error(
+                    "this message needs about " +
+                    std::to_string(prompt_token_count) +
+                    " prompt tokens but the model's context window is " +
+                    std::to_string(context_tokens) +
+                    " -- remove or shorten an attachment, start a new chat, "
+                    "or raise inference.chatContextLength in Settings");
+            }
+            const auto available = static_cast<unsigned int>(
+                context_tokens - prompt_token_count - kContextMarginTokens);
+            if (prepared.options.max_tokens > available) {
+                prepared.options.max_tokens = available;
+            }
+        } catch (const std::runtime_error&) {
+            throw;
+        } catch (const std::exception&) {
+            // A failed token count (runner still warming, transient HTTP
+            // error) falls back to the configured budget, matching
+            // send_chat_message()'s own identical fallback.
+        }
+        return prepared;
+    }
+
+    // Phase 29: result of routing a chat set to the "auto:tiered" sentinel
+    // model id. `routed` false means every other field is meaningless and
+    // the caller should run its own default (non-routed) model resolution
+    // completely unchanged -- true for every chat pinned to a real model id,
+    // and also true for an "auto:tiered" chat when no tier/signal match was
+    // found (routing never fails a request; it just declines to route one).
+    struct RoutedGenerationOutcome {
+        bool routed{false};
+        // true => caller should resolve model_id and stream live exactly
+        // like its own default path (the tier selected has nowhere higher
+        // to escalate to, so buffering would only add latency for nothing).
+        bool stream_live{false};
+        std::string model_id;
+        // Populated only when routed && !stream_live: the buffered cascade
+        // already ran to completion by the time this struct is returned.
+        GenerationResult generated;
+        std::string final_text;
+        ModelTier tier_served{ModelTier::medium_general};
+        bool escalated{false};
+        EscalationReason escalation_reason{EscalationReason::none};
+    };
+
+    // Phase 29: a genuine cascade -- start on the cheapest tier that can
+    // plausibly answer, confidence-check its (buffered, not yet streamed)
+    // answer, escalate once to the next tier on a real trigger -- cannot
+    // stream tokens live: by the time confidence is known, a live-streamed
+    // client would already have seen the small tier's possibly-bad partial
+    // answer. So any tier below the largest is generated here, fully,
+    // before send_chat_message() ever reserves resources or streams
+    // anything for this turn; the largest tier has nowhere to escalate to,
+    // so it is returned for the caller's own ordinary live-streaming path
+    // instead of being buffered for no benefit. Bounded to at most one
+    // escalation hop -- the plan does not require multi-hop cascades, and
+    // one hop keeps worst-case latency/cost bounded.
+    RoutedGenerationOutcome resolve_and_generate_routed(
+        const ChatRecord& chat, const std::string& inference_prompt,
+        const std::string& effort, const std::string& thinking,
+        bool retrieval_requested, bool retrieval_evidence_empty,
+        std::atomic_bool& cancellation) {
+        RoutedGenerationOutcome outcome;
+        if (chat.model_id != "auto:tiered" || !model_router ||
+            !configuration.model_routing_enabled) {
+            return outcome;
+        }
+        RoutingSignals signals;
+        signals.task_category = "general";
+        signals.requested_quality = "standard";
+        try {
+            signals.context_size_tokens = inference->tokenize(inference_prompt);
+        } catch (const std::exception&) {
+            // Left at its default (0) -- a failed tokenize here only means
+            // this one signal is less informed, not that routing fails.
+        }
+        const auto hardware = probe_hardware(configuration.runtime_root);
+        signals.available_ram_mib = hardware.available_ram_mib;
+        signals.available_vram_mib = hardware.gpu_memory_mib;
+        const auto assignment = model_router->select_initial_tier(signals);
+        if (!assignment) {
+            return outcome;
+        }
+        outcome.routed = true;
+        outcome.model_id = assignment->model_id;
+        if (assignment->tier == ModelTier::large_specialist) {
+            outcome.stream_live = true;
+            return outcome;
+        }
+        ModelTier tier = assignment->tier;
+        std::string model_id = assignment->model_id;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            const auto prepared = prepare_generation_for_model(
+                model_id, chat, inference_prompt, effort, thinking);
+            std::string buffered_text;
+            GenerationResult generated;
+            try {
+                generated = run_admitted_generation(
+                    model_id, chat.project_id, prepared.generation_prompt,
+                    prepared.options,
+                    [&buffered_text](const std::string& piece) {
+                        buffered_text += piece;
+                    },
+                    cancellation);
+            } catch (const std::exception&) {
+                if (attempt == 0) {
+                    // Tier 1 itself failed to generate at all (a real error,
+                    // not a quality problem) -- fall back to the chat's own
+                    // ordinary default model resolution rather than
+                    // silently answering with nothing.
+                    outcome = RoutedGenerationOutcome{};
+                    return outcome;
+                }
+                throw;
+            }
+            CascadeStageOutcome stage;
+            stage.tier = tier;
+            stage.model_id = model_id;
+            stage.succeeded = !generated.cancelled && !generated.text.empty();
+            // The only confidence proxy honestly available without a
+            // logprob/uncertainty channel the runner does not expose (see
+            // docs/PLAN.md Phase 29): a natural stop with real text is high
+            // confidence; running out of the reply budget without a natural
+            // stop is a real, cheap "this tier struggled" signal; nothing
+            // usable at all is zero.
+            if (generated.cancelled || generated.text.empty()) {
+                stage.confidence = 0.0;
+            } else if (generated.generated_tokens >= prepared.options.max_tokens) {
+                stage.confidence = 0.4;
+            } else {
+                stage.confidence = 1.0;
+            }
+            stage.retrieval_conflict =
+                retrieval_requested && retrieval_evidence_empty;
+            stage.security_sensitive = false;
+            const auto decision = ModelRouter::evaluate_cascade(stage);
+            if (attempt == 0 && decision.escalate &&
+                decision.next_tier.has_value()) {
+                const auto next_it = configuration.model_tier_assignments.find(
+                    to_string(*decision.next_tier));
+                if (next_it != configuration.model_tier_assignments.end() &&
+                    !next_it->second.empty()) {
+                    tier = *decision.next_tier;
+                    model_id = next_it->second.front();
+                    continue;
+                }
+            }
+            outcome.model_id = model_id;
+            outcome.generated = generated;
+            outcome.final_text = buffered_text;
+            outcome.tier_served = tier;
+            outcome.escalated = attempt > 0;
+            outcome.escalation_reason = decision.reason;
+            return outcome;
+        }
+        return outcome;
     }
 
     // Instruction-tuned models expect their own turn-delimiting markup
@@ -10168,6 +10597,25 @@ private:
             }
         }
         return state;
+    }
+
+    // Wire-format string for AllowedCommandRecord::os on the allow-list
+    // admin routes -- kept distinct from AllowedCommandStore's own
+    // single-character persistence tag (tool_exec.cpp) so the HTTP JSON
+    // shape and the on-disk record shape can evolve independently.
+    static std::string command_os_to_string(CommandOs os) {
+        switch (os) {
+            case CommandOs::windows: return "windows";
+            case CommandOs::linux: return "linux";
+            case CommandOs::both: default: return "both";
+        }
+    }
+
+    static CommandOs command_os_from_string(const std::string& text) {
+        if (text == "windows") return CommandOs::windows;
+        if (text == "linux") return CommandOs::linux;
+        if (text == "both") return CommandOs::both;
+        throw std::runtime_error("invalid os");
     }
 
     // Matches the random_id() pattern every other durable-record unit in
@@ -11465,6 +11913,13 @@ private:
         // runner_pool is configured AND select_and_warm_pool_runner()
         // actually found and warmed a suitable pool runner below.
         std::string active_runner_id;
+        // Phase 29: declared here (rather than inside the try block below,
+        // where it is actually resolved) so the catch handler's own
+        // decrement_waiting() -- which must match whatever model_id the try
+        // block's increment_waiting() used -- can see it too. Defaults to
+        // the chat's own model_id; resolve_and_generate_routed() below
+        // overwrites it only for a chat set to the "auto:tiered" sentinel.
+        std::string effective_model_id = chat->model_id;
         bool model_waiting_recorded = false;
         // Phase 78: set the moment this request is actually admitted into
         // the scheduler (see scheduler_ticket assignment below); used only
@@ -11517,14 +11972,22 @@ private:
             // (unchanged from every pre-Phase-33 build) whenever no pool is
             // configured, no runner qualifies, or the selected runner fails
             // to load the model.
-            active_runner_id =
-                select_and_warm_pool_runner(chat->model_id, chat->project_id);
-            if (active_runner_id.empty()) {
-                ensure_model_loaded(chat->model_id);
+            // Phase 29: the "auto:tiered" sentinel is not a real model id --
+            // find_model() would return nothing for it and ensure_model_
+            // loaded() would throw "selected chat model was not found", so
+            // this pre-warm (a perf optimization only, not required for
+            // correctness) is skipped entirely until routing has resolved a
+            // real model id below.
+            if (chat->model_id != "auto:tiered") {
+                active_runner_id =
+                    select_and_warm_pool_runner(chat->model_id, chat->project_id);
+                if (active_runner_id.empty()) {
+                    ensure_model_loaded(chat->model_id);
+                }
+                queries.record_runner(query_id, active_runner_id.empty()
+                                                     ? std::string("inference")
+                                                     : active_runner_id);
             }
-            queries.record_runner(query_id, active_runner_id.empty()
-                                                 ? std::string("inference")
-                                                 : active_runner_id);
             queries.transition(query_id, QueryStage::normalization,
                                QueryStatus::accepted);
             queries.transition(query_id, QueryStage::classification,
@@ -11578,8 +12041,15 @@ private:
                         "assembled chat context exceeds policy");
                 }
             }
+            // Phase 29: a real, already-computed signal for the tiering
+            // cascade's confidence heuristic below -- true only when
+            // retrieval actually ran for this turn and came back with
+            // nothing, not merely when retrieval is disabled/inapplicable.
+            bool retrieval_requested_this_turn = false;
+            bool retrieval_evidence_empty_this_turn = true;
             if (configuration.retrieval_enabled && !chat->project_id.empty()) {
                 if (const auto project = projects->find(chat->project_id)) {
+                    retrieval_requested_this_turn = true;
                     // Phase 17: a repeated question against an unchanged
                     // index generation and policy state is served from
                     // CacheManager instead of rerunning RetrievalPlanner --
@@ -11590,6 +12060,8 @@ private:
                     bool cache_hit = false;
                     const auto retrieved = retrieve_with_cache(
                         *project, user, inference_prompt, cache_hit);
+                    retrieval_evidence_empty_this_turn =
+                        retrieved.context_text.empty();
                     inference_prompt += retrieved.context_text;
                     if (inference_prompt.size() > configuration.max_request_bytes) {
                         throw std::runtime_error(
@@ -11637,13 +12109,48 @@ private:
                                QueryStatus::retrieving);
             queries.transition(query_id, QueryStage::prompt_assembly,
                                QueryStatus::retrieving);
+            // Phase 29: a chat set to the "auto:tiered" sentinel model id
+            // (see the chat model picker's "Auto (Tiered)" entry) is routed
+            // and, for any tier below the largest, fully generated here
+            // (buffered, non-streaming, confidence-checked, escalated once
+            // if needed) before the rest of this function ever assembles a
+            // prompt or reserves resources for a live generate() call -- see
+            // resolve_and_generate_routed()'s own class comment for why a
+            // genuine cascade cannot stream tokens live. Every other chat
+            // (a real, explicitly-picked model_id) leaves routed_outcome.
+            // routed false and effective_model_id identical to chat->
+            // model_id, so the remainder of this function runs completely
+            // unchanged from every pre-Phase-29 build.
+            const auto routed_outcome = resolve_and_generate_routed(
+                *chat, inference_prompt, effort, thinking,
+                retrieval_requested_this_turn, retrieval_evidence_empty_this_turn,
+                cancellation);
+            if (routed_outcome.routed) effective_model_id = routed_outcome.model_id;
+            // A routed chat's early pre-warm was skipped above (the sentinel
+            // isn't a real model id) -- warm the tier that actually won here
+            // instead, exactly like the skipped pre-warm would have for a
+            // normal chat. Only needed for the live-streaming top-tier case;
+            // the buffered-cascade case already warmed/loaded its own runner
+            // (possibly twice, across an escalation) inside
+            // resolve_and_generate_routed()/run_admitted_generation().
+            if (routed_outcome.routed && routed_outcome.stream_live &&
+                active_runner_id.empty()) {
+                active_runner_id = select_and_warm_pool_runner(
+                    effective_model_id, chat->project_id);
+                if (active_runner_id.empty()) {
+                    ensure_model_loaded(effective_model_id);
+                }
+                queries.record_runner(query_id, active_runner_id.empty()
+                                                     ? std::string("inference")
+                                                     : active_runner_id);
+            }
             // The chat record was looked up before this turn's user message
             // was appended below, so chat->messages here is exactly the
             // prior history -- wrapping it plus this turn's content in the
             // model's own instruction format is what keeps an instruct model
             // (see chat_template_for_architecture()) from free-completing an
             // unrelated document instead of answering.
-            const auto model = find_model(chat->model_id);
+            const auto model = find_model(effective_model_id);
             // Effort/thinking (see the composer's model settings panel):
             // a reasoning-capable architecture gets a real directive folded
             // into this turn's own text before the chat template wraps it;
@@ -11735,7 +12242,17 @@ private:
             // generation (further down) records against the same key
             // instead of the private per-chat try_reuse()/record() pair.
             std::optional<SharedTemplateKey> shared_template_key;
-            if (configuration.session_reuse_enabled) {
+            // Phase 29: a routed/buffered turn's real generation already
+            // happened inside resolve_and_generate_routed() above, against
+            // whichever tier's runner the cascade actually warmed -- that
+            // runner never participates in this function's own session-slot
+            // bookkeeping, so trying to record a reuse decision here would
+            // claim a KV slot was filled that this codepath's own runner
+            // never touched. A chat auto-routed across tiers also has no
+            // single stable model identity for try_reuse()'s prefix-match to
+            // key off in the first place.
+            if (configuration.session_reuse_enabled &&
+                !(routed_outcome.routed && !routed_outcome.stream_live)) {
                 if (model) fingerprint.model_sha256 = model->manifest.model_sha256;
                 fingerprint.backend_executable =
                     configuration.llama_server_executable.string();
@@ -11857,7 +12374,7 @@ private:
             // request actually enters the queue.
             ml_inference_metrics.begin_request();
             request_started = std::chrono::steady_clock::now();
-            model_usage->increment_waiting(chat->model_id);
+            model_usage->increment_waiting(effective_model_id);
             model_waiting_recorded = true;
             const bool streaming = stream_socket != invalid_socket;
             if (streaming) {
@@ -11889,7 +12406,7 @@ private:
                 throw std::runtime_error(
                     "inference request was cancelled or expired while queued");
             }
-            model_usage->decrement_waiting(chat->model_id);
+            model_usage->decrement_waiting(effective_model_id);
             model_waiting_recorded = false;
             scheduler_running = true;
             // Phase 33 (LOCAL-ONLY slice): observe whichever runner is
@@ -11998,7 +12515,7 @@ private:
                     return std::nullopt;
                 }
                 RunnerSelectionSignals signals;
-                signals.model_id = chat->model_id;
+                signals.model_id = effective_model_id;
                 signals.required_capability = "generation";
                 const auto worker_id = intranet_worker_pool->select_worker(signals);
                 if (!worker_id.has_value()) return std::nullopt;
@@ -12013,7 +12530,17 @@ private:
                     return std::nullopt;
                 }
             };
-            if (active_runner_id.empty()) {
+            if (routed_outcome.routed && !routed_outcome.stream_live) {
+                // Phase 29: the buffered cascade already generated (and
+                // confidence-checked, escalating once if needed) the real
+                // answer above, against its own runner selection -- this
+                // request's admission/scheduler slot just above still models
+                // the turn like any other (so concurrency/memory accounting
+                // stays honest), but no further generation happens here.
+                // on_chunk() just below is what actually streams the
+                // already-computed text to the client.
+                generated = routed_outcome.generated;
+            } else if (active_runner_id.empty()) {
                 try {
                     generated = inference->generate(
                         generation_prompt, options, on_chunk, cancellation,
@@ -12048,7 +12575,7 @@ private:
                             failure.any_bytes_emitted)) {
                         generated = std::move(*remote);
                     } else {
-                        ensure_model_loaded(chat->model_id);
+                        ensure_model_loaded(effective_model_id);
                         generated = inference->generate(
                             generation_prompt, options, on_chunk, cancellation,
                             configuration.runner_stall_timeout_seconds);
@@ -12061,6 +12588,19 @@ private:
                     }
                 }
             }
+            if (routed_outcome.routed && !routed_outcome.stream_live) {
+                // Phase 29 disclosure: which tier/model actually answered,
+                // and whether the cascade escalated -- reuses record_runner's
+                // existing free-text slot rather than a new QueryTraceStore
+                // schema addition, exactly like the "intranet-worker:<id>"
+                // and "inference" identities already recorded above for
+                // other fallback paths.
+                queries.record_runner(
+                    query_id,
+                    "tier:" + to_string(routed_outcome.tier_served) +
+                        (routed_outcome.escalated ? ":escalated" : ""));
+                on_chunk(routed_outcome.final_text);
+            }
             if (first_token) {
                 queries.transition(query_id, QueryStage::generation,
                                    QueryStatus::generating);
@@ -12070,7 +12610,13 @@ private:
             queries.observe_resources(
                 query_id,
                 active_runner_metrics(active_runner_id).resident_memory_bytes);
-            if (configuration.session_reuse_enabled) {
+            // See the matching guard on the decision block above -- a
+            // routed/buffered turn's real generation ran against a runner
+            // this function's own session-slot bookkeeping never touched,
+            // so recording a slot here would describe a runner state that
+            // does not exist.
+            if (configuration.session_reuse_enabled &&
+                !(routed_outcome.routed && !routed_outcome.stream_live)) {
                 // A cancelled turn leaves the runner's KV state for that
                 // slot describing an incomplete reply -- never record it as
                 // reusable. A completed turn becomes the new prefix the
@@ -12224,7 +12770,7 @@ private:
             memory_lease_id.clear();
             request_scheduler->complete(*scheduler_ticket);
             scheduler_running = false;
-            model_usage->record_use(chat->model_id, epoch_seconds());
+            model_usage->record_use(effective_model_id, epoch_seconds());
             ml_inference_metrics.end_request(generated.elapsed_microseconds);
             audit.append("chat.generate", user.id, "success", chat_id);
             // "none" for an ordinary turn or one auto-drive mode's model
@@ -12406,7 +12952,7 @@ private:
                 memory->release(memory_lease_id);
             }
             if (model_waiting_recorded) {
-                model_usage->decrement_waiting(chat->model_id);
+                model_usage->decrement_waiting(effective_model_id);
                 model_waiting_recorded = false;
             }
             if (scheduler_ticket.has_value()) {
@@ -13026,7 +13572,21 @@ bool HttpServer::run(std::atomic_bool& stop_requested) {
             // configuration opt-in are required; recommend_thread_placement
             // itself still no-ops on any single-NUMA-node host, so this is
             // a true no-op on the overwhelming majority of hosts.
-            if (configuration_.numa_local_placement_enabled &&
+            // Phase 34 (full completion pass): AdaptiveController may have
+            // recommended giving up cross-node pinning under battery power
+            // (see its own evaluate() comment) -- an explicit `false`
+            // override wins over the administrator's own steady-state
+            // setting for this connection; unset (the common case) leaves
+            // the administrator's own configuration_ value untouched.
+            const auto numa_recommendation =
+                state_->adaptive_controller != nullptr
+                    ? state_->adaptive_controller->launch_recommendation()
+                          .numa_local_placement
+                    : std::nullopt;
+            const bool numa_placement_enabled =
+                numa_recommendation.value_or(
+                    configuration_.numa_local_placement_enabled);
+            if (numa_placement_enabled &&
                 state_->advanced_optimizations != nullptr &&
                 state_->advanced_optimizations->is_enabled("numa_affinity")) {
                 TopologyAffinityPolicy policy;

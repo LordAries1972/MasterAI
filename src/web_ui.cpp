@@ -6,6 +6,7 @@
 #include "server_internal.hpp"
 #include "model_catalog.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <ctime>
@@ -201,8 +202,25 @@ std::string js_single_quoted_escape(const std::string& value) {
 // literal (different whitespace/ordering of object keys is immaterial to a
 // JS object literal).
 std::string model_catalog_presets_js() {
+    // Sorted the same way (displayName ascending, case-insensitive) as the
+    // /api/v1/model-catalog REST route (workload_http.cpp) serving the same
+    // underlying data, so the download page's own preset list and the API
+    // response for it present models in the same order.
+    auto entries = model_catalog();
+    std::sort(entries.begin(), entries.end(),
+              [](const ModelCatalogEntry& left, const ModelCatalogEntry& right) {
+                  const auto lower = [](const std::string& value) {
+                      std::string result = value;
+                      std::transform(result.begin(), result.end(), result.begin(),
+                                      [](const unsigned char ch) {
+                                          return static_cast<char>(std::tolower(ch));
+                                      });
+                      return result;
+                  };
+                  return lower(left.display_name) < lower(right.display_name);
+              });
     std::string js{"const PRESETS=["};
-    for (const auto& entry : model_catalog()) {
+    for (const auto& entry : entries) {
         js += "{id:'" + js_single_quoted_escape(entry.id) +
               "',tier:'" + js_single_quoted_escape(entry.tier) +
               "',label:'" + js_single_quoted_escape(entry.label) +
@@ -618,9 +636,22 @@ std::string application_script() {
         // diagnostic flags it) so the user can judge it themselves.
         "MODEL_ARCHS=Object.fromEntries(m.models.map(x=>[x.id,x.architecture||'']));"
         "const ready=m.models.filter(x=>x.state==='ready');"
-        "fill('#chatModel',ready,x=>x.id,"
-        "x=>(x.diagnostic&&x.diagnostic.startsWith('Warning:')?'\\u26a0\\ufe0f ':'')+"
-        "x.displayName+' ('+Math.round(x.recommendedRamMiB/1024)+'GB)');"
+        // Phase 29: a synthetic, non-model picker entry -- present only when
+        // the administrator has both turned tiered routing on and assigned
+        // at least one model to a tier (see WorkloadHttpController::
+        // model_inventory()'s tieredRoutingAvailable). Chosen exactly like a
+        // real model id; send_chat_message() recognizes this one sentinel
+        // string and routes instead of loading a model literally named this.
+        "const pickerEntries=m.tieredRoutingAvailable?"
+        "[{id:'auto:tiered',displayName:'Auto (Tiered "
+        "\\u2014 routes to the fastest model that can answer well)',"
+        "diagnostic:'',quantization:'',recommendedRamMiB:null},"
+        "...ready]:ready;"
+        "fill('#chatModel',pickerEntries,x=>x.id,"
+        "x=>x.id==='auto:tiered'?x.displayName:"
+        "(x.diagnostic&&x.diagnostic.startsWith('Warning:')?'\\u26a0\\ufe0f ':'')+"
+        "quantTag(x.quantization)+x.displayName+"
+        "' ('+Math.round(x.recommendedRamMiB/1024)+'GB)');"
         "renderChatList(c.chats);renderMemories(mem.memories);"
         // Landing directly on a chat's own URL (/app/chat/<id>) preloads its
         // id into this hidden field server-side; load its history now that
@@ -1178,7 +1209,14 @@ std::string application_script() {
         "1.5 1.5 0 0 1-3 0V5A1.5 1.5 0 0 1 11 3.5z\"/></svg>',"
         "stop:'<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" "
         "fill=\"currentColor\"><path d=\"M3.5 3.5A1 1 0 0 1 4.5 2.5h7a1 1 "
-        "0 0 1 1 1v7a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7z\"/></svg>'};"
+        "0 0 1 1 1v7a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7z\"/></svg>',"
+        "pencil:'<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" "
+        "fill=\"currentColor\"><path d=\"M12.146.146a.5.5 0 0 1 .708 0l3 "
+        "3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-"
+        ".65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 "
+        "14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h."
+        "5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z\"/></svg>'"
+        "};"
         // Renders a single icon-only action button. `label` is both the
         // tooltip and the accessible name since the button carries no
         // visible text -- callers group several of these in a
@@ -1265,8 +1303,8 @@ std::string application_script() {
         "el.innerHTML=table(['Project','ID'],projects.map(x=>"
         "[esc(x.displayName),esc(x.id)]));}"
         "function renderModels(models){const el=q('#modelsList');if(!el)return;"
-        "el.innerHTML=table(['Model','Category','Status','Recommended RAM','Notes'],"
-        "models.map(x=>[esc(x.displayName),esc(x.category),"
+        "el.innerHTML=table(['Model','Category','Quantization','Status','Recommended RAM','Notes'],"
+        "models.map(x=>[esc(x.displayName),esc(x.category),esc(x.quantization||'-'),"
         "'<span class=\"stateTag stateTag-'+esc(x.state)+'\">'+esc(x.state)+'</span>',"
         "x.recommendedRamMiB?Math.round(x.recommendedRamMiB/1024)+' GB':'-',"
         "esc(x.diagnostic)]));}"
@@ -1324,6 +1362,8 @@ std::string application_script() {
         "form.querySelectorAll('[data-path]').forEach(input=>{"
         "const value=cfgGet(cfg,input.dataset.path);if(value===undefined)return;"
         "if(input.dataset.type==='bool')input.checked=!!value;"
+        "else if(input.dataset.type==='json')"
+        "input.value=JSON.stringify(value,null,2);"
         "else input.value=value;});}"
         "async function submitSystemConfig(e){e.preventDefault();"
         "const status=q('#systemConfigStatus');status.textContent='Saving...';"
@@ -1332,7 +1372,8 @@ std::string application_script() {
         "const updated=JSON.parse(JSON.stringify(systemConfigDocument));"
         "q('#systemConfigForm').querySelectorAll('[data-path]').forEach("
         "input=>{const value=input.dataset.type==='bool'?input.checked:"
-        "(input.type==='number'?Number(input.value):input.value);"
+        "(input.dataset.type==='json'?JSON.parse(input.value||'{}'):"
+        "(input.type==='number'?Number(input.value):input.value));"
         "cfgSet(updated,input.dataset.path,value);});"
         "const result=await api('/api/v1/admin/config','POST',updated);"
         "systemConfigDocument=result.configuration;"
@@ -3049,6 +3090,13 @@ std::string application_script() {
         "function fill(sel,items,key,label){const e=q(sel);if(!e)return;e.replaceChildren();"
         "for(const x of items){const o=document.createElement('option');o.value=key(x);"
         "o.textContent=label(x);e.append(o);}}"
+        // Reduces a manifest's free-text quantization string (e.g. 'Q4_K_M',
+        // 'Q5_K_S', 'Q8_0', 'F16') down to a short bracketed tag ('[Q4]',
+        // '[Q5]', '[Q8]', '[F16]') for display next to a model's name.
+        // Falls back to the whole string bracketed, or '' if none is set.
+        "function quantTag(q){if(!q)return '';"
+        "const m=/^[Qq](\\d+)/.exec(q);if(m)return '[Q'+m[1]+'] ';"
+        "return '['+q+'] ';}"
         "async function submit(e,path,body){e.preventDefault();const s=q('#actionStatus');"
         "try{const r=await api(path,'POST',body());s.textContent='Completed: '+JSON.stringify(r);"
         "await load();}catch(x){showSystemError('Action failed: '+x.message);}}"
@@ -3118,16 +3166,45 @@ std::string application_script() {
         "if(assistantEl.dataset.raw)return;"
         "bodyEl.innerHTML='<span class=\"chatThinking\">"
         "<span class=\"chatThinkingSpinner\"></span>'+text+'</span>';}"
-        // Tool-call/result cards reuse appendModelCard's plain-notice style;
-        // the approval card is richer (reason, arguments, Approve/Deny).
-        "function appendToolCard(box,text){if(!box)return null;"
+        // Tool-call/result cards reuse appendModelCard's plain-notice style
+        // for the title line, but a tool_result with real output (e.g.
+        // run_command's stdout) gets that output rendered into its own
+        // scrollable <pre> block underneath -- reusing the same code-block
+        // styling/copy button as a markdown code fence -- rather than being
+        // squashed into the one-line, 200-char-truncated title text. The
+        // approval card is richer still (reason, arguments, Approve/Deny).
+        "function appendToolCard(box,title,body){if(!box)return null;"
         "const card=document.createElement('div');"
-        "card.className='chatMsg chatMsg-modelChange';card.textContent=text;"
+        "card.className='chatMsg chatMsg-toolResult';"
+        "const titleEl=document.createElement('div');"
+        "titleEl.className='chatMsg-toolResultTitle';titleEl.textContent=title;"
+        "card.append(titleEl);"
+        "if(body){const pre=document.createElement('pre');"
+        "const codeEl=document.createElement('code');codeEl.textContent=body;"
+        "pre.append(codeEl);card.append(pre);addCodeCopyButtons(card);}"
         "box.append(card);box.scrollTop=box.scrollHeight;return card;}"
         "function summarizeToolArguments(args){try{"
         "const text=JSON.stringify(args);"
         "return text&&text.length>200?text.slice(0,200)+'...':text;}"
         "catch(e){return '';}}"
+        // Tool results vary in shape by tool (run_command's {exitCode,output},
+        // read_file's plain text, an {error:...} failure, ...) -- this picks
+        // out whichever field actually holds human-readable output instead
+        // of always falling back to a truncated JSON.stringify blob, and
+        // gives it a much larger cap since the <pre> block scrolls instead
+        // of clipping.
+        "function formatToolResultBody(result){try{"
+        "if(result==null)return '';"
+        "if(typeof result==='string')return result;"
+        "if(typeof result==='object'){"
+        "if(typeof result.output==='string'){"
+        "const prefix='exitCode' in result?'exit '+result.exitCode+'\\n':'';"
+        "return prefix+result.output;}"
+        "if(typeof result.error==='string')return result.error;"
+        "if(typeof result.content==='string')return result.content;}"
+        "const text=JSON.stringify(result,null,2);"
+        "return text&&text.length>8000?text.slice(0,8000)+'\\n...(truncated)':"
+        "(text||'');}catch(e){return '';}}"
         "function appendApprovalCard(box,chatId,event){"
         "const card=document.createElement('div');"
         "card.className='chatMsg chatMsg-assistant chatMsg-error';"
@@ -3195,8 +3272,8 @@ std::string application_script() {
         "summarizeToolArguments(event.arguments));}"
         "if(event.type==='tool_result'){"
         "const outcome=event.succeeded?'Tool result':'Tool failed';"
-        "appendToolCard(box,outcome+' ('+event.tool+'): '+"
-        "summarizeToolArguments(event.result));}"
+        "appendToolCard(box,outcome+' ('+event.tool+')',"
+        "formatToolResultBody(event.result));}"
         "if(event.type==='tool_approval_required'){"
         "appendApprovalCard(box,chatId,event);}"
         "if(event.type==='complete'){completeEvent=event;"
@@ -3573,52 +3650,114 @@ std::string application_script() {
         // Phase 84 follow-up: renders the run_command admin allow-list --
         // see the /app/settings/allowed-commands page comment for why this
         // page had to exist. Each row shows exactly what the model is
-        // permitted to invoke (executable, description, default risk, any
-        // project restriction) with a Revoke button, so approving something
-        // is never a silent, unreviewable action.
+        // permitted to invoke (executable, description, OS, default risk,
+        // any project restriction) with Edit/Revoke buttons, so approving
+        // something is never a silent, unreviewable action.
+        // allowedCommandsCache holds the last fetched list so the OS filter
+        // can re-render instantly without a round trip, and
+        // allowedCommandEditingId is non-null while the form below is
+        // editing an existing row rather than creating a new one.
+        "let allowedCommandsCache=[];let allowedCommandEditingId=null;"
+        "function osLabel(os){return os==='windows'?'Windows':"
+        "os==='linux'?'Linux':'Windows & Linux';}"
         "function renderAllowedCommands(commands){"
+        "allowedCommandsCache=commands;"
         "const list=q('#allowedCommandsList');if(!list)return;"
-        "list.replaceChildren();if(!commands.length){"
+        "const filter=q('#allowedCommandOsFilter');"
+        "const filterValue=filter?filter.value:'all';"
+        "const filtered=filterValue==='all'?commands:"
+        "commands.filter(cmd=>cmd.os===filterValue);"
+        "list.replaceChildren();if(!filtered.length){"
         "const empty=document.createElement('div');"
-        "empty.textContent='No executables are approved -- run_command will "
-        "refuse every call until one is added above.';list.append(empty);return;}"
-        "for(const cmd of commands){const row=document.createElement('div');"
-        "row.className='allowedCommandItem';"
+        "empty.textContent=commands.length?"
+        "'No approved executables match this OS filter.':"
+        "'No executables are approved -- run_command will refuse every call "
+        "until one is added above.';list.append(empty);return;}"
+        "for(const cmd of filtered){const row=document.createElement('div');"
+        "row.className='allowedCommandItem'+"
+        "(cmd.enabled?'':' allowedCommandItem-disabled');"
         "const info=document.createElement('span');"
         "info.textContent=cmd.executable+"
         "(cmd.description?' -- '+cmd.description:'')+"
-        "' ['+cmd.riskDefault+']'+"
+        "' ['+osLabel(cmd.os)+', '+cmd.riskDefault+']'+"
         "(cmd.allowedProjectIds.length?"
         "' (projects: '+cmd.allowedProjectIds.join(', ')+')':"
         "' (all projects)')+"
         "(cmd.enabled?'':' (disabled)');"
         "row.append(info);"
+        // Icon-only row buttons (ICONS/.iconBtn -- the same small
+        // square-glyph convention every other row toolbar on this page
+        // uses) instead of full-width text buttons, so a long executable
+        // list stays compact.
+        "const actions=document.createElement('span');"
+        "actions.className='allowedCommandActions';"
+        "const edit=document.createElement('button');edit.type='button';"
+        "edit.className='iconBtn';edit.title='Edit';"
+        "edit.setAttribute('aria-label','Edit');"
+        "edit.innerHTML=ICONS.pencil;"
+        "edit.addEventListener('click',()=>beginEditAllowedCommand(cmd));"
+        "actions.append(edit);"
         "const del=document.createElement('button');del.type='button';"
-        "del.textContent='Revoke';"
+        "del.className='iconBtn iconBtn-delete';del.title='Revoke';"
+        "del.setAttribute('aria-label','Revoke');"
+        "del.innerHTML=ICONS.trash;"
         "del.addEventListener('click',async()=>{"
         "try{await api('/api/v1/chat-tools/allowed-commands/remove','POST',"
-        "{id:cmd.id});await refreshAllowedCommands();}"
+        "{id:cmd.id});if(allowedCommandEditingId===cmd.id)"
+        "cancelEditAllowedCommand();await refreshAllowedCommands();}"
         "catch(x){showSystemError('Could not revoke command: '+x.message);}});"
-        "row.append(del);list.append(row);}}"
+        "actions.append(del);row.append(actions);list.append(row);}}"
         "async function refreshAllowedCommands(){"
         "if(!q('#allowedCommandsList'))return;"
         "try{const data=await api('/api/v1/chat-tools/allowed-commands');"
         "renderAllowedCommands(data.commands||[]);}"
         "catch(x){showSystemError('Could not load the allow-list: '+x.message);}}"
+        // Populates the form from an existing record and flips it into edit
+        // mode; addAllowedCommand() below checks allowedCommandEditingId to
+        // decide whether to PUT-style update this id or POST a new record.
+        "function beginEditAllowedCommand(cmd){"
+        "allowedCommandEditingId=cmd.id;"
+        "q('#allowedCommandExecutable').value=cmd.executable;"
+        "q('#allowedCommandDescription').value=cmd.description||'';"
+        "q('#allowedCommandRisk').value=cmd.riskDefault;"
+        "q('#allowedCommandOs').value=cmd.os;"
+        "q('#allowedCommandProjects').value=cmd.allowedProjectIds.join(', ');"
+        "q('#allowedCommandEnabled').checked=cmd.enabled;"
+        "q('#allowedCommandFormTitle').textContent='Edit '+cmd.executable;"
+        "q('#allowedCommandSubmit').textContent='Save changes';"
+        "q('#allowedCommandCancelEdit').hidden=false;"
+        "const status=q('#allowedCommandStatus');if(status)status.textContent='';"
+        "q('#allowedCommandExecutable').focus();}"
+        // Resets the form to add-mode without touching #allowedCommandStatus,
+        // since addAllowedCommand() below calls this right after setting a
+        // success message that must survive the reset.
+        "function cancelEditAllowedCommand(){"
+        "allowedCommandEditingId=null;q('#newAllowedCommand').reset();"
+        "q('#allowedCommandFormTitle').textContent='Approve a new command';"
+        "q('#allowedCommandSubmit').textContent='Approve command';"
+        "q('#allowedCommandCancelEdit').hidden=true;}"
         "async function addAllowedCommand(e){e.preventDefault();"
         "const status=q('#allowedCommandStatus');"
         "const executable=q('#allowedCommandExecutable').value.trim();"
         "if(!executable)return;"
         "const allowedProjectIds=q('#allowedCommandProjects').value.split(',')"
         ".map(s=>s.trim()).filter(Boolean);"
-        "try{await api('/api/v1/chat-tools/allowed-commands','POST',"
-        "{executable,description:q('#allowedCommandDescription').value.trim(),"
-        "riskDefault:q('#allowedCommandRisk').value,allowedProjectIds});"
-        "q('#newAllowedCommand').reset();"
-        "if(status)status.textContent='Approved '+executable+'.';"
+        "const payload={executable,"
+        "description:q('#allowedCommandDescription').value.trim(),"
+        "riskDefault:q('#allowedCommandRisk').value,"
+        "os:q('#allowedCommandOs').value,allowedProjectIds,"
+        "enabled:q('#allowedCommandEnabled').checked};"
+        "const editingId=allowedCommandEditingId;"
+        "try{if(editingId){payload.id=editingId;"
+        "await api('/api/v1/chat-tools/allowed-commands/update','POST',payload);"
+        "if(status)status.textContent='Saved '+executable+'.';}"
+        "else{await api('/api/v1/chat-tools/allowed-commands','POST',payload);"
+        "if(status)status.textContent='Approved '+executable+'.';}"
+        "cancelEditAllowedCommand();"
         "await refreshAllowedCommands();}"
         "catch(x){if(status)status.textContent='';"
-        "showSystemError('Could not approve command: '+x.message);}}"
+        "showSystemError((editingId?'Could not save command: ':"
+        "'Could not approve command: ')+x.message);}}"
         "function toggleSourceFields(){const type=q('#downloadSourceType').value;"
         "q('#hfFields').hidden=type!=='huggingface';"
         "q('#githubFields').hidden=type!=='github';"
@@ -3761,6 +3900,11 @@ std::string application_script() {
         "if(q('#newUser'))q('#newUser').addEventListener('submit',createUser);"
         "if(q('#newAllowedCommand')){"
         "q('#newAllowedCommand').addEventListener('submit',addAllowedCommand);"
+        "q('#allowedCommandCancelEdit').addEventListener('click',()=>{"
+        "cancelEditAllowedCommand();"
+        "const status=q('#allowedCommandStatus');if(status)status.textContent='';});"
+        "q('#allowedCommandOsFilter').addEventListener('change',"
+        "()=>renderAllowedCommands(allowedCommandsCache));"
         "refreshAllowedCommands();}"
         "if(q('#systemConfigForm'))q('#systemConfigForm').addEventListener("
         "'submit',submitSystemConfig);"
@@ -6226,6 +6370,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // pause for a separate per-call Approve/Deny click regardless of
         // what's approved here (see classify_tool_call_risk()); this only
         // controls which executables are reachable at all.
+        // The Windows/Linux/cross-platform command catalog itself is seeded
+        // server-side (AllowedCommandStore::ensure_default_catalog(),
+        // tool_exec.cpp) enabled by default -- this form only needs to
+        // cover add and edit for a single record, plus an OS filter since
+        // the seeded catalog makes the list long.
         body =
             "<section id=\"panel-settings-allowed-commands\" class=\"panel\">"
             "<div><h2>Run-command tool allow-list</h2>"
@@ -6234,8 +6383,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "matter what it asks for. A destructive command (delete, "
             "format, a forced git reset, ...) still always pauses for your "
             "explicit Approve/Deny before it runs, even if its executable "
-            "is approved below.</p>"
+            "is approved below. A built-in catalog of common Windows and "
+            "Linux commands is pre-loaded below and enabled by default -- "
+            "use Edit to disable anything you don't want the model to be "
+            "able to run.</p>"
             "<form id=\"newAllowedCommand\">"
+            "<h3 id=\"allowedCommandFormTitle\">Approve a new command</h3>"
             "<label>Executable &mdash; full path or name resolved on PATH, "
             "matched exactly (no wildcards)"
             "<input id=\"allowedCommandExecutable\" type=\"text\" "
@@ -6243,6 +6396,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Description"
             "<input id=\"allowedCommandDescription\" type=\"text\" "
             "maxlength=\"256\"></label>"
+            "<label>Operating system"
+            "<select id=\"allowedCommandOs\">"
+            "<option value=\"both\">Windows &amp; Linux</option>"
+            "<option value=\"windows\">Windows</option>"
+            "<option value=\"linux\">Linux</option>"
+            "</select></label>"
             "<label>Default risk"
             "<select id=\"allowedCommandRisk\">"
             "<option value=\"safe\">safe (runs immediately unless a "
@@ -6254,9 +6413,24 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "leave empty to allow every project)"
             "<input id=\"allowedCommandProjects\" type=\"text\" "
             "maxlength=\"4096\"></label>"
-            "<button title=\"Approve command\">" ICON_SAVE_SVG " Approve command</button>"
+            "<label class=\"checkboxLabel\"><input id=\"allowedCommandEnabled\" "
+            "type=\"checkbox\" checked> Enabled -- run_command may invoke "
+            "this executable immediately</label>"
+            "<div class=\"allowedCommandFormButtons\">"
+            "<button id=\"allowedCommandSubmit\" title=\"Approve command\">"
+            ICON_SAVE_SVG " Approve command</button>"
+            "<button id=\"allowedCommandCancelEdit\" type=\"button\" "
+            "hidden>Cancel edit</button>"
+            "</div>"
             "</form>"
             "<p id=\"allowedCommandStatus\" role=\"status\"></p>"
+            "<label class=\"allowedCommandFilter\">Filter by OS"
+            "<select id=\"allowedCommandOsFilter\">"
+            "<option value=\"all\">All</option>"
+            "<option value=\"windows\">Windows</option>"
+            "<option value=\"linux\">Linux</option>"
+            "<option value=\"both\">Windows &amp; Linux</option>"
+            "</select></label>"
             "<div id=\"allowedCommandsList\">Loading...</div>"
             "</div></section>";
     } else if (section == "settings-config") {
@@ -6333,6 +6507,47 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<input id=\"cfgPageFileRoot\" type=\"text\" "
             "placeholder=\"(default cache folder)\" "
             "data-path=\"storage.pageFileRoot\"></label>"
+            "<h3>Topology</h3>"
+            "<label class=\"checkboxLabel\"><input id=\"cfgNumaPlacement\" "
+            "type=\"checkbox\" data-path=\"topology.numaLocalPlacementEnabled\" "
+            "data-type=\"bool\"> Pin worker threads to the nearest NUMA "
+            "node</label>" +
+            field_hint("On multi-socket/multi-NUMA-node hardware, keeps "
+                      "each connection's worker thread on the same memory "
+                      "node as the model it is serving, reducing cross-node "
+                      "memory latency. Has no effect on single-node "
+                      "hardware. Also requires the \"NUMA affinity\" "
+                      "advanced optimization to be admitted under "
+                      "Performance &rarr; Benchmarks &amp; Regression first "
+                      "-- this checkbox alone does not enable pinning "
+                      "without real per-host benchmark evidence.") +
+            "<h3>Model tiering (routing)</h3>"
+            "<label class=\"checkboxLabel\"><input "
+            "id=\"cfgModelRoutingEnabled\" type=\"checkbox\" "
+            "data-path=\"modelRouting.enabled\" data-type=\"bool\"> "
+            "Tiered auto-routing enabled</label>" +
+            field_hint("When on and at least one tier below has a model "
+                      "assigned, chats can select an \"Auto (Tiered)\" "
+                      "model option that routes each message to the "
+                      "cheapest tier that can answer well, escalating to a "
+                      "larger tier only when the smaller one's answer looks "
+                      "unreliable. Existing chats pinned to a specific "
+                      "model are never affected by this setting.") +
+            "<label>Tier assignments (JSON: tier name &rarr; list of model "
+            "IDs)" +
+            field_hint("Valid tier names: deterministic_processing, "
+                      "compact_router, small_fast, medium_general, "
+                      "large_specialist. Each is a list of downloaded model "
+                      "IDs (see Models &rarr; Inventory) that may serve that "
+                      "tier, cheapest/fastest tier first. A tier left out "
+                      "or empty is simply never selected -- routing always "
+                      "falls back to a chat's own pinned model when no tier "
+                      "can satisfy a request.") +
+            "<textarea id=\"cfgModelTierAssignments\" rows=\"6\" "
+            "data-path=\"modelRouting.tiers\" data-type=\"json\" "
+            "placeholder=\"{&quot;small_fast&quot;:[&quot;...&quot;],"
+            "&quot;large_specialist&quot;:[&quot;...&quot;]}\"></textarea>"
+            "</label>"
             "<h3>Retrieval</h3>"
             "<label class=\"checkboxLabel\"><input id=\"cfgRetrievalEnabled\" "
             "type=\"checkbox\" data-path=\"retrieval.enabled\" "
@@ -6444,6 +6659,68 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<button type=\"button\" id=\"perfRollback\" "
             "title=\"Revert the most recent automatic change\">Rollback last "
             "change</button></form>"
+            "<details><summary>Ceilings (advanced)</summary>"
+            "<form id=\"perfCeilingsForm\">"
+            "<label>Maximum simultaneous generations" +
+            field_hint("The most inference requests the adaptive controller "
+                      "may ever let run at once, however much spare memory "
+                      "there is.") +
+            "<input id=\"ceilMaxInferenceConcurrency\" type=\"number\" "
+            "min=\"1\"></label>"
+            "<label>Maximum queued generations" +
+            field_hint("How many more requests may wait in line once every "
+                      "concurrency slot above is busy, before new requests "
+                      "are rejected instead of queued.") +
+            "<input id=\"ceilMaxQueuedInference\" type=\"number\" min=\"0\">"
+            "</label>"
+            "<label>Maximum background index workers" +
+            field_hint("The most project-indexing worker threads the "
+                      "controller may run at once.") +
+            "<input id=\"ceilMaxIndexWorkers\" type=\"number\" min=\"1\">"
+            "</label>"
+            "<label>Maximum context tokens" +
+            field_hint("The controller never shrinks a model's context "
+                      "window below normal, but this caps how far it may "
+                      "recover back up to after a prior shrink.") +
+            "<input id=\"ceilMaxContextTokens\" type=\"number\" min=\"512\">"
+            "</label>"
+            "<label>Minimum idle-unload delay, seconds" +
+            field_hint("The shortest time an idle model may sit warm before "
+                      "the controller is allowed to unload it under memory "
+                      "pressure.") +
+            "<input id=\"ceilMinIdleUnloadSeconds\" type=\"number\" min=\"1\">"
+            "</label>"
+            "<label>Maximum idle-unload delay, seconds" +
+            field_hint("The longest an idle model may stay warm once "
+                      "pressure eases back to normal.") +
+            "<input id=\"ceilMaxIdleUnloadSeconds\" type=\"number\" min=\"1\">"
+            "</label>"
+            "<label>Maximum step size, percent" +
+            field_hint("How large a single automatic change to any one "
+                      "number may be, as a percentage of its current value "
+                      "-- keeps one adjustment from swinging a setting too "
+                      "far at once.") +
+            "<input id=\"ceilMaxStepPercent\" type=\"number\" min=\"1\" "
+            "max=\"100\"></label>"
+            "<label>Maximum changes per interval" +
+            field_hint("The most automatic adjustments allowed within one "
+                      "interval (see below), across every knob combined.") +
+            "<input id=\"ceilMaxChangesPerInterval\" type=\"number\" min=\"1\">"
+            "</label>"
+            "<label>Interval length, seconds" +
+            field_hint("The rolling window the \"maximum changes per "
+                      "interval\" limit above is measured over.") +
+            "<input id=\"ceilIntervalSeconds\" type=\"number\" min=\"1\">"
+            "</label>"
+            "<label>Minimum dwell time, seconds" +
+            field_hint("How long the controller must wait after making one "
+                      "change before it is allowed to make another -- "
+                      "prevents rapid back-and-forth flapping.") +
+            "<input id=\"ceilMinimumDwellSeconds\" type=\"number\" min=\"1\">"
+            "</label>"
+            "<button type=\"submit\" title=\"Save ceilings\">" ICON_SAVE_SVG
+            " Save ceilings</button>"
+            "</form></details>"
             "</div>"
             "<div class=\"reportSection\"><h3>Local runner pool</h3>"
             "<div id=\"perfRunnerPool\">Loading...</div></div>"
@@ -6506,7 +6783,18 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "a.previousValue+' \\u2192 '+a.proposedValue+' ('+a.reason+"
             "', confidence '+Math.round(a.confidence*100)+'%)</li>').join('')+"
             "'</ul>';}"
-            "el.innerHTML=html;q('#perfMode').value=r.activeMode;}"
+            "el.innerHTML=html;q('#perfMode').value=r.activeMode;"
+            "const c=r.ceilings;if(c){"
+            "q('#ceilMaxInferenceConcurrency').value=c.maxInferenceConcurrency;"
+            "q('#ceilMaxQueuedInference').value=c.maxQueuedInference;"
+            "q('#ceilMaxIndexWorkers').value=c.maxIndexWorkers;"
+            "q('#ceilMaxContextTokens').value=c.maxContextTokens;"
+            "q('#ceilMinIdleUnloadSeconds').value=c.minIdleUnloadSeconds;"
+            "q('#ceilMaxIdleUnloadSeconds').value=c.maxIdleUnloadSeconds;"
+            "q('#ceilMaxStepPercent').value=c.maxStepPercent;"
+            "q('#ceilMaxChangesPerInterval').value=c.maxChangesPerInterval;"
+            "q('#ceilIntervalSeconds').value=c.intervalSeconds;"
+            "q('#ceilMinimumDwellSeconds').value=c.minimumDwellSeconds;}}"
             "function renderPool(elementId,list,noun){const el=q(elementId);"
             "if(!el)return;if(!list.length){el.textContent='No '+noun+' configured.';"
             "return;}"
@@ -6626,6 +6914,24 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "if(rollback)rollback.addEventListener('click',async()=>{"
             "try{await api('/api/v1/performance/adaptive/rollback','POST',{});"
             "await refresh();}catch(err){showSystemError(err.message);}});"
+            "const ceilingsForm=q('#perfCeilingsForm');"
+            "if(ceilingsForm)ceilingsForm.addEventListener('submit',"
+            "async(e)=>{e.preventDefault();try{await api("
+            "'/api/v1/performance/adaptive/ceilings','POST',{"
+            "maxInferenceConcurrency:Number("
+            "q('#ceilMaxInferenceConcurrency').value),"
+            "maxQueuedInference:Number(q('#ceilMaxQueuedInference').value),"
+            "maxIndexWorkers:Number(q('#ceilMaxIndexWorkers').value),"
+            "maxContextTokens:Number(q('#ceilMaxContextTokens').value),"
+            "minIdleUnloadSeconds:Number(q('#ceilMinIdleUnloadSeconds').value),"
+            "maxIdleUnloadSeconds:Number(q('#ceilMaxIdleUnloadSeconds').value),"
+            "maxStepPercent:Number(q('#ceilMaxStepPercent').value),"
+            "maxChangesPerInterval:Number("
+            "q('#ceilMaxChangesPerInterval').value),"
+            "intervalSeconds:Number(q('#ceilIntervalSeconds').value),"
+            "minimumDwellSeconds:Number(q('#ceilMinimumDwellSeconds').value)"
+            "});await refresh();}"
+            "catch(err){showSystemError(err.message);}});"
             "const cacheTrim=q('#perfCacheTrim');"
             "if(cacheTrim)cacheTrim.addEventListener('click',async()=>{"
             "try{await api('/api/v1/system/cache/trim','POST',{});"
@@ -7508,6 +7814,16 @@ std::string application_page(const UserRecord& user, const std::string& section,
         "border:1px solid var(--panel-border);border-radius:.4rem;"
         "font-size:.82rem}"
         ".allowedCommandItem span{flex:1;min-width:0;overflow-wrap:anywhere}"
+        ".allowedCommandItem .allowedCommandActions{flex:none;display:flex;"
+        "gap:.4rem}"
+        // Disabled entries (including most of the seeded catalog once an
+        // admin turns individual ones off) get a visually distinct dark
+        // maroon/yellow treatment so a disabled row reads as "off" at a
+        // glance rather than only via the "(disabled)" text suffix.
+        ".allowedCommandItem-disabled{background:#3a0a12;"
+        "border-color:#c9a227}"
+        ".allowedCommandFormButtons{display:flex;gap:.5rem;align-items:center}"
+        ".allowedCommandFilter{max-width:16rem;margin-top:.75rem}"
         // Model Inventory page: a self-contained "container" (background,
         // border, radius) matching the look #systemReport's own
         // .reportSection cards use, but scoped to its own id rather than
@@ -7607,6 +7923,16 @@ std::string application_page(const UserRecord& user, const std::string& section,
         ".chatMsg-modelChange{margin:0 auto;background:rgba(40,167,69,.12);"
         "border:1px solid rgba(40,167,69,.5);color:#4ade80;font-size:.82rem;"
         "text-align:center}"
+        // Tool-call/tool-result cards: unlike .chatMsg-modelChange's short
+        // centered one-liners, these can carry a real output block (a
+        // run_command's stdout, a file's contents, ...) so they're
+        // left-aligned and allowed the full bubble width rather than
+        // being squeezed to 80% and centered.
+        ".chatMsg-toolResult{max-width:100%;background:rgba(40,167,69,.08);"
+        "border:1px solid rgba(40,167,69,.4);color:#4ade80;font-size:.82rem;"
+        "text-align:left}"
+        ".chatMsg-toolResultTitle{font-weight:700}"
+        ".chatMsg-toolResult pre{margin-top:.4rem}"
         // Rendered Markdown structure inside a bubble: paragraphs/lists need
         // their own spacing since the bubble itself no longer relies on
         // white-space:pre-wrap for line breaks (renderMarkdown() emits real

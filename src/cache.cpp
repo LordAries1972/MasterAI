@@ -813,6 +813,16 @@ std::uint64_t CacheManager::current_policy_generation() const {
     return state_->policy_generation.load(std::memory_order_relaxed);
 }
 
+void CacheManager::set_policy(CachePolicy policy) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->policy = policy;
+}
+
+CachePolicy CacheManager::policy() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->policy;
+}
+
 CacheStatus CacheManager::status() const {
     CacheStatus result;
     std::lock_guard<std::mutex> lock(state_->mutex);

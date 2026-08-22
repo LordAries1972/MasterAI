@@ -621,7 +621,10 @@ AppConfig ConfigurationManager::load(
         }
 
         if (const auto* model_routing = root.optional("modelRouting")) {
-            require_only(*model_routing, {"tiers"}, "modelRouting.");
+            require_only(*model_routing, {"tiers", "enabled"}, "modelRouting.");
+            if (const auto* enabled = model_routing->optional("enabled")) {
+                config.model_routing_enabled = enabled->as_boolean();
+            }
             if (const auto* tiers = model_routing->optional("tiers")) {
                 for (const auto& tier_field : tiers->as_object()) {
                     // Throws on an unknown tier spelling, matching every
@@ -1011,7 +1014,8 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         (c.watch_project_files ? "true" : "false") + "},\n"
         "  \"topology\":{\"numaLocalPlacementEnabled\":" +
         (c.numa_local_placement_enabled ? "true" : "false") + "},\n"
-        "  \"modelRouting\":{\"tiers\":" +
+        "  \"modelRouting\":{\"enabled\":" +
+        (c.model_routing_enabled ? "true" : "false") + ",\"tiers\":" +
         tier_assignments(c.model_tier_assignments) + "},\n"
         "  \"retrieval\":{\"enabled\":" +
         (c.retrieval_enabled ? "true" : "false") +
