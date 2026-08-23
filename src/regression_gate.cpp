@@ -167,6 +167,20 @@ void PerformanceCertificationStore::restore() {
             record.storage_bytes_read =
                 static_cast<std::uint64_t>(storage_read->as_integer());
         }
+        if (const auto* value = root.optional("storageReadOperations")) {
+            record.storage_read_operations =
+                static_cast<std::uint64_t>(value->as_integer());
+        }
+        if (const auto* value = root.optional("storageWriteOperations")) {
+            record.storage_write_operations =
+                static_cast<std::uint64_t>(value->as_integer());
+        }
+        if (const auto* value = root.optional("commitBytes")) {
+            record.commit_bytes = static_cast<std::uint64_t>(value->as_integer());
+        }
+        if (const auto* value = root.optional("pageFaults")) {
+            record.page_faults = static_cast<std::uint64_t>(value->as_integer());
+        }
         record.accepted = root.required("accepted").as_boolean();
         if (const auto* reason = root.optional("rejectionReason")) {
             record.rejection_reason = reason->as_string();
@@ -532,11 +546,11 @@ PerformanceCertificationRecord PerformanceCertificationRunner::run(
         scheduler_.complete(*admission.ticket);
     }
 
-    // Real storage bytes read: this process's own cumulative disk-read
-    // counter (the same figure CalibrationService already records as
-    // disk_read_bytes), sampled before and after the quality suite so the
-    // delta reflects only what this run itself read.
-    const auto storage_before = probe_system_utilization(1U).disk_read_bytes;
+    // Real storage bytes read/write operation counts: this process's own
+    // cumulative disk-I/O counters (the same figure CalibrationService
+    // already records as disk_read_bytes), sampled before and after the
+    // quality suite so the delta reflects only what this run itself read.
+    const auto storage_before = probe_system_utilization(1U);
 
     BenchmarkRunner quality_runner(inference_, quality_store_);
     // concurrency > 1 is measured sequentially (this single-process control
@@ -573,15 +587,43 @@ PerformanceCertificationRecord PerformanceCertificationRunner::run(
     record.total_elapsed_microseconds = accumulated.total_elapsed_microseconds;
     record.peak_resident_memory_bytes = accumulated.peak_resident_memory_bytes;
 
-    const auto storage_after = probe_system_utilization(1U).disk_read_bytes;
+    const auto storage_after = probe_system_utilization(1U);
     record.storage_bytes_read =
-        storage_after > storage_before ? storage_after - storage_before : 0U;
+        storage_after.disk_read_bytes > storage_before.disk_read_bytes
+            ? storage_after.disk_read_bytes - storage_before.disk_read_bytes
+            : 0U;
+    record.storage_read_operations =
+        storage_after.disk_read_operations > storage_before.disk_read_operations
+            ? storage_after.disk_read_operations -
+                  storage_before.disk_read_operations
+            : 0U;
+    record.storage_write_operations =
+        storage_after.disk_write_operations > storage_before.disk_write_operations
+            ? storage_after.disk_write_operations -
+                  storage_before.disk_write_operations
+            : 0U;
+
+    // Real commit charge and page-fault count -- see PerformanceCertification
+    // Record::commit_bytes/page_faults's own comments in masterai.hpp for
+    // exactly what these do and do not measure.
+    const auto process_resources = probe_process_resources();
+    record.commit_bytes = process_resources.commit_bytes;
+    record.page_faults = process_resources.page_faults;
 
     const auto metrics = inference_.metrics();
     record.accelerator_mode =
         metrics.requested_gpu_layers > 0U ? "gpu_offloaded" : "cpu_only";
-    // A real, if brief, post-run CPU sample -- not a synthesized figure.
-    record.average_cpu_percent = probe_system_utilization(100U).cpu_percent;
+    // A real post-run CPU sample -- not a synthesized figure. Widened from
+    // an original 100ms window: a system-wide CPU percentage sampled over
+    // only 100ms is dominated by whatever unrelated background process
+    // happens to tick during that exact slice (observed in practice: two
+    // consecutive real runs against the identical fixture differing by
+    // ~2x purely from this window, tripping the regression gate's default
+    // 25% CPU-increase threshold with zero actual regression). 500ms
+    // averages over enough wall-clock time that one transient background
+    // burst no longer dominates the reading, without meaningfully slowing
+    // down a real certification run.
+    record.average_cpu_percent = probe_system_utilization(500U).cpu_percent;
 
     record.group_results = {
         check_runner_attribution_regression(metrics, accelerator_policy),
@@ -637,6 +679,12 @@ std::string PerformanceCertificationRunner::to_json(
         ",\"queueWaitMicroseconds\":" +
         std::to_string(record.queue_wait_microseconds) +
         ",\"storageBytesRead\":" + std::to_string(record.storage_bytes_read) +
+        ",\"storageReadOperations\":" +
+        std::to_string(record.storage_read_operations) +
+        ",\"storageWriteOperations\":" +
+        std::to_string(record.storage_write_operations) +
+        ",\"commitBytes\":" + std::to_string(record.commit_bytes) +
+        ",\"pageFaults\":" + std::to_string(record.page_faults) +
         ",\"averageCpuPercent\":" + std::to_string(record.average_cpu_percent) +
         ",\"qualityScore\":" + std::to_string(record.quality_score) +
         ",\"accepted\":" + (record.accepted ? "true" : "false") +

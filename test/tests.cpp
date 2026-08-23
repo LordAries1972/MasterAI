@@ -3719,9 +3719,9 @@ void test_phase_thirty_a_memory_sweeper_idle_unload() {
 }
 
 // Phase 20 validates the complete fail-closed lifecycle: evidence is strict
-// and durable, recording never admits, unavailable implementations cannot be
-// admitted, accepted implemented features can be independently disabled, and
-// a restart restores the exact decision.
+// and durable, recording never admits, evidence that fails the fallback-
+// verified check cannot be admitted, accepted implemented features can be
+// independently disabled, and a restart restores the exact decision.
 void test_phase_twenty_advanced_optimization_admission() {
     TemporaryDirectory temporary;
     masterai::RecordStore records(temporary.path() / "database");
@@ -3777,17 +3777,27 @@ void test_phase_twenty_advanced_optimization_admission() {
             "complete accepted evidence did not admit speculative_decoding "
             "now that its implementation is real");
 
-    masterai::AdvancedOptimizationEvidence unavailable_evidence = evidence;
-    unavailable_evidence.feature_name = "numa_affinity";
-    registry.record_evidence("numa_affinity", unavailable_evidence);
-    bool unavailable_rejected = false;
+    // Every one of this registry's six candidates now has a real caller and
+    // implementation_available: true (continuous_batching/speculative_
+    // decoding/storage_prefetch/gpu_cpu_kv_placement from the start,
+    // numa_affinity since Phase 28, multiple_warm_runners since this
+    // codebase's own Phase 20 completion pass) -- so there is no longer an
+    // "implementation unavailable" feature left in the roster to admit
+    // against. The still-real fail-closed condition this proves instead:
+    // evidence whose fallback was never verified must not be admitted
+    // either, no matter how real the implementation is.
+    masterai::AdvancedOptimizationEvidence unverified_fallback_evidence = evidence;
+    unverified_fallback_evidence.feature_name = "numa_affinity";
+    unverified_fallback_evidence.fallback_verified = false;
+    registry.record_evidence("numa_affinity", unverified_fallback_evidence);
+    bool unverified_fallback_rejected = false;
     try {
         registry.admit("numa_affinity");
     } catch (const std::exception&) {
-        unavailable_rejected = true;
+        unverified_fallback_rejected = true;
     }
-    require(unavailable_rejected,
-            "an unavailable advanced implementation was admitted");
+    require(unverified_fallback_rejected,
+            "evidence with an unverified fallback was admitted");
 
     evidence.feature_name = "storage_prefetch";
     evidence.changed_setting = "bounded native prefetch enabled";
@@ -5387,29 +5397,38 @@ void test_phase_twentyfour_request_classification() {
             "plain prose with no shape signal was not classified as generic lexical");
 }
 
-// Declared-but-disabled strategies: every strategy without an adapter must
-// report exactly itself with a "no adapter" reason, the enabled set must
-// not appear in the disabled list, and RetrievalPlanner must stamp both the
-// classification and the disabled-strategy reasons onto every outcome so a
-// caller can push them onto QueryTrace.
+// Declared-but-disabled strategies: after the retrieval-strategy-
+// mislabeling fix, every RetrievalStrategy enum value has a real build-
+// level adapter (disabled_retrieval_strategy_reasons() is therefore always
+// empty -- see that function's own comment in retrieval.cpp), so this test
+// now instead proves (a) that static list genuinely stays empty and every
+// strategy reports having an adapter, and (b) RetrievalPlanner still stamps
+// a classification onto every outcome and that stamp survives a real
+// QueryCoordinator round-trip -- the disabled-strategy-reasons plumbing
+// itself (RetrievalOutcome -> QueryCoordinator -> JSON) is still exercised
+// via a planner instance missing its optional embedding/MCP/user-memory
+// dependencies, which independently populates real per-instance runtime
+// skip reasons (retrieve_uncached()'s own, separate mechanism) whenever a
+// query is not satisfied by the always-available staged strategies alone.
 void test_phase_twentyfour_disabled_strategies_recorded_on_trace() {
     const auto disabled = masterai::disabled_retrieval_strategy_reasons();
-    require(disabled.size() == 7U,
-            "the declared-but-disabled retrieval strategy count drifted from "
-            "the seven strategies with no adapter");
-    for (const auto& entry : disabled) {
-        require(!masterai::retrieval_strategy_has_adapter(entry.first),
-                "a strategy with a working adapter was reported as disabled");
-        require(entry.second.find("no adapter") != std::string::npos,
-                "a disabled strategy's skip reason did not explain why");
-    }
+    require(disabled.empty(),
+            "disabled_retrieval_strategy_reasons() must stay empty now that "
+            "every RetrievalStrategy has a real adapter");
     require(masterai::retrieval_strategy_has_adapter(
                 masterai::RetrievalStrategy::exact_symbol) &&
                 masterai::retrieval_strategy_has_adapter(
                     masterai::RetrievalStrategy::filename_path) &&
                 masterai::retrieval_strategy_has_adapter(
-                    masterai::RetrievalStrategy::recent_change),
-            "an enabled Phase 24 strategy was incorrectly reported as having no adapter");
+                    masterai::RetrievalStrategy::recent_change) &&
+                masterai::retrieval_strategy_has_adapter(
+                    masterai::RetrievalStrategy::semantic_embedding) &&
+                masterai::retrieval_strategy_has_adapter(
+                    masterai::RetrievalStrategy::mcp_resource) &&
+                masterai::retrieval_strategy_has_adapter(
+                    masterai::RetrievalStrategy::conversation_memory),
+            "a Phase 24 strategy was incorrectly reported as having no "
+            "adapter");
 
     TemporaryDirectory temporary;
     const auto project_root = temporary.path() / "disabled-strategy-project";
@@ -5423,16 +5442,22 @@ void test_phase_twentyfour_disabled_strategies_recorded_on_trace() {
     masterai::ProjectRecord project{"phase24-disabled", "Phase 24 Disabled", project_root};
     build_ready_retrieval_project(project_root, service, project);
 
+    // No embedding/MCP/user-memory dependencies given -- a query the staged
+    // exact/lexical/path/recent-change strategies cannot satisfy must fall
+    // through to the optional stages and record a real runtime skip reason
+    // for each of the three this planner instance lacks.
     masterai::RetrievalPlanner planner(service);
     masterai::RetrievalRequest request;
     request.project = project;
-    request.query_text = "phase24_marker_symbol";
+    request.query_text = "no_such_symbol_anywhere_in_this_fixture";
     request.deadline = std::chrono::milliseconds(2000);
     const auto outcome = planner.retrieve(request);
     require(!outcome.classification.empty(),
             "retrieve() did not stamp a request classification onto its outcome");
-    require(outcome.disabled_strategy_reasons.size() == 7U,
-            "retrieve() did not stamp every disabled strategy's skip reason onto its outcome");
+    require(outcome.disabled_strategy_reasons.size() == 3U,
+            "a planner instance missing its optional embedding/MCP/user-"
+            "memory dependencies must report exactly those three runtime "
+            "skip reasons for a query the staged strategies cannot satisfy");
 
     masterai::QueryCoordinator queries;
     const auto query_id = queries.begin("user", project.id, "model");
@@ -5441,7 +5466,8 @@ void test_phase_twentyfour_disabled_strategies_recorded_on_trace() {
     queries.finish(query_id, masterai::QueryStatus::completed);
     const auto trace = queries.find(query_id);
     require(trace && trace->request_classification == outcome.classification &&
-                trace->disabled_retrieval_strategies.size() == 7U,
+                trace->disabled_retrieval_strategies.size() ==
+                    outcome.disabled_strategy_reasons.size(),
             "a successful finish() lost the recorded classification/disabled strategies");
     const auto json = masterai::QueryCoordinator::to_json(*trace);
     require(json.find("\"requestClassification\":") != std::string::npos &&
@@ -6215,19 +6241,15 @@ void test_machine_learning_foundation_dashboard() {
     require(dashboard_entry != dashboard.interfaces.end() &&
                 dashboard_entry->status == "available",
             "the Dashboard interface must report available");
-    // Dashboard (Phase 37), Projects (Phase 38), Model Registry / Dataset
-    // Manager (Phase 39), Subject Knowledge Manager (Phase 40), Data
-    // Labeling / Data Preparation (Phase 41), Training Jobs (Phase 42),
-    // Model Builder (Phase 46), Evaluation Lab (Phase 56), Model Comparison
-    // (Phase 57), the indexed retrieval surfaces (Phases 58-60), Fine-Tuning
-    // (Phase 70), Hardware and Compute (Phase 63/67/75), Automation
-    // Pipelines (Phase 64/69/71/72), Monitoring and Diagnostics (Phase 68),
-    // Audit Logs (Phase 66), Machine Learning Settings, Prompt and
-    // Instruction Training (Phase 81), and Synthetic Data/Deployment
-    // Manager/Inference Endpoints (Phase 82) have real backing services;
-    // every other roadmap entry from docs/PLAN.md "Machine Learning
-    // Abilities" section 2 must still report planned rather than
-    // fabricating readiness ahead of its own phase.
+    // Every key MachineLearningRegistry's constructor (src/ml.cpp) marks
+    // "available" -- kept as an explicit list (not derived from the
+    // registry itself) so this test independently proves the roster hasn't
+    // silently marked something "available" ahead of a real executor;
+    // every roadmap entry from docs/PLAN.md "Machine Learning Abilities"
+    // section 2 not named here must still report planned. Update this list
+    // whenever ml.cpp's constructor gains or loses an "available" entry --
+    // see each entry's own comment there for which phase gave it a real
+    // executor.
     for (const auto& interface : dashboard.interfaces) {
         if (interface.key == "dashboard" || interface.key == "projects" ||
             interface.key == "model-registry" ||
@@ -6237,13 +6259,19 @@ void test_machine_learning_foundation_dashboard() {
             interface.key == "data-labeling" ||
             interface.key == "data-preparation" ||
             interface.key == "training-jobs" ||
+            interface.key == "checkpoint-management" ||
+            interface.key == "hyperparameter-optimization" ||
             interface.key == "evaluation-lab" ||
+            interface.key == "experiment-tracking" ||
+            interface.key == "subject-examination" ||
+            interface.key == "model-optimization" ||
             interface.key == "model-comparison" ||
             interface.key == "embeddings-vector-stores" ||
             interface.key == "retrieval-augmented-generation" ||
             interface.key == "fine-tuning" ||
             interface.key == "hardware-compute" ||
             interface.key == "automation-pipelines" ||
+            interface.key == "safety-governance" ||
             interface.key == "monitoring-diagnostics" ||
             interface.key == "audit-logs" ||
             interface.key == "ml-settings" ||
@@ -9326,8 +9354,15 @@ void test_machine_learning_real_training_and_prediction() {
     // convert to the exact same CSV text a hand-written CSV upload would
     // produce, so parse_tabular_csv (and everything downstream) never has
     // to know a dataset started as anything else.
+    // A numeric-only "label" column (e.g. {"label":0}) would make
+    // parse_tabular_csv treat this as a *regression* target (its own rule:
+    // an all-numeric target column means regression, not classification --
+    // see data.classification = !numeric_target in ml_engine.cpp), so this
+    // fixture uses genuinely non-numeric label text to actually exercise
+    // the classification path the assertion below checks for.
     const auto json_array_csv = masterai::json_array_to_csv(
-        "[{\"a\":1,\"b\":2,\"label\":0},{\"a\":3,\"b\":4,\"label\":1}]");
+        "[{\"a\":1,\"b\":2,\"label\":\"low\"},{\"a\":3,\"b\":4,\"label\":"
+        "\"high\"}]");
     const auto json_array_parsed =
         masterai::parse_tabular_csv(json_array_csv, "label");
     require(json_array_parsed.feature_names.size() == 2U &&
@@ -9337,8 +9372,8 @@ void test_machine_learning_real_training_and_prediction() {
             "JSON array of flat objects");
 
     const auto jsonl_csv = masterai::jsonl_to_csv(
-        "{\"a\":1,\"b\":2,\"label\":0}\n"
-        "{\"a\":3,\"b\":4,\"label\":1}\n"
+        "{\"a\":1,\"b\":2,\"label\":\"low\"}\n"
+        "{\"a\":3,\"b\":4,\"label\":\"high\"}\n"
         "\n");
     require(jsonl_csv == json_array_csv,
             "jsonl_to_csv must produce the exact same CSV text as the "
@@ -9377,6 +9412,262 @@ void test_machine_learning_real_training_and_prediction() {
     results.put("run-56", metrics_json);
     require(results.find("run-56").value_or("") == metrics_json,
             "EvaluationResultStore did not round-trip the metrics");
+}
+
+// Phase 94/96: compute_dataset_content_metrics() (real dataset content
+// metrics -- record count, schema, hash, duplicate rate, quality score) and
+// evaluate_tabular_model()'s new real-measured fields (latency, throughput,
+// stability, robustness, an optional bias/fairness breakdown). Both are
+// pure library functions, so this is deterministic -- no server, no timing
+// assumptions beyond "a duration is never negative".
+void test_phase94_dataset_metrics_and_phase96_evaluation_metrics() {
+    // A known duplicate row (rows 1 and 2 are byte-identical), a known
+    // missing cell (row 3's "b"), and a known non-numeric column ("label").
+    const std::string csv =
+        "a,b,label\n"
+        "1,2,x\n"
+        "1,2,x\n"
+        "3,,y\n";
+    const auto metrics = masterai::compute_dataset_content_metrics(csv);
+    require(metrics.record_count == 3U,
+            "compute_dataset_content_metrics miscounted data rows");
+    require(metrics.content_hash == masterai::sha256_hex(csv),
+            "compute_dataset_content_metrics did not hash the exact "
+            "uploaded bytes");
+    require(metrics.schema_summary ==
+                "a:numeric,b:numeric,label:categorical",
+            "compute_dataset_content_metrics misclassified a column's "
+            "numeric/categorical type");
+    require(std::fabs(metrics.duplicate_rate - (1.0 / 3.0)) < 1e-9,
+            "compute_dataset_content_metrics did not detect the exact "
+            "duplicate row");
+    require(std::fabs(metrics.data_quality_score - (16.0 / 27.0)) < 1e-9,
+            "compute_dataset_content_metrics's quality formula did not "
+            "match non-null-ratio * (1 - duplicate-rate)");
+
+    // An empty (header-only) upload must report real zeros, never a
+    // fabricated non-zero score.
+    const auto empty_metrics =
+        masterai::compute_dataset_content_metrics("a,b\n");
+    require(empty_metrics.record_count == 0U &&
+                empty_metrics.data_quality_score == 0.0,
+            "an empty dataset upload must report zero metrics, not a "
+            "guessed value");
+
+    // A fresh separable classification dataset/model, reused from
+    // test_machine_learning_real_training_and_prediction's fixture shape.
+    std::string train_csv = "x1,x2,label\n";
+    for (int index = 0; index < 20; ++index) {
+        train_csv += std::to_string(0.1 * index) + "," +
+                     std::to_string(1.0 + 0.05 * index) + ",low\n";
+        train_csv += std::to_string(4.0 + 0.1 * index) + "," +
+                     std::to_string(3.0 + 0.05 * index) + ",high\n";
+    }
+    const auto data = masterai::parse_tabular_csv(train_csv, "label");
+    masterai::TabularTrainingOptions options;
+    options.epochs = 300U;
+    options.learning_rate = 0.5;
+    options.test_fraction = 0.0;
+    masterai::TrainedTabularModel model;
+    masterai::train_tabular_model(data, options, model);
+
+    const auto plain = masterai::evaluate_tabular_model(model, data);
+    require(plain.evaluated_rows == 40U,
+            "evaluate_tabular_model must still score every row when the "
+            "new Phase 96 fields are requested");
+    require(plain.latency_ms >= 0.0 &&
+                plain.throughput_predictions_per_sec >= 0.0,
+            "evaluate_tabular_model must report a non-negative measured "
+            "latency/throughput");
+    require(plain.stability_score <= 1.0 + 1e-9,
+            "stability_score must not exceed its defined ceiling of 1.0");
+    require(plain.robustness_score >= 0.0 &&
+                plain.robustness_score <= 1.0 + 1e-9,
+            "robustness_score must stay within its defined [0,1] range");
+    require(plain.bias_fairness_report.empty(),
+            "bias_fairness_report must stay empty when no sensitive "
+            "feature column was named");
+
+    // x1 is numeric and distinct on every one of the 40 rows in this
+    // fixture, so naming it as the sensitive column must produce one group
+    // per row.
+    const auto with_bias = masterai::evaluate_tabular_model(model, data, "x1");
+    require(with_bias.bias_fairness_report.size() == 40U,
+            "bias_fairness_report must have one entry per distinct "
+            "(already-encoded) value of the named feature column");
+
+    const auto with_unknown_column =
+        masterai::evaluate_tabular_model(model, data, "does-not-exist");
+    require(with_unknown_column.bias_fairness_report.empty(),
+            "an unknown sensitive feature column name must be ignored, "
+            "not guessed against a different column");
+
+    const auto metrics_json = masterai::tabular_evaluation_metrics_json(plain);
+    require(metrics_json.find("\"latencyMs\":") != std::string::npos &&
+                metrics_json.find("\"stabilityScore\":") != std::string::npos &&
+                metrics_json.find("\"robustnessScore\":") != std::string::npos &&
+                metrics_json.find("\"biasFairnessReport\":{}") != std::string::npos,
+            "tabular_evaluation_metrics_json missed a Phase 96 field");
+}
+
+// Phase 95: TrainingJob execution-policy fields, exercised over real HTTP
+// against a running server in no-auth mode (the synthetic full-permission
+// administrator no-auth mode grants -- see test_phase_eightysix_no_auth_mode
+// -- makes this a plain, header-free request/response test). Proves
+// max_runtime_seconds is genuinely enforced (not just recorded) by handing
+// the real training executor an epoch count no machine could finish inside
+// the 1-second deadline, so the deadline check inside the training loop is
+// what has to fire for this test to pass in bounded time -- it cannot pass
+// by the run simply finishing first.
+void test_phase95_training_job_execution_policy_and_timeout_enforcement() {
+    TemporaryDirectory temporary;
+    const std::uint16_t port = 18480U;
+    auto configuration = phase_eightysix_base_config(temporary, port);
+    configuration.authentication_enabled = false;
+
+    masterai::HttpServer server(configuration);
+    std::atomic_bool stop{false};
+    JoiningThread server_thread{std::thread([&] {
+        try {
+            server.run(stop);
+        } catch (const std::exception& error) {
+            std::clog << "  server thread exception: " << error.what() << '\n';
+        }
+    })};
+    phase_eightysix_wait_until_ready(port);
+
+    const auto project_response = masterai_test::http_request(
+        port, "POST", "/api/v1/ml/projects", {},
+        "{\"name\":\"Phase 95 timeout test\"}");
+    require(project_response.status == 201,
+            "creating the test project failed");
+    const auto project_id =
+        masterai::parse_json(project_response.body).required("id").as_string();
+
+    // Every administrator id in Phase 93's new "administrators" field must
+    // resolve to a real account -- an unknown id must be rejected, not
+    // silently stored.
+    const auto bad_governance = masterai_test::http_request(
+        port, "POST", "/api/v1/ml/projects/" + project_id + "/governance", {},
+        "{\"administrators\":\"does-not-exist\"}");
+    require(bad_governance.status == 400,
+            "an unknown administrator id must be rejected, not stored");
+
+    const auto dataset_response = masterai_test::http_request(
+        port, "POST", "/api/v1/ml/datasets", {},
+        "{\"name\":\"Phase 95 timeout dataset\",\"purpose\":\"tabular\"}");
+    require(dataset_response.status == 201,
+            "creating the test dataset failed");
+    const auto dataset_id =
+        masterai::parse_json(dataset_response.body).required("id").as_string();
+
+    std::string csv = "x1,x2,label\n";
+    for (int index = 0; index < 20; ++index) {
+        csv += std::to_string(0.1 * index) + "," +
+              std::to_string(1.0 + 0.05 * index) + ",low\n";
+        csv += std::to_string(4.0 + 0.1 * index) + "," +
+              std::to_string(3.0 + 0.05 * index) + ",high\n";
+    }
+    const auto content_response = masterai_test::http_request(
+        port, "POST", "/api/v1/ml/datasets/" + dataset_id + "/content", {},
+        "{\"csv\":\"" + masterai::server_internal::json_escape(csv) +
+            "\",\"targetColumn\":\"label\"}");
+    require(content_response.status == 200,
+            "uploading the test dataset's content failed");
+
+    // Phase 94: real content-derived metrics and a Dataset Versioning entry
+    // must exist now that content was uploaded.
+    const auto dataset_list = masterai_test::http_request(
+        port, "GET", "/api/v1/ml/datasets");
+    require(dataset_list.body.find("\"recordCount\":40") != std::string::npos,
+            "the dataset listing did not report the real uploaded row count");
+    const auto versions_response = masterai_test::http_request(
+        port, "GET", "/api/v1/ml/datasets/" + dataset_id + "/versions");
+    require(versions_response.status == 200 &&
+                versions_response.body.find("\"version\":1") !=
+                    std::string::npos &&
+                versions_response.body.find("\"recordCount\":40") !=
+                    std::string::npos,
+            "the content upload did not create a real Dataset Versioning "
+            "entry");
+
+    // Section 10's declared split percentages must not be allowed to sum
+    // past 100%.
+    const auto bad_split = masterai_test::http_request(
+        port, "POST", "/api/v1/ml/datasets/" + dataset_id + "/declare", {},
+        "{\"trainSplitPercent\":70,\"validationSplitPercent\":20,"
+        "\"testSplitPercent\":20}");
+    require(bad_split.status == 400,
+            "declared split percentages summing past 100% must be rejected");
+
+    const auto job_response = masterai_test::http_request(
+        port, "POST", "/api/v1/ml/training-jobs", {},
+        "{\"name\":\"Phase 95 timeout job\",\"projectId\":\"" + project_id +
+            "\",\"datasetId\":\"" + dataset_id + "\"}");
+    require(job_response.status == 201, "creating the test training job failed");
+    const auto job_id =
+        masterai::parse_json(job_response.body).required("id").as_string();
+
+    // An invalid failure-recovery strategy must be rejected before it can
+    // ever reach the executor.
+    const auto bad_policy = masterai_test::http_request(
+        port, "POST",
+        "/api/v1/ml/training-jobs/" + job_id + "/execution-policy", {},
+        "{\"failureRecoveryStrategy\":\"not_a_real_strategy\"}");
+    require(bad_policy.status == 400,
+            "an invalid failure recovery strategy must be rejected");
+
+    const auto policy_response = masterai_test::http_request(
+        port, "POST",
+        "/api/v1/ml/training-jobs/" + job_id + "/execution-policy", {},
+        "{\"maxRuntimeSeconds\":1,\"failureRecoveryStrategy\":\"retry_once\","
+        "\"computeTarget\":\"on-prem-node-1\"}");
+    require(policy_response.status == 200 &&
+                policy_response.body.find("\"maxRuntimeSeconds\":1") !=
+                    std::string::npos &&
+                policy_response.body.find(
+                    "\"failureRecoveryStrategy\":\"retry_once\"") !=
+                    std::string::npos &&
+                policy_response.body.find(
+                    "\"computeTarget\":\"on-prem-node-1\"") != std::string::npos,
+            "the execution policy did not round-trip through the API");
+
+    // The real deadline check: an epoch count this tiny (40-row) dataset
+    // cannot plausibly finish inside one second forces the training loop's
+    // own timeout check to be what stops the run -- if max_runtime_seconds
+    // were merely recorded and not enforced, this request would instead
+    // keep training until epochs actually completed. Deliberately NOT an
+    // extreme epoch count (e.g. billions): the deadline check only runs
+    // once per epoch, so a needlessly huge target risks a real multi-
+    // second-to-minute wall-clock run under host CPU contention before the
+    // *next* epoch boundary is even reached to notice the deadline passed
+    // -- 1,000,000 epochs is already ~3000x the 300-epoch fixture other ML
+    // tests train to completion near-instantly, comfortably enough to
+    // guarantee the 1-second deadline fires first on any real machine,
+    // while keeping this test's own worst-case bounded and fast.
+    const auto started = std::chrono::steady_clock::now();
+    const auto run_response = masterai_test::http_request(
+        port, "POST", "/api/v1/ml/training-jobs/" + job_id + "/run", {},
+        "{\"epochs\":1000000}");
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+    require(run_response.status == 409 &&
+                run_response.body.find("timeout") != std::string::npos,
+            "a run that overshoots max_runtime_seconds must fail with a "
+            "timeout reason, not silently keep training");
+    require(elapsed < 15,
+            "the max-runtime deadline did not bound the run to a "
+            "reasonable wall-clock time -- it is not being enforced");
+
+    const auto job_list = masterai_test::http_request(
+        port, "GET", "/api/v1/ml/training-jobs");
+    require(job_list.body.find("\"status\":\"failed\"") != std::string::npos,
+            "a timed-out training job must end in the failed state");
+
+    stop.store(true);
+    server.stop();
+    server_thread.thread.join();
 }
 
 // Phase 70: docs/PLAN.md "Machine Learning Abilities" section 18
@@ -10085,6 +10376,10 @@ int main() {
             test_machine_learning_automation_pipeline_progress_lifecycle);
         run("Machine Learning real training and prediction",
             test_machine_learning_real_training_and_prediction);
+        run("Phase 94/96 dataset content metrics and evaluation metrics",
+            test_phase94_dataset_metrics_and_phase96_evaluation_metrics);
+        run("Phase 95 training job execution policy and timeout enforcement",
+            test_phase95_training_job_execution_policy_and_timeout_enforcement);
         run("Machine Learning model comparison lifecycle and execution",
             test_machine_learning_model_comparison_lifecycle_and_execution);
         run("Machine Learning knowledge ingestion and RAG retrieval",

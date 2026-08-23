@@ -12,6 +12,8 @@
 #include <ctime>
 #include <iterator>
 #include <random>
+#include <utility>
+#include <vector>
 
 // Small inline-SVG glyphs for the primary submit button on every form --
 // mirrors the dynamically-built ICONS set in application_script() (used for
@@ -130,8 +132,55 @@
     "padding:.3rem .7rem;background:transparent;border:1px solid #ffd9d9;" \
     "color:#ffd9d9;font-size:.75rem;border-radius:.4rem;cursor:pointer}" \
     "#systemErrorBanner .systemErrorCopy:hover{background:rgba(255,217,217,.15)}" \
+    /* Machine Learning form-success confirmation: centered on screen (both \
+       axes) rather than pinned to a corner, since a completed ML action is \
+       a positive result worth a brief, hard-to-miss interruption instead of \
+       an easy-to-miss corner note. Same title-bar-plus-body construction as \
+       #systemErrorBanner just above (see that block's own comment) but in \
+       green instead of red, with the copy button living in the title bar \
+       itself next to the close button rather than a separate footer strip. \
+       Auto-fades to solid black over its last .4s before hiding itself 10 \
+       seconds after the most recent showFormSuccess() call, exactly like \
+       the error banner's own timer; its close and copy buttons both act \
+       immediately instead of waiting on that timer. */ \
+    "#formSuccessBanner{position:fixed;top:50%;left:50%;" \
+    "transform:translate(-50%,-50%);z-index:9999;" \
+    "width:min(24rem,calc(100vw - 2rem));padding:0;" \
+    "border:1px solid #2f9e44;border-radius:.75rem;overflow:hidden;" \
+    "box-shadow:0 6px 20px rgba(0,0,0,.45);" \
+    "display:flex;flex-direction:column;" \
+    "transition:border-color .4s ease}" \
+    "#formSuccessBanner[hidden]{display:none}" \
+    "#formSuccessBanner.formSuccessFading{border-color:#000}" \
+    "#formSuccessBanner .formSuccessTitleBar{display:flex;align-items:center;" \
+    "justify-content:space-between;gap:.5rem;padding:.55rem .75rem;" \
+    "background:linear-gradient(135deg,#14532d,#2f9e44 55%,#0a3d1f);" \
+    "color:#eafff0;transition:background-color .4s ease}" \
+    "#formSuccessBanner.formSuccessFading .formSuccessTitleBar{background:#000}" \
+    "#formSuccessBanner .formSuccessTitle{font-weight:800;letter-spacing:.03em;" \
+    "flex:1;min-width:0}" \
+    "#formSuccessBanner .formSuccessCopy{width:auto;margin:0;" \
+    "padding:.25rem .6rem;background:transparent;border:1px solid #eafff0;" \
+    "color:#eafff0;font-size:.75rem;border-radius:.4rem;cursor:pointer;" \
+    "flex:none}" \
+    "#formSuccessBanner .formSuccessCopy:hover{background:rgba(234,255,240,.15)}" \
+    "#formSuccessBanner .formSuccessClose{width:auto;margin:0;padding:0 .3rem;" \
+    "background:transparent;border:none;color:#eafff0;font-weight:700;" \
+    "font-size:1.15rem;line-height:1;cursor:pointer;flex:none}" \
+    "#formSuccessBanner .formSuccessClose:hover{color:#c9f7d9}" \
+    "#formSuccessBanner .formSuccessBody{flex:1;overflow-wrap:anywhere;" \
+    "max-height:12rem;overflow:auto;padding:.75rem 1rem;" \
+    "background:#0a3319;color:#c9f7d9;font-weight:600;" \
+    "transition:background-color .4s ease,color .4s ease}" \
+    "#formSuccessBanner.formSuccessFading .formSuccessBody{background:#000;" \
+    "color:#000}" \
     ".checkboxLabel{display:flex;align-items:center;gap:.5rem}" \
-    ".checkboxLabel input{width:auto}" \
+    ".checkboxLabel input{width:auto;margin:0;vertical-align:middle}" \
+    /* A checkbox used outside .checkboxLabel (e.g. inline inside a plain \
+       sentence) still gets the same vertical centering against its text \
+       instead of falling back to the browser's own default (usually a \
+       couple pixels low against the text baseline). */ \
+    "input[type=\"checkbox\"]{vertical-align:middle}" \
     /* Field hint bubbles (ML forms clarity pass): a small "?" badge sits \
        after a label's own text; hovering or focusing it reveals a detailed \
        explanation in a floating bubble instead of cramming that text into \
@@ -143,8 +192,12 @@
     ".mlHint{display:inline-flex;align-items:center;justify-content:center;" \
     "width:1.1rem;height:1.1rem;margin-left:.4rem;border-radius:50%;" \
     "background:var(--panel-border);color:var(--muted);font-size:.7rem;" \
-    "font-weight:700;font-style:normal;cursor:help;position:relative;" \
-    "vertical-align:middle}" \
+    "line-height:1;font-weight:700;font-style:normal;cursor:help;" \
+    /* line-height:1 above stops the badge's own line box from inheriting \
+       body's line-height:1.6, which otherwise made vertical-align:middle \
+       center it against an inflated line and leave it sitting visibly \
+       high relative to the label text's actual glyph height. */ \
+    "position:relative;vertical-align:middle}" \
     ".mlHint:hover,.mlHint:focus{background:var(--accent);color:#fff;" \
     "outline:none}" \
     ".mlHint:hover .mlHintBubble,.mlHint:focus .mlHintBubble{" \
@@ -170,7 +223,53 @@
     "width:auto;margin:0;font-weight:400}" \
     ".multiSelect input{width:auto}" \
     ".multiSelect:empty::before{content:'Nothing to choose from yet.';" \
-    "color:var(--muted);font-size:.8rem}"
+    "color:var(--muted);font-size:.8rem}" \
+    /* Step-flow banner (ML forms clarity pass): a plain-language "you are \
+       here" strip at the top of any panel that is one stage of a real \
+       multi-panel pipeline -- see ml_step_flow()'s own comment for why it \
+       shows the whole sequence but only highlights the current stage(s). \
+       A CSS grid with auto-fit columns (not a non-wrapping flex row with \
+       a horizontal scrollbar, which is what this used to be) so it always \
+       lays out cleanly at any browser width or height -- narrow viewports \
+       simply get more rows instead of clipped/scrolled content, with \
+       nothing to overflow its container in either direction. There is no \
+       connecting arrow between boxes (a wrapping grid has no single "next \
+       box" direction to point one at); the number circles alone already \
+       state the order. */ \
+    ".mlStepFlow{display:grid;" \
+    "grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));gap:.5rem;" \
+    "padding:.85rem;margin-bottom:1.25rem;background:var(--panel);" \
+    "border:1px solid var(--panel-border);border-radius:.6rem}" \
+    ".mlStepBox{display:flex;align-items:flex-start;gap:.55rem;" \
+    "min-width:0;padding:.4rem .5rem;border-radius:.5rem}" \
+    ".mlStepBox.mlStepActive{background:rgba(124,92,255,.16)}" \
+    ".mlStepNum{flex:none;display:inline-flex;align-items:center;" \
+    "justify-content:center;width:1.6rem;height:1.6rem;border-radius:50%;" \
+    "background:var(--panel-border);color:var(--muted);font-weight:700;" \
+    "font-size:.8rem}" \
+    ".mlStepBox.mlStepActive .mlStepNum{background:var(--accent);color:#fff}" \
+    ".mlStepBox strong{display:block;font-size:.85rem}" \
+    ".mlStepDesc{display:block;color:var(--muted);font-size:.75rem;" \
+    "line-height:1.35;margin-top:.15rem}" \
+    /* Short callouts under a step's <h2> (ML forms clarity pass): \
+       .mlPipelineNote for a plain "here is what this does" aside (e.g. \
+       "this step is optional"), .mlPipelineWarning for a required-step \
+       gap that would otherwise only surface later as a raw server error \
+       (e.g. missing dataset content before training). */ \
+    ".mlPipelineNote{color:var(--muted);font-size:.82rem;line-height:1.4;" \
+    "margin:-.25rem 0 .85rem}" \
+    ".mlPipelineWarning{color:#f2c96d;background:#3a2f0d;" \
+    "border:1px solid #5c4b13;border-radius:.5rem;padding:.5rem .7rem;" \
+    "font-size:.82rem;line-height:1.4;margin:-.15rem 0 .85rem}" \
+    /* Machine Learning Dashboard: the same five-box grid .mlStepFlow uses, \
+       but every box is a real link to that step's page (clicking anywhere \
+       lands you there) -- overrides the global anchor color/underline so \
+       a clickable step still reads as plain step-box text, not a link. */ \
+    ".mlPipelineOverview .mlStepBox{text-decoration:none;color:inherit;" \
+    "cursor:pointer}" \
+    ".mlPipelineOverview .mlStepBox:hover{background:var(--panel-border)}" \
+    ".mlPipelineOverview .mlStepBox.mlStepActive:hover{" \
+    "background:rgba(124,92,255,.28)}"
 
 namespace masterai::server_internal {
 
@@ -425,6 +524,49 @@ std::string application_script() {
         "if(el._fadeTimer)clearTimeout(el._fadeTimer);"
         "if(el._hideTimer)clearTimeout(el._hideTimer);"
         "el.hidden=true;el.classList.remove('systemErrorFading');}"
+        // The success counterpart to showSystemError() just above, raised
+        // by every completed Machine Learning form action instead of the
+        // easy-to-miss #actionStatus line -- centered on screen on both
+        // axes (not pinned to a corner) since a completed action is worth a
+        // brief, hard-to-miss interruption. Its own title bar -- a green
+        // gradient, with a Copy button and then the close (x) button both
+        // pinned to its far right -- sits above a body panel that carries
+        // the completion text in light green on a very dark green
+        // background, so the message stays legible while the title bar
+        // signals success. Unless closed sooner (the x button), the whole
+        // banner fades to solid black over its last .4 seconds and then
+        // closes 10 seconds after this call, mirroring showSystemError's
+        // own timer. Reuses one element (created lazily) so a second
+        // completion while the first is still showing just replaces the
+        // message and restarts the timer rather than stacking banners.
+        "function showFormSuccess(message){let el=q('#formSuccessBanner');"
+        "if(!el){el=document.createElement('div');el.id='formSuccessBanner';"
+        "const titleBar=document.createElement('div');"
+        "titleBar.className='formSuccessTitleBar';"
+        "const title=document.createElement('div');"
+        "title.className='formSuccessTitle';title.textContent='COMPLETED';"
+        "const copyBtn=document.createElement('button');copyBtn.type='button';"
+        "copyBtn.className='formSuccessCopy';copyBtn.textContent='Copy';"
+        "copyBtn.setAttribute('aria-label','Copy success message');"
+        "copyBtn.addEventListener('click',()=>"
+        "copyToClipboard(el.querySelector('.formSuccessBody').textContent,copyBtn));"
+        "const close=document.createElement('button');close.type='button';"
+        "close.className='formSuccessClose';close.textContent='\\u00d7';"
+        "close.setAttribute('aria-label','Dismiss success message');"
+        "close.addEventListener('click',()=>hideFormSuccess(el));"
+        "titleBar.append(title,copyBtn,close);"
+        "const body=document.createElement('div');body.className='formSuccessBody';"
+        "el.append(titleBar,body);document.body.append(el);}"
+        "el.querySelector('.formSuccessBody').textContent=message;"
+        "el.hidden=false;el.classList.remove('formSuccessFading');"
+        "if(el._fadeTimer)clearTimeout(el._fadeTimer);"
+        "if(el._hideTimer)clearTimeout(el._hideTimer);"
+        "el._fadeTimer=setTimeout(()=>el.classList.add('formSuccessFading'),9600);"
+        "el._hideTimer=setTimeout(()=>hideFormSuccess(el),10000);}"
+        "function hideFormSuccess(el){el=el||q('#formSuccessBanner');if(!el)return;"
+        "if(el._fadeTimer)clearTimeout(el._fadeTimer);"
+        "if(el._hideTimer)clearTimeout(el._hideTimer);"
+        "el.hidden=true;el.classList.remove('formSuccessFading');}"
         "async function login(e){e.preventDefault();try{const d=await api('/api/v1/auth/login','POST',"
         "{username:q('#username').value,password:q('#password').value});"
         "sessionStorage.setItem('csrf',d.csrfToken);location.href='/app';}"
@@ -547,7 +689,7 @@ std::string application_script() {
         "renderMlModels(mlm.models);renderMlDatasets(mld.datasets);"
         "renderMlSubjects(mls.subjects);"
         "renderMlLabelTasks(mllt.labelTasks);renderMlPrepJobs(mlpj.prepJobs);"
-        "renderMlTrainingJobs(mltj.trainingJobs);"
+        "renderMlTrainingJobs(mltj.trainingJobs,mld.datasets);"
         "renderMlEvaluationRuns(mler.evaluationRuns);"
         "renderMlExperiments(mlex.experiments);"
         "renderMlFineTuningJobs(mlft.fineTuningJobs);"
@@ -582,22 +724,66 @@ std::string application_script() {
         "'#mlPipelineProjectId'])"
         "fillMlSelect(id,mlp.projects,'None / choose a project',x=>x.name);"
         "for(const id of ['#mlPredictModelId','#mlTrainingJobModelId',"
-        "'#mlEvaluationRunModelId','#mlExperimentModelId','#mlFineTuningJobModelId',"
-        "'#mlModelBuilderConfigBaseModelId','#mlModelOptimizationModelId',"
+        "'#mlEvaluationRunModelId','#mlExperimentModelId',"
+        "'#mlModelOptimizationModelId',"
         "'#mlDeploymentModelId','#mlModelComparisonBaselineModelId',"
         "'#mlModelComparisonCandidateModelId','#mlEndpointModelId',"
         "'#mlModelCardModelId','#mlPipelineModelId',"
         "'#mlInstructionExampleGenerateModelId',"
         "'#mlSyntheticRecordGenerateModelId'])fillMlSelect(id,mlm.models,"
         "'None / choose a model',x=>x.displayName||x.name);"
+        // Fine-Tuning Job's and Model Builder Config's "base model" fields
+        // are the two places you pick what training actually starts from,
+        // so unlike every other model field above (which only makes sense
+        // against something already in the ML registry -- predict,
+        // evaluate, deploy, compare, ...) these also offer every model
+        // already downloaded into the local model catalog (GET
+        // /api/v1/models -- 'm' below), not only ones some prior training
+        // run already registered. Picking a catalog entry here works with
+        // no separate registration step: the create endpoints transparently
+        // register it into the ML registry on submit (see
+        // resolve_or_register_base_model() in server.cpp).
+        "const mlBaseModelChoices=[...mlm.models.map(x=>"
+        "({id:x.id,label:(x.displayName||x.name)+' (ML registry)'})),"
+        "...m.models.map(x=>"
+        "({id:x.id,label:(x.displayName||x.id)+' (downloaded)'}))];"
+        "for(const id of ['#mlFineTuningJobModelId',"
+        "'#mlModelBuilderConfigBaseModelId'])"
+        "fillMlSelect(id,mlBaseModelChoices,'None / choose a model',"
+        "x=>x.label);"
+        // ML forms clarity pass: every dataset picker now shows whether
+        // that dataset actually has uploaded rows to work with, so a user
+        // can no longer select an empty dataset shell without warning and
+        // only discover it later from a raw ml_dataset_has_no_content
+        // error at training/evaluation time.
+        "const mlDatasetLabel=x=>x.name+(x.hasContent?"
+        "' \\u2014 '+x.contentRows+' row(s) ready':"
+        "' \\u2014 \\u26a0 no content uploaded yet');"
+        // Dataset purpose filtering: Training Jobs/Evaluation Lab/
+        // Experiment Tracking/Model Comparison/Automation Pipelines only
+        // ever run parse_tabular_csv against the dataset's content (see
+        // those same endpoints in server.cpp) -- picking an
+        // Instruction/fine-tuning-text-purpose dataset there was
+        // previously only caught at run/evaluate time with a raw
+        // classification-validation error, even though it can never work.
+        // Their pickers now only list Tabular-purpose datasets so that
+        // dead end is no longer offered in the first place. Dataset
+        // Manager's own content-upload picker, and Fine-Tuning Jobs'
+        // (whose Method decides which purpose it actually needs -- a plain
+        // method trains tabular, an \"llm:\" method fine-tunes an
+        // Instruction dataset), still list every dataset regardless of
+        // purpose.
+        "const mlTabularDatasets=mld.datasets.filter(x=>x.purpose!=='instruction');"
+        "for(const id of ['#mlTrainingJobDatasetId','#mlEvaluationRunDatasetId',"
+        "'#mlExperimentDatasetId','#mlModelComparisonDatasetId','#mlPipelineDatasetId'])"
+        "fillMlSelect(id,mlTabularDatasets,'None / choose a tabular dataset',"
+        "mlDatasetLabel);"
         "for(const id of ['#mlDatasetContentId','#mlLabelTaskDatasetId',"
-        "'#mlPrepJobDatasetId','#mlTrainingJobDatasetId','#mlEvaluationRunDatasetId',"
-        "'#mlExperimentDatasetId','#mlFineTuningJobDatasetId',"
+        "'#mlPrepJobDatasetId','#mlFineTuningJobDatasetId',"
         "'#mlInstructionExampleDatasetId','#mlInstructionExampleGenerateDatasetId',"
         "'#mlInstructionExampleCheckDatasetId',"
-        "'#mlSyntheticRecordDatasetId','#mlSyntheticRecordGenerateDatasetId',"
-        "'#mlModelComparisonDatasetId','#mlPipelineDatasetId'])fillMlSelect(id,mld.datasets,"
-        "'None / choose a dataset',x=>x.name);"
+        "'#mlSyntheticRecordDatasetId','#mlSyntheticRecordGenerateDatasetId'])"
+        "fillMlSelect(id,mld.datasets,'None / choose a dataset',mlDatasetLabel);"
         "fillMlSelect('#mlHyperparameterSearchTrainingJobId',mltj.trainingJobs,"
         "'Choose a training job',x=>x.name+' ('+x.status+')');"
         "fillMlSelect('#mlCheckpointTrainingJobId',mltj.trainingJobs,"
@@ -612,6 +798,12 @@ std::string application_script() {
         "'#mlInstructionExampleTestId'])fillMlSelect(id,"
         "mlie.instructionExamples,'Choose an instruction example',"
         "x=>x.name+' ('+x.status+')');"
+        "fillMlSelect('#mlProjectGovernanceId',mlp.projects,"
+        "'Choose a project',x=>x.name+' ('+x.status+')');"
+        "fillMlSelect('#mlDatasetDeclareId',mld.datasets,"
+        "'Choose a dataset',x=>x.name+' ('+x.approvalStatus+')');"
+        "fillMlSelect('#mlTrainingJobPolicyId',mltj.trainingJobs,"
+        "'Choose a training job',x=>x.name+' ('+x.status+')');"
         "fillMultiSelect('#mlInstructionExampleTestModelIds',mlm.models,"
         "x=>x.id,x=>x.displayName||x.name);"
         "fillMlSelect('#mlEndpointPolicyId',mlend.inferenceEndpoints,"
@@ -1237,8 +1429,8 @@ std::string application_script() {
         "attr,id,'iconBtn-apply');}"
         "function rejectBtn(attr,id){return iconBtn('x','Reject',attr,id,"
         "'iconBtn-delete');}"
-        "function runBtn(attr,id,label){return iconBtn('play',"
-        "label||'Run',attr,id,'');}"
+        "function runBtn(attr,id,label,extraAttr){return iconBtn('play',"
+        "label||'Run',attr,id,'',extraAttr);}"
         "function viewBtn(attr,id,label){return iconBtn('eye',"
         "label||'View',attr,id,'');}"
         "function configureBtn(attr,id){return iconBtn('gear','Configure',"
@@ -1460,9 +1652,43 @@ std::string application_script() {
         "row('TLS mode',esc(f.tlsMode))"
         "]);}"
         // Renders the Machine Learning foundation page: an acknowledgement
-        // line, the (currently always zero) dashboard counts, and the full
-        // interface roadmap with each entry tagged available/planned -- see
-        // MachineLearningRegistry's class comment in masterai.hpp.
+        // line, the real dashboard counts, and the interface roadmap with
+        // each entry tagged available/planned -- see MachineLearningRegistry's
+        // class comment in masterai.hpp. Phase 92 (consolidation): the five
+        // real content pages that make up the core pipeline (and the
+        // Dashboard's own self-listing) are now excluded from this table --
+        // application_page()'s ml_pipeline_overview() above already shows
+        // those five, as real links, in pipeline order; repeating them here
+        // as a sixth/plain-text copy would just be the same information
+        // twice. ML_DASHBOARD_ROUTE_BY_KEY turns every remaining interface's
+        // key into that page's real URL so this table becomes a set of
+        // links too, not just a status list.
+        "const ML_DASHBOARD_ROUTE_BY_KEY={'model-registry':'/app/ml/models',"
+        "'model-builder':'/app/ml/model-builder-configs',"
+        "'subject-knowledge':'/app/ml/subjects',"
+        "'data-labeling':'/app/ml/label-tasks',"
+        "'data-preparation':'/app/ml/prep-jobs',"
+        "'fine-tuning':'/app/ml/fine-tuning-jobs',"
+        "'checkpoint-management':'/app/ml/checkpoints',"
+        "'hyperparameter-optimization':'/app/ml/hyperparameter-searches',"
+        "'experiment-tracking':'/app/ml/experiments',"
+        "'subject-examination':'/app/ml/subject-exams',"
+        "'model-optimization':'/app/ml/model-optimizations',"
+        "'prompt-instruction-training':'/app/ml/instruction-examples',"
+        "'embeddings-vector-stores':'/app/ml/vector-stores',"
+        "'retrieval-augmented-generation':'/app/ml/rag-configs',"
+        "'synthetic-data':'/app/ml/synthetic-records',"
+        "'model-comparison':'/app/ml/model-comparisons',"
+        "'deployment-manager':'/app/ml/deployments',"
+        "'inference-endpoints':'/app/ml/inference-endpoints',"
+        "'hardware-compute':'/app/ml/compute-nodes',"
+        "'automation-pipelines':'/app/ml/automation-pipelines',"
+        "'safety-governance':'/app/ml/safety-governance',"
+        "'monitoring-diagnostics':'/app/ml/monitoring',"
+        "'audit-logs':'/app/ml/audit-logs',"
+        "'ml-settings':'/app/ml/settings'};"
+        "const ML_DASHBOARD_CORE_KEYS=['dashboard','projects',"
+        "'dataset-manager','training-jobs','evaluation-lab'];"
         "function renderMlDashboard(ml){const ack=q('#mlAck');if(!ack)return;"
         "ack.textContent=ml.enabled?"
         "'Machine Learning module is enabled ('+ml.phase+' phase).':"
@@ -1476,9 +1702,11 @@ std::string application_script() {
         "['Failed training jobs','failedTrainingJobs']]"
         ".map(([label,key])=>[label,String(ml[key])]));"
         "q('#mlInterfaces').innerHTML=table(['Interface','Status'],"
-        "ml.interfaces.map(x=>[esc(x.label),"
+        "ml.interfaces.filter(x=>!ML_DASHBOARD_CORE_KEYS.includes(x.key))"
+        ".map(x=>{const route=ML_DASHBOARD_ROUTE_BY_KEY[x.key];"
+        "return[route?'<a href=\"'+route+'\">'+esc(x.label)+'</a>':esc(x.label),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+esc(x.status)+"
-        "'</span>']));}"
+        "'</span>'];}));}"
         // Renders the ML Projects list with a Delete button per row -- the
         // only mutation this foundation phase supports beyond create, since
         // status transitions belong to the training/evaluation/deployment
@@ -1487,18 +1715,44 @@ std::string application_script() {
         "if(!el)return;"
         "if(!projects.length){el.innerHTML='<p>No Machine Learning projects "
         "yet.</p>';return;}"
-        "el.innerHTML=table(['Name','Subject domain','Model task','Status',''],"
+        "el.innerHTML=table(['Name','Subject domain','Model task',"
+        "'Administrators','Status',''],"
         "projects.map(x=>[esc(x.name),esc(x.subjectDomain),esc(x.modelTask),"
+        "escTrim(x.administrators,24)||'-',"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+esc(x.status)+"
         "'</span>',"
-        "deleteBtn('delete-ml-project',x.id)]));"
+        "toolbar(configureBtn('edit-ml-project-governance',x.id),"
+        "deleteBtn('delete-ml-project',x.id))]));"
         "for(const btn of el.querySelectorAll('[data-delete-ml-project]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
         "try{await api('/api/v1/ml/projects/'+"
         "encodeURIComponent(btn.dataset.deleteMlProject)+'/delete','POST');"
         "await load();}"
         "catch(x){showSystemError('Delete Machine Learning project failed: '+"
-        "x.message);}});}}"
+        "x.message);}});}"
+        // Phase 93: "Configure" loads the project's real governance fields
+        // (not just id) into the Governance form below the table.
+        "for(const btn of el.querySelectorAll("
+        "'[data-edit-ml-project-governance]')){"
+        "btn.addEventListener('click',()=>{"
+        "const id=btn.dataset.editMlProjectGovernance;"
+        "const p=projects.find(y=>y.id===id);if(!p)return;"
+        "q('#mlProjectGovernanceId').value=id;"
+        "q('#mlProjectAdministrators').value=p.administrators||'';"
+        "q('#mlProjectApprovedDataSources').value=p.approvedDataSources||'';"
+        "q('#mlProjectSecurityClassification').value="
+        "p.securityClassification||'';"
+        "q('#mlProjectTargetArchitecture').value=p.targetArchitecture||'';"
+        "q('#mlProjectTargetDeploymentEnvironment').value="
+        "p.targetDeploymentEnvironment||'';"
+        "q('#mlProjectSuccessCriteria').value=p.successCriteria||'';"
+        "q('#mlProjectEvaluationRequirements').value="
+        "p.evaluationRequirements||'';"
+        "q('#mlProjectSafetyRequirements').value=p.safetyRequirements||'';"
+        "q('#mlProjectStorageAllocationMb').value="
+        "p.storageAllocationMb||0;"
+        "q('#mlProjectComputeAllocationNotes').value="
+        "p.computeAllocationNotes||'';});}}"
         // Model Registry (docs/PLAN.md "Machine Learning Abilities" section
         // 7): each row carries its own lifecycle-state dropdown so an
         // administrator can move a model along its states one deliberate
@@ -1514,9 +1768,9 @@ std::string application_script() {
         "if(!el)return;"
         "if(!models.length){el.innerHTML='<p>No models registered yet.</p>';"
         "return;}"
-        "el.innerHTML=table(['Name','Version','Family','Task','State','Set state'],"
+        "el.innerHTML=table(['Name','Version','Family','Task','Quantization','State','Set state'],"
         "models.map(x=>[esc(x.displayName||x.name),esc(x.version),"
-        "esc(x.family),esc(x.task),"
+        "esc(x.family),esc(x.task),esc(x.quantization||'unknown'),"
         "'<span class=\"stateTag stateTag-'+esc(x.state)+'\">'+esc(x.state)+"
         "'</span>',"
         "toolbar('<select data-state-for=\"'+x.id+'\">'+MODEL_STATES.map(s=>"
@@ -1543,12 +1797,27 @@ std::string application_script() {
         "if(!el)return;"
         "if(!datasets.length){el.innerHTML='<p>No datasets registered yet.</p>';"
         "return;}"
-        "el.innerHTML=table(['Name','Subject area','Format','Approval',''],"
-        "datasets.map(x=>[esc(x.name),esc(x.subjectArea),esc(x.dataFormat),"
+        "el.innerHTML=table(['Name','Purpose','Subject area','Format','Content',"
+        "'Version','Quality','Duplicates','Approval',''],"
+        "datasets.map(x=>[esc(x.name),"
+        "x.purpose==='instruction'?'Instruction / fine-tuning':'Tabular',"
+        "esc(x.subjectArea),esc(x.dataFormat),"
+        // ML forms clarity pass: makes the exact gap that used to only
+        // surface as a raw ml_dataset_has_no_content error at training
+        // time visible right here in the dataset list.
+        "'<span class=\"stateTag stateTag-'+(x.hasContent?'ready':'missing')+"
+        "'\">'+(x.hasContent?x.contentRows+' row(s)':'no content')+'</span>',"
+        // Phase 94: real content-derived metrics, computed at upload time --
+        // see Dataset::record_count's comment in masterai.hpp.
+        "x.currentVersion?('v'+x.currentVersion):'-',"
+        "x.recordCount?(Math.round(x.dataQualityScore*100)+'%'):'-',"
+        "x.recordCount?(Math.round(x.duplicateRate*100)+'%'):'-',"
         "'<span class=\"stateTag stateTag-'+esc(x.approvalStatus)+'\">'+"
         "esc(x.approvalStatus)+'</span>',"
         "toolbar(approveBtn('approve-ml-dataset',x.id),"
         "rejectBtn('reject-ml-dataset',x.id),"
+        "configureBtn('edit-ml-dataset-declaration',x.id),"
+        "viewBtn('history-ml-dataset',x.id,'History'),"
         "deleteBtn('delete-ml-dataset',x.id))]));"
         "for(const btn of el.querySelectorAll('[data-approve-ml-dataset]')){"
         "btn.addEventListener('click',async()=>{const s=q('#actionStatus');"
@@ -1567,7 +1836,37 @@ std::string application_script() {
         "try{await api('/api/v1/ml/datasets/'+"
         "encodeURIComponent(btn.dataset.deleteMlDataset)+'/delete','POST');"
         "await load();}"
-        "catch(x){showSystemError('Delete dataset failed: '+x.message);}});}}"
+        "catch(x){showSystemError('Delete dataset failed: '+x.message);}});}"
+        // Phase 94: "Configure" loads the dataset's declared fields
+        // (sensitive-data status, split percentages) into the Declare
+        // metadata form below the table.
+        "for(const btn of el.querySelectorAll("
+        "'[data-edit-ml-dataset-declaration]')){"
+        "btn.addEventListener('click',()=>{"
+        "const id=btn.dataset.editMlDatasetDeclaration;"
+        "const d=datasets.find(y=>y.id===id);if(!d)return;"
+        "q('#mlDatasetDeclareId').value=id;"
+        "q('#mlDatasetSensitiveDataStatus').value=d.sensitiveDataStatus||'';"
+        "q('#mlDatasetTrainSplitPercent').value=d.trainSplitPercent||0;"
+        "q('#mlDatasetValidationSplitPercent').value="
+        "d.validationSplitPercent||0;"
+        "q('#mlDatasetTestSplitPercent').value=d.testSplitPercent||0;});}"
+        // Phase 94: "History" fetches this dataset's real immutable version
+        // list (docs/PLAN.md section 11) and reports it in the shared
+        // action status line -- a full table felt like overkill for what is
+        // usually a handful of uploads.
+        "for(const btn of el.querySelectorAll('[data-history-ml-dataset]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const id=btn.dataset.historyMlDataset;"
+        "try{const r=await api('/api/v1/ml/datasets/'+"
+        "encodeURIComponent(id)+'/versions','GET');"
+        "const s=q('#actionStatus');"
+        "const summary=r.versions.map(v=>'v'+v.version+' ('+"
+        "v.recordCount+' rows, '+v.uploadedBy+')').join('; ');"
+        "if(s)s.textContent=r.versions.length?"
+        "('Version history: '+summary):'No content uploaded yet.';}"
+        "catch(x){showSystemError('Load dataset history failed: '+"
+        "x.message);}});}}"
         // Subject Knowledge Manager (docs/PLAN.md "Machine Learning
         // Abilities" section 12): each row carries its own review-status
         // dropdown, mirroring the Model Registry's set-state pattern above,
@@ -1707,22 +2006,47 @@ std::string application_script() {
         // Training Jobs, Evaluation Lab, and prediction results all report
         // numbers the same way.
         "function fmtMlMetrics(m){if(!m)return'';"
+        // Phase 96: latency/throughput/memory/stability/robustness/bias --
+        // real-measured, appended after whichever core metric line below
+        // applies, so every existing caller (Training Jobs, Evaluation Lab,
+        // Model Comparison, prediction results) shows them for free.
+        "const extra=(m.latencyMs===undefined)?'':"
+        "(' Latency '+Number(m.latencyMs).toFixed(1)+'ms, throughput '+"
+        "Number(m.throughputPredictionsPerSec).toFixed(1)+'/s, stability '+"
+        "Number(m.stabilityScore).toFixed(2)+', robustness '+"
+        "Number(m.robustnessScore).toFixed(2)+"
+        "(m.biasFairnessReport&&Object.keys(m.biasFairnessReport).length?"
+        "(', bias breakdown: '+Object.entries(m.biasFairnessReport)."
+        "map(([k,v])=>k+'='+Number(v).toFixed(3)).join(', ')):'')+'.');"
         "if(m.task==='classification'){return'accuracy '+"
         "(100*m.accuracy).toFixed(1)+'%, macro precision '+"
         "Number(m.macroPrecision).toFixed(3)+', macro recall '+"
         "Number(m.macroRecall).toFixed(3)+', macro F1 '+"
-        "Number(m.macroF1).toFixed(3)+' over '+m.evaluatedRows+' rows.';}"
+        "Number(m.macroF1).toFixed(3)+' over '+m.evaluatedRows+' rows.'+extra;}"
         "return'MSE '+Number(m.mse).toPrecision(4)+', MAE '+"
         "Number(m.mae).toPrecision(4)+', R\\u00b2 '+"
-        "Number(m.rSquared).toFixed(3)+' over '+m.evaluatedRows+' rows.';}"
-        "function renderMlTrainingJobs(jobs){const el=q('#mlTrainingJobsList');"
+        "Number(m.rSquared).toFixed(3)+' over '+m.evaluatedRows+' rows.'+extra;}"
+        "function renderMlTrainingJobs(jobs,datasets){"
+        "const el=q('#mlTrainingJobsList');"
         "if(!el)return;"
         "if(!jobs.length){el.innerHTML='<p>No training jobs created "
         "yet.</p>';return;}"
+        // Guard rail (ML forms clarity pass): a job whose dataset has no
+        // uploaded content can only ever fail with
+        // ml_dataset_has_no_content, so Train Now is disabled up front
+        // with a tooltip explaining exactly what to do, instead of the
+        // user finding out from a raw server error after clicking it.
+        "const contentByDataset=new Map((datasets||[]).map("
+        "x=>[x.id,!!x.hasContent]));"
         "el.innerHTML=table(['Name','Project','Model','Dataset','Training "
-        "type','Status','Set status'],"
-        "jobs.map(x=>[esc(x.name),escTrim(x.projectId,16),"
+        "type','Max runtime','Retry','Status','Set status'],"
+        "jobs.map(x=>{const ready=contentByDataset.get(x.datasetId)===true;"
+        "return[esc(x.name),escTrim(x.projectId,16),"
         "escTrim(x.modelId,16),escTrim(x.datasetId,16),esc(x.trainingType),"
+        // Phase 95: real enforced fields -- see execute_training_job()'s
+        // comment in server.cpp for exactly how each is used.
+        "x.maxRuntimeSeconds?(x.maxRuntimeSeconds+'s'):'no limit',"
+        "esc(x.failureRecoveryStrategy||'none'),"
         "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
         "esc(x.status)+'</span>',"
         "toolbar('<select data-training-job-status-for=\"'+x.id+'\">'+"
@@ -1730,8 +2054,11 @@ std::string application_script() {
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
         "applyBtn('apply-training-job-status',x.id),"
-        "runBtn('run-ml-training-job',x.id,'Train now'),"
-        "deleteBtn('delete-ml-training-job',x.id))]));"
+        "runBtn('run-ml-training-job',x.id,ready?'Train now':"
+        "'Train now (upload this dataset\\u2019s content first)',"
+        "ready?'':'disabled'),"
+        "configureBtn('edit-ml-training-job-policy',x.id),"
+        "deleteBtn('delete-ml-training-job',x.id))];}));"
         // Phase 56: "Train now" invokes the real training executor and
         // shows the genuine result (method, loss, held-out metrics) in the
         // panel below the table.
@@ -1768,7 +2095,38 @@ std::string application_script() {
         "encodeURIComponent(btn.dataset.deleteMlTrainingJob)+'/delete',"
         "'POST');await load();}"
         "catch(x){showSystemError('Delete training job failed: '+"
-        "x.message);}});}}"
+        "x.message);}});}"
+        // Phase 95: "Configure" loads this job's real execution-policy
+        // fields into the Execution policy form below the table.
+        "for(const btn of el.querySelectorAll("
+        "'[data-edit-ml-training-job-policy]')){"
+        "btn.addEventListener('click',()=>{"
+        "const id=btn.dataset.editMlTrainingJobPolicy;"
+        "const j=jobs.find(y=>y.id===id);if(!j)return;"
+        "q('#mlTrainingJobPolicyId').value=id;"
+        "q('#mlTrainingJobMaxRuntimeSeconds').value=j.maxRuntimeSeconds||0;"
+        "q('#mlTrainingJobFailureRecoveryStrategy').value="
+        "j.failureRecoveryStrategy||'none';"
+        "q('#mlTrainingJobCheckpointFrequencyEpochs').value="
+        "j.checkpointFrequencyEpochs||0;"
+        "q('#mlTrainingJobOutputDirectory').value=j.outputDirectory||'';"
+        "q('#mlTrainingJobComputeTarget').value=j.computeTarget||'';"
+        "q('#mlTrainingJobHardwareAllocation').value="
+        "j.hardwareAllocation||'';"
+        "q('#mlTrainingJobRuntimeEnvironment').value="
+        "j.runtimeEnvironment||'';"
+        "q('#mlTrainingJobContainerImage').value=j.containerImage||'';"
+        "q('#mlTrainingJobEnvironmentVariables').value="
+        "j.environmentVariables||'';"
+        "q('#mlTrainingJobSecretsReferences').value="
+        "j.secretsReferences||'';"
+        "q('#mlTrainingJobLoggingPolicy').value=j.loggingPolicy||'';"
+        "q('#mlTrainingJobNotificationPolicy').value="
+        "j.notificationPolicy||'';"
+        "q('#mlTrainingJobResourceCeilingNotes').value="
+        "j.resourceCeilingNotes||'';"
+        "q('#mlTrainingJobCostCeilingNotes').value="
+        "j.costCeilingNotes||'';});}}"
         // Evaluation Lab (docs/PLAN.md "Machine Learning Abilities" section
         // 23): same status-dropdown-plus-Delete pattern as Training Jobs
         // above.
@@ -1924,15 +2282,52 @@ std::string application_script() {
         "btn.addEventListener('click',async()=>{"
         "const out=q('#mlFineTuningRunResult');"
         "if(out)out.textContent='Fine-tuning...';btn.disabled=true;"
+        "const jobId=btn.dataset.runMlFineTuningJob;"
         "try{const r=await api('/api/v1/ml/fine-tuning-jobs/'+"
-        "encodeURIComponent(btn.dataset.runMlFineTuningJob)+'/run','POST',{});"
+        "encodeURIComponent(jobId)+'/run','POST',{});"
+        // A real LLM LoRA run (Method starting "llm:") answers 202
+        // "queued" immediately and finishes on a detached background
+        // thread -- poll GET .../llm-result until it reports completed or
+        // failed instead of expecting the tabular path's synchronous report
+        // shape (r.method/r.finalLoss/...).
+        "if(r.status==='queued'){"
+        "if(out)out.textContent='LLM fine-tuning running in the "
+        "background (this can take a while)...';"
+        "let tries=0;"
+        "while(tries<600){"
+        "await new Promise(res=>setTimeout(res,3000));tries++;"
+        // Real progress, not a spinner: tails whichever llama.cpp tool's
+        // own log file the background run is currently writing to (see
+        // GET .../llm-progress's own comment in server.cpp) so the user
+        // sees the actual write operation's live output.
+        "try{const prog=await api('/api/v1/ml/fine-tuning-jobs/'+"
+        "encodeURIComponent(jobId)+'/llm-progress','GET');"
+        "if(out){const lastLine=(prog.logTail||'').trim().split('\\n').pop()||"
+        "'starting...';"
+        "out.textContent='LLM fine-tuning: '+prog.stage+' -- '+lastLine;}}"
+        "catch(e){}"
+        "let poll;try{poll=await api('/api/v1/ml/fine-tuning-jobs/'+"
+        "encodeURIComponent(jobId)+'/llm-result','GET');}"
+        "catch(e){continue;}"
+        "if(poll.status==='completed'){"
+        "if(out)out.textContent='LLM fine-tuning complete. Adapted model "
+        "ID: '+poll.modelId+'.'+(poll.catalogModelId?"
+        "' Ready to chat with as model \\''+poll.catalogModelId+'\\'.':"
+        "(poll.catalogNote?' '+poll.catalogNote:''))+"
+        "(poll.quantizationWarning?' \\u26a0 '+poll.quantizationWarning:'');"
+        "await load();break;}"
+        "if(poll.status==='failed'){"
+        "if(out)out.textContent='';"
+        "showSystemError('LLM fine-tuning failed: '+poll.error);break;}"
+        "}"
+        "}else{"
         "if(out)out.textContent='Fine-tuned '+r.method+' over '+r.epochs+"
         "' epochs on '+r.trainRows+' rows (final loss '+"
         "Number(r.finalLoss).toPrecision(4)+'). '+"
         "(r.evaluatedOnTest?'Held-out ('+r.testRows+' rows): '"
         ":'No held-out rows; metrics use training data: ')+"
         "fmtMlMetrics(r.metrics)+' Adapted model ID: '+r.modelId;"
-        "await load();}"
+        "await load();}}"
         "catch(x){if(out)out.textContent='';"
         "showSystemError('Fine-tuning failed: '+x.message);}"
         "finally{btn.disabled=false;}});}"
@@ -3017,7 +3412,13 @@ std::string application_script() {
         "const stateCell=q('#state-'+id);"
         "const total=downloadSizes[id];let handle;"
         "const tick=async()=>{try{const d=await api('/api/v1/model-downloads');"
-        "const job=d.downloads.find(x=>x.id===id);if(!job)return;"
+        "const job=d.downloads.find(x=>x.id===id);"
+        // A completed download is auto-removed from the list server-side
+        // the moment it finishes, so no matching job ever comes back for
+        // it -- without this, the old '!job return' behaviour left this
+        // interval ticking every second forever with nothing to stop it.
+        "if(!job){clearInterval(handle);delete activePolls[id];"
+        "if(stateCell)stateCell.textContent='complete';await load();return;}"
         "if(stateCell)stateCell.textContent=job.state;"
         "const mib=(job.completedBytes/1048576).toFixed(1);"
         "if(cell){if(total){cell.textContent=mib+' / '+(total/1048576).toFixed(1)+"
@@ -3097,8 +3498,16 @@ std::string application_script() {
         "function quantTag(q){if(!q)return '';"
         "const m=/^[Qq](\\d+)/.exec(q);if(m)return '[Q'+m[1]+'] ';"
         "return '['+q+'] ';}"
+        // Machine Learning forms (any path under /api/v1/ml/) route their
+        // completion through showFormSuccess()'s centered green banner
+        // instead of this plain #actionStatus line -- see that function's
+        // own comment for why. Every other form keeps the original inline
+        // status text.
         "async function submit(e,path,body){e.preventDefault();const s=q('#actionStatus');"
-        "try{const r=await api(path,'POST',body());s.textContent='Completed: '+JSON.stringify(r);"
+        "try{const r=await api(path,'POST',body());const msg='Completed: '+"
+        "JSON.stringify(r);"
+        "if(path.indexOf('/api/v1/ml/')===0){showFormSuccess(msg);}"
+        "else{s.textContent=msg;}"
         "await load();}catch(x){showSystemError('Action failed: '+x.message);}}"
         // Uploads one picked file as a project attachment (text only, per
         // AttachmentStore::add_text) and adds it to the pending list for the
@@ -3237,21 +3646,117 @@ std::string application_script() {
         // Returns the last 'complete' event seen (or null on error/abort),
         // so the caller can decide whether to continue the auto-drive loop.
         // Re-parsing and re-patching the *entire* accumulated reply on every
-        // single token (the old behaviour) is O(reply length) per token, so
-        // a long streamed reply got visibly slower to render as it grew --
-        // once the model warmed up and tokens arrived faster than that
-        // shrinking per-token budget, the main thread started missing
-        // frames and the whole page read as stalling roughly once a second.
-        // Coalescing with requestAnimationFrame instead renders at most once
-        // per painted frame no matter how many token events land in
-        // between, so cost scales with frames-on-screen, not tokens
-        // received. el.rafPending guards against queuing more than one
-        // frame at a time per bubble.
-        "function scheduleAssistantRender(el,box){if(!el||el.rafPending)return;"
-        "el.rafPending=true;requestAnimationFrame(()=>{el.rafPending=false;"
+        // single token (the old behaviour, via requestAnimationFrame
+        // coalescing) is still O(reply length) per re-render -- coalescing
+        // to once per painted frame only bounded *how often* that cost was
+        // paid, not the cost itself, so a long streamed reply still made the
+        // main thread miss frames once the model warmed up and the reply
+        // grew past a few paragraphs, reading as the page stalling roughly
+        // once a second. This appends each token's raw text directly to a
+        // single Text node instead -- O(1) per token, no markdown parsing,
+        // no DOM diffing -- and defers the real markdown render entirely
+        // until the stream finishes (see the flush after the read loop
+        // below). The trade-off is that formatting (code fences, bold,
+        // lists, ...) only appears once the reply completes rather than
+        // live; plain text still streams in immediately either way.
+        // el.rafPending only coalesces the scroll-into-view, which is cheap
+        // but still forces a layout read if done on every token.
+        // Lazily builds the live "Thinking..." panel the first time a
+        // stream is detected to have opened a <think> block -- same markup/
+        // classes renderMarkdown() itself produces for a completed reply
+        // (the ".thinkBlock"/".thinkBody" CSS classes), so the swap at
+        // stream-completion (which still re-renders from the server's
+        // authoritative text) never reads as a different element suddenly
+        // appearing in its place.
+        "function ensureThinkBlock(el){if(el.thinkDetails)return el.thinkDetails;"
+        "const bodyEl=el.querySelector('.msgBody');"
+        "const details=document.createElement('details');"
+        "details.className='thinkBlock thinkBlockLive';details.open=true;"
+        "const summary=document.createElement('summary');"
+        "summary.textContent='Thinking\\u2026';"
+        "const body=document.createElement('div');body.className='thinkBody';"
+        "const textNode=document.createTextNode('');body.appendChild(textNode);"
+        "details.append(summary,body);bodyEl.appendChild(details);"
+        "el.thinkDetails=details;el.thinkSummary=summary;el.thinkTextNode=textNode;"
+        "return details;}"
+        // <details> has no native open/close transition -- toggling `open`
+        // off snapped the whole panel away in a single frame, which read as
+        // the jarring "jump" the rest of this pass is fixing. This measures
+        // the body's current rendered height, then animates max-height/
+        // opacity down to zero before actually closing it.
+        "function collapseThinkBlock(el){const details=el.thinkDetails;"
+        "if(!details)return;if(el.thinkSummary)el.thinkSummary.textContent='Thinking';"
+        "const body=details.querySelector('.thinkBody');"
+        "if(!body){details.open=false;return;}"
+        "body.style.maxHeight=body.scrollHeight+'px';body.style.overflow='hidden';"
+        "body.style.transition='max-height .22s ease,opacity .22s ease';"
+        "requestAnimationFrame(()=>{body.style.maxHeight='0px';body.style.opacity='0';});"
+        "setTimeout(()=>{details.open=false;body.style.maxHeight='';"
+        "body.style.overflow='';body.style.transition='';body.style.opacity='';},240);}"
+        "function ensureAnswerNode(el){if(el.answerTextNode)return el.answerTextNode;"
+        "const bodyEl=el.querySelector('.msgBody');"
+        "el.answerTextNode=document.createTextNode('');bodyEl.appendChild(el.answerTextNode);"
+        "return el.answerTextNode;}"
+        // Feeds one streamed chunk of confirmed thinking-block content into
+        // the live panel above, watching for the closing "</think>" tag
+        // arriving split across separate token events via a small tail
+        // buffer (never the whole reply seen so far) -- O(this chunk) per
+        // call, not O(reply length), matching appendStreamToken's own
+        // per-token cost budget (see its class comment below).
+        "function feedThinkingChunk(el,chunk){ensureThinkBlock(el);"
+        "el.thinkTailBuffer=(el.thinkTailBuffer||'')+chunk;"
+        "const closeIdx=el.thinkTailBuffer.toLowerCase().indexOf('</think>');"
+        "if(closeIdx>=0){const before=el.thinkTailBuffer.slice(0,closeIdx);"
+        "if(before)el.thinkTextNode.appendData(before);"
+        "collapseThinkBlock(el);"
+        "const after=el.thinkTailBuffer.slice(closeIdx+8);"
+        "el.thinkTailBuffer='';el.streamPhase='answer';"
+        "if(after)ensureAnswerNode(el).appendData(after);}"
+        "else{const keep=Math.min(el.thinkTailBuffer.length,8);"
+        "const flush=el.thinkTailBuffer.slice(0,el.thinkTailBuffer.length-keep);"
+        "if(flush)el.thinkTextNode.appendData(flush);"
+        "el.thinkTailBuffer=el.thinkTailBuffer.slice("
+        "el.thinkTailBuffer.length-keep);}}"
+        // Phase 88 follow-up: a reasoning-capable model's <think>...</think>
+        // block used to stream in as flat, undifferentiated text -- exactly
+        // like the rest of the reply -- and only became the styled
+        // collapsible panel renderMarkdown() knows how to draw once the
+        // *entire* reply finished and got its one full markdown re-parse
+        // (see that comment below). The actual thinking, which can run for
+        // a real amount of time on a reasoning-heavy model, looked like
+        // nothing was happening beyond plain scrolling text. This now
+        // classifies the stream into three phases per token -- 'unknown'
+        // (still buffering up to a "<think>"-length prefix to decide),
+        // 'thinking' (routed live into the panel above via
+        // feedThinkingChunk), 'answer' (appended to its own plain text node,
+        // exactly as before) -- so reasoning shows up in its own container
+        // the moment it starts, not only in retrospect. Every path here
+        // stays O(1) amortized per token: the prefix decision buffers at
+        // most a few characters before committing, and thinking-phase
+        // routing never rescans more than the small tail buffer above.
+        "function appendStreamToken(el,box,content){"
         "const bodyEl=el.querySelector('.msgBody');if(!bodyEl)return;"
-        "patchMsgBody(bodyEl,renderMarkdown(el.dataset.raw||''));"
-        "addCodeCopyButtons(bodyEl);box.scrollTop=box.scrollHeight;});}"
+        "if(!el.streamingText){bodyEl.replaceChildren();"
+        "bodyEl.style.whiteSpace='pre-wrap';el.streamingText=true;"
+        "el.streamPhase='unknown';el.prefixBuffer='';}"
+        "if(el.streamPhase==='unknown'){el.prefixBuffer+=content;"
+        "const trimmed=el.prefixBuffer.replace(/^\\s+/,'');"
+        "if(trimmed.length>=7){"
+        "if(/^<think>/i.test(trimmed)){el.streamPhase='thinking';"
+        "feedThinkingChunk(el,trimmed.slice(7));}"
+        "else{el.streamPhase='answer';"
+        "ensureAnswerNode(el).appendData(el.prefixBuffer);}"
+        "el.prefixBuffer='';}}"
+        "else if(el.streamPhase==='thinking'){feedThinkingChunk(el,content);}"
+        "else{ensureAnswerNode(el).appendData(content);}"
+        // scrollTo(...,{behavior:'smooth'}) rather than a hard scrollTop
+        // jump -- still coalesced to once per animation frame below, but
+        // now the box eases toward the new bottom each time instead of
+        // snapping straight there, which is what actually read as "jaggy"
+        // during a fast-streaming reply.
+        "if(!el.rafPending){el.rafPending=true;"
+        "requestAnimationFrame(()=>{el.rafPending=false;"
+        "box.scrollTo({top:box.scrollHeight,behavior:'smooth'});});}}"
         "async function readTurnStream(r,box,chatId,userEl,assistantEl){"
         "const reader=r.body.getReader(),decoder=new TextDecoder();let pending='';"
         "let completeEvent=null;"
@@ -3263,7 +3768,17 @@ std::string application_script() {
         "if(event.type==='token'){"
         "if(!assistantEl){assistantEl=appendMessage(box,'assistant','');}"
         "assistantEl.dataset.raw=(assistantEl.dataset.raw||'')+event.content;"
-        "scheduleAssistantRender(assistantEl,box);}"
+        // Counted client-side, one per 'token' SSE event received, so the
+        // titlebar updates live as the reply streams in instead of sitting
+        // blank until the final 'complete' event backfills it (see that
+        // handler below, which still overwrites this with the server's own
+        // authoritative count once the turn finishes -- a tool-call turn
+        // withholds some chunks from the stream entirely, so this running
+        // count is an approximation of what's on screen, not a guarantee of
+        // matching the model's real token count).
+        "assistantEl.streamedTokens=(assistantEl.streamedTokens||0)+1;"
+        "setMsgTokens(assistantEl,'assistant',assistantEl.streamedTokens);"
+        "appendStreamToken(assistantEl,box,event.content);}"
         "if(event.type==='tool_call'){"
         "if(!assistantEl){assistantEl=appendMessage(box,'assistant','');}"
         "setLiveStatus(assistantEl,'Running '+event.tool+"
@@ -3274,23 +3789,54 @@ std::string application_script() {
         "const outcome=event.succeeded?'Tool result':'Tool failed';"
         "appendToolCard(box,outcome+' ('+event.tool+')',"
         "formatToolResultBody(event.result));}"
+        // The model attempted a tool call in a chat where tools aren't
+        // actually available (no project bound, not auto-drive) -- the
+        // server already stripped the raw attempt out of the reply text, so
+        // without this the turn just trailed off with no explanation. Shown
+        // as its own card, same style as a real tool result, so it's
+        // obvious something was attempted rather than looking like the
+        // model simply stopped mid-thought.
+        "if(event.type==='tool_notice'){"
+        "appendToolCard(box,event.message||"
+        "('Tool unavailable: '+event.tool),"
+        "summarizeToolArguments(event.arguments));}"
         "if(event.type==='tool_approval_required'){"
         "appendApprovalCard(box,chatId,event);}"
         "if(event.type==='complete'){completeEvent=event;"
+        // The client's dataset.raw was built purely by appending each raw
+        // 'token' chunk as it streamed in, *before* the server's own
+        // detect_and_strip_tool_call() cleanup runs on the full reply (that
+        // only happens once generation finishes). Without this, a stray/
+        // hallucinated tool-call attempt the server successfully strips
+        // from what it persists would still render raw -- stray commas,
+        // brackets and all -- because the final markdown render below reads
+        // from this locally-accumulated buffer, not from what the server
+        // actually saved. 'content' carries the server's authoritative
+        // post-cleanup text, so swap it in before that render happens.
+        "if(typeof event.content==='string')assistantEl.dataset.raw="
+        "event.content;"
         "if(userEl)setMsgTokens(userEl,'user',event.promptTokens||0);"
         "if(assistantEl)setMsgTokens(assistantEl,'assistant',"
         "event.generatedTokens||0);"
         "if(event.memorySaved)refreshMemories().catch(()=>{});}"
         "if(event.type==='error')throw new Error(event.error,"
         "{cause:event.detail});}}"
-        // The stream is finished here, but a render scheduled via
-        // scheduleAssistantRender() may still be waiting on its
-        // requestAnimationFrame -- which a backgrounded tab can throttle to
-        // once a second or slower. Flush synchronously so the bubble always
-        // ends up showing the exact final text the moment the turn
-        // completes, regardless of tab visibility/frame timing.
+        // The stream is finished here; appendStreamToken() above only ever
+        // appended plain text (either straight to a bare answer Text node,
+        // or -- live -- into the lightweight thinking-panel preview built by
+        // ensureThinkBlock()/feedThinkingChunk()) with no real markdown
+        // parsing, so formatting stays snappy while tokens are arriving --
+        // this is the one point that actually renders the real markdown,
+        // from the full accumulated raw text. patchMsgBody()'s diff walks
+        // bodyEl's *element* children, which the streaming Text node(s) and
+        // the live thinking-panel preview aren't, so they're all cleared
+        // first or they'd end up sitting duplicated alongside the freshly
+        // rendered elements -- the preview panel was only ever a stand-in
+        // for this authoritative render, not a second source of truth.
         "if(assistantEl){const bodyEl=assistantEl.querySelector('.msgBody');"
-        "if(bodyEl){patchMsgBody(bodyEl,renderMarkdown(assistantEl.dataset.raw||''));"
+        "if(bodyEl){if(assistantEl.streamingText){bodyEl.replaceChildren();"
+        "bodyEl.style.whiteSpace='';assistantEl.streamingText=false;}"
+        "patchMsgBody(bodyEl,renderMarkdown(assistantEl.dataset.raw||''));"
         "addCodeCopyButtons(bodyEl);box.scrollTop=box.scrollHeight;}}"
         "return completeEvent;}"
         // Posts one turn's content (real user text on the very first turn
@@ -3917,6 +4463,80 @@ std::string application_script() {
         "objective:q('#mlProjectObjective').value,"
         "subjectDomain:q('#mlProjectSubjectDomain').value,"
         "modelTask:q('#mlProjectModelTask').value})));"
+        // Phase 93: governance save -- PATCHes the section-5 fields onto
+        // whichever project is currently loaded in the form (filled by
+        // "Configure" above).
+        "if(q('#mlProjectGovernanceForm'))"
+        "q('#mlProjectGovernanceForm').addEventListener('submit',"
+        "async e=>{e.preventDefault();"
+        "const id=q('#mlProjectGovernanceId').value;"
+        "if(!id){showSystemError('Choose a project first.');return;}"
+        "try{await api('/api/v1/ml/projects/'+encodeURIComponent(id)+"
+        "'/governance','POST',{"
+        "administrators:q('#mlProjectAdministrators').value,"
+        "approvedDataSources:q('#mlProjectApprovedDataSources').value,"
+        "securityClassification:q('#mlProjectSecurityClassification').value,"
+        "targetArchitecture:q('#mlProjectTargetArchitecture').value,"
+        "targetDeploymentEnvironment:"
+        "q('#mlProjectTargetDeploymentEnvironment').value,"
+        "successCriteria:q('#mlProjectSuccessCriteria').value,"
+        "evaluationRequirements:q('#mlProjectEvaluationRequirements').value,"
+        "safetyRequirements:q('#mlProjectSafetyRequirements').value,"
+        "storageAllocationMb:"
+        "Number(q('#mlProjectStorageAllocationMb').value)||0,"
+        "computeAllocationNotes:"
+        "q('#mlProjectComputeAllocationNotes').value});"
+        "showFormSuccess('Project governance saved.');await load();}"
+        "catch(x){showSystemError('Save project governance failed: '+"
+        "x.message);}});"
+        // Phase 94: dataset declared-metadata save (sensitive-data status,
+        // split percentages) -- fields content upload cannot derive itself.
+        "if(q('#mlDatasetDeclareForm'))"
+        "q('#mlDatasetDeclareForm').addEventListener('submit',"
+        "async e=>{e.preventDefault();"
+        "const id=q('#mlDatasetDeclareId').value;"
+        "if(!id){showSystemError('Choose a dataset first.');return;}"
+        "try{await api('/api/v1/ml/datasets/'+encodeURIComponent(id)+"
+        "'/declare','POST',{"
+        "sensitiveDataStatus:q('#mlDatasetSensitiveDataStatus').value,"
+        "trainSplitPercent:Number(q('#mlDatasetTrainSplitPercent').value)||0,"
+        "validationSplitPercent:"
+        "Number(q('#mlDatasetValidationSplitPercent').value)||0,"
+        "testSplitPercent:Number(q('#mlDatasetTestSplitPercent').value)||0});"
+        "showFormSuccess('Dataset metadata saved.');await load();}"
+        "catch(x){showSystemError('Save dataset metadata failed: '+"
+        "x.message);}});"
+        // Phase 95: training job execution-policy save.
+        "if(q('#mlTrainingJobPolicyForm'))"
+        "q('#mlTrainingJobPolicyForm').addEventListener('submit',"
+        "async e=>{e.preventDefault();"
+        "const id=q('#mlTrainingJobPolicyId').value;"
+        "if(!id){showSystemError('Choose a training job first.');return;}"
+        "try{await api('/api/v1/ml/training-jobs/'+encodeURIComponent(id)+"
+        "'/execution-policy','POST',{"
+        "maxRuntimeSeconds:"
+        "Number(q('#mlTrainingJobMaxRuntimeSeconds').value)||0,"
+        "failureRecoveryStrategy:"
+        "q('#mlTrainingJobFailureRecoveryStrategy').value,"
+        "checkpointFrequencyEpochs:"
+        "Number(q('#mlTrainingJobCheckpointFrequencyEpochs').value)||0,"
+        "outputDirectory:q('#mlTrainingJobOutputDirectory').value,"
+        "computeTarget:q('#mlTrainingJobComputeTarget').value,"
+        "hardwareAllocation:q('#mlTrainingJobHardwareAllocation').value,"
+        "runtimeEnvironment:q('#mlTrainingJobRuntimeEnvironment').value,"
+        "containerImage:q('#mlTrainingJobContainerImage').value,"
+        "environmentVariables:"
+        "q('#mlTrainingJobEnvironmentVariables').value,"
+        "secretsReferences:q('#mlTrainingJobSecretsReferences').value,"
+        "loggingPolicy:q('#mlTrainingJobLoggingPolicy').value,"
+        "notificationPolicy:q('#mlTrainingJobNotificationPolicy').value,"
+        "resourceCeilingNotes:"
+        "q('#mlTrainingJobResourceCeilingNotes').value,"
+        "costCeilingNotes:q('#mlTrainingJobCostCeilingNotes').value});"
+        "showFormSuccess('Training job execution policy saved.');"
+        "await load();}"
+        "catch(x){showSystemError('Save execution policy failed: '+"
+        "x.message);}});"
         "if(q('#newMlModel'))q('#newMlModel').addEventListener('submit',"
         "e=>submit(e,'/api/v1/ml/models',()=>({name:q('#mlModelName').value,"
         "displayName:q('#mlModelDisplayName').value,"
@@ -3924,10 +4544,12 @@ std::string application_script() {
         "family:q('#mlModelFamily').value,"
         "task:q('#mlModelTask').value,"
         "format:q('#mlModelFormat').value,"
+        "quantization:q('#mlModelQuantization').value,"
         "source:q('#mlModelSource').value,"
         "license:q('#mlModelLicense').value})));"
         "if(q('#newMlDataset'))q('#newMlDataset').addEventListener('submit',"
         "e=>submit(e,'/api/v1/ml/datasets',()=>({name:q('#mlDatasetName').value,"
+        "purpose:q('#mlDatasetPurpose').value,"
         "description:q('#mlDatasetDescription').value,"
         "subjectArea:q('#mlDatasetSubjectArea').value,"
         "source:q('#mlDatasetSource').value,"
@@ -3963,11 +4585,15 @@ std::string application_script() {
         "encodeURIComponent(q('#mlDatasetContentId').value.trim())+'/content',"
         "'POST',{content,format,"
         "targetColumn:q('#mlDatasetContentTarget').value.trim()});"
-        "out.textContent='Stored '+r.rows+' rows: '+r.featureColumns.length+"
+        "out.textContent=r.task==='instruction'?"
+        "('Stored '+r.rows+' row(s): instruction column \\''+"
+        "r.instructionColumn+'\\', response column \\''+"
+        "r.responseColumn+'\\' (fine-tuning text).'):"
+        "('Stored '+r.rows+' rows: '+r.featureColumns.length+"
         "' feature column(s) ['+r.featureColumns.join(', ')+'], target \\''+"
         "r.targetColumn+'\\' ('+r.task+"
         "(r.task==='classification'?', classes: '+r.classes.join(', '):'')+"
-        "').';await load();}"
+        "').');showFormSuccess(out.textContent);await load();}"
         "catch(x){out.textContent='';"
         "showSystemError('Upload dataset content failed: '+x.message);}});"
         // Phase 56: live prediction form -- parses the feature JSON locally
@@ -3987,7 +4613,8 @@ std::string application_script() {
         "out.textContent='Predicted class: '+r.label+' ('+r.classes.map("
         "(c,i)=>c+' '+(100*r.probabilities[i]).toFixed(1)+'%').join(', ')+')';}"
         "else{out.textContent='Predicted value: '+"
-        "Number(r.value).toPrecision(6);}}"
+        "Number(r.value).toPrecision(6);}"
+        "showFormSuccess(out.textContent);}"
         "catch(x){out.textContent='';"
         "showSystemError('Prediction failed: '+x.message);}});"
         "if(q('#newMlSubject'))q('#newMlSubject').addEventListener('submit',"
@@ -4021,7 +4648,7 @@ std::string application_script() {
         "vectorStoreId:q('#mlKnowledgeVectorStoreId').value,"
         "fileName:file.name,mediaType,content});"
         "out.textContent='Indexed '+r.fileName+': '+r.chunkCount+' chunk(s), SHA-256 '+r.sha256+'.';"
-        "await load();}catch(x){out.textContent='';"
+        "showFormSuccess(out.textContent);await load();}catch(x){out.textContent='';"
         "showSystemError('Knowledge ingestion failed: '+x.message);}});"
         "if(q('#newMlLabelTask'))q('#newMlLabelTask').addEventListener("
         "'submit',e=>submit(e,'/api/v1/ml/label-tasks',"
@@ -4050,7 +4677,9 @@ std::string application_script() {
         "datasetId:q('#mlEvaluationRunDatasetId').value,"
         "name:q('#mlEvaluationRunName').value,"
         "description:q('#mlEvaluationRunDescription').value,"
-        "category:q('#mlEvaluationRunCategory').value})));"
+        "category:q('#mlEvaluationRunCategory').value,"
+        "sensitiveFeatureName:"
+        "q('#mlEvaluationRunSensitiveFeatureName').value})));"
         "if(q('#newMlExperiment'))q('#newMlExperiment').addEventListener("
         "'submit',e=>submit(e,'/api/v1/ml/experiments',"
         "()=>({projectId:q('#mlExperimentProjectId').value,"
@@ -4091,7 +4720,9 @@ std::string application_script() {
         "c.metricDelta!==undefined?Number(c.metricDelta).toPrecision(4):"
         "(c.metricComparison||''),c.regression?'yes':'no',"
         "c.runtimeDeltaMilliseconds!==undefined?"
-        "String(c.runtimeDeltaMilliseconds):'']));}"
+        "String(c.runtimeDeltaMilliseconds):'']));"
+        "showFormSuccess('Compared '+r.experiments.length+' experiment(s) "
+        "against the baseline.');}"
         "catch(x){showSystemError('Compare experiments failed: '+"
         "x.message);}});"
         "if(q('#newMlFineTuningJob'))q('#newMlFineTuningJob').addEventListener("
@@ -4183,7 +4814,8 @@ std::string application_script() {
         "difficulty:q('#mlInstructionExampleDifficulty').value,"
         "safetyClassification:"
         "q('#mlInstructionExampleSafetyClassification').value});"
-        "if(status)status.textContent='Content saved.';}"
+        "if(status)status.textContent='Content saved.';"
+        "showFormSuccess('Instruction example content saved.');}"
         "catch(x){showSystemError('Save instruction example content "
         "failed: '+x.message);}});"
         // Phase 81: generate -- calls execute_rag_generation for real and
@@ -4204,6 +4836,8 @@ std::string application_script() {
         "context:q('#mlInstructionExampleGenerateContext').value});"
         "if(status)status.textContent='Generated draft \"'+r.example.name+"
         "'\" (status: draft, needs review before approval).';"
+        "showFormSuccess(status?status.textContent:"
+        "'Generated draft \"'+r.example.name+'\".');"
         "await load();}"
         "catch(x){if(status)status.textContent='';"
         "showSystemError('Generate instruction example failed: '+"
@@ -4223,7 +4857,8 @@ std::string application_script() {
         "r.results.map(x=>[escTrim(x.modelId,16),"
         "esc(x.error?('error: '+x.error):x.response),"
         "x.elapsedMicroseconds!==undefined?String(x.elapsedMicroseconds):''"
-        "]));}"
+        "]));"
+        "showFormSuccess('Tested against '+r.results.length+' model(s).');}"
         "catch(x){if(out)out.textContent='';"
         "showSystemError('Test instruction example failed: '+x.message);}});"
         // Phase 81: duplicate/contradiction detection over one dataset.
@@ -4239,7 +4874,8 @@ std::string application_script() {
         "const pairs=r[kind]||[];"
         "if(out)out.innerHTML=pairs.length?table(['First ID','Second ID'],"
         "pairs.map(p=>[escTrim(p.firstId,20),escTrim(p.secondId,20)])):"
-        "'<p>No '+kind+' found.</p>';}"
+        "'<p>No '+kind+' found.</p>';"
+        "showFormSuccess('Checked for '+kind+': '+pairs.length+' found.');}"
         "catch(x){if(out)out.textContent='';"
         "showSystemError('Check '+kind+' failed: '+x.message);}});"
         "if(q('#newMlSyntheticRecord'))"
@@ -4270,6 +4906,7 @@ std::string application_script() {
         "if(status)status.textContent='Generated \"'+r.record.name+"
         "'\" (status: draft, needs review before approval). Output: '+"
         "r.content.generatedText;"
+        "showFormSuccess('Generated draft \"'+r.record.name+'\".');"
         "await load();}"
         "catch(x){if(status)status.textContent='';"
         "showSystemError('Generate synthetic record failed: '+"
@@ -4298,7 +4935,9 @@ std::string application_script() {
         "' chunk(s) with '+result.searchStrategy+' search.\\n\\n'+"
         "result.chunks.map((x,i)=>(i+1)+'. '+x.citation+' score '+"
         "Number(x.score).toFixed(4)+'\\n'+x.text).join('\\n\\n')+"
-        "'\\n\\nContext package:\\n'+result.context;}catch(x){out.textContent='';"
+        "'\\n\\nContext package:\\n'+result.context;"
+        "showFormSuccess('Retrieved '+result.retrievedCount+' chunk(s) with '+"
+        "result.searchStrategy+' search.');}catch(x){out.textContent='';"
         "showSystemError('RAG retrieval failed: '+x.message);}});"
         "if(q('#newMlSubjectExam'))"
         "q('#newMlSubjectExam').addEventListener("
@@ -4377,7 +5016,9 @@ std::string application_script() {
         "modelClassifierConfidenceFloor:"
         "Number(q('#mlEndpointPolicyConfidenceFloor').value)||0.5});"
         "if(status)status.textContent='Policy saved. Takes effect on the "
-        "endpoint\\'s next request, no restart required.';}"
+        "endpoint\\'s next request, no restart required.';"
+        "showFormSuccess('Endpoint policy saved. Takes effect on the "
+        "endpoint\\'s next request, no restart required.');}"
         "catch(x){if(status)status.textContent='';"
         "showSystemError('Save endpoint policy failed: '+x.message);}});"
         "if(q('#newMlComputeNode'))"
@@ -4481,6 +5122,78 @@ std::string field_hint(const std::string& text) {
            "<span class=\"mlHintBubble\">" + text + "</span></span>";
 }
 
+// ML forms clarity pass: a numbered "1, 2, 3, ..." banner placed once at
+// the top of a panel that is one (or, for Dataset Manager, two adjacent)
+// stage(s) of a real multi-panel pipeline (Dataset -> Training Job ->
+// Evaluation, for example), so a user without an ML background sees where
+// the panel they landed on fits before reading a single form field.
+// `active_from`/`active_to` (1-based, inclusive) are the step(s) this
+// panel represents -- equal for every panel except Dataset Manager, which
+// hosts both "register" and "upload content" and highlights both rather
+// than forcing two separate banners (one of which would otherwise sit in
+// a form column too narrow to lay out five boxes, which is exactly the
+// squeezed, broken-looking duplicate this replaced). Every other step
+// just shows its title/one-line description as context for what comes
+// before/after. This intentionally does not track live completion
+// (whether step 1 has actually been done yet) -- that would need
+// per-panel data the banner has no access to at server-render time -- it
+// only orients the user in the sequence. Rendered as a CSS grid (see
+// .mlStepFlow) that reflows its own row count rather than a fixed-width
+// row, so it never needs to be placed more than once per panel to stay
+// readable at any browser size. `steps` entries are always literal
+// strings this function's own callers author, matching field_hint's own
+// escaping rule above.
+std::string ml_step_flow(
+    const int active_from, const int active_to,
+    const std::vector<std::pair<std::string, std::string>>& steps) {
+    std::string html = "<div class=\"mlStepFlow\">";
+    for (std::size_t i = 0; i < steps.size(); ++i) {
+        const int step_number = static_cast<int>(i) + 1;
+        const bool active = step_number >= active_from && step_number <= active_to;
+        html += "<div class=\"mlStepBox";
+        if (active) html += " mlStepActive";
+        html += "\"><span class=\"mlStepNum\">" + std::to_string(step_number) +
+                "</span><div><strong>" + steps[i].first + "</strong>";
+        if (!steps[i].second.empty()) {
+            html += "<span class=\"mlStepDesc\">" + steps[i].second + "</span>";
+        }
+        html += "</div></div>";
+    }
+    return html + "</div>";
+}
+std::string ml_step_flow(
+    const int active_index,
+    const std::vector<std::pair<std::string, std::string>>& steps) {
+    return ml_step_flow(active_index, active_index, steps);
+}
+
+// Machine Learning Dashboard consolidation pass: the same five-box grid
+// ml_step_flow() renders on each individual pipeline page, but every box on
+// the Dashboard is a real link (a plain full-page navigation, matching
+// nav_link()'s own convention -- no client-side router involved) to that
+// step's own page, so landing on the Dashboard first teaches the whole path
+// before the user picks a page to start on. `hrefs` is a parallel array to
+// `steps`, one URL per step in the same order; a step whose page also hosts
+// the next step (Dataset Manager hosts both "register" and "upload
+// content") simply repeats that URL, exactly as kMlPipelineSteps' own two
+// dataset entries do. No step is rendered "active" here -- there is no
+// single current step on an overview page, all five are equally reachable.
+std::string ml_pipeline_overview(
+    const std::vector<std::pair<std::string, std::string>>& steps,
+    const std::vector<std::string>& hrefs) {
+    std::string html = "<div class=\"mlStepFlow mlPipelineOverview\">";
+    for (std::size_t i = 0; i < steps.size(); ++i) {
+        html += "<a class=\"mlStepBox\" href=\"" + hrefs[i] +
+                "\"><span class=\"mlStepNum\">" + std::to_string(i + 1) +
+                "</span><div><strong>" + steps[i].first + "</strong>";
+        if (!steps[i].second.empty()) {
+            html += "<span class=\"mlStepDesc\">" + steps[i].second + "</span>";
+        }
+        html += "</div></a>";
+    }
+    return html + "</div>";
+}
+
 // Wraps one titled group of sidebar links (Workspace, Settings, Machine
 // Learning, Admin, ...) in a collapsible <details> instead of a plain <h3>,
 // so a caller with many reachable sections can shrink the sidebar down to
@@ -4503,7 +5216,15 @@ std::string sidebar_section(const std::string& key, const std::string& title,
 // (capitalized here) and after a name salutation (left lowercase); this
 // avoids maintaining two parallel 64-entry message lists just to get
 // name-aware and anonymous phrasing out of the same pool.
-std::string chat_welcome_message(const std::string& display_name) {
+// last_chat_title, when non-empty, is the signed-in user's most recent
+// chat's real (model-derived, not "New chat") title -- see the caller in
+// server.cpp, which looks that up before this page renders. About a third
+// of the time this pulls from kResumeBodies instead of kBodies, so a
+// returning user is sometimes grounded back into their last real topic
+// before they type anything, rather than only ever getting generic small
+// talk that ignores a chat history the server already has.
+std::string chat_welcome_message(const std::string& display_name,
+                                 const std::string& last_chat_title) {
     static const char* const kBodies[] = {
         "what's on the agenda today?", "where should we start?",
         "what are we building today?", "what's the plan for today?",
@@ -4537,6 +5258,46 @@ std::string chat_welcome_message(const std::string& display_name) {
         "what's the game plan today?", "what can I get started on?",
         "what's today's mission?", "what's the next problem to solve?",
         "what's worth diving into?", "what's the first move today?",
+        "what's today's headline?", "what's the story today?",
+        "what's up first?", "what's calling?", "what's the play today?",
+        "what should we crack on with?", "what's on the runway today?",
+        "what's the lead item today?", "what's queued up?",
+        "what's the docket today?", "what's the opening move?",
+        "what's the target today?", "what should we chip away at?",
+        "what's front of mind today?", "what's the thread to pull today?",
+        "what's the next milestone?", "what's the sprint today?",
+        "what's the win we're chasing today?", "what's the ask today?",
+        "what's the assignment today?", "what's the itch to scratch today?",
+        "what's the objective right now?", "what's the opener today?",
+        "what's up on your end?", "what's the shape of today?",
+        "what's the lineup today?", "what should we set in motion?",
+        "what's the pressing item today?", "what's the next chapter?",
+        "what's the direction today?", "what's the move?",
+        "what's begging for attention?", "what's the starting point today?",
+        "what's the theme for today?", "what should we make happen?",
+        "what's the ball to get rolling?", "what's the loose end to tie up?",
+        "what's the itinerary look like?", "what's the checklist today?",
+        "what's the standing item today?", "what's the next win?",
+        "what's the thing to unblock?", "what's the fresh start today?",
+    };
+    // Referenced when a returning user's most recent chat had a real,
+    // model-derived title (see ChatRecord::title's own comment) -- this
+    // pool grounds the greeting in that actual prior topic instead of only
+    // ever showing generic small talk, so a returning user is reminded
+    // what they were last doing before they type a single word. "{topic}"
+    // is replaced with that title, quoted, by the caller below.
+    static const char* const kResumeBodies[] = {
+        "welcome back -- last time we were on {topic}. Pick that back up, "
+        "or start something new?",
+        "last session was about {topic}. Want to continue there, or dig "
+        "into something else today?",
+        "picking up where we left off? Last time was {topic}.",
+        "still thinking about {topic} from last time, or ready for "
+        "something new?",
+        "your last chat here was {topic} -- carry on with that, or fresh "
+        "start today?",
+        "welcome back -- {topic} was the last thing on the table. Back to "
+        "that, or something new?",
     };
     // Time-neutral salutations are always eligible. "Morning"/"Afternoon"/
     // "Evening" are only mixed in when the server's actual local clock is in
@@ -4557,8 +5318,19 @@ std::string chat_welcome_message(const std::string& display_name) {
     };
     static thread_local std::mt19937 rng{std::random_device{}()};
 
-    const char* body = kBodies[std::uniform_int_distribution<size_t>(
-        0, std::size(kBodies) - 1)(rng)];
+    std::string body;
+    if (!last_chat_title.empty() &&
+        std::uniform_int_distribution<int>(0, 2)(rng) == 0) {
+        body = kResumeBodies[std::uniform_int_distribution<size_t>(
+            0, std::size(kResumeBodies) - 1)(rng)];
+        const size_t topic_token = body.find("{topic}");
+        if (topic_token != std::string::npos) {
+            body.replace(topic_token, 7, "\"" + last_chat_title + "\"");
+        }
+    } else {
+        body = kBodies[std::uniform_int_distribution<size_t>(
+            0, std::size(kBodies) - 1)(rng)];
+    }
 
     if (display_name.empty()) {
         std::string sentence(body);
@@ -4611,7 +5383,8 @@ std::string chat_welcome_message(const std::string& display_name) {
 // reach. Switching sections is therefore a normal full-page navigation, not
 // a client-side panel swap -- there is no hash router involved.
 std::string application_page(const UserRecord& user, const std::string& section,
-                             const std::string& chat_id) {
+                             const std::string& chat_id,
+                             const std::string& last_chat_title) {
     // The Admin nav entries are omitted entirely for non-administrators, and
     // the Settings entries for plain viewers. This is presentation only --
     // every admin-only or settings-only route (users.manage,
@@ -4623,6 +5396,31 @@ std::string application_page(const UserRecord& user, const std::string& section,
     const bool can_write_chat = role_allows(user.role, "chats.write");
     const std::string role_attr =
         is_administrator ? "administrator" : (is_developer ? "developer" : "viewer");
+
+    // ML forms clarity pass: the real end-to-end path from nothing to a
+    // trained model spans five separate panels with no other on-page cue
+    // that they are one sequence (see ml_step_flow()'s own comment). Every
+    // panel that is a stage of this pipeline prepends this same banner
+    // with its own stage highlighted, so a user landing on any one of them
+    // sees the whole path before reading a single form field.
+    static const std::vector<std::pair<std::string, std::string>>
+        kMlPipelineSteps = {
+            {"Create a project",
+             "Groups the datasets, models, and training jobs below under "
+             "one goal."},
+            {"Register a dataset",
+             "Describes the data (name, source, license). This alone "
+             "stores no rows yet."},
+            {"Upload dataset content",
+             "Adds the actual CSV/JSON/JSONL/Parquet rows. A training job "
+             "cannot run without this step."},
+            {"Create &amp; run a training job",
+             "Picks a project and a dataset, then Train Now fits a real "
+             "model on the uploaded rows."},
+            {"Evaluate the result",
+             "Checks accuracy on held-out data, or tracks the run as a "
+             "comparable experiment."},
+        };
 
     std::string body;
     if (section == "chat") {
@@ -4640,7 +5438,8 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<div id=\"chatTopBar\"><label>Project"
             "<select id=\"chatProject\"></select></label></div>"
             "<div id=\"chatEmpty\"" + std::string(is_new_chat ? "" : " hidden") +
-            "><h1>" + html_escape(chat_welcome_message(user.display_name)) +
+            "><h1>" + html_escape(chat_welcome_message(user.display_name,
+                                                       last_chat_title)) +
             "</h1></div>"
             "<div id=\"chatMessages\"></div>"
             "<div id=\"attachChips\" class=\"attachChips\"></div>"
@@ -4949,30 +5748,68 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</div></section>";
     } else if (section == "ml-dashboard") {
         // Foundation-phase acknowledgement page: confirms the Machine
-        // Learning module is enabled and shows its real (currently zero)
-        // counts alongside the full roadmap of interfaces from docs/PLAN.md
-        // "Machine Learning Abilities" section 2, each marked available or
-        // planned -- see MachineLearningRegistry's class comment in
-        // masterai.hpp for why nothing here is fabricated.
+        // Learning module is enabled and shows its real counts alongside the
+        // full roadmap of interfaces from docs/PLAN.md "Machine Learning
+        // Abilities" section 2, each marked available or planned -- see
+        // MachineLearningRegistry's class comment in masterai.hpp for why
+        // nothing here is fabricated.
+        //
+        // Phase 92 (consolidation): this landing page used to show only the
+        // acknowledgement line, the stat counts, and one flat, unordered
+        // table of all ~25 interfaces -- a newcomer had no way to tell from
+        // this page which five pages are the real, working, end-to-end path
+        // (create a project, register a dataset, fill it with rows, train,
+        // evaluate) versus which are optional support tooling around that
+        // path. The pipeline overview below is that path, in order, each
+        // box a real link; the Interfaces table underneath deliberately
+        // excludes those same five real content pages (see
+        // renderMlDashboard()) so the two lists never repeat each other.
         body =
             "<section id=\"panel-ml-dashboard\" class=\"panel\"><div>"
             "<h2>Machine Learning</h2>"
             "<p id=\"mlAck\">Loading...</p>"
             "<div id=\"mlStats\"></div>"
             "</div><div>"
-            "<h2>Interfaces</h2>"
+            "<h2>The five steps, in order</h2>"
+            "<p>Every one of these five pages does something real: creating "
+            "a project, registering a dataset, filling it with rows, "
+            "training a genuine model on those rows, and measuring how "
+            "accurate the result is. They connect in a straight line -- "
+            "the project you create in Step 1 is what you pick again in "
+            "Step 4; the dataset you register in Step 2 is empty until "
+            "Step 3 gives it real rows; Step 4 cannot run without a "
+            "dataset that has those rows; Step 5 only makes sense once "
+            "Step 4 has produced a trained model to measure. Click any box "
+            "below to go straight to that step.</p>" +
+            ml_pipeline_overview(
+                kMlPipelineSteps,
+                {"/app/ml/projects", "/app/ml/datasets", "/app/ml/datasets",
+                 "/app/ml/training-jobs", "/app/ml/evaluation-runs"}) +
+            "</div><div>"
+            "<h2>Additional tools</h2>"
+            "<p>Everything below supports the five steps above -- "
+            "registering an existing model instead of letting Step 4 "
+            "create one, fine-tuning, generating synthetic or "
+            "instruction-formatted data, retrieval, safety review, "
+            "deployment, and more -- but none of it is required to "
+            "complete the real end-to-end path above.</p>"
             "<div id=\"mlInterfaces\">Loading...</div>"
             "</div></section>";
     } else if (section == "ml-projects") {
         // Phase 38 (docs/PLAN.md "Machine Learning Abilities" section 5):
-        // create and list ML projects. Only the identity/intent/status
-        // fields MLProjectStore actually persists are collected here -- see
-        // that class's comment in masterai.hpp for the fields deferred to
-        // later phases.
+        // create and list ML projects. Phase 93 added the section's
+        // remaining governance/target fields (see MLProject's comment in
+        // masterai.hpp) -- collected here at creation, and editable
+        // afterwards via the Governance form below (POST
+        // .../projects/{id}/governance).
         body =
+            ml_step_flow(1, kMlPipelineSteps) +
             "<section id=\"panel-ml-projects\" class=\"panel\"><div>"
-            "<h2>New Machine Learning project</h2>"
-            "<form id=\"newMlProject\"><label>Name"
+            "<h2>Step 1 &mdash; New Machine Learning project</h2>"
+            "<form id=\"newMlProject\"><label>Name" +
+            field_hint("A short, memorable name for this effort, e.g. "
+                       "&quot;Support ticket triage&quot;. You will pick "
+                       "this project again when creating a training job.") +
             "<input id=\"mlProjectName\" required maxlength=\"160\"></label>"
             "<label>Description<textarea id=\"mlProjectDescription\" "
             "rows=\"2\"></textarea></label>"
@@ -4983,6 +5820,48 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<button title=\"Create project\">" ICON_PLUS_SVG " Create project</button></form>"
             "</div><div>"
             "<h2>Projects</h2><div id=\"mlProjectsList\">Loading...</div>"
+            "</div><div>"
+            "<h2>Governance &amp; targets</h2>"
+            "<form id=\"mlProjectGovernanceForm\">"
+            "<label>Project" +
+            field_hint("Which project this form edits. Clicking the "
+                      "Configure (gear) button on a row in the Projects "
+                      "table above fills this in automatically.") +
+            "<select id=\"mlProjectGovernanceId\" required>"
+            "<option value=\"\">Choose a project</option></select></label>"
+            "<label>Administrators" +
+            field_hint("Comma-separated user ids, in addition to the "
+                      "owner, who are shown as co-administering this "
+                      "project. Each id must be a real account or saving "
+                      "is rejected.") +
+            "<input id=\"mlProjectAdministrators\" "
+            "placeholder=\"user-id-1, user-id-2\"></label>"
+            "<label>Approved data sources<input "
+            "id=\"mlProjectApprovedDataSources\" "
+            "placeholder=\"comma-separated\"></label>"
+            "<label>Security classification<input "
+            "id=\"mlProjectSecurityClassification\"></label>"
+            "<label>Target architecture<input "
+            "id=\"mlProjectTargetArchitecture\"></label>"
+            "<label>Target deployment environment<input "
+            "id=\"mlProjectTargetDeploymentEnvironment\"></label>"
+            "<label>Success criteria<textarea "
+            "id=\"mlProjectSuccessCriteria\" rows=\"2\"></textarea></label>"
+            "<label>Evaluation requirements<textarea "
+            "id=\"mlProjectEvaluationRequirements\" rows=\"2\">"
+            "</textarea></label>"
+            "<label>Safety requirements<textarea "
+            "id=\"mlProjectSafetyRequirements\" rows=\"2\"></textarea></label>"
+            "<label>Storage allocation (MB)" +
+            field_hint("A declared ceiling recorded for operator "
+                      "reference -- this build does not yet enforce a "
+                      "per-project disk quota against it.") +
+            "<input id=\"mlProjectStorageAllocationMb\" type=\"number\" "
+            "min=\"0\" step=\"1\"></label>"
+            "<label>Compute allocation notes<textarea "
+            "id=\"mlProjectComputeAllocationNotes\" rows=\"2\">"
+            "</textarea></label>"
+            "<button title=\"Save governance\">" ICON_PLUS_SVG " Save governance</button></form>"
             "</div></section>";
     } else if (section == "ml-models") {
         // Phase 39 (docs/PLAN.md "Machine Learning Abilities" section 7):
@@ -4992,9 +5871,17 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // masterai.hpp for the fields deferred to later phases.
         body =
             "<section id=\"panel-ml-models\" class=\"panel\"><div>"
+            "<p class=\"mlPipelineNote\">Optional. A training job that "
+            "names no model here still works &mdash; it creates one "
+            "automatically when it finishes. Register a model here only "
+            "if you want to track its identity/provenance before you "
+            "start training.</p>"
             "<h2>Register a model</h2>"
             "<form id=\"newMlModel\">"
-            "<label>Internal name (unique identifier)"
+            "<label>Internal name (unique identifier)" +
+            field_hint("A short machine-friendly id with no spaces, e.g. "
+                       "&quot;support-triage-v1&quot;. Used to reference "
+                       "this exact model elsewhere.") +
             "<input id=\"mlModelName\" required maxlength=\"160\"></label>"
             "<label>Display name<input id=\"mlModelDisplayName\"></label>"
             "<label>Version<input id=\"mlModelVersion\" "
@@ -5005,6 +5892,17 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "placeholder=\"e.g. text-classification\"></label>"
             "<label>Model format<input id=\"mlModelFormat\" "
             "placeholder=\"e.g. GGUF, ONNX, safetensors\"></label>"
+            "<label>Quantization" +
+            field_hint("The GGUF's quantization level, e.g. &quot;F16&quot;, "
+                       "&quot;Q8_0&quot;, or &quot;Q4_K_M&quot;. Matters most "
+                       "if this model will be used as a Fine-Tuning base: "
+                       "LoRA fine-tuning is only reliable against a "
+                       "full/near-full precision base (F32, F16, BF16, or "
+                       "Q8_0) -- a more heavily quantized base still runs "
+                       "but the Fine-Tuning result will carry a quality "
+                       "warning. Leave blank if unknown.") +
+            "<input id=\"mlModelQuantization\" "
+            "placeholder=\"e.g. F16, Q8_0, Q4_K_M\"></label>"
             "<label>Source<input id=\"mlModelSource\" "
             "placeholder=\"where this model came from\"></label>"
             "<label>License<input id=\"mlModelLicense\"></label>"
@@ -5029,17 +5927,37 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</div></section>";
     } else if (section == "ml-datasets") {
         // Phase 39 (docs/PLAN.md "Machine Learning Abilities" section 10):
-        // register and list datasets, and approve or reject them. Only the
-        // identity/provenance/approval fields DatasetStore actually
-        // persists are collected here -- see that class's comment in
-        // masterai.hpp for the fields deferred to later phases (record/file
-        // count, schema, versioning, ...).
+        // register and list datasets, and approve or reject them. Phase 94
+        // added the section's remaining content-derived metrics (computed
+        // for real at upload time -- see compute_dataset_content_metrics()
+        // in ml_engine.cpp) and Dataset Versioning (section 11), shown in
+        // the table's Version/Quality/Duplicates columns and the History
+        // button below, plus the administrator-declared fields (sensitive-
+        // data status, split percentages) in the Declare metadata form.
         body =
+            ml_step_flow(2, 3, kMlPipelineSteps) +
             "<section id=\"panel-ml-datasets\" class=\"panel\"><div>"
-            "<h2>Register a dataset</h2>"
+            "<h2>Step 2 &mdash; Register a dataset</h2>"
+            "<p class=\"mlPipelineNote\">This only records where the data "
+            "comes from. It stores no rows yet &mdash; that is the "
+            "separate step below.</p>"
             "<form id=\"newMlDataset\">"
             "<label>Name<input id=\"mlDatasetName\" required "
             "maxlength=\"160\"></label>"
+            "<label>What kind of data is this?" +
+            field_hint("Tabular picks rows of numbers/categories with one "
+                       "column to predict (classification or regression), "
+                       "e.g. spreadsheet-style data. Instruction / "
+                       "fine-tuning text picks rows of question-and-answer "
+                       "or prompt-and-response text used to fine-tune an "
+                       "LLM &mdash; no column to predict is needed, so a "
+                       "\"target column\" does not apply.") +
+            "<select id=\"mlDatasetPurpose\">"
+            "<option value=\"tabular\">Tabular data (classification / "
+            "regression)</option>"
+            "<option value=\"instruction\">Instruction / fine-tuning text "
+            "(LLM training)</option>"
+            "</select></label>"
             "<label>Description<textarea id=\"mlDatasetDescription\" "
             "rows=\"2\"></textarea></label>"
             "<label>Subject area<input id=\"mlDatasetSubjectArea\" "
@@ -5059,18 +5977,42 @@ std::string application_page(const UserRecord& user, const std::string& section,
             // the Knowledge ingestion page uses) are all accepted -- the
             // file's own extension picks the format, so nothing else on
             // this form changes between them.
-            "<h2>Upload dataset content</h2>"
+            "<h2>Step 3 &mdash; Upload dataset content</h2>"
+            "<p class=\"mlPipelineWarning\">Required before training. A "
+            "dataset registered above but never given content here will "
+            "fail training with &quot;upload CSV content to the job's "
+            "dataset first&quot;.</p>"
             "<form id=\"newMlDatasetContent\">"
-            "<label>Dataset<select id=\"mlDatasetContentId\" required>"
+            "<label>Dataset" +
+            field_hint("Pick the dataset you registered in Step 2. Its "
+                       "row shows &#9888; no content uploaded yet until "
+                       "you finish this step.") +
+            "<select id=\"mlDatasetContentId\" required>"
             "<option value=\"\">Choose a registered dataset</option>"
             "</select></label>"
             "<label>Target column (the column to predict; blank uses the "
-            "last column)<input id=\"mlDatasetContentTarget\"></label>"
-            "<label>Dataset file -- .csv, .json, .jsonl, or .parquet (a CSV/"
-            "JSONL row or JSON array entry is one training example; every "
-            "feature column must be numeric; Parquet requires an "
-            "administrator-configured DuckDB helper, see Machine Learning "
-            "Settings)<input id=\"mlDatasetContentFile\" type=\"file\" "
+            "last column; ignored for an Instruction / fine-tuning text "
+            "dataset)" +
+            field_hint("The column of values the model should learn to "
+                       "predict from every other column, e.g. "
+                       "&quot;price&quot; or &quot;label&quot;. Leave "
+                       "blank to use the file's last column. Ignored "
+                       "entirely for a dataset registered as Instruction / "
+                       "fine-tuning text -- that data needs "
+                       "&quot;instruction&quot;/&quot;prompt&quot; and "
+                       "&quot;response&quot;/&quot;output&quot;/"
+                       "&quot;completion&quot; columns instead.") +
+            "<input id=\"mlDatasetContentTarget\"></label>"
+            "<label>Dataset file -- .csv, .json, .jsonl, or .parquet" +
+            field_hint("A CSV/JSONL row or JSON array entry is one "
+                       "training example. A feature column may be a "
+                       "number or a category (e.g. text like "
+                       "&quot;document&quot;/&quot;image&quot;) &mdash; a "
+                       "category column is encoded automatically, no "
+                       "manual conversion needed. Parquet needs an "
+                       "administrator-configured DuckDB helper, see "
+                       "Machine Learning Settings.") +
+            "<input id=\"mlDatasetContentFile\" type=\"file\" "
             "accept=\".csv,text/csv,.json,application/json,.jsonl,"
             "application/x-ndjson,.parquet\" required></label>"
             "<button title=\"Upload content\">" ICON_UPLOAD_SVG " Upload content</button></form>"
@@ -5078,6 +6020,33 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</div><div>"
             "<h2>Registered datasets</h2>"
             "<div id=\"mlDatasetsList\">Loading...</div>"
+            "</div><div>"
+            "<h2>Declare metadata</h2>"
+            "<form id=\"mlDatasetDeclareForm\">"
+            "<label>Dataset" +
+            field_hint("Which dataset this form edits. Clicking the "
+                      "Configure (gear) button on a row above fills this "
+                      "in automatically.") +
+            "<select id=\"mlDatasetDeclareId\" required>"
+            "<option value=\"\">Choose a dataset</option></select></label>"
+            "<label>Sensitive data status" +
+            field_hint("Free text you declare yourself, e.g. &quot;contains "
+                      "customer email addresses&quot; or &quot;none "
+                      "known&quot;. This build does not scan content for "
+                      "PII automatically.") +
+            "<input id=\"mlDatasetSensitiveDataStatus\"></label>"
+            "<label>Train split %<input id=\"mlDatasetTrainSplitPercent\" "
+            "type=\"number\" min=\"0\" max=\"100\" step=\"1\"></label>"
+            "<label>Validation split %<input "
+            "id=\"mlDatasetValidationSplitPercent\" type=\"number\" "
+            "min=\"0\" max=\"100\" step=\"1\"></label>"
+            "<label>Test split %" +
+            field_hint("The three splits together must not exceed 100%. "
+                      "Leave all at 0 to keep using training/evaluation's "
+                      "own default split.") +
+            "<input id=\"mlDatasetTestSplitPercent\" type=\"number\" "
+            "min=\"0\" max=\"100\" step=\"1\"></label>"
+            "<button title=\"Save declaration\">" ICON_PLUS_SVG " Save declaration</button></form>"
             "</div></section>";
     } else if (section == "ml-subjects") {
         // Phase 40 (docs/PLAN.md "Machine Learning Abilities" section 12):
@@ -5089,6 +6058,10 @@ std::string application_page(const UserRecord& user, const std::string& section,
         body =
             "<section id=\"panel-ml-subjects\" class=\"panel\"><div>"
             "<h2>New subject package</h2>"
+            "<p class=\"mlPipelineNote\">A subject package groups related "
+            "knowledge files under one topic, e.g. &quot;Product "
+            "documentation&quot;, so they can be ingested and searched "
+            "together below.</p>"
             "<form id=\"newMlSubject\"><label>Name"
             "<input id=\"mlSubjectName\" required maxlength=\"160\"></label>"
             "<label>Description<textarea id=\"mlSubjectDescription\" "
@@ -5105,7 +6078,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<form id=\"newMlKnowledgeDocument\">"
             "<label>Subject package<select id=\"mlKnowledgeSubjectId\" required>"
             "<option value=\"\">Choose a subject</option></select></label>"
-            "<label>Vector store<select id=\"mlKnowledgeVectorStoreId\" required>"
+            "<label>Vector store" +
+            field_hint("Create this first on the Embeddings and Vector "
+                       "Stores page if none exists yet -- this file's "
+                       "chunks are indexed into whichever store you pick "
+                       "here.") +
+            "<select id=\"mlKnowledgeVectorStoreId\" required>"
             "<option value=\"\">Choose a vector store</option></select></label>"
             "<label>Knowledge file<input id=\"mlKnowledgeFile\" type=\"file\" "
             "accept=\".txt,.md,.markdown,.csv,.json,.jsonl,.parquet,text/plain,text/markdown,text/csv,application/json\" "
@@ -5130,6 +6108,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // phase.
         body =
             "<section id=\"panel-ml-label-tasks\" class=\"panel\"><div>"
+            "<p class=\"mlPipelineNote\">This tracks a human labeling "
+            "task's status -- there is no automated labeler here. Moving a "
+            "task to &quot;completed&quot; is what lets Automation "
+            "Pipelines' &quot;Label data&quot; stage recognize this "
+            "dataset as labeled.</p>"
             "<h2>New labeling task</h2>"
             "<form id=\"newMlLabelTask\">"
             "<label>Dataset<select id=\"mlLabelTaskDatasetId\" required>"
@@ -5138,7 +6121,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "maxlength=\"160\"></label>"
             "<label>Description<textarea id=\"mlLabelTaskDescription\" "
             "rows=\"2\"></textarea></label>"
-            "<label>Label mode<input id=\"mlLabelTaskLabelMode\" "
+            "<label>Label mode" +
+            field_hint("Free text describing what kind of label this task "
+                       "collects, e.g. text_category for a single-class "
+                       "label per row.") +
+            "<input id=\"mlLabelTaskLabelMode\" "
             "placeholder=\"e.g. text_category, entity_span, bounding_box\">"
             "</label>"
             "<label>Assignee (optional)<select id=\"mlLabelTaskAssigneeId\">"
@@ -5159,6 +6146,10 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // phase that actually executes a pipeline.
         body =
             "<section id=\"panel-ml-prep-jobs\" class=\"panel\"><div>"
+            "<p class=\"mlPipelineNote\">This records a data-preparation "
+            "step and moves it through a status lifecycle -- it does not "
+            "yet actually transform your dataset's rows. Use it to track "
+            "what cleanup work a dataset needs and its progress.</p>"
             "<h2>New data preparation job</h2>"
             "<form id=\"newMlPrepJob\">"
             "<label>Dataset<select id=\"mlPrepJobDatasetId\" required>"
@@ -5167,7 +6158,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "maxlength=\"160\"></label>"
             "<label>Description<textarea id=\"mlPrepJobDescription\" "
             "rows=\"2\"></textarea></label>"
-            "<label>Operation<input id=\"mlPrepJobOperation\" required "
+            "<label>Operation" +
+            field_hint("Free text naming the intended cleanup step, e.g. "
+                       "remove_duplicates. Recorded for tracking only -- "
+                       "moving this job to &quot;completed&quot; does not "
+                       "run the operation against the dataset.") +
+            "<input id=\"mlPrepJobOperation\" required "
             "placeholder=\"e.g. remove_duplicates, redact_pii, split_dataset\">"
             "</label>"
             "<button title=\"Create preparation job\">" ICON_PLUS_SVG " Create preparation job</button></form>"
@@ -5178,21 +6174,33 @@ std::string application_page(const UserRecord& user, const std::string& section,
     } else if (section == "ml-training-jobs") {
         // Phase 42 (docs/PLAN.md "Machine Learning Abilities" section 16):
         // create and list training jobs against a registered project and
-        // dataset, and move them through a lifecycle status. Only the
-        // identity/target-project/target-model/target-dataset/training-
-        // type/status fields TrainingJobStore actually persists are
-        // collected here -- see that class's comment in masterai.hpp for
-        // the compute/hyperparameter/scheduling fields deferred to the
-        // phase that actually executes a training run.
+        // dataset, and move them through a lifecycle status. Phase 95 added
+        // the section's remaining execution-policy fields -- see
+        // TrainingJob's comment in masterai.hpp for which are genuinely
+        // enforced by execute_training_job() (max runtime, retry,
+        // checkpoint cadence) vs. recorded for operator reference only
+        // (compute target, hardware, container, ...), collected in the
+        // Execution policy form below.
         body =
+            ml_step_flow(4, kMlPipelineSteps) +
             "<section id=\"panel-ml-training-jobs\" class=\"panel\"><div>"
-            "<h2>New training job</h2>"
+            "<h2>Step 4 &mdash; New training job</h2>"
             "<form id=\"newMlTrainingJob\">"
             "<label>Project<select id=\"mlTrainingJobProjectId\" required>"
             "<option value=\"\">Choose a project</option></select></label>"
-            "<label>Existing model (optional)<select id=\"mlTrainingJobModelId\">"
+            "<label>Existing model (optional)" +
+            field_hint("Leave as &quot;Create a new model&quot; unless "
+                       "you registered a model on the Model Registry "
+                       "page and specifically want this run to update "
+                       "it.") +
+            "<select id=\"mlTrainingJobModelId\">"
             "<option value=\"\">Create a new model</option></select></label>"
-            "<label>Dataset<select id=\"mlTrainingJobDatasetId\" required>"
+            "<label>Dataset" +
+            field_hint("Must show a row count, e.g. &quot;120 row(s) "
+                       "ready&quot;. A dataset marked &#9888; no content "
+                       "uploaded yet has nothing to train on &mdash; go "
+                       "back to Step 3 first.") +
+            "<select id=\"mlTrainingJobDatasetId\" required>"
             "<option value=\"\">Choose a dataset</option></select></label>"
             "<label>Name<input id=\"mlTrainingJobName\" required "
             "maxlength=\"160\"></label>"
@@ -5212,19 +6220,81 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<p id=\"mlTrainingRunResult\">No training run in this session "
             "yet. Click \"Train now\" on a job whose dataset has uploaded "
             "CSV content.</p>"
+            "</div><div>"
+            "<h2>Execution policy</h2>"
+            "<form id=\"mlTrainingJobPolicyForm\">"
+            "<label>Training job" +
+            field_hint("Which job this form edits. Clicking the Configure "
+                      "(gear) button on a row above fills this in "
+                      "automatically.") +
+            "<select id=\"mlTrainingJobPolicyId\" required>"
+            "<option value=\"\">Choose a training job</option></select>"
+            "</label>"
+            "<label>Max runtime (seconds, 0 = no limit)" +
+            field_hint("Genuinely enforced: a run that overshoots this is "
+                      "aborted and the job marked failed with reason "
+                      "&quot;timeout&quot;.") +
+            "<input id=\"mlTrainingJobMaxRuntimeSeconds\" type=\"number\" "
+            "min=\"0\" step=\"1\"></label>"
+            "<label>Failure recovery" +
+            field_hint("Genuinely enforced: retry once actually re-runs "
+                      "training a second time before giving up if the "
+                      "first attempt fails.") +
+            "<select id=\"mlTrainingJobFailureRecoveryStrategy\">"
+            "<option value=\"none\">None</option>"
+            "<option value=\"retry_once\">Retry once</option></select></label>"
+            "<label>Checkpoint frequency (epochs, 0 = use the job's own "
+            "default)<input id=\"mlTrainingJobCheckpointFrequencyEpochs\" "
+            "type=\"number\" min=\"0\" step=\"1\"></label>"
+            "<label>Output directory<input "
+            "id=\"mlTrainingJobOutputDirectory\"></label>"
+            "<label>Compute target" +
+            field_hint("Recorded for operator reference -- this build "
+                      "always trains in-process on the host running "
+                      "MasterAI; there is no container/cluster scheduler "
+                      "for this field to actually target.") +
+            "<input id=\"mlTrainingJobComputeTarget\"></label>"
+            "<label>Hardware allocation<input "
+            "id=\"mlTrainingJobHardwareAllocation\"></label>"
+            "<label>Runtime environment<input "
+            "id=\"mlTrainingJobRuntimeEnvironment\"></label>"
+            "<label>Container image<input "
+            "id=\"mlTrainingJobContainerImage\"></label>"
+            "<label>Environment variables<textarea "
+            "id=\"mlTrainingJobEnvironmentVariables\" rows=\"2\">"
+            "</textarea></label>"
+            "<label>Secrets references<textarea "
+            "id=\"mlTrainingJobSecretsReferences\" rows=\"2\"></textarea>"
+            "</label>"
+            "<label>Logging policy<input "
+            "id=\"mlTrainingJobLoggingPolicy\"></label>"
+            "<label>Notification policy<input "
+            "id=\"mlTrainingJobNotificationPolicy\"></label>"
+            "<label>Resource ceiling notes<input "
+            "id=\"mlTrainingJobResourceCeilingNotes\"></label>"
+            "<label>Cost ceiling notes<input "
+            "id=\"mlTrainingJobCostCeilingNotes\"></label>"
+            "<button title=\"Save execution policy\">" ICON_PLUS_SVG " Save execution policy</button></form>"
             "</div></section>";
     } else if (section == "ml-evaluation-runs") {
         // Phase 43 (docs/PLAN.md "Machine Learning Abilities" section 23):
         // create and list evaluation runs against a registered model and
-        // benchmark dataset, and move them through a lifecycle status. Only
-        // the identity/target-model/target-dataset/category/status fields
-        // EvaluationRunStore actually persists are collected here -- see
-        // that class's comment in masterai.hpp for the benchmark-set/human-
-        // evaluation/comparison/numeric-score fields deferred to the phase
-        // that actually executes an evaluation.
+        // benchmark dataset, and move them through a lifecycle status.
+        // Phase 96 added a real, measured metric set beyond accuracy/F1/
+        // MSE (latency, throughput, memory, stability, robustness, and an
+        // optional bias/fairness breakdown by a named feature column) --
+        // see TabularEvaluationMetrics's comment in masterai.hpp for
+        // exactly how each is computed, and for the honest boundary on the
+        // generative/LLM-only categories (hallucination rate, perplexity,
+        // ...) this tabular evaluator does not compute.
         body =
+            ml_step_flow(5, kMlPipelineSteps) +
             "<section id=\"panel-ml-evaluation-runs\" class=\"panel\"><div>"
-            "<h2>New evaluation run</h2>"
+            "<h2>Step 5 &mdash; New evaluation run</h2>"
+            "<p class=\"mlPipelineNote\">Measures a trained model's real "
+            "accuracy on a chosen dataset. Needs a model produced by "
+            "Step 4's Train Now (or Model Registry &gt; Register a "
+            "model).</p>"
             "<form id=\"newMlEvaluationRun\">"
             "<label>Model<select id=\"mlEvaluationRunModelId\" required>"
             "<option value=\"\">Choose a trained model</option></select></label>"
@@ -5237,6 +6307,15 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Category<input id=\"mlEvaluationRunCategory\" "
             "placeholder=\"e.g. accuracy, f1_score, hallucination_rate\">"
             "</label>"
+            "<label>Sensitive feature for bias/fairness breakdown "
+            "(optional)" +
+            field_hint("A feature column name from this dataset, e.g. "
+                      "&quot;region&quot; or a one-hot slot like "
+                      "&quot;region=west&quot;. When set, the run's result "
+                      "reports accuracy/fit separately for each value of "
+                      "this column. Leave blank to skip -- this codebase "
+                      "never guesses which column, if any, is sensitive.") +
+            "<input id=\"mlEvaluationRunSensitiveFeatureName\"></label>"
             "<button title=\"Create evaluation run\">" ICON_PLUS_SVG " Create evaluation run</button></form>"
             "</div><div>"
             "<h2>Evaluation runs</h2>"
@@ -5257,8 +6336,13 @@ std::string application_page(const UserRecord& user, const std::string& section,
         // execute_experiment_run in server.cpp), and compare two or more
         // side by side.
         body =
+            ml_step_flow(5, kMlPipelineSteps) +
             "<section id=\"panel-ml-experiments\" class=\"panel\"><div>"
-            "<h2>New experiment</h2>"
+            "<h2>Step 5 (alternative) &mdash; New experiment</h2>"
+            "<p class=\"mlPipelineNote\">A tracked, comparable alternative "
+            "to a plain evaluation run &mdash; records the exact "
+            "hyperparameters/seed/versions used so two runs can be "
+            "compared side by side later.</p>"
             "<form id=\"newMlExperiment\">"
             "<label>Project<select id=\"mlExperimentProjectId\" required>"
             "<option value=\"\">Choose a project</option></select></label>"
@@ -5331,7 +6415,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<form id=\"newMlFineTuningJob\">"
             "<label>Base model<select id=\"mlFineTuningJobModelId\" required>"
             "<option value=\"\">Choose a base model</option></select></label>"
-            "<label>Fine-tuning dataset<select id=\"mlFineTuningJobDatasetId\" required>"
+            "<label>Fine-tuning dataset" +
+            field_hint("Must show a row count in the Dataset Manager list "
+                       "(content uploaded there first) -- a dataset with "
+                       "no content has nothing to fine-tune on.") +
+            "<select id=\"mlFineTuningJobDatasetId\" required>"
             "<option value=\"\">Choose a dataset</option></select></label>"
             "<label>Project (optional)<select id=\"mlFineTuningJobProjectId\">"
             "<option value=\"\">No project</option></select></label>"
@@ -5339,7 +6427,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "maxlength=\"160\"></label>"
             "<label>Description<textarea id=\"mlFineTuningJobDescription\" "
             "rows=\"2\"></textarea></label>"
-            "<label>Method<input id=\"mlFineTuningJobMethod\" "
+            "<label>Method" +
+            field_hint("Free text describing the intent of this run, e.g. "
+                       "subject_specialisation. Informational only -- it "
+                       "does not select which fine-tuning technique "
+                       "actually runs.") +
+            "<input id=\"mlFineTuningJobMethod\" "
             "placeholder=\"e.g. subject_specialisation, code_assistant, "
             "safety_alignment\"></label>"
             "<button title=\"Create fine-tuning job\">" ICON_PLUS_SVG " Create fine-tuning job</button></form>"
@@ -5389,13 +6482,27 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<p id=\"mlMbcTarget\">Press Configure on a configuration in "
             "the list below to edit its build settings here.</p>"
             "<form id=\"configureMlModelBuilderConfig\">"
+            "<p class=\"mlPipelineNote\">This build trains a real, "
+            "from-scratch multi-layer-perceptron (MLP) on tabular rows -- "
+            "not a transformer/sequence model. Fields below marked "
+            "&quot;not used by this trainer&quot; are recorded for your "
+            "own notes but do not change how training actually runs.</p>"
             "<label>Configuration mode<select id=\"mlMbcMode\">"
             "<option value=\"basic\">Basic</option>"
             "<option value=\"advanced\">Advanced</option></select></label>"
-            "<label>Model architecture<input id=\"mlMbcArchitecture\" "
-            "placeholder=\"e.g. transformer_decoder, cnn, "
-            "gradient_boosted_trees\"></label>"
-            "<label>Loss function<input id=\"mlMbcLossFunction\" "
+            "<label>Model architecture" +
+            field_hint("A free-text label for your own reference, e.g. "
+                       "&quot;tabular_mlp&quot;. Does not select the "
+                       "network shape -- Layer configuration/Hidden "
+                       "dimensions in Advanced mode do that.") +
+            "<input id=\"mlMbcArchitecture\" "
+            "placeholder=\"e.g. tabular_mlp\"></label>"
+            "<label>Loss function" +
+            field_hint("A free-text label for your own reference. The "
+                       "trainer always picks its own loss automatically "
+                       "from the dataset's target column -- this field "
+                       "does not choose it.") +
+            "<input id=\"mlMbcLossFunction\" "
             "placeholder=\"e.g. cross_entropy, mse\"></label>"
             "<label>Optimiser<input id=\"mlMbcOptimiser\" "
             "placeholder=\"e.g. adamw, sgd\"></label>"
@@ -5404,22 +6511,44 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Epoch count<input id=\"mlMbcEpochCount\" "
             "type=\"number\" min=\"0\" placeholder=\"0 = executor default\">"
             "</label>"
-            "<label>Sequence length<input id=\"mlMbcSequenceLength\" "
-            "type=\"number\" min=\"0\" placeholder=\"0 = executor default\">"
-            "</label>"
             "<div id=\"mlMbcAdvanced\" style=\"display:none\">"
-            "<label>Layer configuration<textarea "
+            "<label>Layer configuration" +
+            field_hint("The real hidden-layer sizes, as any numbers found "
+                       "in this text, e.g. &quot;128, 64&quot; or &quot;2 "
+                       "hidden layers of 128 and 64&quot;. This genuinely "
+                       "shapes the trained network.") +
+            "<textarea "
             "id=\"mlMbcLayerConfiguration\" rows=\"2\" placeholder=\"e.g. "
-            "24 decoder layers\"></textarea></label>"
-            "<label>Hidden dimensions<input id=\"mlMbcHiddenDimensions\" "
+            "128, 64\"></textarea></label>"
+            "<label>Hidden dimensions" +
+            field_hint("A single hidden-layer size, used only when Layer "
+                       "configuration above is left blank. Also genuinely "
+                       "shapes the trained network.") +
+            "<input id=\"mlMbcHiddenDimensions\" "
             "type=\"number\" min=\"0\" placeholder=\"0 = executor default\">"
             "</label>"
-            "<label>Attention configuration<input "
-            "id=\"mlMbcAttentionConfiguration\" placeholder=\"e.g. 16 heads, "
-            "grouped-query attention\"></label>"
-            "<label>Vocabulary and tokenizer<input "
-            "id=\"mlMbcVocabularyTokenizer\" placeholder=\"e.g. 32000-entry "
-            "BPE tokenizer\"></label>"
+            "<label>Sequence length" +
+            field_hint("Not used by this trainer -- sequence length is a "
+                       "transformer/text-model concept and this build "
+                       "trains a tabular MLP, one fixed-width row at a "
+                       "time.") +
+            "<input id=\"mlMbcSequenceLength\" "
+            "type=\"number\" min=\"0\" placeholder=\"not used by this "
+            "trainer\"></label>"
+            "<label>Attention configuration" +
+            field_hint("Not used by this trainer -- attention is a "
+                       "transformer concept and this build trains a "
+                       "tabular MLP, which has no attention layers.") +
+            "<input "
+            "id=\"mlMbcAttentionConfiguration\" placeholder=\"not used by "
+            "this trainer\"></label>"
+            "<label>Vocabulary and tokenizer" +
+            field_hint("Not used by this trainer -- tokenization applies "
+                       "to text/sequence models, not the fixed numeric/"
+                       "categorical feature columns this build trains on.") +
+            "<input "
+            "id=\"mlMbcVocabularyTokenizer\" placeholder=\"not used by "
+            "this trainer\"></label>"
             "<label>Activation functions<input "
             "id=\"mlMbcActivationFunctions\" placeholder=\"e.g. silu, "
             "gelu\"></label>"
@@ -5438,30 +6567,54 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Gradient clipping (max norm)<input "
             "id=\"mlMbcGradientClipping\" type=\"number\" min=\"0\" "
             "step=\"0.1\" placeholder=\"0 = disabled\"></label>"
-            "<label>Mixed precision<input id=\"mlMbcMixedPrecision\" "
+            "<label>Mixed precision" +
+            field_hint("Not used by this trainer -- mixed-precision tensor "
+                       "cores are a GPU/transformer-training concept; this "
+                       "build's tabular MLP trainer always runs in plain "
+                       "precision.") +
+            "<input id=\"mlMbcMixedPrecision\" "
             "type=\"checkbox\"></label>"
             "<label>Checkpoint frequency (steps)<input "
             "id=\"mlMbcCheckpointFrequency\" type=\"number\" min=\"0\" "
             "placeholder=\"0 = executor default\"></label>"
-            "<label>Validation frequency (steps)<input "
-            "id=\"mlMbcValidationFrequency\" type=\"number\" min=\"0\" "
-            "placeholder=\"0 = executor default\"></label>"
+            "<label>Validation frequency (steps)" +
+            field_hint("Not used by this trainer -- it always validates "
+                       "on a held-out split once per epoch, not on a "
+                       "configurable step interval.") +
+            "<input id=\"mlMbcValidationFrequency\" type=\"number\" min=\"0\" "
+            "placeholder=\"not used by this trainer\"></label>"
             "<label>Early stopping<input id=\"mlMbcEarlyStopping\" "
             "type=\"checkbox\"></label>"
             "<label>Random seed<input id=\"mlMbcRandomSeed\" "
             "type=\"number\" min=\"0\" placeholder=\"0 = not fixed\">"
             "</label>"
-            "<label>Reproducibility settings<textarea "
+            "<label>Reproducibility settings" +
+            field_hint("Free-text notes only, e.g. &quot;pinned library "
+                       "versions&quot; -- nothing reads this back to "
+                       "change how training runs. Random seed above is "
+                       "what actually makes a run reproducible.") +
+            "<textarea "
             "id=\"mlMbcReproducibilitySettings\" rows=\"2\" "
             "placeholder=\"e.g. deterministic kernels, pinned library "
             "versions\"></textarea></label>"
-            "<label>Distributed-training settings<textarea "
+            "<label>Distributed-training settings" +
+            field_hint("Free-text notes only -- this build trains on a "
+                       "single process, so there is nothing to actually "
+                       "configure here yet.") +
+            "<textarea "
             "id=\"mlMbcDistributedTrainingSettings\" rows=\"2\" "
             "placeholder=\"e.g. 2-node data parallel\"></textarea></label>"
             "</div>"
             "<button title=\"Save build settings\">" ICON_SAVE_SVG " Save build settings</button></form>"
             "</div><div>"
             "<h2>Model builder configurations</h2>"
+            "<p class=\"mlPipelineNote\">To build (or rebuild) a real "
+            "model from a configuration: set its status to "
+            "&quot;submitted&quot; in the table below and press Apply. "
+            "That creates a real training job from Layer configuration/"
+            "Hidden dimensions/Optimiser/etc above, which then trains like "
+            "any Training Jobs page entry -- open Training Jobs and click "
+            "&quot;Train now&quot; on it to actually run it.</p>"
             "<div id=\"mlModelBuilderConfigsList\">Loading...</div>"
             "</div></section>";
     } else if (section == "ml-instruction-examples") {
@@ -5645,6 +6798,10 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<section id=\"panel-ml-synthetic-records\" class=\"panel\">"
             "<div>"
             "<h2>New synthetic record</h2>"
+            "<p class=\"mlPipelineNote\">This creates an empty record with "
+            "no generated text yet -- use Generate synthetic record below "
+            "instead if you want MasterAI to actually write the content "
+            "with a real model.</p>"
             "<form id=\"newMlSyntheticRecord\">"
             "<label>Dataset<select id=\"mlSyntheticRecordDatasetId\" required>"
             "<option value=\"\">Choose a dataset</option></select></label>"
@@ -5713,6 +6870,10 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<section id=\"panel-ml-vector-stores\" class=\"panel\">"
             "<div>"
             "<h2>New vector store</h2>"
+            "<p class=\"mlPipelineNote\">A vector store is a searchable "
+            "index you fill by ingesting knowledge files (Subject "
+            "Knowledge Manager) or dataset rows -- creating one here just "
+            "registers it, empty, ready to receive content.</p>"
             "<form id=\"newMlVectorStore\">"
             "<label>Name<input id=\"mlVectorStoreName\" required "
             "maxlength=\"160\"></label>"
@@ -5747,6 +6908,9 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<section id=\"panel-ml-rag-configs\" class=\"panel\">"
             "<div>"
             "<h2>New RAG configuration</h2>"
+            "<p class=\"mlPipelineNote\">A new configuration starts "
+            "&quot;pending&quot; and must be approved (status dropdown "
+            "below) before Test retrieval will accept it.</p>"
             "<form id=\"newMlRagConfig\">"
             "<label>Name<input id=\"mlRagConfigName\" required "
             "maxlength=\"160\"></label>"
@@ -5790,6 +6954,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<section id=\"panel-ml-subject-exams\" class=\"panel\">"
             "<div>"
             "<h2>New subject exam</h2>"
+            "<p class=\"mlPipelineNote\">Running an exam grades each "
+            "answer with a real model acting as judge, falling back to a "
+            "plain text-overlap check only if the judge call fails. Each "
+            "result records which of the two graded it, and only an "
+            "overall pass/fail score is produced today.</p>"
             "<form id=\"newMlSubjectExam\">"
             "<label>Name<input id=\"mlSubjectExamName\" required "
             "maxlength=\"160\"></label>"
@@ -5824,14 +6993,28 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<form id=\"newMlHyperparameterSearch\">"
             "<label>Name<input id=\"mlHyperparameterSearchName\" required "
             "maxlength=\"160\"></label>"
-            "<label>Training job<select id=\"mlHyperparameterSearchTrainingJobId\" required>"
+            "<label>Training job" +
+            field_hint("The search reuses this job's dataset and, when "
+                       "it has a real model-builder MLP architecture, "
+                       "also sweeps its batch size/dropout/optimiser -- "
+                       "otherwise only learning rate and epoch count are "
+                       "swept.") +
+            "<select id=\"mlHyperparameterSearchTrainingJobId\" required>"
             "<option value=\"\">Choose a training job</option></select></label>"
             "<label>Description<textarea "
             "id=\"mlHyperparameterSearchDescription\" rows=\"2\">"
             "</textarea></label>"
-            "<label>Search strategy<input "
+            "<label>Search strategy" +
+            field_hint("Only &quot;grid&quot; actually runs a real sweep "
+                       "(a bounded grid over learning rate/epochs, plus "
+                       "batch size/dropout/optimiser for MLP jobs, capped "
+                       "at 20 trials). random/bayesian/other values are "
+                       "recorded but still run the same grid search -- "
+                       "there is no separate executor for them yet.") +
+            "<input "
             "id=\"mlHyperparameterSearchStrategy\" "
-            "placeholder=\"e.g. grid, random, bayesian\"></label>"
+            "placeholder=\"grid (the only strategy that actually runs)\">"
+            "</label>"
             "<button title=\"Create hyperparameter search\">" ICON_PLUS_SVG " Create hyperparameter search</button></form>"
             "</div><div>"
             "<h2>Hyperparameter searches</h2>"
@@ -5858,8 +7041,15 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Description<textarea "
             "id=\"mlModelOptimizationDescription\" rows=\"2\"></textarea>"
             "</label>"
-            "<label>Operation<input id=\"mlModelOptimizationOperation\" "
-            "placeholder=\"e.g. quantization, pruning, distillation\">"
+            "<label>Operation" +
+            field_hint("Only &quot;pruning&quot; actually runs a real "
+                       "optimization pass on the model's weights. "
+                       "quantization/distillation/graph_optimization and "
+                       "other values are recorded but have no executor "
+                       "yet, so \"Run now\" will fail with &quot;has no "
+                       "real executor yet&quot;.") +
+            "<input id=\"mlModelOptimizationOperation\" "
+            "placeholder=\"pruning (the only operation that actually runs)\">"
             "</label>"
             "<button title=\"Create model optimization\">" ICON_PLUS_SVG " Create model optimization</button></form>"
             "</div><div>"
@@ -5883,6 +7073,13 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<section id=\"panel-ml-checkpoints\" class=\"panel\">"
             "<div>"
             "<h2>New checkpoint record</h2>"
+            "<p class=\"mlPipelineNote\">A checkpoint created here manually "
+            "is a note only, with no saved weights to resume from. A real, "
+            "resumable checkpoint (with actual learned weights) is instead "
+            "captured automatically by a real training or fine-tuning "
+            "run -- look for one with a Snapshot in the list below, and "
+            "use its &quot;Resume training&quot; action to continue "
+            "gradient descent from it.</p>"
             "<form id=\"newMlCheckpoint\">"
             "<label>Name<input id=\"mlCheckpointName\" required "
             "maxlength=\"160\"></label>"
@@ -5920,9 +7117,19 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<option value=\"\">Choose a model</option></select></label>"
             "<label>Description<textarea "
             "id=\"mlDeploymentDescription\" rows=\"2\"></textarea></label>"
-            "<label>Environment<input id=\"mlDeploymentEnvironment\" "
+            "<label>Environment" +
+            field_hint("A deployment supersedes the previous active "
+                       "deployment for this same environment name -- "
+                       "matching text here, e.g. &quot;production&quot;, "
+                       "is what makes Rollback find its predecessor.") +
+            "<input id=\"mlDeploymentEnvironment\" "
             "placeholder=\"e.g. development, staging, production\"></label>"
-            "<label>Strategy<input id=\"mlDeploymentStrategy\" "
+            "<label>Strategy" +
+            field_hint("Free text for your own record-keeping -- every "
+                       "deployment goes live the same way regardless of "
+                       "this value; there is no separate blue-green/canary "
+                       "rollout executor yet.") +
+            "<input id=\"mlDeploymentStrategy\" "
             "placeholder=\"e.g. direct, blue_green, canary\"></label>"
             "<button title=\"Create deployment\">" ICON_PLUS_SVG " Create deployment</button></form>"
             "</div><div>"
@@ -6232,7 +7439,14 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "maxlength=\"160\"></label>"
             "<label>Scope<input id=\"mlSafetyPolicyScope\" "
             "placeholder=\"e.g. project name or 'global'\"></label>"
-            "<label>Restricted data categories<textarea "
+            "<label>Restricted data categories" +
+            field_hint("Real, in effect: attach this policy to an "
+                       "Inference Endpoint (Endpoint policy, on the "
+                       "Inference Endpoints page) and its content scanner "
+                       "checks every prompt/answer for these categories, "
+                       "on top of its built-in secret/prompt-injection "
+                       "patterns.") +
+            "<textarea "
             "id=\"mlSafetyPolicyRestrictedDataCategories\" rows=\"2\" "
             "placeholder=\"e.g. personal information, credentials, "
             "copyrighted text\"></textarea></label>"
@@ -6243,6 +7457,9 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</div>"
             "<div>"
             "<h2>New model card</h2>"
+            "<p class=\"mlPipelineNote\">Real, in effect: a model needs an "
+            "approved model card here before Deployment Manager's "
+            "&quot;Deploy now&quot; will accept it.</p>"
             "<form id=\"newMlModelCard\">"
             "<label>Model<select id=\"mlModelCardModelId\" required>"
             "<option value=\"\">Choose a model</option></select></label>"
@@ -6564,6 +7781,27 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Retrieval maximum total chunks"
             "<input id=\"cfgRetrievalMaxTotalChunks\" type=\"number\" "
             "min=\"1\" data-path=\"retrieval.maximumTotalChunks\"></label>"
+            "<label class=\"checkboxLabel\"><input id=\"cfgRetrievalMcpResource\" "
+            "type=\"checkbox\" data-path=\"retrieval.mcpResourceEnabled\" "
+            "data-type=\"bool\"> Use connected MCP tools/agents to help "
+            "answer questions" +
+            field_hint("When on, retrieval can call out to any outbound "
+                       "MCP server this MasterAI instance is already "
+                       "connected to (Settings &gt; Allowed Commands/"
+                       "Outbound Connections) as one more evidence source "
+                       "alongside the local project index -- effectively "
+                       "letting another connected AI agent or tool help "
+                       "find the answer. Off by default is safer if you "
+                       "don't want outbound calls during retrieval; on by "
+                       "default otherwise, matching every prior "
+                       "installation's existing behavior.") +
+            "</label>"
+            "<label class=\"checkboxLabel\"><input id=\"cfgRetrievalSemanticEmbedding\" "
+            "type=\"checkbox\" data-path=\"retrieval.semanticEmbeddingEnabled\" "
+            "data-type=\"bool\"> Semantic embedding search enabled</label>"
+            "<label class=\"checkboxLabel\"><input id=\"cfgRetrievalGitDiff\" "
+            "type=\"checkbox\" data-path=\"retrieval.gitDiffEnabled\" "
+            "data-type=\"bool\"> Git diff evidence enabled</label>"
             "<h3>Cache</h3>"
             "<label class=\"checkboxLabel\"><input id=\"cfgCacheEnabled\" "
             "type=\"checkbox\" data-path=\"cache.enabled\" "
@@ -7070,14 +8308,26 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "certification runs recorded yet.';return;}"
             "el.innerHTML='<table><thead><tr><th>When</th><th>Model</th>"
             "<th>Profile</th><th>Cache</th><th>Accelerator</th>"
-            "<th>Quality</th><th>Accepted</th><th>Reason</th></tr></thead>"
+            "<th>Quality</th><th>Accepted</th><th>Reason</th>"
+            "<th>Resources</th></tr></thead>"
             "<tbody>'+list.map(c=>'<tr><td>'+"
             "new Date(c.createdEpochSeconds*1000).toLocaleString()+"
             "'</td><td>'+c.modelId+'</td><td>'+c.profile+'</td><td>'+"
             "c.cacheState+'</td><td>'+c.acceleratorMode+'</td><td>'+"
             "Math.round(c.qualityScore*100)+'%</td><td>'+"
             "(c.accepted?'yes':'no')+'</td><td>'+(c.rejectionReason||'')+"
-            "'</td></tr>').join('')+'</tbody></table>';}"
+            // Phase 36 benchmark-gap pass: commit/page-fault/storage-
+            // operation-count -- real measured numbers (see
+            // PerformanceCertificationRecord's field comments in
+            // masterai.hpp), shown as a compact tooltip rather than four
+            // more table columns, matching this page's existing
+            // uncluttered layout.
+            "'</td><td title=\"Commit '+"
+            "(c.commitBytes/1048576).toFixed(1)+' MB, '+c.pageFaults+"
+            "' page faults, '+c.storageReadOperations+' storage read op(s), '+"
+            "c.storageWriteOperations+' storage write op(s)\">'+"
+            "(c.commitBytes/1048576).toFixed(0)+' MB, '+c.pageFaults+"
+            "' faults</td></tr>').join('')+'</tbody></table>';}"
             "async function refresh(){"
             "try{renderThresholds(await api("
             "'/api/v1/performance/certification/thresholds'));}catch(e){}"
@@ -7591,6 +8841,14 @@ std::string application_page(const UserRecord& user, const std::string& section,
                          section == "ml-projects") +
                 nav_link("/app/ml/datasets", "Dataset Manager",
                          section == "ml-datasets") +
+                // Moved out of "Machine Learning Logs and Settings" (where
+                // it was mislabeled "Model Registry (Statistics)") -- it is
+                // one of the two prerequisite entities (with Dataset
+                // Manager, just above) a training job references, and its
+                // panel is a real "Register a model" / "Predict with a
+                // trained model" form, not a read-only statistics page.
+                nav_link("/app/ml/models", "Model Registry",
+                         section == "ml-models") +
                 nav_link("/app/ml/subjects", "Subject Knowledge Manager",
                          section == "ml-subjects") +
                 nav_link("/app/ml/label-tasks", "Data Labeling",
@@ -7609,9 +8867,6 @@ std::string application_page(const UserRecord& user, const std::string& section,
                 nav_link("/app/ml/rag-configs",
                          "Retrieval-Augmented Generation",
                          section == "ml-rag-configs") +
-                nav_link("/app/ml/hyperparameter-searches",
-                         "Hyperparameter Optimization",
-                         section == "ml-hyperparameter-searches") +
                 nav_link("/app/ml/training-jobs", "Training Jobs",
                          section == "ml-training-jobs") +
                 nav_link("/app/ml/fine-tuning-jobs", "Fine-Tuning",
@@ -7619,6 +8874,14 @@ std::string application_page(const UserRecord& user, const std::string& section,
                 nav_link("/app/ml/checkpoints",
                          "Checkpoint Management",
                          section == "ml-checkpoints") +
+                // Moved after Training Jobs/Fine-Tuning/Checkpoints (was
+                // previously listed before Training Jobs even existed one
+                // to search over) -- a hyperparameter search always picks
+                // an existing training job, so it only makes sense once
+                // one exists.
+                nav_link("/app/ml/hyperparameter-searches",
+                         "Hyperparameter Optimization",
+                         section == "ml-hyperparameter-searches") +
                 nav_link("/app/ml/evaluation-runs", "Evaluation Lab",
                          section == "ml-evaluation-runs") +
                 nav_link("/app/ml/experiments", "Experiment Tracking",
@@ -7660,9 +8923,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
                 nav_link("/app/ml/audit-logs", "Audit Logs",
                          section == "ml-audit-logs") +
                 nav_link("/app/ml/settings", "Machine Learning Settings",
-                         section == "ml-settings") +
-                nav_link("/app/ml/models", "Model Registry (Statistics)",
-                         section == "ml-models"));
+                         section == "ml-settings"));
     }
 
     return html_response(
@@ -7767,6 +9028,14 @@ std::string application_page(const UserRecord& user, const std::string& section,
         ".iconBtn:hover{background:var(--panel);color:var(--text)}"
         ".iconBtn-apply:hover{color:#4caf6a;border-color:#4caf6a}"
         ".iconBtn-delete:hover{color:#e5657a;border-color:#e5657a}"
+        // Guard rail (ML forms clarity pass): a button disabled because a
+        // prerequisite step is missing (e.g. Train Now before dataset
+        // content is uploaded) must look obviously inert -- dimmed, no
+        // hover reaction -- rather than looking identical to every
+        // clickable button, which is what an un-styled [disabled] button
+        // otherwise renders as.
+        ".iconBtn:disabled{opacity:.35;cursor:not-allowed}"
+        ".iconBtn:disabled:hover{background:transparent;color:var(--muted)}"
         // Table cells hold either short controls or long free-text/id
         // values; cap width and ellipsize the latter (escTrim already
         // shortens the text itself, this is the belt-and-suspenders CSS
@@ -8023,6 +9292,20 @@ std::string application_page(const UserRecord& user, const std::string& section,
         ".thinkBlock .thinkBody{padding:0 .6rem .6rem;font-size:.85rem;"
         "color:var(--muted);font-style:italic}"
         ".thinkBlock .thinkBody p{margin:0 0 .4rem}"
+        // The live thinking panel (built token-by-token by ensureThinkBlock()/
+        // feedThinkingChunk() in the script above, before the reply is
+        // complete) eases in rather than popping into existence the instant
+        // reasoning starts, and its summary label breathes gently while open
+        // so the panel visibly reads as "still working" the same way the
+        // Thinking spinner above the bubble already does -- without a full
+        // per-token markdown re-render, this is the UI's only other signal
+        // that generation is actively producing something.
+        ".thinkBlockLive{animation:chatBlockFadeIn .25s ease}"
+        "@keyframes chatBlockFadeIn{from{opacity:0;transform:translateY(-3px)}"
+        "to{opacity:1;transform:translateY(0)}}"
+        ".thinkBlockLive[open]>summary{animation:chatThinkPulse 1.6s ease-in-out "
+        "infinite}"
+        "@keyframes chatThinkPulse{0%,100%{opacity:.6}50%{opacity:1}}"
         // The composer: a single rounded pill carrying the attach toggle,
         // the message box, the model picker, and send/cancel -- no separate
         // "start chat" form above it.
@@ -8099,7 +9382,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
         ".stateTag-ready,.stateTag-approved,.stateTag-production,"
         ".stateTag-verified{background:#0d3321;color:#5fe3a4}"
         ".stateTag-invalid,.stateTag-failed,.stateTag-quarantined,"
-        ".stateTag-rejected{background:#3a1414;color:#f299a0}"
+        ".stateTag-rejected,.stateTag-missing{background:#3a1414;color:#f299a0}"
         ".stateTag-downloading,.stateTag-unverified,.stateTag-training,"
         ".stateTag-evaluation,.stateTag-pending,.stateTag-imported,"
         ".stateTag-staging{background:#3a2f0d;color:#f2c96d}"

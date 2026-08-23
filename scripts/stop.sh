@@ -20,12 +20,12 @@ case "${server_pid}" in *[!0-9]*|'') echo "PID file is invalid." >&2; exit 1 ;; 
 if kill -0 "${server_pid}" 2>/dev/null; then
     : >"${runtime_root}/run/stop.request"
     count=0
-    while kill -0 "${server_pid}" 2>/dev/null && [ "${count}" -lt 30 ]; do
+    while kill -0 "${server_pid}" 2>/dev/null && [ "${count}" -lt 60 ]; do
         sleep 1
         count=$((count + 1))
     done
     kill -0 "${server_pid}" 2>/dev/null &&
-        { echo "MasterAI did not stop within 30 seconds." >&2; exit 1; }
+        { echo "MasterAI did not stop within 60 seconds." >&2; exit 1; }
 fi
 rm -f -- "${pid_file}"
 echo "MasterAI is stopped."

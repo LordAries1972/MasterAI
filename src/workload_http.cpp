@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cctype>
 #include <fstream>
+#include <iostream>
 #include <stdexcept>
 
 namespace masterai::server_internal {
@@ -800,12 +801,33 @@ std::string WorkloadHttpController::run_download(
     std::atomic_bool cancellation{false};
     try {
         const auto job = state_->downloads->run(id, cancellation);
+        const auto final_state = job.state();
         state_->audit.append(
             "download.run", user.id,
-            job.state() == DownloadState::complete ? "success" : "failed", id);
+            final_state == DownloadState::complete ? "success" : "failed", id);
+        // A successfully completed download has nothing left to track --
+        // the model file itself is already on disk and registered, so
+        // leaving its job record (and progress row) sitting in the list
+        // forever is just clutter. remove() is safe to call here: run()'s
+        // own RAII guard has already dropped `id` from in_flight_ by the
+        // time it returns, on every exit path, so this is never fighting an
+        // in-progress transfer. Best-effort -- if removal fails for any
+        // reason, the completed download still succeeded and simply stays
+        // visible, same as before this change.
+        if (final_state == DownloadState::complete) {
+            try {
+                state_->downloads->remove(id);
+            } catch (const std::exception& remove_exception) {
+                std::cerr << "download: completed job '" << id
+                          << "' finished successfully but could not be "
+                             "auto-removed from the list (will stay visible "
+                             "until removed manually): "
+                          << remove_exception.what() << std::endl;
+            }
+        }
         return response(200, "OK",
                         "{\"id\":\"" + id + "\",\"state\":\"" +
-                            download_state(job.state()) + "\"}");
+                            download_state(final_state) + "\"}");
     } catch (const DownloadAlreadyRunning&) {
         // Distinguished from the generic failure below so the frontend can
         // tell "already downloading, keep polling" apart from a real error.

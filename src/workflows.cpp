@@ -247,7 +247,12 @@ ProjectTextFile read_project_text_file(
     if (error || !is_path_within(root, path) ||
         !std::filesystem::is_regular_file(path, error) || error ||
         std::filesystem::is_symlink(project.root / relative, error)) {
-        throw std::invalid_argument("project text file is unavailable");
+        // Names the requested file so a tool-call failure tells the caller
+        // (and, via the chat transcript, the model) exactly which file
+        // wasn't there instead of a bare "unavailable" that gives no clue
+        // which of several requested files was the problem.
+        throw std::invalid_argument(
+            "project text file not found: " + relative_text);
     }
     const auto size = std::filesystem::file_size(path, error);
     if (error || size > maximum_bytes) {

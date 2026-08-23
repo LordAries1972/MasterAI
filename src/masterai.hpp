@@ -707,6 +707,16 @@ struct SystemUtilizationSample {
     double cpu_percent{0.0};
     std::uint64_t disk_read_bytes{0};
     std::uint64_t disk_write_bytes{0};
+    // Phase 36 benchmark-gap pass: this process's own cumulative read/write
+    // I/O *operation* counts (IO_COUNTERS::ReadOperationCount/
+    // WriteOperationCount on Windows, read_bytes/write_bytes' operation-
+    // count-shaped analogue isn't exposed by /proc/self/io on Linux, so
+    // these stay 0 there) -- distinct from disk_read_bytes/disk_write_bytes
+    // above, which count bytes, not operations. Read from the exact same
+    // IO_COUNTERS sample already being taken for the byte counters, so this
+    // is free reuse, not a new native call.
+    std::uint64_t disk_read_operations{0};
+    std::uint64_t disk_write_operations{0};
 };
 
 SystemUtilizationSample probe_system_utilization(
@@ -3665,17 +3675,20 @@ private:
     std::unique_ptr<State> state_;
 };
 
-// Machine Learning foundation phase (docs/PLAN.md "Machine Learning
-// Abilities" section 1-51): an administrator-only module for teaching and
-// building models, covering everything from dataset ingestion through
-// training, evaluation, deployment, and governance. That section describes
-// 25 sidebar interfaces (Dashboard, Projects, Model Registry, Model
-// Builder, Dataset Manager, ...); this registry is deliberately scoped down
-// to just the Dashboard's real, honest starting state -- every interface
-// beyond Dashboard is listed as "planned" and none of them exist yet. This
-// mirrors how AdvancedOptimizationRegistry above starts a large gated
-// section: a real, truthful acknowledgement that the subsystem exists and
-// is enabled, with zero fabricated data standing in for work not yet done.
+// Machine Learning module (docs/PLAN.md "Machine Learning Abilities"
+// section 1-51): an administrator-only module for teaching and building
+// models, covering everything from dataset ingestion through training,
+// evaluation, deployment, and governance. Started (Phase 37) as a
+// foundation-phase acknowledgement with every interface beyond Dashboard
+// listed "planned" and nothing real behind any of them; every one of the 29
+// interfaces this registry now lists is "available" -- each has a real
+// backing store and, per its own class comment/roster entry, a stated real-
+// vs-recorded-only boundary for anything inside it that is not (see e.g.
+// ModelOptimizationRun's roster entry: the interface itself is real, but
+// only its `pruning` operation actually executes). See MachineLearningDashboard
+// above for the always-real dashboard counts (Phase 38+) and
+// docs/ToDo.md's "Documented scope limits" section for the current honest
+// list of what inside an available interface still does not execute.
 struct MachineLearningInterface {
     std::string key;
     std::string label;
@@ -3757,6 +3770,32 @@ struct MLProject {
     std::string model_task;
     std::string owner_id;
     MLProjectStatus status{MLProjectStatus::draft};
+    // Phase 93: docs/PLAN.md section 5's remaining definition-time fields,
+    // added once the pipeline they describe (Phases 46/56/57) actually
+    // exists to make them meaningful. administrators is comma-joined user
+    // ids, each validated against UserStore at create()/update_governance()
+    // time (matching how owner_id is already a real user id) -- these users
+    // are shown alongside the owner everywhere a project is displayed, the
+    // only field here with real logic beyond storage. approved_data_sources
+    // is comma-joined free text (section 5 doesn't define a closed source
+    // taxonomy). security_classification/target_architecture/
+    // target_deployment_environment/success_criteria/
+    // evaluation_requirements/safety_requirements are free text: they are
+    // administrator-declared intent, not something this codebase computes.
+    // storage_allocation_mb is a real declared ceiling; nothing enforces it
+    // yet (no ML executor here allocates project-scoped disk quota), so it
+    // is descriptive today, same honest-boundary treatment Phase 46 already
+    // gives Model Builder's non-applicable fields.
+    std::string administrators;
+    std::string approved_data_sources;
+    std::string security_classification;
+    std::string target_architecture;
+    std::string target_deployment_environment;
+    std::string success_criteria;
+    std::string evaluation_requirements;
+    std::string safety_requirements;
+    std::uint64_t storage_allocation_mb{0};
+    std::string compute_allocation_notes;
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -3769,12 +3808,37 @@ public:
                      const std::string& description,
                      const std::string& objective,
                      const std::string& subject_domain,
-                     const std::string& model_task);
+                     const std::string& model_task,
+                     const std::string& administrators = {},
+                     const std::string& approved_data_sources = {},
+                     const std::string& security_classification = {},
+                     const std::string& target_architecture = {},
+                     const std::string& target_deployment_environment = {},
+                     const std::string& success_criteria = {},
+                     const std::string& evaluation_requirements = {},
+                     const std::string& safety_requirements = {},
+                     std::uint64_t storage_allocation_mb = 0,
+                     const std::string& compute_allocation_notes = {});
     std::optional<MLProject> find(const std::string& id) const;
     std::vector<MLProject> list() const;
     // Returns false (no-op) if the project doesn't exist, so callers can
     // turn that into a 404 the same way ChatStore::remove()'s callers do.
     bool set_status(const std::string& id, MLProjectStatus status);
+    // Post-creation edits to the section-5 governance/target fields added
+    // in Phase 93 -- these legitimately evolve as a project moves through
+    // its lifecycle, the same way Experiment::update_metadata() already
+    // lets hyperparameters/tags/notes evolve after creation.
+    bool update_governance(const std::string& id,
+                           const std::string& administrators,
+                           const std::string& approved_data_sources,
+                           const std::string& security_classification,
+                           const std::string& target_architecture,
+                           const std::string& target_deployment_environment,
+                           const std::string& success_criteria,
+                           const std::string& evaluation_requirements,
+                           const std::string& safety_requirements,
+                           std::uint64_t storage_allocation_mb,
+                           const std::string& compute_allocation_notes);
     bool remove(const std::string& id);
 
 private:
@@ -3829,6 +3893,15 @@ struct ModelRegistryEntry {
     std::string source;
     std::string license;
     std::string owner_id;
+    // GGUF quantization label (e.g. "F16", "Q8_0", "Q4_K_M"), carried over
+    // from ModelManifest::quantization when a downloaded model is resolved
+    // into the registry (see resolve_or_register_base_model in server.cpp)
+    // -- empty for a manually-registered entry with no known quantization.
+    // The LLM LoRA fine-tuning executor (ml_finetune.cpp) reads this to warn
+    // when a base model is quantized below full precision, since llama.cpp's
+    // finetune tooling is only reliably accurate against an F16/F32 (or
+    // lightly quantized Q8_0) base.
+    std::string quantization;
     ModelRegistryState state{ModelRegistryState::imported};
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
@@ -3846,7 +3919,8 @@ public:
                               const std::string& task,
                               const std::string& format,
                               const std::string& source,
-                              const std::string& license);
+                              const std::string& license,
+                              const std::string& quantization = std::string{});
     std::optional<ModelRegistryEntry> find(const std::string& id) const;
     std::vector<ModelRegistryEntry> list() const;
     // Enforces docs/PLAN.md section 7's rule that a model must never reach
@@ -3892,6 +3966,44 @@ struct Dataset {
     std::string data_format;
     std::string owner_id;
     DatasetApprovalStatus approval_status{DatasetApprovalStatus::pending};
+    // "tabular" (default) means content upload validates a classification/
+    // regression target column; "instruction" means content is LLM fine-
+    // tuning data (instruction/prompt + response/output/completion columns)
+    // and skips that target-column validation entirely -- see the content
+    // upload endpoint in server.cpp.
+    std::string purpose{"tabular"};
+    // Phase 94: docs/PLAN.md section 10's remaining fields, computed for
+    // real from the actual uploaded content (DatasetContentStore) every
+    // time POST .../content succeeds -- see compute_dataset_content_metrics()
+    // in ml_engine.cpp for exactly how each is derived. Zero/empty until
+    // content has been uploaded at least once. file_count is always 0 or 1:
+    // one upload always replaces/creates exactly one stored CSV blob, this
+    // codebase has no multi-file dataset concept.
+    std::uint64_t record_count{0};
+    std::uint32_t file_count{0};
+    // Comma-joined "columnName:numeric|categorical" pairs, in header order.
+    std::string schema_summary;
+    std::string content_hash;  // sha256_hex of the exact stored CSV bytes
+    double duplicate_rate{0.0};       // exact-duplicate data rows / total
+    // non_null_ratio * non_duplicate_ratio -- see the function comment for
+    // exactly what this does and does not measure; never fabricated for an
+    // empty/no-content dataset (stays 0 until real content exists).
+    double data_quality_score{0.0};
+    // Administrator-declared, never auto-detected -- real PII/sensitive-
+    // content scanning is Phase 65/74/83, still Planned. Free text so an
+    // administrator can note "contains customer emails" etc., not just a
+    // bool.
+    std::string sensitive_data_status;
+    // Real split percentages actually used by evaluate_tabular_model's
+    // seeded split (0 = "use that function's own default"). Recorded here
+    // so it is administrator-visible/-adjustable per dataset rather than a
+    // silent hardcoded constant.
+    std::uint32_t train_split_percent{0};
+    std::uint32_t validation_split_percent{0};
+    std::uint32_t test_split_percent{0};
+    // Current DatasetVersionStore version number for this dataset; 0 =
+    // no content uploaded yet, no version exists.
+    std::uint32_t current_version{0};
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -3904,11 +4016,31 @@ public:
                    const std::string& description,
                    const std::string& subject_area,
                    const std::string& source, const std::string& license,
-                   const std::string& data_format);
+                   const std::string& data_format,
+                   const std::string& purpose = "tabular");
     std::optional<Dataset> find(const std::string& id) const;
     std::vector<Dataset> list() const;
     bool set_approval_status(const std::string& id,
                              DatasetApprovalStatus status);
+    // Called once per successful POST .../content, after
+    // compute_dataset_content_metrics() has derived the real values from
+    // the just-uploaded bytes. Bumps current_version by one -- pair this
+    // with DatasetVersionStore::create() at the same call site so the
+    // version number here always matches that store's latest entry.
+    bool record_content_metrics(const std::string& id,
+                                std::uint64_t record_count,
+                                std::uint32_t file_count,
+                                const std::string& schema_summary,
+                                const std::string& content_hash,
+                                double duplicate_rate,
+                                double data_quality_score);
+    // Administrator-declared fields Phase 94 added that content upload
+    // cannot derive on its own.
+    bool update_declared_metadata(const std::string& id,
+                                  const std::string& sensitive_data_status,
+                                  std::uint32_t train_split_percent,
+                                  std::uint32_t validation_split_percent,
+                                  std::uint32_t test_split_percent);
     bool remove(const std::string& id);
 
 private:
@@ -3921,6 +4053,53 @@ private:
 
 std::string dataset_json(const Dataset& dataset);
 std::string datasets_json(const std::vector<Dataset>& datasets);
+
+// Phase 94: docs/PLAN.md "Machine Learning Abilities" section 11 (Dataset
+// Versioning), never implemented before now since it requires a real
+// content pipeline to version -- Phase 56 built that pipeline. Every
+// successful POST .../content creates one new immutable DatasetVersion
+// instead of silently overwriting the previous upload's history;
+// DatasetContentStore (which still holds only the current/latest CSV bytes,
+// unchanged) and this store together give both "what does training read
+// right now" and "what changed, and when." A version's own record/hash
+// fields duplicate the ones just written onto Dataset -- that's
+// intentional: Dataset always reflects current_version's numbers, but this
+// store keeps every prior version's numbers too, which Dataset overwriting
+// itself in place could never do.
+struct DatasetVersion {
+    std::string dataset_id;
+    std::uint32_t version{0};
+    std::string content_hash;
+    std::uint64_t record_count{0};
+    std::string uploaded_by;
+    std::uint64_t uploaded_at_epoch_seconds{0};
+};
+
+class DatasetVersionStore final {
+public:
+    DatasetVersionStore() = default;
+    explicit DatasetVersionStore(RecordStore& records);
+    // Assigns the next version number for dataset_id (1 for its first
+    // upload) and appends an immutable record -- there is deliberately no
+    // update/remove for an individual version, only remove_all() below when
+    // the whole dataset is deleted.
+    DatasetVersion create(const std::string& dataset_id,
+                          const std::string& content_hash,
+                          std::uint64_t record_count,
+                          const std::string& uploaded_by);
+    std::vector<DatasetVersion> list_for_dataset(
+        const std::string& dataset_id) const;
+    void remove_all_for_dataset(const std::string& dataset_id);
+
+private:
+    RecordStore* records_{nullptr};
+    // Keyed by dataset_id, each entry append-only in upload order.
+    std::map<std::string, std::vector<DatasetVersion>> versions_;
+    mutable std::mutex mutex_;
+};
+
+std::string dataset_version_json(const DatasetVersion& version);
+std::string dataset_versions_json(const std::vector<DatasetVersion>& versions);
 
 // Phase 40: docs/PLAN.md "Machine Learning Abilities" section 12 (Subject
 // Knowledge Manager) -- lets an administrator register a subject domain the
@@ -4131,6 +4310,41 @@ struct TrainingJob {
     std::string training_type;
     std::string owner_id;
     TrainingJobStatus status{TrainingJobStatus::draft};
+    // Phase 95: docs/PLAN.md section 16's remaining fields, split into two
+    // groups (see execute_training_job()'s comment in server.cpp for
+    // exactly how the first group is enforced):
+    //   - Genuinely enforced by this in-process executor: max_runtime_seconds
+    //     (0 = no cap) aborts a run that overshoots it and marks the job
+    //     failed with reason "timeout"; failure_recovery_strategy
+    //     ("none" | "retry_once") controls whether a failed run is retried
+    //     once for real before giving up; checkpoint_frequency_epochs (0 =
+    //     use the run's own default stride) overrides the existing
+    //     checkpoint-stride computation; output_directory names where this
+    //     job's checkpoint/artifact records are attributed (informational --
+    //     the actual storage location is still TrainedModelStore/
+    //     TrainingCheckpointStore, unchanged).
+    //   - Recorded for operator reference only, because this server always
+    //     trains in-process on the host it runs on -- there is no container/
+    //     cluster scheduler for these to target, so inventing execution
+    //     behavior for them would misrepresent what actually runs:
+    //     compute_target, hardware_allocation, runtime_environment,
+    //     container_image, environment_variables, secrets_references,
+    //     logging_policy, notification_policy, resource_ceiling_notes,
+    //     cost_ceiling_notes.
+    std::uint64_t max_runtime_seconds{0};
+    std::string failure_recovery_strategy{"none"};
+    std::uint32_t checkpoint_frequency_epochs{0};
+    std::string output_directory;
+    std::string compute_target;
+    std::string hardware_allocation;
+    std::string runtime_environment;
+    std::string container_image;
+    std::string environment_variables;
+    std::string secrets_references;
+    std::string logging_policy;
+    std::string notification_policy;
+    std::string resource_ceiling_notes;
+    std::string cost_ceiling_notes;
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -4149,6 +4363,24 @@ public:
     std::optional<TrainingJob> find(const std::string& id) const;
     std::vector<TrainingJob> list() const;
     bool set_status(const std::string& id, TrainingJobStatus status);
+    // Post-creation edits to the Phase 95 execution-policy fields --
+    // separate from set_status the same way ExperimentStore separates
+    // status transitions from update_metadata().
+    bool update_execution_policy(
+        const std::string& id, std::uint64_t max_runtime_seconds,
+        const std::string& failure_recovery_strategy,
+        std::uint32_t checkpoint_frequency_epochs,
+        const std::string& output_directory,
+        const std::string& compute_target,
+        const std::string& hardware_allocation,
+        const std::string& runtime_environment,
+        const std::string& container_image,
+        const std::string& environment_variables,
+        const std::string& secrets_references,
+        const std::string& logging_policy,
+        const std::string& notification_policy,
+        const std::string& resource_ceiling_notes,
+        const std::string& cost_ceiling_notes);
     bool remove(const std::string& id);
 
 private:
@@ -4193,6 +4425,12 @@ struct EvaluationRun {
     std::string category;
     std::string owner_id;
     EvaluationRunStatus status{EvaluationRunStatus::queued};
+    // Phase 96: names a real feature column (post-encoding name, e.g. a
+    // one-hot "region=west" slot) in the run's dataset to break the primary
+    // metric down by -- see TabularEvaluationMetrics::bias_fairness_report's
+    // comment. Empty (the default) means no bias/fairness breakdown is
+    // computed for this run.
+    std::string sensitive_feature_name;
     std::uint64_t created_at_epoch_seconds{0};
     std::uint64_t updated_at_epoch_seconds{0};
 };
@@ -4206,7 +4444,8 @@ public:
                          const std::string& dataset_id,
                          const std::string& name,
                          const std::string& description,
-                         const std::string& category);
+                         const std::string& category,
+                         const std::string& sensitive_feature_name = {});
     std::optional<EvaluationRun> find(const std::string& id) const;
     std::vector<EvaluationRun> list() const;
     bool set_status(const std::string& id, EvaluationRunStatus status);
@@ -4481,6 +4720,22 @@ LlmFineTuneResult run_llama_lora_finetune(
 // guessing which columns to use.
 std::filesystem::path write_llm_finetune_training_text(
     const std::string& csv, const std::filesystem::path& output_path);
+
+// Result of validating a dataset's CSV content against the same
+// instruction/response column rules write_llm_finetune_training_text
+// enforces, without writing anything to disk -- used at dataset content
+// upload time for a purpose="instruction" Dataset (see the Dataset::purpose
+// comment above) so bad content is rejected at upload, not at training time.
+struct InstructionDatasetProfile {
+    std::size_t rows{0};
+    std::string instruction_column;
+    std::string response_column;
+};
+
+InstructionDatasetProfile validate_instruction_dataset_csv(
+    const std::string& csv, std::uint64_t maximum_csv_bytes);
+std::string instruction_dataset_profile_json(
+    const std::string& dataset_id, const InstructionDatasetProfile& profile);
 
 // Persisted outcome of the most recent LLM LoRA fine-tuning attempt for one
 // FineTuningJob, keyed by job id -- the async counterpart to
@@ -5533,9 +5788,10 @@ std::string deployments_json(const std::vector<Deployment>& deployments);
 // reloadable artifact tied to a ModelRegistryStore entry, and serves live
 // predictions from those weights. Implemented in src/ml_engine.cpp.
 
-// A parsed tabular dataset: every feature column must be numeric; the
-// target column decides the task (all-numeric -> regression, otherwise
-// classification with targets stored as class-label indices).
+// A parsed tabular dataset: with categorical feature encoding off (the
+// original, still-default behavior), every feature column must be
+// numeric; the target column decides the task (all-numeric -> regression,
+// otherwise classification with targets stored as class-label indices).
 struct TabularDataset {
     std::vector<std::string> feature_names;
     std::string target_name;
@@ -5545,14 +5801,51 @@ struct TabularDataset {
     std::vector<double> targets;                // class index or numeric value
 };
 
+// A fitted (or, applied, imposed) one-hot scheme for a dataset's
+// non-numeric feature columns. `columns` maps an original CSV header name
+// to the ordered, distinct raw string values seen for it -- that order is
+// exactly the order parse_tabular_csv() below expands into one-hot
+// "columnName=value" feature slots, so it must stay fixed once a model has
+// trained against it (see parse_tabular_csv's own comment on "fit" vs.
+// "apply" mode). Only columns that were actually non-numeric are present;
+// an all-numeric column is never listed here even when categorical
+// encoding is on.
+struct CategoricalEncoding {
+    std::map<std::string, std::vector<std::string>> columns;
+    bool empty() const { return columns.empty(); }
+};
+
 // Parses CSV text (header row required, quoted fields supported) into a
 // TabularDataset. target_column names the label column; empty selects the
 // last column. Throws std::runtime_error with a human-readable reason on
-// any structural problem (missing column, non-numeric feature, too few
-// rows, ...).
+// any structural problem (missing column, too few rows, ...).
+//
+// `encode_categorical_features` (default off, preserving the original
+// strict behavior byte-for-byte for every caller that doesn't pass it):
+// when on, a feature column that isn't purely numeric is no longer
+// rejected -- it is one-hot encoded instead, using `encoding`:
+//   - `encoding == nullptr`, or non-null but `encoding->empty()`: FIT mode.
+//     Every non-numeric feature column's distinct values (sorted) become
+//     its one-hot scheme; when `encoding` is non-null, the fitted scheme
+//     is written into it so the caller (a training run) can persist it
+//     for later reuse.
+//   - `encoding` non-null and non-empty: APPLY mode. Every column named in
+//     `encoding->columns` is treated as categorical and expanded using
+//     exactly that column's stored value list, regardless of whether this
+//     particular CSV's own cells for it look numeric -- this is what keeps
+//     an evaluation/comparison/benchmark dataset's feature schema aligned
+//     with the model it is being scored against. A value not present in
+//     the stored list is a clear "not seen while training this model"
+//     error rather than a silent guess. A feature column NOT named in
+//     `encoding->columns` still gets the original strict numeric-only
+//     treatment, so an evaluation dataset that changed a column from
+//     numeric to text (real schema drift, not a legitimate category) is
+//     still caught.
 TabularDataset parse_tabular_csv(
     const std::string& csv, const std::string& target_column,
-    std::uint64_t maximum_csv_bytes = 8ULL * 1024ULL * 1024ULL);
+    std::uint64_t maximum_csv_bytes = 8ULL * 1024ULL * 1024ULL,
+    bool encode_categorical_features = false,
+    CategoricalEncoding* encoding = nullptr);
 
 // Dataset content upload completion: Dataset Manager (docs/PLAN.md
 // "Machine Learning Abilities" section 10) originally accepted CSV text
@@ -5600,25 +5893,119 @@ private:
 std::string tabular_dataset_profile_json(const std::string& dataset_id,
                                          const TabularDataset& data);
 
+// Phase 94: real content-derived metrics for Dataset::record_count/
+// file_count/schema_summary/content_hash/duplicate_rate/data_quality_score
+// (docs/PLAN.md section 10). Computed directly from the raw CSV bytes
+// DatasetContentStore stores -- header-agnostic to a dataset's purpose
+// (works the same for a tabular target-column CSV and an instruction
+// prompt/response CSV), unlike parse_tabular_csv which only tabular
+// datasets go through. Never invents a value: an empty/header-only CSV
+// yields record_count 0 and data_quality_score 0.
+struct DatasetContentMetrics {
+    std::uint64_t record_count{0};
+    // "columnName:numeric" or "columnName:categorical" per header column,
+    // comma-joined in header order -- a column is "numeric" only when every
+    // one of its cells across every row parses as a number.
+    std::string schema_summary;
+    std::string content_hash;  // sha256_hex of the exact csv bytes
+    // Exact-duplicate data rows (byte-identical row, header excluded) /
+    // total data rows. 0 when there are 0 or 1 data rows.
+    double duplicate_rate{0.0};
+    // non_null_ratio * (1 - duplicate_rate): the fraction of cells that are
+    // non-empty, discounted by how much of the dataset is exact duplicate
+    // rows. A simple, stated formula -- not a claim about label
+    // correctness, outlier presence, or any deeper notion of "quality"
+    // real data-quality tooling would check.
+    double data_quality_score{0.0};
+};
+
+DatasetContentMetrics compute_dataset_content_metrics(const std::string& csv);
+
+// Content-status-aware dataset listing (ML forms clarity pass): every
+// dataset in a listing carries "hasContent" and, when true, an approximate
+// "contentRows" count (a cheap newline count of the stored CSV, not a full
+// parse), so the web UI can show "content: ready" vs. "content: missing"
+// instead of a user discovering the gap only when /run rejects it with
+// ml_dataset_has_no_content. Row 0 (the header) is never counted.
+std::string datasets_json_with_content_status(
+    const std::vector<Dataset>& datasets,
+    const DatasetContentStore& content_store);
+
 // Hyperparameters for one training run. Every field has a working default
 // so a bare "run" request trains sensibly.
+//
+// Phase 46 (this pass): the fields below `checkpoint_interval` turn on a
+// real multi-layer-perceptron (MLP) training path in train_tabular_model()
+// instead of the original plain linear/logistic/softmax regression path.
+// `hidden_layer_sizes` empty (the default) means "no hidden layers" and
+// train_tabular_model() behaves exactly as it always has -- byte-for-byte
+// the same code path, so every existing caller/test is unaffected. A
+// non-empty `hidden_layer_sizes` is the only thing that switches on the
+// new backprop/mini-batch/optimizer machinery; the fields below it are
+// then genuinely consumed (see train_tabular_model()'s own comment for
+// exactly how each one is used).
 struct TabularTrainingOptions {
     std::uint32_t epochs{200};
     double learning_rate{0.05};
     double test_fraction{0.2};   // held-out share, [0, 0.9]
     std::uint32_t seed{42};      // deterministic shuffle/split
     std::uint32_t checkpoint_interval{50};  // epochs between checkpoints
+
+    // MLP architecture. One entry per hidden layer, in order (e.g. {128,64}
+    // is a 128-neuron layer feeding a 64-neuron layer). Empty = classic
+    // linear/logistic/softmax regression, the original behavior.
+    std::vector<std::uint32_t> hidden_layer_sizes;
+    // "relu" | "tanh" | "sigmoid" -- applied after every hidden layer, not
+    // the output layer (which stays linear; softmax/sigmoid is applied to
+    // its logits the same way the original classifier already does).
+    std::string activation{"relu"};
+    // Inverted dropout on hidden-layer activations, training time only
+    // (never applied by predict_tabular()/evaluate_tabular_model()). 0 = off.
+    double dropout{0.0};
+    // "sgd" | "sgd_momentum" | "adam". Only meaningful with a non-empty
+    // hidden_layer_sizes -- the plain-linear path keeps its original
+    // full-batch gradient descent regardless of this field.
+    std::string optimiser{"sgd"};
+    // Mini-batch size for the MLP path. 0 = full batch (all training rows
+    // per epoch, matching the plain-linear path's own behavior).
+    std::uint32_t batch_size{0};
+    // Max L2 norm of the gradient vector before a batch's update is scaled
+    // down to match it. 0 = disabled.
+    double gradient_clip_norm{0.0};
+    // Number of mini-batches whose gradients are summed before one weight
+    // update is applied. 1 = update after every mini-batch (no accumulation).
+    std::uint32_t gradient_accumulation_steps{1};
+    // "constant" | "step" | "cosine" -- decays the base learning_rate over
+    // the run; see train_tabular_model()'s comment for the exact formulas.
+    std::string lr_schedule{"constant"};
+    // Epochs of no held-out-loss improvement before training stops early.
+    // 0 = disabled. Requires test_fraction > 0 to have a held-out loss to
+    // judge; falls back to training loss when there is no held-out split.
+    std::uint32_t early_stopping_patience{0};
+    // "he" | "xavier" | "uniform" -- hidden/output layer weight
+    // initialization scheme. Empty/unrecognized defaults to "he" for relu
+    // and "xavier" otherwise.
+    std::string initialisation;
 };
 
 // The learned model: standardization statistics plus weight rows (one row
 // of n_features+1 values including bias for regression; one row per class
 // for classification). This is the artifact that gets persisted and later
 // reloaded for evaluation and prediction.
+//
+// Phase 46 (this pass): `hidden_layers`, when non-empty, is a real trained
+// MLP -- one weight matrix per hidden layer (each row is one neuron's
+// [w_1..w_prevdim, bias]), applied in order before `weights` (which stays
+// the final linear output layer, exactly as it always was). Empty
+// `hidden_layers` (the default, and every model trained before this pass)
+// means `weights` is applied directly to the standardized input features,
+// identical to the original behavior.
 struct TrainedTabularModel {
     std::string model_id;         // owning ModelRegistryEntry id
     std::string training_job_id;  // job that produced it
     std::string method;  // "linear_regression" | "logistic_regression" |
-                         // "softmax_regression"
+                         // "softmax_regression" | "mlp_regression" |
+                         // "mlp_classification"
     bool classification{false};
     std::vector<std::string> feature_names;
     std::string target_name;
@@ -5626,7 +6013,20 @@ struct TrainedTabularModel {
     std::vector<double> feature_means;
     std::vector<double> feature_stddevs;
     std::vector<std::vector<double>> weights;
+    std::vector<std::vector<std::vector<double>>> hidden_layers;
+    std::string activation{"relu"};  // only meaningful when hidden_layers is non-empty
     std::uint64_t trained_at_epoch_seconds{0};
+    // The one-hot scheme fitted against the training dataset's non-numeric
+    // feature columns, empty when none were categorical (every model
+    // trained before this field existed has an empty map here, which is
+    // exactly correct for it -- it never saw a categorical column).
+    // Evaluation/comparison re-parse a benchmark dataset in "apply" mode
+    // against this same scheme (see parse_tabular_csv's own comment) so
+    // its feature layout always matches what these `weights` were trained
+    // on; prediction uses it to accept the natural category value (e.g.
+    // {"record_type":"document"}) instead of requiring the caller to know
+    // the internal one-hot feature names.
+    CategoricalEncoding categorical_encoding;
 };
 
 // Real evaluation metrics computed against actual labels: classification
@@ -5643,6 +6043,32 @@ struct TabularEvaluationMetrics {
     double mse{0.0};
     double mae{0.0};
     double r_squared{0.0};
+    // Phase 96: docs/PLAN.md section 23's remaining categories that are
+    // honestly computable for a tabular classifier/regressor -- see
+    // evaluate_tabular_model()'s comment in ml_engine.cpp for exactly how
+    // each is measured. The categories that only mean something for a
+    // generative/LLM evaluation (perplexity, hallucination rate,
+    // groundedness, retrieval accuracy, response relevance, code
+    // correctness/compilation, adversarial-prompt resistance, ...) are
+    // deliberately absent here rather than fabricated -- see this codebase's
+    // documented boundary note in docs/HowToUse-MachineLearning.md.
+    double latency_ms{0.0};                    // total wall time to score every row
+    double throughput_predictions_per_sec{0.0};
+    double memory_usage_mb{0.0};  // peak RSS delta measured during scoring
+    // 1.0 - (stdev of the primary metric across a few reseeded re-splits of
+    // this same evaluation data) / max(1.0, |mean|) -- higher is more
+    // stable. 0 rows or a single re-split yields 0 (undefined), never a
+    // fabricated "perfectly stable" 1.0.
+    double stability_score{0.0};
+    // primary metric on the same rows with small injected feature noise,
+    // divided by the clean primary metric (capped at 1.0). 0 when the clean
+    // metric itself is 0 (undefined ratio).
+    double robustness_score{0.0};
+    // Empty unless the caller named a real sensitive column present in the
+    // evaluation dataset -- per-group breakdown of the primary metric, e.g.
+    // {"male": 0.82, "female": 0.79}. Never auto-detected or fabricated;
+    // absent, not guessed, when no sensitive column was named.
+    std::map<std::string, double> bias_fairness_report;
 };
 
 // Outcome of one real training run: the per-epoch loss curve (cross-entropy
@@ -5658,10 +6084,30 @@ struct TabularTrainingReport {
     TabularEvaluationMetrics metrics;
 };
 
-// Trains by full-batch gradient descent on standardized features. Picks the
-// method from the dataset's task (regression vs 2-class vs k-class). Fills
-// `model` (except model_id/training_job_id, which the caller owns) and
-// returns the report. Throws std::runtime_error on an untrainable dataset.
+// Trains by full-batch gradient descent on standardized features when
+// `options.hidden_layer_sizes` is empty (the original, unchanged path):
+// picks the method from the dataset's task (regression vs 2-class vs
+// k-class). Fills `model` (except model_id/training_job_id, which the
+// caller owns) and returns the report. Throws std::runtime_error on an
+// untrainable dataset.
+//
+// Phase 46 (this pass): a non-empty `options.hidden_layer_sizes` instead
+// trains a real multi-layer perceptron -- forward pass through each hidden
+// layer (options.activation, `on_epoch`'s dropout applied only to this
+// forward pass, never at evaluation/prediction time) into the same linear
+// output layer/softmax the plain path already used, backpropagated via the
+// chain rule. `options.batch_size` (0 = full batch), `options.optimiser`
+// ("sgd" | "sgd_momentum" | "adam"), `options.gradient_clip_norm` (global
+// L2 clip, 0 = off), `options.gradient_accumulation_steps`, and
+// `options.lr_schedule` ("constant" | "step": halves every epochs/4 |
+// "cosine": cosine anneal to ~0) are all genuinely consumed by this path.
+// `options.early_stopping_patience` (0 = off) stops the run early on
+// held-out-loss (or training-loss, if there is no held-out split)
+// stagnation; the returned report's loss_history simply has fewer entries
+// than options.epochs when that happens. `warm_start`'s architecture (if
+// it has hidden_layers) always wins over `options.hidden_layer_sizes` --
+// fine-tuning/checkpoint-resume must continue the exact architecture that
+// was already trained, not silently reshape it.
 //
 // `warm_start`, when non-null, is Phase 70's real Fine-Tuning executor
 // hook: instead of zero-initializing `model.weights`, gradient descent
@@ -5732,9 +6178,14 @@ std::string training_progress_snapshot_json(const TrainingProgressSnapshot& snap
 
 // Scores an existing model against a dataset with the same schema (feature
 // names must match; classification labels must be known to the model).
-// Throws std::runtime_error on schema mismatch.
-TabularEvaluationMetrics evaluate_tabular_model(const TrainedTabularModel& model,
-                                                const TabularDataset& data);
+// Throws std::runtime_error on schema mismatch. `sensitive_feature_name`
+// (Phase 96), when non-empty and present in data.feature_names, fills
+// bias_fairness_report with the primary metric computed separately for each
+// distinct raw value of that feature column; empty/absent leaves that map
+// empty rather than guessing which column, if any, is sensitive.
+TabularEvaluationMetrics evaluate_tabular_model(
+    const TrainedTabularModel& model, const TabularDataset& data,
+    const std::string& sensitive_feature_name = {});
 
 // One live prediction. For classification, label/class_probabilities are
 // filled and value is the winning class index; for regression, value is
@@ -8104,6 +8555,24 @@ struct PerformanceCertificationRecord {
     // process I/O counter CalibrationService already uses for its own
     // disk_read_bytes evidence.
     std::uint64_t storage_bytes_read{0};
+    // Phase 36 benchmark-gap pass: read/write operation counts, distinct
+    // from storage_bytes_read's byte count -- see SystemUtilizationSample::
+    // disk_read_operations's comment.
+    std::uint64_t storage_read_operations{0};
+    std::uint64_t storage_write_operations{0};
+    // This process's own commit charge (PROCESS_MEMORY_COUNTERS_EX::
+    // PrivateUsage on Windows -- see probe_process_resources()'s comment in
+    // platform.cpp for why this equals "commit_bytes" in this codebase's
+    // existing ProcessResourceSample), sampled once after the run.
+    std::uint64_t commit_bytes{0};
+    // This process's own page-fault count (probe_process_resources()'s
+    // ProcessResourceSample::page_faults) across the run. On Windows this
+    // is PROCESS_MEMORY_COUNTERS_EX::PageFaultCount, which counts every
+    // page fault (soft and hard) -- Windows exposes no per-process hard-
+    // fault-only counter without ETW tracing, which this codebase does not
+    // do, so this is reported honestly as "page faults", not "hard page
+    // faults", rather than mislabeling a soft+hard count as hard-only.
+    std::uint64_t page_faults{0};
     double average_cpu_percent{0.0};
     double quality_score{0.0};  // passed_cases / total_cases of the embedded quality run
     std::vector<RegressionCheckResult> group_results;

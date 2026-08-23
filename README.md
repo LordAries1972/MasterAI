@@ -535,9 +535,13 @@ The current source includes native implementations for:
   from persisted weight artifacts, ingests and hashes approved text files,
   persists either authored hashing vectors or validated learned vectors from
   a verified local embedding GGUF, and executes ranked, cited retrieval/
-  context assembly. LLM fine-tuning, generative RAG answers, exam
-  administration, hyperparameter search execution, and deployment promotion
-  do not run yet.
+  context assembly. LLM LoRA fine-tuning (Phase 73), generative RAG answers
+  (Phase 76), exam administration with real LLM-as-judge grading (Phase 51),
+  hyperparameter search execution (Phase 52), and deployment promotion
+  (Phase 82) all run for real too -- see the Project status table below for
+  each one's own honest boundary (e.g. Phase 73's LoRA CLI flags are pinned
+  to a historical llama.cpp interface). Every ML executor not explicitly
+  named across Phases 56-82 remains `Planned`.
 
 Implementation does not automatically mean operational certification. The next
 section records the distinction.
@@ -569,7 +573,7 @@ Status below reflects the evidence recorded in
 | 17 | Security-partitioned cache hierarchy | Complete; representative cache latency benchmark passes |
 | 18 | Prompt-prefix and KV/session reuse | Complete; real repeated-turn prefix reuse validated |
 | 19 | Hardware/model calibration | Comparative Qwen 3B offload/throughput matrix validated; broader semantic-quality scoring remains forward work |
-| 20 | Optional advanced throughput | Complete admission layer; all candidates remain disabled by default |
+| 20 | Optional advanced throughput | Complete admission layer; every candidate (including `multiple_warm_runners`, closed 2026-08-23) now has a real implementation and a real caller gated on this registry; all candidates remain disabled by default until an administrator records real evidence and admits one |
 | 21 | Native asynchronous storage and prefetch engine | Implementation complete; bounded IOCP/`pread` fallback, mapped regions, coalescing, cancellation |
 | 22 | Hierarchical content and model-data caching | Implementation complete; immutable resident L1 and streaming-aware segmented eviction |
 | 23 | Tokenization, template, and prompt-fragment caching | Implementation complete; exact recorded token-prefix reuse |
@@ -586,23 +590,23 @@ Status below reflects the evidence recorded in
 | 33 | Distributed local runners and multi-device orchestration | Implemented; local runner pool and intranet mTLS worker protocol |
 | 34 | Adaptive performance controller | Complete; every named knob has a real, genuinely-consumed target (instant, next-natural-load, or a documented permanent scope limit) |
 | 35 | Performance administration interfaces | Implemented at a scoped-down level; one consolidated Performance page |
-| 36 | Full performance certification and regression gates | Implemented at a scoped-down level; real quality-plus-five-regression-check-group certification with threshold-gated build comparison, real evidence recorded on this host via `scripts/run-certification.ps1`; physical cross-device matrix remains an administrator-run exercise on further hosts |
+| 36 | Full performance certification and regression gates | Implemented at a scoped-down level; real quality-plus-five-regression-check-group certification with threshold-gated build comparison, real evidence recorded on this host via `scripts/run-certification.ps1`; physical cross-device matrix remains an administrator-run exercise on further hosts. 2026-08-24: added real commit-bytes/page-fault/storage-operation-count metrics and widened the CPU sample window (100ms to 500ms) to stop a too-short sample from spuriously tripping the regression gate; model-load-time, cancellation/shutdown latency, per-stage retrieval/prompt/tokenization latency, mapped-bytes, and cache-hit-rate remain out of scope (no reusable measurement exists for them in this codebase -- see docs/PLAN.md's Phase 36 status note) |
 | 37 | Machine Learning module foundation | Implemented at a scoped-down level |
-| 38 | Machine Learning projects | Implemented at a scoped-down level |
-| 39 | ML model registry and dataset manager | Implemented at a scoped-down level |
+| 38 | Machine Learning projects | Implemented; Phase 93 (2026-08-24) added the section 5 governance/target fields (administrators, validated against real accounts; approved data sources; security classification; target architecture/deployment; success/evaluation/safety criteria; a declared storage allocation) |
+| 39 | ML model registry and dataset manager | Model Registry implemented at a scoped-down level; Dataset Manager's remaining fields (record/file count, schema, content hash, duplicate rate, data quality score) are now real, computed at upload time, and Dataset Versioning (section 11) is implemented -- Phase 94 (2026-08-24) |
 | 40 | Subject Knowledge Manager | Implemented at a scoped-down level |
 | 41 | Data labeling and preparation | Implemented at a scoped-down level |
-| 42 | Training Jobs | Implemented; real tabular training executor (Phase 56) |
-| 43 | Evaluation Lab | Implemented; real tabular scoring harness (Phase 56) |
+| 42 | Training Jobs | Implemented; real tabular training executor (Phase 56); Phase 95 (2026-08-24) added the section 16 execution-policy fields, with max runtime, retry-once failure recovery, and checkpoint cadence genuinely enforced by the executor |
+| 43 | Evaluation Lab | Implemented; real tabular scoring harness (Phase 56); Phase 96 (2026-08-24) added latency, throughput, memory use, a stability score, a robustness score, and an optional bias/fairness breakdown -- every metric category honestly computable for a tabular model; LLM-only categories (perplexity, hallucination rate, ...) remain out of scope |
 | 44 | Experiment Tracking | Implemented at a scoped-down level initially; Phase 80 adds a real training/evaluation executor and side-by-side comparison |
-| 45 | Fine-Tuning Interface | Implemented at a scoped-down level; no fine-tuning executor |
-| 46 | Model Builder | Fully implemented (full section 9 design sheet, basic/advanced modes); `POST .../run` hands a submitted configuration off to a real `TrainingJob` against the existing tabular trainer (the from-scratch architecture sheet is recorded but not consumed — no such trainer exists) |
+| 45 | Fine-Tuning Interface | Implemented; Phase 70 adds a warm-start executor that continues gradient descent from an existing tabular model's learned weights, and Phase 73 adds a real LLM LoRA fine-tuning executor via the pinned llama.cpp `finetune`/`export-lora` CLI (triggered by a `llm:`-prefixed method) |
+| 46 | Model Builder | Fully implemented (full section 9 design sheet, basic/advanced modes); `POST .../run` hands a submitted configuration off to a real `TrainingJob`, which now trains against a real from-scratch, configurable multi-layer-perceptron (MLP) trainer when the settings specify a hidden-layer architecture, genuinely consuming layer/activation/dropout/optimiser/batch-size/gradient-clip/accumulation/LR-schedule/early-stopping/init/epoch/seed/checkpoint settings (2026-08-23); attention/tokenizer/sequence-length/mixed-precision fields stay honestly unconsumed as transformer-only concepts this tabular-row engine does not implement |
 | 47 | Prompt and Instruction Training | Implemented at a scoped-down metadata level initially; Phase 81 adds the real content record, generation, multi-model testing, duplicate/contradiction detection, and structured-output validation |
 | 48 | Synthetic Data Generation | Implemented at a scoped-down metadata level initially; Phase 82 adds a real generation executor |
 | 49 | Embeddings and Vector Stores | Registry implemented; real local hashing-vector index added in Phase 59 |
 | 50 | Retrieval-Augmented Generation | Configuration implemented; real retrieval/context executor added in Phase 60 |
-| 51 | Subject Examination System | Implemented at a scoped-down record level; `POST .../run` genuinely asks the target model each configured question and scores answers with a plain text-overlap heuristic, not "AI grading" |
-| 52 | Hyperparameter Optimization | Implemented at a scoped-down record level; `POST .../run` runs a real, bounded grid search over learning rate and epochs against the referenced training job's dataset |
+| 51 | Subject Examination System | Implemented at a scoped-down record level; `POST .../run` genuinely asks the target model each configured question and grades it with a real LLM-as-judge (fixed JSON-prompt pattern, 2026-08-23), falling back to the original plain text-overlap heuristic whenever the judge call fails or its reply is unparseable — every result records which grading path produced it |
+| 52 | Hyperparameter Optimization | Implemented at a scoped-down record level; `POST .../run` runs a real, bounded grid search over learning rate and epochs (plus batch size, dropout, and optimiser choice for an MLP-architecture job, 2026-08-23) against the referenced training job's dataset |
 | 53 | Model Optimization | Implemented at a scoped-down record level; no optimizer executor |
 | 54 | Checkpoint Management | Implemented at a scoped-down retention-record level initially; Phase 79 adds real mid-training weight-snapshot capture and a resume-training executor |
 | 55 | Deployment Manager | Implemented at a scoped-down approval-record level initially; Phase 82 adds a real deploy/health/rollback executor |
@@ -637,6 +641,11 @@ Status below reflects the evidence recorded in
 | — | ML forms clarity pass | Implemented; hover/focus "?" hint bubbles on ambiguous fields (toggleable off per-browser from Machine Learning Settings), every remaining raw-ID text field converted to a named dropdown, and every remaining comma-separated multi-id field converted to a checkbox multi-select |
 | 84 | Agentic tool use in chat | Implemented, not yet build/host validated; real `read_file`/`list_directory`/`search`/`write_file`/`delete_file`/`run_command` tools, an auto-drive mode ("confirm"/"implement"/"proceed"-style composer messages) that keeps a turn working a stated plan across turns with no further input until the model reports it done, a per-chat Tool execution mode (Auto/Confirm every action/Off, set from the composer's Model settings panel), mandatory Approve/Deny for destructive actions regardless of mode, every tool call/result shown live in the transcript, admin allow-list management routes/UI, and the same six tools reachable through MCP `tools/call` (`masterai.project.*`) sharing the identical `execute_chat_tool()` dispatch — MCP refuses rather than executes a high-risk call, since it has no Approve/Deny UI of its own yet |
 | 85 | Inference and retrieval throughput tuning | Implemented, not yet build/host validated; evidence-based `--threads`/`--ubatch-size` launch tuning derived from the host's real core count (Phase 19's `thread_count`/`ubatch_tokens` fields existed since their introduction but were never populated until now); `CacheCategory::retrieval_result` actually wired into the live retrieval request path (the category and its serializer existed since Phase 17 but nothing had ever called them); parallel worker-pool dispatch for the semantic-embedding adapter's per-chunk embed calls and for model pre-touch; a cached (not rebuilt-per-call) dependency-graph map for the `dependency_neighbour` retrieval strategy |
+| 88 | Downloaded models as a fine-tuning/model-builder base, and a live-streaming cleanup fix | Implemented; Fine-Tuning Job's and Model Builder Config's "Base model" dropdowns now also list every downloaded (not just previously-registered) model, tagged "(downloaded)"; picking one registers it into the Model Registry transparently on submit (`resolve_or_register_base_model()`, `src/server.cpp`) with no separate manual step. Also fixes the chat UI occasionally rendering a raw, unstripped fragment of a hallucinated tool-call attempt: the `"complete"` streaming event now carries the server's fully-cleaned reply text, which the client swaps in before its final render instead of trusting its own pre-cleanup streamed buffer |
+| 89 | ML web UI clarity pass, part 1: core training pipeline | Implemented (core pipeline only — see `docs/PLAN.md` Phase 89 for the remaining-panels list); every dataset picker and the Dataset Manager table now show real content status ("N row(s) ready" / "⚠ no content uploaded yet", `datasets_json_with_content_status()`); Training Jobs' "Train now" is disabled with an explanatory tooltip when its dataset has no uploaded content, instead of only failing after the click with `ml_dataset_has_no_content`; a numbered "Step 1 → 5" banner (`ml_step_flow()`) now orients a user landing on any of Projects/Model Registry/Dataset Manager/Training Jobs/Evaluation Lab/Experiment Tracking; sidebar nav fixed to put Model Registry beside Dataset Manager instead of mislabeled under "Logs and Settings", and Hyperparameter Optimization after Training Jobs instead of before it |
+| 90 | ML web UI clarity pass, part 2: responsive step banner, and automatic categorical feature encoding | Implemented; `.mlStepFlow` is now a CSS grid that wraps at any browser width/height (was a fixed-width scrolling flex row that clipped on resize), and Dataset Manager renders one banner spanning steps 2–3 instead of a squeezed duplicate copy; `parse_tabular_csv()` gained an opt-in `encode_categorical_features` flag (default off, every prior caller unchanged) that one-hot encodes a text/category feature column instead of rejecting it with "every feature column must be numeric" — fit mode for a fresh training/experiment run, apply mode (reusing the trained model's own persisted `categorical_encoding`) for evaluation/comparison/fine-tuning/checkpoint-resume, so a dataset like one with a `record_type` text column now uploads, trains, and predicts (via its natural value, e.g. `{"record_type":"document"}`) with zero manual CSV pre-processing |
+| 91 | Dataset Manager instruction-purpose datasets, and quote-aware CSV row parsing | Implemented; a `Dataset` now carries a `purpose` ("Tabular data" or "Instruction / fine-tuning text", chosen at registration and shown as a Dataset Manager list column) that the content-upload endpoint validates against — a Tabular dataset is unchanged (classification/regression target column, up to 64 distinct labels); an Instruction dataset skips that entirely and instead just checks for an instruction/prompt column and a response/output/completion column, since LLM fine-tuning data has no target-column concept and was previously forced through — and could fail — classification validation that never applied to it. Also fixes a real parsing bug the same investigation surfaced: CSV row splitting in `parse_tabular_csv`, `auto_label_tabular_dataset`, and the LLM fine-tuning text writer was a raw split on `\n`, silently corrupting any RFC 4180 quoted field with an embedded newline (any multi-paragraph text cell) into multiple broken rows; all three now use a quote-aware row splitter |
+| 92 | Model Registry quantization tracking | Implemented; `ModelRegistryEntry` gained a `quantization` field, auto-carried over from a downloaded model's manifest when it becomes a Fine-Tuning base (previously silently dropped), settable manually otherwise, and shown as a Model Registry list column. The real LLM LoRA fine-tuning executor now checks it against the precisions llama.cpp's finetune tooling trains against reliably (F32/F16/BF16/Q8_0) and adds a non-blocking `quantizationWarning` to the job's result when the base is more heavily quantized. Also closes a pre-existing gap found while wiring that warning to the UI: the Fine-Tuning Jobs page's "Fine-tune now" button previously only handled the tabular path's synchronous response and left a real (`llm:`-method) job's 202 "queued" response completely unrendered — it now polls the job's result until it completes or fails |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -724,10 +733,11 @@ embedding spaces. Durable user-memory records are also recalled only when a
 conversation starts; the bounded snapshot is retained with that chat and
 reused on later turns and after restart.
 The honest remaining boundary: the authored fallback is still lexical
-feature hashing, no learned embedding GGUF is installed in this checkout for
-model-specific semantic-quality or latency evidence, and the RAG executor
-retrieves and assembles grounded context but does not generate an LLM answer.
-LLM fine-tuning still does not execute. For the concepts, current workflows, exact capability boundary,
+feature hashing, and no learned embedding GGUF is installed in this
+checkout for model-specific semantic-quality or latency evidence. RAG
+generation (Phase 76) and LLM LoRA fine-tuning (Phase 73) both run for
+real now -- see the Project status table above for each one's own
+boundary. For the concepts, current workflows, exact capability boundary,
 and a sequential teaching guide, read
 [How to Use Machine Learning and Models with MasterAI](docs/HowToUse-MachineLearning.md).
 
@@ -1292,11 +1302,15 @@ experiments, model building, instruction examples, synthetic data, vector
 stores, RAG configurations, subject exams, hyperparameter searches,
 model-optimization runs, training checkpoints, deployments, model
 comparisons, inference endpoints, compute nodes, automation pipelines, and
-safety-governance policies/model cards. All 25 interfaces the plan names are
-now present in the sidebar; two of the newest -- Audit Logs and Machine
-Learning Settings -- are genuinely functional rather than lifecycle
-metadata (a real read over the existing audit trail, and a real ML-scoped
-subset of System Configuration), covered in more detail below.
+safety-governance policies/model cards. All 29 interfaces the plan names are
+now present in the sidebar and marked available in the Dashboard's own
+roster; Audit Logs and Machine Learning Settings are genuinely functional
+rather than lifecycle metadata (a real read over the existing audit trail,
+and a real ML-scoped subset of System Configuration), covered in more
+detail below. The Dashboard (`/app/ml`) itself leads with the five pages
+that form the one real end-to-end path -- create a project, register a
+dataset, upload its content, train, evaluate -- as clickable step boxes in
+order, before listing everything else as optional supporting tooling.
 
 Since Phase 56, the module executes real machine learning for tabular data:
 uploading CSV content to a dataset makes it trainable, "Train now" on a
@@ -1350,17 +1364,30 @@ environment — an approval decision, not a live traffic cutover), and
 real, reusing Phase 68's aggregation. A pipeline run now executes on a
 background thread and reports live per-stage progress that the web UI
 renders as a progress bar, instead of blocking the page until every stage
-finishes. Import/clean/label/split data, optimize, and staging tests are
-still honestly recorded as skipped, since no executor for those exists in
-this codebase yet.
+finishes. Phase 72 then closed the remaining six stages Phase 71 left
+honestly `"skipped"`: "Import data" checks the dataset actually has stored
+content, "Clean data" removes blank/exact-duplicate rows and persists the
+cleaned CSV back over the dataset, "Split data" reports real train/holdout
+counts using the same formula the trainer itself uses, "Optimize" runs a
+real magnitude-pruning pass against the pipeline's model's actual learned
+weights, "Staging tests" reuses the same real evaluation executor "Evaluate
+model" calls, and "Label data" either references a completed real labeling
+task or runs a real deterministic heuristic labeler
+(percentile-threshold-based) when none exists. Phase 73 added a real LLM
+LoRA fine-tuning executor (the pinned llama.cpp `finetune`/`export-lora`
+CLI, triggered by a `llm:`-prefixed Fine-Tuning method) and Phase 76 added
+real generative RAG answers, both summarized in the Project status table
+above.
 
 The honest boundary that remains: creating or advancing the other job types
-records administrative intent and state, not execution. Creating an empty
-vector-store record alone does not populate it, and RAG retrieval does not
-generate or validate a model-authored answer. The authored fallback is not a
-learned semantic embedding model, and learned-adapter quality depends on the
-verified embedding GGUF an administrator installs. LLM fine-tuning does not
-run.
+(section 2's interfaces this README's Project status table above still
+marks `Planned`) records administrative intent and state, not execution.
+Creating an empty vector-store record alone does not populate it. The
+authored embedding fallback is not a learned semantic embedding model, and
+learned-adapter quality depends on the verified embedding GGUF an
+administrator installs. Phase 73's LoRA fine-tuning CLI flags are pinned to
+a historical llama.cpp interface and may need administrator-supplied extra
+arguments if that interface drifts.
 Approved externally trained models must still be deliberately packaged
 as verified GGUF artifacts in the inference model tree before MasterAI can
 serve them for chat.
@@ -1711,10 +1738,13 @@ Near-term work is:
    already is, and extend the Phase 35 administration page toward the
    plan's remaining named pages (Query Traces, Runner Configuration, Model
    Comparison).
-8. Extend the Phase 61 Machine Learning executors with governed LLM
-   fine-tuning, generated-answer RAG
-   evaluation, and the remaining planned job executors without allowing
-   lifecycle state to substitute for proof that work ran successfully.
+8. LLM LoRA fine-tuning (Phase 73) and generated-answer RAG (Phase 76) are
+   now implemented -- remaining forward work is the ML executors the
+   Project status table above still marks `Planned` (e.g. safety/
+   governance's PII/copyright/data-poisoning detectors and retention/
+   export/network policy enforcement, section 2's interfaces with no
+   phase of their own yet), without allowing lifecycle state to
+   substitute for proof that work ran successfully.
 
 Outstanding operational certification also includes:
 

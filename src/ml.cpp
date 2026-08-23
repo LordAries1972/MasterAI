@@ -118,6 +118,23 @@ MachineLearningRegistry::MachineLearningRegistry() {
         // fresh model that merely reuses the training code path) -- see
         // execute_fine_tuning_job's comment in server.cpp.
         {"fine-tuning", "Fine-Tuning", "available"},
+        // Phase 79: a training/fine-tuning run captures a real checkpoint
+        // (real epoch, real learned-weight snapshot) at a computed stride,
+        // and "Resume training" genuinely continues gradient descent from
+        // one -- see TrainingCheckpoint's class comment in masterai.hpp.
+        // Was missing from this roster entirely (Phase 92 consolidation
+        // pass) despite having had a real executor since Phase 79.
+        {"checkpoint-management", "Checkpoint Management", "available"},
+        // Phase 52: POST .../run genuinely sweeps learning rate/epochs (and
+        // batch size/dropout/optimiser for a real Model Builder MLP job) via
+        // a bounded grid search -- see run_hyperparameter_search's comment
+        // in server.cpp. Only the "grid" strategy has a real executor; other
+        // recorded strategy values still run this same search (see that
+        // page's own field hint). Was missing from this roster entirely
+        // (Phase 92 consolidation pass) despite having had a real executor
+        // since Phase 52.
+        {"hyperparameter-optimization", "Hyperparameter Optimization",
+         "available"},
         {"evaluation-lab", "Evaluation Lab", "available"},
         // Phase 80: POST .../run genuinely trains and evaluates the
         // experiment's dataset via the same real tabular engine Training
@@ -125,6 +142,23 @@ MachineLearningRegistry::MachineLearningRegistry() {
         // side-by-side diff -- see execute_experiment_run's comment in
         // server.cpp.
         {"experiment-tracking", "Experiment Tracking", "available"},
+        // Phase 51: POST .../{id}/run genuinely asks the target model each
+        // question and grades the answer with a real LLM-as-judge, falling
+        // back to a plain text-overlap heuristic only when the judge call
+        // fails -- see judge_exam_answer's comment in server.cpp. Only an
+        // aggregate pass/fail score exists; section 24's wider metric set is
+        // not implemented. Was missing from this roster entirely (Phase 92
+        // consolidation pass) despite having had a real executor since
+        // Phase 51.
+        {"subject-examination", "Subject Examination", "available"},
+        // Phase 53: requesting status `running` for `operation: "pruning"`
+        // genuinely zeroes weights below a magnitude threshold and persists
+        // the result -- see run_model_optimization's comment in server.cpp.
+        // Every other named operation (quantization, distillation, ...)
+        // still only records intent; that page's own field hint says so.
+        // Was missing from this roster entirely (Phase 92 consolidation
+        // pass) despite having had a real executor since Phase 53.
+        {"model-optimization", "Model Optimization", "available"},
         // Phase 81: POST .../generate and .../{id}/test genuinely invoke a
         // model via Server::execute_rag_generation, and the duplicate/
         // contradiction detectors and structured-output validator run real
@@ -305,7 +339,13 @@ MLProjectStore::MLProjectStore(RecordStore& records) : records_(&records) {
 void MLProjectStore::restore() {
     for (const auto& item : records_->list("ml_projects")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 8U) {
+        // 8 fields: pre-Phase-93 records (identity/intent/classification/
+        // lifecycle only). 18: Phase 93's governance/target fields
+        // appended. Missing this backward-compat branch entirely (an
+        // authoring mistake -- every other store touched this pass keeps
+        // both sizes) broke every existing database's ML Projects on
+        // startup; caught from a real user report after the fact.
+        if (fields.size() != 8U && fields.size() != 18U) {
             throw std::runtime_error("persisted ML project record field count is wrong");
         }
         MLProject project;
@@ -317,10 +357,25 @@ void MLProjectStore::restore() {
         project.model_task = fields[4];
         project.owner_id = fields[5];
         project.status = parse_ml_project_status(fields[6]);
-        project.created_at_epoch_seconds = std::stoull(fields[7]);
-        // updated_at isn't persisted separately (see persist()'s field
-        // list) -- restoring it as created_at is the same approximation
-        // ChatStore makes for fields it doesn't independently track either.
+        if (fields.size() == 18U) {
+            project.administrators = fields[7];
+            project.approved_data_sources = fields[8];
+            project.security_classification = fields[9];
+            project.target_architecture = fields[10];
+            project.target_deployment_environment = fields[11];
+            project.success_criteria = fields[12];
+            project.evaluation_requirements = fields[13];
+            project.safety_requirements = fields[14];
+            project.storage_allocation_mb = std::stoull(fields[15]);
+            project.compute_allocation_notes = fields[16];
+            project.created_at_epoch_seconds = std::stoull(fields[17]);
+        } else {
+            project.created_at_epoch_seconds = std::stoull(fields[7]);
+        }
+        // updated_at isn't persisted separately -- restoring it as
+        // created_at is the same approximation the original scoped-down
+        // implementation already made for fields it doesn't independently
+        // track.
         project.updated_at_epoch_seconds = project.created_at_epoch_seconds;
         projects_[project.id] = project;
     }
@@ -331,7 +386,14 @@ void MLProjectStore::persist(const MLProject& project) {
         "ml_projects", project.id,
         pack({project.name, project.description, project.objective,
              project.subject_domain, project.model_task, project.owner_id,
-             ml_project_status_name(project.status),
+             ml_project_status_name(project.status), project.administrators,
+             project.approved_data_sources, project.security_classification,
+             project.target_architecture,
+             project.target_deployment_environment,
+             project.success_criteria, project.evaluation_requirements,
+             project.safety_requirements,
+             std::to_string(project.storage_allocation_mb),
+             project.compute_allocation_notes,
              std::to_string(project.created_at_epoch_seconds)}));
 }
 
@@ -340,7 +402,17 @@ MLProject MLProjectStore::create(const std::string& owner_id,
                                  const std::string& description,
                                  const std::string& objective,
                                  const std::string& subject_domain,
-                                 const std::string& model_task) {
+                                 const std::string& model_task,
+                                 const std::string& administrators,
+                                 const std::string& approved_data_sources,
+                                 const std::string& security_classification,
+                                 const std::string& target_architecture,
+                                 const std::string& target_deployment_environment,
+                                 const std::string& success_criteria,
+                                 const std::string& evaluation_requirements,
+                                 const std::string& safety_requirements,
+                                 std::uint64_t storage_allocation_mb,
+                                 const std::string& compute_allocation_notes) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("ML project name is invalid");
     }
@@ -354,11 +426,50 @@ MLProject MLProjectStore::create(const std::string& owner_id,
     project.model_task = model_task;
     project.owner_id = owner_id;
     project.status = MLProjectStatus::draft;
+    project.administrators = administrators;
+    project.approved_data_sources = approved_data_sources;
+    project.security_classification = security_classification;
+    project.target_architecture = target_architecture;
+    project.target_deployment_environment = target_deployment_environment;
+    project.success_criteria = success_criteria;
+    project.evaluation_requirements = evaluation_requirements;
+    project.safety_requirements = safety_requirements;
+    project.storage_allocation_mb = storage_allocation_mb;
+    project.compute_allocation_notes = compute_allocation_notes;
     project.created_at_epoch_seconds = epoch_seconds();
     project.updated_at_epoch_seconds = project.created_at_epoch_seconds;
     projects_[project.id] = project;
     if (records_) persist(project);
     return project;
+}
+
+bool MLProjectStore::update_governance(
+    const std::string& id, const std::string& administrators,
+    const std::string& approved_data_sources,
+    const std::string& security_classification,
+    const std::string& target_architecture,
+    const std::string& target_deployment_environment,
+    const std::string& success_criteria,
+    const std::string& evaluation_requirements,
+    const std::string& safety_requirements,
+    std::uint64_t storage_allocation_mb,
+    const std::string& compute_allocation_notes) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = projects_.find(id);
+    if (found == projects_.end()) return false;
+    found->second.administrators = administrators;
+    found->second.approved_data_sources = approved_data_sources;
+    found->second.security_classification = security_classification;
+    found->second.target_architecture = target_architecture;
+    found->second.target_deployment_environment = target_deployment_environment;
+    found->second.success_criteria = success_criteria;
+    found->second.evaluation_requirements = evaluation_requirements;
+    found->second.safety_requirements = safety_requirements;
+    found->second.storage_allocation_mb = storage_allocation_mb;
+    found->second.compute_allocation_notes = compute_allocation_notes;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
 }
 
 std::optional<MLProject> MLProjectStore::find(const std::string& id) const {
@@ -405,6 +516,26 @@ std::string ml_project_json(const MLProject& project) {
            json_escape(project.model_task) + "\",\"ownerId\":\"" +
            json_escape(project.owner_id) + "\",\"status\":\"" +
            ml_project_status_name(project.status) +
+           "\",\"administrators\":\"" +
+           json_escape(project.administrators) +
+           "\",\"approvedDataSources\":\"" +
+           json_escape(project.approved_data_sources) +
+           "\",\"securityClassification\":\"" +
+           json_escape(project.security_classification) +
+           "\",\"targetArchitecture\":\"" +
+           json_escape(project.target_architecture) +
+           "\",\"targetDeploymentEnvironment\":\"" +
+           json_escape(project.target_deployment_environment) +
+           "\",\"successCriteria\":\"" +
+           json_escape(project.success_criteria) +
+           "\",\"evaluationRequirements\":\"" +
+           json_escape(project.evaluation_requirements) +
+           "\",\"safetyRequirements\":\"" +
+           json_escape(project.safety_requirements) +
+           "\",\"storageAllocationMb\":" +
+           std::to_string(project.storage_allocation_mb) +
+           ",\"computeAllocationNotes\":\"" +
+           json_escape(project.compute_allocation_notes) +
            "\",\"createdAtEpochSeconds\":" +
            std::to_string(project.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
@@ -463,7 +594,9 @@ ModelRegistryStore::ModelRegistryStore(RecordStore& records) : records_(&records
 void ModelRegistryStore::restore() {
     for (const auto& item : records_->list("ml_model_registry")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 10U) {
+        // 10 fields: pre-quantization records. 11 fields: quantization
+        // appended at the end.
+        if (fields.size() != 10U && fields.size() != 11U) {
             throw std::runtime_error(
                 "persisted model registry record field count is wrong");
         }
@@ -485,6 +618,7 @@ void ModelRegistryStore::restore() {
         // above defaults keep the struct valid even if this loop is later
         // split; see persist() for the authoritative field order.
         entries_[entry.id].state = parse_model_registry_state(fields[9]);
+        entries_[entry.id].quantization = fields.size() == 11U ? fields[10] : std::string{};
     }
 }
 
@@ -493,7 +627,8 @@ void ModelRegistryStore::persist(const ModelRegistryEntry& entry) {
         "ml_model_registry", entry.id,
         pack({entry.name, entry.display_name, entry.version, entry.family,
              entry.task, entry.format, entry.source, entry.license,
-             entry.owner_id, model_registry_state_name(entry.state)}));
+             entry.owner_id, model_registry_state_name(entry.state),
+             entry.quantization}));
 }
 
 ModelRegistryEntry ModelRegistryStore::create(
@@ -501,7 +636,7 @@ ModelRegistryEntry ModelRegistryStore::create(
     const std::string& display_name, const std::string& version,
     const std::string& family, const std::string& task,
     const std::string& format, const std::string& source,
-    const std::string& license) {
+    const std::string& license, const std::string& quantization) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("model registry entry name is invalid");
     }
@@ -517,6 +652,7 @@ ModelRegistryEntry ModelRegistryStore::create(
     entry.source = source;
     entry.license = license;
     entry.owner_id = owner_id;
+    entry.quantization = quantization;
     entry.state = ModelRegistryState::imported;
     entry.created_at_epoch_seconds = epoch_seconds();
     entry.updated_at_epoch_seconds = entry.created_at_epoch_seconds;
@@ -580,7 +716,8 @@ std::string model_registry_entry_json(const ModelRegistryEntry& entry) {
            json_escape(entry.format) + "\",\"source\":\"" +
            json_escape(entry.source) + "\",\"license\":\"" +
            json_escape(entry.license) + "\",\"ownerId\":\"" +
-           json_escape(entry.owner_id) + "\",\"state\":\"" +
+           json_escape(entry.owner_id) + "\",\"quantization\":\"" +
+           json_escape(entry.quantization) + "\",\"state\":\"" +
            model_registry_state_name(entry.state) +
            "\",\"createdAtEpochSeconds\":" +
            std::to_string(entry.created_at_epoch_seconds) +
@@ -623,7 +760,10 @@ DatasetStore::DatasetStore(RecordStore& records) : records_(&records) {
 void DatasetStore::restore() {
     for (const auto& item : records_->list("ml_datasets")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 8U) {
+        // 8 fields: pre-purpose records, default to "tabular". 9 fields:
+        // purpose appended. 20 fields: Phase 94's content-derived/declared
+        // metadata appended after purpose.
+        if (fields.size() != 8U && fields.size() != 9U && fields.size() != 20U) {
             throw std::runtime_error(
                 "persisted dataset record field count is wrong");
         }
@@ -637,6 +777,25 @@ void DatasetStore::restore() {
         dataset.data_format = fields[5];
         dataset.owner_id = fields[6];
         dataset.approval_status = parse_dataset_approval_status(fields[7]);
+        dataset.purpose = fields.size() >= 9U ? fields[8] : "tabular";
+        if (fields.size() == 20U) {
+            dataset.record_count = std::stoull(fields[9]);
+            dataset.file_count =
+                static_cast<std::uint32_t>(std::stoul(fields[10]));
+            dataset.schema_summary = fields[11];
+            dataset.content_hash = fields[12];
+            dataset.duplicate_rate = std::stod(fields[13]);
+            dataset.data_quality_score = std::stod(fields[14]);
+            dataset.sensitive_data_status = fields[15];
+            dataset.train_split_percent =
+                static_cast<std::uint32_t>(std::stoul(fields[16]));
+            dataset.validation_split_percent =
+                static_cast<std::uint32_t>(std::stoul(fields[17]));
+            dataset.test_split_percent =
+                static_cast<std::uint32_t>(std::stoul(fields[18]));
+            dataset.current_version =
+                static_cast<std::uint32_t>(std::stoul(fields[19]));
+        }
         datasets_[dataset.id] = dataset;
     }
 }
@@ -647,7 +806,16 @@ void DatasetStore::persist(const Dataset& dataset) {
         pack({dataset.name, dataset.description, dataset.subject_area,
              dataset.source, dataset.license, dataset.data_format,
              dataset.owner_id,
-             dataset_approval_status_name(dataset.approval_status)}));
+             dataset_approval_status_name(dataset.approval_status),
+             dataset.purpose, std::to_string(dataset.record_count),
+             std::to_string(dataset.file_count), dataset.schema_summary,
+             dataset.content_hash, std::to_string(dataset.duplicate_rate),
+             std::to_string(dataset.data_quality_score),
+             dataset.sensitive_data_status,
+             std::to_string(dataset.train_split_percent),
+             std::to_string(dataset.validation_split_percent),
+             std::to_string(dataset.test_split_percent),
+             std::to_string(dataset.current_version)}));
 }
 
 Dataset DatasetStore::create(const std::string& owner_id,
@@ -656,9 +824,14 @@ Dataset DatasetStore::create(const std::string& owner_id,
                              const std::string& subject_area,
                              const std::string& source,
                              const std::string& license,
-                             const std::string& data_format) {
+                             const std::string& data_format,
+                             const std::string& purpose) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("dataset name is invalid");
+    }
+    if (purpose != "tabular" && purpose != "instruction") {
+        throw std::invalid_argument(
+            "dataset purpose must be \"tabular\" or \"instruction\"");
     }
     const std::lock_guard<std::mutex> lock(mutex_);
     Dataset dataset;
@@ -670,6 +843,7 @@ Dataset DatasetStore::create(const std::string& owner_id,
     dataset.license = license;
     dataset.data_format = data_format;
     dataset.owner_id = owner_id;
+    dataset.purpose = purpose;
     dataset.approval_status = DatasetApprovalStatus::pending;
     dataset.created_at_epoch_seconds = epoch_seconds();
     dataset.updated_at_epoch_seconds = dataset.created_at_epoch_seconds;
@@ -704,6 +878,47 @@ bool DatasetStore::set_approval_status(const std::string& id,
     return true;
 }
 
+bool DatasetStore::record_content_metrics(
+    const std::string& id, std::uint64_t record_count,
+    std::uint32_t file_count, const std::string& schema_summary,
+    const std::string& content_hash, double duplicate_rate,
+    double data_quality_score) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = datasets_.find(id);
+    if (found == datasets_.end()) return false;
+    found->second.record_count = record_count;
+    found->second.file_count = file_count;
+    found->second.schema_summary = schema_summary;
+    found->second.content_hash = content_hash;
+    found->second.duplicate_rate = duplicate_rate;
+    found->second.data_quality_score = data_quality_score;
+    found->second.current_version += 1U;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool DatasetStore::update_declared_metadata(
+    const std::string& id, const std::string& sensitive_data_status,
+    std::uint32_t train_split_percent, std::uint32_t validation_split_percent,
+    std::uint32_t test_split_percent) {
+    if (train_split_percent + validation_split_percent + test_split_percent >
+        100U) {
+        throw std::invalid_argument(
+            "dataset split percentages must not exceed 100");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = datasets_.find(id);
+    if (found == datasets_.end()) return false;
+    found->second.sensitive_data_status = sensitive_data_status;
+    found->second.train_split_percent = train_split_percent;
+    found->second.validation_split_percent = validation_split_percent;
+    found->second.test_split_percent = test_split_percent;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
 bool DatasetStore::remove(const std::string& id) {
     const std::lock_guard<std::mutex> lock(mutex_);
     const auto found = datasets_.find(id);
@@ -723,7 +938,25 @@ std::string dataset_json(const Dataset& dataset) {
            json_escape(dataset.data_format) + "\",\"ownerId\":\"" +
            json_escape(dataset.owner_id) + "\",\"approvalStatus\":\"" +
            dataset_approval_status_name(dataset.approval_status) +
-           "\",\"createdAtEpochSeconds\":" +
+           "\",\"purpose\":\"" + json_escape(dataset.purpose) +
+           "\",\"recordCount\":" + std::to_string(dataset.record_count) +
+           ",\"fileCount\":" + std::to_string(dataset.file_count) +
+           ",\"schemaSummary\":\"" + json_escape(dataset.schema_summary) +
+           "\",\"contentHash\":\"" + json_escape(dataset.content_hash) +
+           "\",\"duplicateRate\":" + std::to_string(dataset.duplicate_rate) +
+           ",\"dataQualityScore\":" +
+           std::to_string(dataset.data_quality_score) +
+           ",\"sensitiveDataStatus\":\"" +
+           json_escape(dataset.sensitive_data_status) +
+           "\",\"trainSplitPercent\":" +
+           std::to_string(dataset.train_split_percent) +
+           ",\"validationSplitPercent\":" +
+           std::to_string(dataset.validation_split_percent) +
+           ",\"testSplitPercent\":" +
+           std::to_string(dataset.test_split_percent) +
+           ",\"currentVersion\":" +
+           std::to_string(dataset.current_version) +
+           ",\"createdAtEpochSeconds\":" +
            std::to_string(dataset.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
            std::to_string(dataset.updated_at_epoch_seconds) + "}";
@@ -736,6 +969,131 @@ std::string datasets_json(const std::vector<Dataset>& datasets) {
         if (!first) body += ",";
         first = false;
         body += dataset_json(dataset);
+    }
+    return body + "]";
+}
+
+DatasetVersionStore::DatasetVersionStore(RecordStore& records)
+    : records_(&records) {
+    for (const auto& item : records_->list("ml_dataset_versions")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 5U) {
+            throw std::runtime_error(
+                "persisted dataset version record field count is wrong");
+        }
+        DatasetVersion version;
+        version.dataset_id = fields[0];
+        version.version = static_cast<std::uint32_t>(std::stoul(fields[1]));
+        version.content_hash = fields[2];
+        version.record_count = std::stoull(fields[3]);
+        version.uploaded_by = fields[4];
+        // uploaded_at isn't independently persisted (item.first is the
+        // opaque record key, not a timestamp) -- approximated the same way
+        // other stores approximate a field they don't separately track.
+        version.uploaded_at_epoch_seconds = 0U;
+        versions_[version.dataset_id].push_back(version);
+    }
+}
+
+DatasetVersion DatasetVersionStore::create(const std::string& dataset_id,
+                                           const std::string& content_hash,
+                                           std::uint64_t record_count,
+                                           const std::string& uploaded_by) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    auto& history = versions_[dataset_id];
+    DatasetVersion version;
+    version.dataset_id = dataset_id;
+    version.version = static_cast<std::uint32_t>(history.size()) + 1U;
+    version.content_hash = content_hash;
+    version.record_count = record_count;
+    version.uploaded_by = uploaded_by;
+    version.uploaded_at_epoch_seconds = epoch_seconds();
+    history.push_back(version);
+    if (records_) {
+        records_->put("ml_dataset_versions",
+                      dataset_id + "." + std::to_string(version.version),
+                      pack({version.dataset_id,
+                           std::to_string(version.version),
+                           version.content_hash,
+                           std::to_string(version.record_count),
+                           version.uploaded_by}));
+    }
+    return version;
+}
+
+std::vector<DatasetVersion> DatasetVersionStore::list_for_dataset(
+    const std::string& dataset_id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = versions_.find(dataset_id);
+    return found != versions_.end() ? found->second
+                                    : std::vector<DatasetVersion>{};
+}
+
+void DatasetVersionStore::remove_all_for_dataset(
+    const std::string& dataset_id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = versions_.find(dataset_id);
+    if (found == versions_.end()) return;
+    if (records_) {
+        for (const auto& version : found->second) {
+            records_->erase("ml_dataset_versions",
+                            dataset_id + "." + std::to_string(version.version));
+        }
+    }
+    versions_.erase(found);
+}
+
+std::string dataset_version_json(const DatasetVersion& version) {
+    return "{\"datasetId\":\"" + json_escape(version.dataset_id) +
+           "\",\"version\":" + std::to_string(version.version) +
+           ",\"contentHash\":\"" + json_escape(version.content_hash) +
+           "\",\"recordCount\":" + std::to_string(version.record_count) +
+           ",\"uploadedBy\":\"" + json_escape(version.uploaded_by) +
+           "\",\"uploadedAtEpochSeconds\":" +
+           std::to_string(version.uploaded_at_epoch_seconds) + "}";
+}
+
+std::string dataset_versions_json(const std::vector<DatasetVersion>& versions) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& version : versions) {
+        if (!first) body += ",";
+        first = false;
+        body += dataset_version_json(version);
+    }
+    return body + "]";
+}
+
+std::string datasets_json_with_content_status(
+    const std::vector<Dataset>& datasets,
+    const DatasetContentStore& content_store) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& dataset : datasets) {
+        if (!first) body += ",";
+        first = false;
+        const auto content = content_store.find(dataset.id);
+        std::size_t rows = 0;
+        if (content) {
+            // Approximate row count: newlines minus the header row, no
+            // full CSV parse. Good enough for a status badge; training
+            // itself still re-parses the exact bytes.
+            rows = static_cast<std::size_t>(
+                std::count(content->csv.begin(), content->csv.end(), '\n'));
+            if (!content->csv.empty() && content->csv.back() != '\n') {
+                ++rows;  // last line has no trailing newline
+            }
+            if (rows > 0) --rows;  // header row
+        }
+        // dataset_json's trailing "}" is replaced with the two extra
+        // fields plus a fresh "}" rather than re-serializing every field,
+        // so this stays a thin wrapper instead of a second copy of
+        // dataset_json's field list.
+        std::string entry = dataset_json(dataset);
+        entry.pop_back();
+        entry += ",\"hasContent\":" + std::string(content ? "true" : "false") +
+                 ",\"contentRows\":" + std::to_string(rows) + "}";
+        body += entry;
     }
     return body + "]";
 }
@@ -1198,7 +1556,9 @@ TrainingJobStore::TrainingJobStore(RecordStore& records) : records_(&records) {
 void TrainingJobStore::restore() {
     for (const auto& item : records_->list("ml_training_jobs")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 8U) {
+        // 8 fields: pre-Phase-95 records. 22 fields: Phase 95's execution-
+        // policy fields appended.
+        if (fields.size() != 8U && fields.size() != 22U) {
             throw std::runtime_error(
                 "persisted training job record field count is wrong");
         }
@@ -1212,6 +1572,23 @@ void TrainingJobStore::restore() {
         job.training_type = fields[5];
         job.owner_id = fields[6];
         job.status = parse_training_job_status(fields[7]);
+        if (fields.size() == 22U) {
+            job.max_runtime_seconds = std::stoull(fields[8]);
+            job.failure_recovery_strategy = fields[9];
+            job.checkpoint_frequency_epochs =
+                static_cast<std::uint32_t>(std::stoul(fields[10]));
+            job.output_directory = fields[11];
+            job.compute_target = fields[12];
+            job.hardware_allocation = fields[13];
+            job.runtime_environment = fields[14];
+            job.container_image = fields[15];
+            job.environment_variables = fields[16];
+            job.secrets_references = fields[17];
+            job.logging_policy = fields[18];
+            job.notification_policy = fields[19];
+            job.resource_ceiling_notes = fields[20];
+            job.cost_ceiling_notes = fields[21];
+        }
         jobs_[job.id] = job;
     }
 }
@@ -1221,7 +1598,16 @@ void TrainingJobStore::persist(const TrainingJob& job) {
         "ml_training_jobs", job.id,
         pack({job.project_id, job.model_id, job.dataset_id, job.name,
              job.description, job.training_type, job.owner_id,
-             training_job_status_name(job.status)}));
+             training_job_status_name(job.status),
+             std::to_string(job.max_runtime_seconds),
+             job.failure_recovery_strategy,
+             std::to_string(job.checkpoint_frequency_epochs),
+             job.output_directory, job.compute_target,
+             job.hardware_allocation, job.runtime_environment,
+             job.container_image, job.environment_variables,
+             job.secrets_references, job.logging_policy,
+             job.notification_policy, job.resource_ceiling_notes,
+             job.cost_ceiling_notes}));
 }
 
 TrainingJob TrainingJobStore::create(
@@ -1282,6 +1668,46 @@ bool TrainingJobStore::set_status(const std::string& id,
     return true;
 }
 
+bool TrainingJobStore::update_execution_policy(
+    const std::string& id, std::uint64_t max_runtime_seconds,
+    const std::string& failure_recovery_strategy,
+    std::uint32_t checkpoint_frequency_epochs,
+    const std::string& output_directory, const std::string& compute_target,
+    const std::string& hardware_allocation,
+    const std::string& runtime_environment,
+    const std::string& container_image,
+    const std::string& environment_variables,
+    const std::string& secrets_references, const std::string& logging_policy,
+    const std::string& notification_policy,
+    const std::string& resource_ceiling_notes,
+    const std::string& cost_ceiling_notes) {
+    if (failure_recovery_strategy != "none" &&
+        failure_recovery_strategy != "retry_once") {
+        throw std::invalid_argument(
+            "failure recovery strategy must be \"none\" or \"retry_once\"");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = jobs_.find(id);
+    if (found == jobs_.end()) return false;
+    found->second.max_runtime_seconds = max_runtime_seconds;
+    found->second.failure_recovery_strategy = failure_recovery_strategy;
+    found->second.checkpoint_frequency_epochs = checkpoint_frequency_epochs;
+    found->second.output_directory = output_directory;
+    found->second.compute_target = compute_target;
+    found->second.hardware_allocation = hardware_allocation;
+    found->second.runtime_environment = runtime_environment;
+    found->second.container_image = container_image;
+    found->second.environment_variables = environment_variables;
+    found->second.secrets_references = secrets_references;
+    found->second.logging_policy = logging_policy;
+    found->second.notification_policy = notification_policy;
+    found->second.resource_ceiling_notes = resource_ceiling_notes;
+    found->second.cost_ceiling_notes = cost_ceiling_notes;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
 bool TrainingJobStore::remove(const std::string& id) {
     const std::lock_guard<std::mutex> lock(mutex_);
     const auto found = jobs_.find(id);
@@ -1301,6 +1727,30 @@ std::string training_job_json(const TrainingJob& job) {
            json_escape(job.training_type) + "\",\"ownerId\":\"" +
            json_escape(job.owner_id) + "\",\"status\":\"" +
            training_job_status_name(job.status) +
+           "\",\"maxRuntimeSeconds\":" +
+           std::to_string(job.max_runtime_seconds) +
+           ",\"failureRecoveryStrategy\":\"" +
+           json_escape(job.failure_recovery_strategy) +
+           "\",\"checkpointFrequencyEpochs\":" +
+           std::to_string(job.checkpoint_frequency_epochs) +
+           ",\"outputDirectory\":\"" + json_escape(job.output_directory) +
+           "\",\"computeTarget\":\"" + json_escape(job.compute_target) +
+           "\",\"hardwareAllocation\":\"" +
+           json_escape(job.hardware_allocation) +
+           "\",\"runtimeEnvironment\":\"" +
+           json_escape(job.runtime_environment) +
+           "\",\"containerImage\":\"" + json_escape(job.container_image) +
+           "\",\"environmentVariables\":\"" +
+           json_escape(job.environment_variables) +
+           "\",\"secretsReferences\":\"" +
+           json_escape(job.secrets_references) +
+           "\",\"loggingPolicy\":\"" + json_escape(job.logging_policy) +
+           "\",\"notificationPolicy\":\"" +
+           json_escape(job.notification_policy) +
+           "\",\"resourceCeilingNotes\":\"" +
+           json_escape(job.resource_ceiling_notes) +
+           "\",\"costCeilingNotes\":\"" +
+           json_escape(job.cost_ceiling_notes) +
            "\",\"createdAtEpochSeconds\":" +
            std::to_string(job.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
@@ -1345,7 +1795,9 @@ EvaluationRunStore::EvaluationRunStore(RecordStore& records) : records_(&records
 void EvaluationRunStore::restore() {
     for (const auto& item : records_->list("ml_evaluation_runs")) {
         const auto fields = unpack(item.second);
-        if (fields.size() != 7U) {
+        // 7 fields: pre-Phase-96 records. 8 fields: sensitive_feature_name
+        // appended.
+        if (fields.size() != 7U && fields.size() != 8U) {
             throw std::runtime_error(
                 "persisted evaluation run record field count is wrong");
         }
@@ -1358,6 +1810,7 @@ void EvaluationRunStore::restore() {
         run.category = fields[4];
         run.owner_id = fields[5];
         run.status = parse_evaluation_run_status(fields[6]);
+        run.sensitive_feature_name = fields.size() == 8U ? fields[7] : "";
         runs_[run.id] = run;
     }
 }
@@ -1367,13 +1820,15 @@ void EvaluationRunStore::persist(const EvaluationRun& run) {
         "ml_evaluation_runs", run.id,
         pack({run.model_id, run.dataset_id, run.name, run.description,
              run.category, run.owner_id,
-             evaluation_run_status_name(run.status)}));
+             evaluation_run_status_name(run.status),
+             run.sensitive_feature_name}));
 }
 
 EvaluationRun EvaluationRunStore::create(
     const std::string& owner_id, const std::string& model_id,
     const std::string& dataset_id, const std::string& name,
-    const std::string& description, const std::string& category) {
+    const std::string& description, const std::string& category,
+    const std::string& sensitive_feature_name) {
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("evaluation run name is invalid");
     }
@@ -1392,6 +1847,7 @@ EvaluationRun EvaluationRunStore::create(
     run.description = description;
     run.category = category;
     run.owner_id = owner_id;
+    run.sensitive_feature_name = sensitive_feature_name;
     run.status = EvaluationRunStatus::queued;
     run.created_at_epoch_seconds = epoch_seconds();
     run.updated_at_epoch_seconds = run.created_at_epoch_seconds;
@@ -1444,6 +1900,8 @@ std::string evaluation_run_json(const EvaluationRun& run) {
            json_escape(run.category) + "\",\"ownerId\":\"" +
            json_escape(run.owner_id) + "\",\"status\":\"" +
            evaluation_run_status_name(run.status) +
+           "\",\"sensitiveFeatureName\":\"" +
+           json_escape(run.sensitive_feature_name) +
            "\",\"createdAtEpochSeconds\":" +
            std::to_string(run.created_at_epoch_seconds) +
            ",\"updatedAtEpochSeconds\":" +
@@ -2414,14 +2872,16 @@ bool validate_structured_output(const InstructionExampleContent& content,
 
 namespace {
 
-// Lowercases and collapses runs of whitespace so two instructions that
-// differ only in casing/spacing still compare as the same text.
+// Lowercases and collapses runs of whitespace/punctuation into single
+// spaces so two instructions that differ only in casing, spacing, or
+// trailing punctuation ("bugs." vs "bugs") still tokenize to the same
+// words and compare as the same text.
 std::string normalize_instruction_text(const std::string& text) {
     std::string result;
     result.reserve(text.size());
     bool last_was_space = false;
     for (const unsigned char character : text) {
-        if (std::isspace(character)) {
+        if (std::isspace(character) || std::ispunct(character)) {
             if (!last_was_space && !result.empty()) result += ' ';
             last_was_space = true;
         } else {
@@ -3305,12 +3765,15 @@ void HyperparameterSearchStore::restore() {
     for (const auto& item : records_->list("ml_hyperparameter_searches")) {
         const auto fields = unpack(item.second);
         // 6 fields is the legacy scoped-down Phase 52 record (identity/
-        // training-job/strategy/status only); 12 (this pass) adds the
-        // search-space/trial-budget inputs and the trial-history/best-
-        // trial outputs the real executor produces. Legacy records restore
-        // with default (unset) search fields so existing databases keep
-        // working without a migration step.
-        if (fields.size() != 6U && fields.size() != 12U) {
+        // training-job/strategy/status only); 12 adds the search-space/
+        // trial-budget inputs and the trial-history/best-trial outputs the
+        // real executor produces; 13 (this pass) additionally persists
+        // trials_run, which record_result() was already setting in memory
+        // but persist()/restore() never round-tripped -- a real search's
+        // trial count silently reverted to 0 on every server restart.
+        // Legacy records restore with default (unset) search fields so
+        // existing databases keep working without a migration step.
+        if (fields.size() != 6U && fields.size() != 12U && fields.size() != 13U) {
             throw std::runtime_error(
                 "persisted hyperparameter search record field count is wrong");
         }
@@ -3322,13 +3785,16 @@ void HyperparameterSearchStore::restore() {
         search.strategy = fields[3];
         search.owner_id = fields[4];
         search.status = parse_hyperparameter_search_status(fields[5]);
-        if (fields.size() == 12U) {
+        if (fields.size() >= 12U) {
             search.search_space_json = fields[6];
             search.max_trials = static_cast<std::uint32_t>(std::stoul(fields[7]));
             search.trials_json = fields[8];
             search.best_learning_rate = std::stod(fields[9]);
             search.best_epochs = static_cast<std::uint32_t>(std::stoul(fields[10]));
             search.best_score = std::stod(fields[11]);
+        }
+        if (fields.size() == 13U) {
+            search.trials_run = static_cast<std::uint32_t>(std::stoul(fields[12]));
         }
         searches_[search.id] = search;
     }
@@ -3343,7 +3809,8 @@ void HyperparameterSearchStore::persist(const HyperparameterSearch& search) {
              search.search_space_json, std::to_string(search.max_trials),
              search.trials_json, std::to_string(search.best_learning_rate),
              std::to_string(search.best_epochs),
-             std::to_string(search.best_score)}));
+             std::to_string(search.best_score),
+             std::to_string(search.trials_run)}));
 }
 
 HyperparameterSearch HyperparameterSearchStore::create(

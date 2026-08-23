@@ -58,9 +58,13 @@ std::string login_page();
 // Each section is served at its own URL (see server.cpp's /app/* routes) so
 // switching sections is a normal full-page navigation, not a client-side
 // panel swap. chat_id, when non-empty, preloads that conversation's history
-// on the chat section.
+// on the chat section. last_chat_title, when non-empty, is the caller's
+// most recent chat's real (model-derived) title -- only used by the "chat"
+// section's empty-state greeting (see chat_welcome_message's own comment)
+// to sometimes ground a returning user back in what they were last doing.
 std::string application_page(const UserRecord& user, const std::string& section,
-                             const std::string& chat_id = "");
+                             const std::string& chat_id = "",
+                             const std::string& last_chat_title = "");
 
 class IntegrationHttpController final {
 public:

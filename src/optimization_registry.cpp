@@ -118,7 +118,19 @@ void AdvancedOptimizationRegistry::initialize_features() {
         {"multiple_warm_runners",
          "Multiple warm runners, admitted only where their measured latency "
          "value justifies their full memory cost.",
-         false, true, false, std::nullopt},
+         // Phase 20 (this pass): implementation_available flipped to true
+         // now that a real caller genuinely gates on this feature's
+         // admission -- LocalRunnerPool (Phase 33, src/runner_pool.cpp) was
+         // already a fully real multi-runner implementation, but server.cpp
+         // constructed and used it purely from
+         // AppConfig::local_runner_pool's own presence, independent of this
+         // registry; that config-only gate is now additionally conditioned
+         // on advanced_optimizations->is_enabled("multiple_warm_runners")
+         // (see the runner_pool construction and every generate/embed call
+         // site in server.cpp). Admission still requires an administrator
+         // to separately record real evidence and admit, per this
+         // registry's own "evidence never self-enables" rule.
+         false, true, true, std::nullopt},
         {"gpu_cpu_kv_placement",
          "Backend-specific GPU/CPU KV placement, unified/separate KV, "
          "direct I/O, or model pre-touch policies.",

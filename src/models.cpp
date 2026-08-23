@@ -190,6 +190,20 @@ ModelManifest load_manifest(
     }
     manifest.required_gpu_backend = hardware.required("gpuBackend").as_string();
 
+    // A model this codebase itself produces (an LLM LoRA fine-tuning run's
+    // merged output -- see run_llm_fine_tuning_job()'s model-catalog
+    // promotion in server.cpp) has no external download URL and, when its
+    // base model was registered manually rather than downloaded, no
+    // pre-approved SPDX license id to check against the closed
+    // allowed_licenses list below either. Both checks are narrowly skipped
+    // for exactly this case (source_url starting with the internal
+    // "masterai-finetune:" marker, never something an external download
+    // writes), trusting whatever non-empty license the human who manually
+    // registered that base model already put on record for it -- not
+    // fabricated here, and every other check (identity, category, format,
+    // backend, RAM math, digest, license_accepted) still applies in full.
+    const bool self_produced_derivative =
+        manifest.source_url.rfind("masterai-finetune:", 0U) == 0U;
     if (manifest.schema_version != 1 || !is_safe_identifier(manifest.id) ||
         manifest.id != model_directory.filename().string() ||
         manifest.category != expected_category ||
@@ -211,10 +225,13 @@ ModelManifest load_manifest(
          manifest.required_gpu_backend != "cuda" &&
          manifest.required_gpu_backend != "vulkan" &&
          manifest.required_gpu_backend != "hip") ||
-        (manifest.source_url.rfind("https://huggingface.co/", 0U) != 0U &&
+        (!self_produced_derivative &&
+         manifest.source_url.rfind("https://huggingface.co/", 0U) != 0U &&
          manifest.source_url.rfind("https://github.com/", 0U) != 0U &&
          manifest.source_url.rfind("https://modelscope.cn/", 0U) != 0U) ||
-        allowed_licenses.find(manifest.license_id) == allowed_licenses.end() ||
+        (self_produced_derivative
+             ? manifest.license_id.empty()
+             : allowed_licenses.find(manifest.license_id) == allowed_licenses.end()) ||
         !manifest.license_accepted) {
         throw std::runtime_error("manifest identity, category, format, or backend is invalid");
     }

@@ -339,6 +339,26 @@ std::vector<std::string> split_pipeline_stages(const std::string& stages) {
     return result;
 }
 
+// Phase 94: shared by every POST .../content route (the standalone Dataset
+// Manager upload and both Automation Pipeline ingest stages) so a dataset's
+// record_count/schema/hash/duplicate_rate/data_quality_score and its
+// DatasetVersionStore history stay in sync no matter which caller uploaded
+// the content -- computing real metrics only in the standalone route would
+// leave a pipeline-created dataset's numbers stuck at zero forever.
+void record_dataset_content_upload(DatasetStore& datasets,
+                                   DatasetVersionStore& versions,
+                                   const std::string& dataset_id,
+                                   const std::string& csv,
+                                   const std::string& uploaded_by) {
+    const auto metrics = compute_dataset_content_metrics(csv);
+    datasets.record_content_metrics(dataset_id, metrics.record_count,
+                                    /*file_count=*/1U, metrics.schema_summary,
+                                    metrics.content_hash, metrics.duplicate_rate,
+                                    metrics.data_quality_score);
+    versions.create(dataset_id, metrics.content_hash, metrics.record_count,
+                    uploaded_by);
+}
+
 // Phase 53/72 unification: the one real optimization executor
 // (prune_tabular_model, magnitude pruning) shared between the standalone
 // Model Optimization status handler and the Automation Pipeline's
@@ -386,29 +406,140 @@ std::pair<std::string, std::string> run_model_optimization(
     }
 }
 
+// Phase 46 (this pass): maps a ModelBuilderConfig's free-text/loose-typed
+// ModelBuilderSettings (masterai.hpp; docs/PLAN.md "Machine Learning
+// Abilities" section 9) onto the real MLP-capable TabularTrainingOptions
+// (masterai.hpp) train_tabular_model() (ml_engine.cpp) now genuinely
+// consumes. Only called for a fresh training run (execute_training_job()
+// below, when it has no warm_start) -- fine-tuning/checkpoint-resume
+// already inherit their base model's real architecture directly through
+// train_tabular_model()'s own warm_start handling, independent of this
+// lookup.
+//
+// `layer_configuration` is the architecture's source of truth when it
+// parses as a comma/space-separated list of positive integers (e.g.
+// "256,128,64" -- one hidden layer per number, in order); otherwise a
+// non-zero `hidden_dimensions` becomes a single hidden layer of that size;
+// otherwise there is no concrete layer list to build from and this run
+// stays a plain linear/logistic/softmax model, exactly as before this
+// pass -- an administrator who wants a real MLP must give it a real shape.
+// `attention_configuration`, `vocabulary_tokenizer`, `sequence_length`,
+// and `mixed_precision` stay genuinely unconsumed: they describe
+// transformer/sequence-model concepts (attention, tokens, mixed-precision
+// tensor cores) that do not apply to this tabular-row MLP executor, and
+// fabricating a mapping for them would misrepresent what actually runs.
+// `reproducibility_settings`/`distributed_training_settings` remain
+// descriptive free text for the same reason -- there is no defined schema
+// to consume them against. `random_seed`, when non-zero, and
+// `epoch_count`/`checkpoint_frequency`, when non-zero, always override
+// whatever `base` already carried (an ad-hoc POST body field or the
+// TabularTrainingOptions default) -- a Model-Builder-originated job's whole
+// point is that its own recorded settings drive training.
+// `validation_frequency` is accepted but not separately throttled: this
+// engine only ever has one held-out split to validate against, and
+// evaluating it once per epoch (already required for early stopping) is
+// cheap at the tabular dataset sizes this endpoint accepts, so there is
+// nothing further to gain by rate-limiting it.
+TabularTrainingOptions resolve_training_architecture(
+    ModelBuilderConfigStore& configs, const std::string& training_job_id,
+    TabularTrainingOptions base) {
+    ModelBuilderConfig* found = nullptr;
+    std::vector<ModelBuilderConfig> all = configs.list();
+    for (auto& candidate : all) {
+        if (candidate.resulting_training_job_id == training_job_id) {
+            found = &candidate;
+            break;
+        }
+    }
+    if (found == nullptr) return base;
+    const auto& settings = found->settings;
+
+    std::vector<std::uint32_t> layer_sizes;
+    {
+        std::string token;
+        for (const char character : settings.layer_configuration) {
+            if (std::isdigit(static_cast<unsigned char>(character))) {
+                token += character;
+            } else if (!token.empty()) {
+                layer_sizes.push_back(static_cast<std::uint32_t>(std::stoul(token)));
+                token.clear();
+            }
+        }
+        if (!token.empty()) {
+            layer_sizes.push_back(static_cast<std::uint32_t>(std::stoul(token)));
+        }
+    }
+    if (layer_sizes.empty() && settings.hidden_dimensions > 0U) {
+        layer_sizes.push_back(static_cast<std::uint32_t>(settings.hidden_dimensions));
+    }
+    if (layer_sizes.empty()) return base;  // no concrete shape -- stay linear
+
+    base.hidden_layer_sizes = std::move(layer_sizes);
+    if (settings.activation_functions == "tanh" || settings.activation_functions == "sigmoid") {
+        base.activation = settings.activation_functions;
+    } else {
+        base.activation = "relu";
+    }
+    base.dropout = settings.dropout;
+    if (settings.optimiser == "adam" || settings.optimiser == "sgd_momentum") {
+        base.optimiser = settings.optimiser;
+    } else {
+        base.optimiser = "sgd";
+    }
+    if (settings.batch_size > 0U) {
+        base.batch_size = static_cast<std::uint32_t>(settings.batch_size);
+    }
+    base.gradient_clip_norm = settings.gradient_clipping;
+    if (settings.gradient_accumulation > 0U) {
+        base.gradient_accumulation_steps =
+            static_cast<std::uint32_t>(settings.gradient_accumulation);
+    }
+    if (settings.learning_rate_scheduler == "step" ||
+        settings.learning_rate_scheduler == "cosine") {
+        base.lr_schedule = settings.learning_rate_scheduler;
+    } else {
+        base.lr_schedule = "constant";
+    }
+    // ModelBuilderSettings' early_stopping is a bare bool (section 9 has no
+    // separate patience field); ten epochs of no held-out improvement is a
+    // reasonable, disclosed default patience for the tabular dataset sizes
+    // this endpoint accepts.
+    base.early_stopping_patience = settings.early_stopping ? 10U : 0U;
+    if (!settings.initialisation_strategy.empty()) {
+        base.initialisation = settings.initialisation_strategy;
+    }
+    if (settings.epoch_count > 0U) {
+        base.epochs = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(settings.epoch_count, 10000ULL));
+    }
+    if (settings.random_seed > 0U) {
+        base.seed = static_cast<std::uint32_t>(settings.random_seed);
+    }
+    if (settings.checkpoint_frequency > 0U) {
+        base.checkpoint_interval = static_cast<std::uint32_t>(settings.checkpoint_frequency);
+    }
+    return base;
+}
+
 // Phase 46: docs/PLAN.md "Machine Learning Abilities" section 9 (Model
-// Builder Interface). This codebase has no from-scratch, architecture-
-// configurable neural network trainer -- only the existing tabular
-// linear/logistic/softmax-regression trainer in ml_engine.cpp
-// (train_tabular_model) that TrainingJob already drives. Rather than
-// fabricate a fake deep-learning executor that pretends to honor
-// ModelBuilderSettings' architecture/hidden-dimension/attention/optimiser/
-// scheduler fields, submitting a configuration hands off to that same
-// real trainer via a genuine TrainingJob: this function re-validates the
-// settings (the same range checks configure() already applied at save
-// time -- see validate_model_builder_settings in masterai.hpp), requires
-// a dataset to actually train against, creates the job, and moves the
-// configuration to its terminal "submitted" status recording which job it
-// produced. ModelBuilderSettings' from-scratch-architecture fields stay
-// on the record for a human to read, but the resulting TrainingJob does
-// NOT consume them -- there is no executor in this codebase that
-// understands a custom architecture/hidden-dimension/attention
-// configuration yet. See ModelBuilderConfig's masterai.hpp class comment
-// for this honest, permanent scope limit. A validation or missing-dataset
-// failure leaves the configuration's status untouched (ModelBuilderConfig
-// Status has no "failed" state -- it is a design-time draft/review
-// lifecycle, not a job lifecycle) so an administrator can fix the problem
-// and resubmit.
+// Builder Interface). Submitting a configuration hands off to the real
+// tabular/MLP trainer (train_tabular_model(), ml_engine.cpp) via a genuine
+// TrainingJob: this function re-validates the settings (the same range
+// checks configure() already applied at save time -- see
+// validate_model_builder_settings in masterai.hpp), requires a dataset to
+// actually train against, creates the job, and moves the configuration to
+// its terminal "submitted" status recording which job it produced. Once
+// that job is actually run (POST .../training-jobs/{id}/run, or the
+// automation-pipeline "Train model" stage -- both funnel through
+// execute_training_job() below), resolve_training_architecture() above
+// looks this same configuration back up by its resulting_training_job_id
+// and genuinely drives the run's architecture/optimizer/schedule from
+// ModelBuilderSettings -- see that function's own comment for exactly
+// which fields are consumed and which stay honestly unconsumed. A
+// validation or missing-dataset failure leaves the configuration's status
+// untouched (ModelBuilderConfigStatus has no "failed" state -- it is a
+// design-time draft/review lifecycle, not a job lifecycle) so an
+// administrator can fix the problem and resubmit.
 std::pair<std::string, std::string> run_model_builder_config(
     ModelBuilderConfigStore& configs, TrainingJobStore& training_jobs,
     AuditLog& audit, const std::string& acting_user_id,
@@ -445,8 +576,10 @@ std::pair<std::string, std::string> run_model_builder_config(
         return {"submitted",
                 "model builder config " + config.id +
                     " handed off to training job " + job.id +
-                    " (real tabular trainer; from-scratch architecture "
-                    "settings are recorded but not executed by it)"};
+                    " (running that job trains the real tabular/MLP "
+                    "engine using this configuration's settings, when a "
+                    "concrete layer_configuration/hidden_dimensions "
+                    "architecture is set)"};
     } catch (const std::exception& error) {
         audit.append("ml.model_builder_config.run", acting_user_id, "failure",
                      config.id);
@@ -461,13 +594,30 @@ std::pair<std::string, std::string> run_model_builder_config(
 constexpr std::uint32_t kMaxHyperparameterTrials = 20U;
 
 // Runs a small, bounded grid search over learning_rate and epochs -- the
-// only two TabularTrainingOptions fields (masterai.hpp) that genuinely
+// two TabularTrainingOptions fields (masterai.hpp) that always genuinely
 // change what train_tabular_model() learns (test_fraction/seed change the
 // evaluation split, not the search). Every trial genuinely retrains a
 // fresh TrainedTabularModel via train_tabular_model() against the
 // referenced TrainingJob's real dataset content, scored by the real
 // evaluate_tabular_model() held-out metric (accuracy for classification,
 // R-squared for regression) -- never a fabricated or interpolated score.
+//
+// Phase 52 (this pass): when `configs` has a ModelBuilderConfig pointing at
+// this search's training job with a real hidden-layer architecture (the
+// same resolve_training_architecture() lookup execute_training_job() uses),
+// batch_size, dropout, and optimiser genuinely change what the MLP path
+// learns too -- see TabularTrainingOptions' own comment. Rather than a full
+// 5-dimensional cartesian grid (which would need grid_side^5 trials to
+// cover evenly, far past kMaxHyperparameterTrials), this reuses the same
+// (i, j) pair the learning-rate/epoch grid already walks: batch_size rides
+// i's fraction, dropout rides j's fraction, and optimiser cycles through
+// {"sgd","sgd_momentum","adam"} by (i+j). This is a deliberate bounded
+// joint sweep, not an even cartesian grid -- every additional dimension is
+// still genuinely varied and genuinely retrained/scored, just along the
+// existing trial budget instead of multiplying it. A plain (non-MLP)
+// job's search is completely unaffected: the extra fields are only ever
+// set on `options` when architecture.hidden_layer_sizes is real.
+//
 // Grid size is floor(sqrt(min(search.max_trials, kMaxHyperparameterTrials)))
 // per dimension, so the real trial count this function runs never exceeds
 // what was requested or the hard cap. Leaves the search's status untouched
@@ -477,8 +627,9 @@ constexpr std::uint32_t kMaxHyperparameterTrials = 20U;
 // content, malformed search space) is reported clearly.
 std::pair<std::string, std::string> run_hyperparameter_search(
     HyperparameterSearchStore& searches, TrainingJobStore& training_jobs,
-    DatasetContentStore& dataset_content, AuditLog& audit,
-    const std::string& acting_user_id, const HyperparameterSearch& search) {
+    DatasetContentStore& dataset_content, ModelBuilderConfigStore& configs,
+    AuditLog& audit, const std::string& acting_user_id,
+    const HyperparameterSearch& search) {
     const auto job = training_jobs.find(search.training_job_id);
     if (!job) {
         searches.set_status(search.id, HyperparameterSearchStatus::failed);
@@ -535,13 +686,34 @@ std::pair<std::string, std::string> run_hyperparameter_search(
     }
     TabularDataset data;
     try {
-        data = parse_tabular_csv(content->csv, content->target_column);
+        // Fit mode: every trial below is scored and discarded, never
+        // persisted, so there is no later evaluation/prediction that
+        // needs this fitted scheme reapplied -- see parse_tabular_csv's
+        // own comment in masterai.hpp.
+        data = parse_tabular_csv(content->csv, content->target_column,
+                                 8ULL * 1024ULL * 1024ULL,
+                                 /*encode_categorical_features=*/true);
     } catch (const std::exception& error) {
         searches.set_status(search.id, HyperparameterSearchStatus::failed);
         audit.append("ml.hyperparameter_search.run", acting_user_id,
                      "failure", search.id);
         return {"failed", error.what()};
     }
+    // Phase 52: this search's job architecture, if any real one exists (see
+    // this function's own comment above for exactly what "eligible" means
+    // and how the extra dimensions are swept).
+    const TabularTrainingOptions architecture = resolve_training_architecture(
+        configs, search.training_job_id, TabularTrainingOptions{});
+    const bool mlp_eligible = !architecture.hidden_layer_sizes.empty();
+    static const std::array<std::string, 3U> kOptimiserChoices{
+        "sgd", "sgd_momentum", "adam"};
+    const std::uint32_t batch_size_min = 8U;
+    const std::uint32_t batch_size_max = static_cast<std::uint32_t>(
+        std::max<std::size_t>(batch_size_min,
+                              std::min<std::size_t>(128U, data.features.size())));
+    constexpr double kDropoutMin = 0.0;
+    constexpr double kDropoutMax = 0.5;
+
     const std::uint32_t requested_trials =
         std::min(std::max<std::uint32_t>(search.max_trials, 1U),
                  kMaxHyperparameterTrials);
@@ -553,6 +725,9 @@ std::pair<std::string, std::string> run_hyperparameter_search(
     double best_score = -std::numeric_limits<double>::infinity();
     double best_learning_rate = learning_rate_min;
     std::uint32_t best_epochs = epoch_min;
+    std::uint32_t best_batch_size = 0U;
+    double best_dropout = 0.0;
+    std::string best_optimiser;
     std::uint32_t trials_run = 0U;
     for (std::uint32_t i = 0U; i < grid_side; ++i) {
         const double lr_fraction =
@@ -569,10 +744,27 @@ std::pair<std::string, std::string> run_hyperparameter_search(
             const std::uint32_t trial_epochs = epoch_min +
                 static_cast<std::uint32_t>(
                     static_cast<double>(epoch_max - epoch_min) * epoch_fraction);
-            TabularTrainingOptions options;
+            // Base options: plain TabularTrainingOptions{} for a non-MLP
+            // job (unaffected by this pass, exactly as before), or the
+            // job's real architecture (hidden layers, activation,
+            // initialisation, lr_schedule, gradient clip/accumulation)
+            // when eligible.
+            TabularTrainingOptions options = architecture;
             options.learning_rate = trial_learning_rate;
             options.epochs = trial_epochs > 0U ? trial_epochs : 1U;
             options.checkpoint_interval = 0U;
+            std::uint32_t trial_batch_size = 0U;
+            double trial_dropout = 0.0;
+            std::string trial_optimiser;
+            if (mlp_eligible) {
+                trial_batch_size = batch_size_min + static_cast<std::uint32_t>(
+                    static_cast<double>(batch_size_max - batch_size_min) * lr_fraction);
+                trial_dropout = kDropoutMin + (kDropoutMax - kDropoutMin) * epoch_fraction;
+                trial_optimiser = kOptimiserChoices[(i + j) % kOptimiserChoices.size()];
+                options.batch_size = trial_batch_size > 0U ? trial_batch_size : 1U;
+                options.dropout = trial_dropout;
+                options.optimiser = trial_optimiser;
+            }
             TrainedTabularModel model;
             try {
                 const auto report = train_tabular_model(data, options, model);
@@ -585,11 +777,20 @@ std::pair<std::string, std::string> run_hyperparameter_search(
                 trials_json += "{\"learningRate\":" +
                     std::to_string(trial_learning_rate) + ",\"epochs\":" +
                     std::to_string(options.epochs) + ",\"score\":" +
-                    std::to_string(score) + "}";
+                    std::to_string(score);
+                if (mlp_eligible) {
+                    trials_json += ",\"batchSize\":" + std::to_string(trial_batch_size) +
+                        ",\"dropout\":" + std::to_string(trial_dropout) +
+                        ",\"optimiser\":" + json_string(trial_optimiser);
+                }
+                trials_json += "}";
                 if (score > best_score) {
                     best_score = score;
                     best_learning_rate = trial_learning_rate;
                     best_epochs = options.epochs;
+                    best_batch_size = trial_batch_size;
+                    best_dropout = trial_dropout;
+                    best_optimiser = trial_optimiser;
                 }
             } catch (const std::exception&) {
                 // A trial that fails to train (degenerate learning rate,
@@ -610,12 +811,21 @@ std::pair<std::string, std::string> run_hyperparameter_search(
     searches.set_status(search.id, HyperparameterSearchStatus::completed);
     audit.append("ml.hyperparameter_search.run", acting_user_id, "success",
                  search.id);
-    return {"completed",
-            "hyperparameter search " + search.id + " ran " +
-                std::to_string(trials_run) + " real trial(s); best score " +
-                std::to_string(best_score) + " at learning rate " +
-                std::to_string(best_learning_rate) + ", " +
-                std::to_string(best_epochs) + " epochs"};
+    std::string detail = "hyperparameter search " + search.id + " ran " +
+        std::to_string(trials_run) + " real trial(s); best score " +
+        std::to_string(best_score) + " at learning rate " +
+        std::to_string(best_learning_rate) + ", " +
+        std::to_string(best_epochs) + " epochs";
+    if (mlp_eligible) {
+        // Phase 52: batch_size/dropout/optimiser aren't duplicated onto
+        // dedicated HyperparameterSearch fields (see this function's own
+        // comment) -- the winning trial's values are surfaced here and are
+        // also findable in trials_json by matching this same best_score.
+        detail += ", batch size " + std::to_string(best_batch_size) +
+                  ", dropout " + std::to_string(best_dropout) +
+                  ", optimiser " + best_optimiser;
+    }
+    return {"completed", detail};
 }
 
 std::string ascii_lower(const std::string& value) {
@@ -625,6 +835,18 @@ std::string ascii_lower(const std::string& value) {
             std::tolower(static_cast<unsigned char>(character)));
     }
     return result;
+}
+
+// Whether a GGUF quantization label is full/near-full precision enough for
+// llama.cpp's finetune tooling to backpropagate reliably against -- see
+// run_llm_fine_tuning_job's quantization_warning comment. F32/F16/BF16 are
+// unquantized; Q8_0 is the lightest quantization llama.cpp itself documents
+// as safe for further training. Everything else (Q6_K and below) is not
+// refused, only flagged, since this is a quality caution, not a hard rule.
+bool llm_finetune_safe_quantization(const std::string& quantization) {
+    const auto label = ascii_lower(quantization);
+    return label == "f32" || label == "f16" || label == "bf16" ||
+           label == "q8_0";
 }
 
 }  // namespace
@@ -760,6 +982,8 @@ public:
         ml_deployments = std::make_unique<DeploymentStore>(records);
         // Phase 56: real ML execution stores (see ml_engine.cpp).
         ml_dataset_content = std::make_unique<DatasetContentStore>(records);
+        // Phase 94: real Dataset Versioning (docs/PLAN.md section 11).
+        ml_dataset_versions = std::make_unique<DatasetVersionStore>(records);
         ml_trained_models = std::make_unique<TrainedModelStore>(records);
         ml_evaluation_results = std::make_unique<EvaluationResultStore>(records);
         // Phase 73: real LLM LoRA fine-tuning run outcomes (see
@@ -2803,15 +3027,116 @@ public:
                 const auto objective = text_field("objective");
                 const auto subject_domain = text_field("subjectDomain");
                 const auto model_task = text_field("modelTask");
+                const auto administrators = text_field("administrators");
+                // Every administrator id must resolve to a real account --
+                // the only field here with logic beyond storage (Phase 93).
+                for (const auto& admin_id : split_pipeline_stages(administrators)) {
+                    if (!users->find_by_id(admin_id)) {
+                        return response(
+                            400, "Bad Request",
+                            "{\"error\":\"unknown_administrator\",\"detail\":\"" +
+                                json_escape(admin_id) + "\"}");
+                    }
+                }
+                const auto approved_data_sources =
+                    text_field("approvedDataSources");
+                const auto security_classification =
+                    text_field("securityClassification");
+                const auto target_architecture =
+                    text_field("targetArchitecture");
+                const auto target_deployment_environment =
+                    text_field("targetDeploymentEnvironment");
+                const auto success_criteria = text_field("successCriteria");
+                const auto evaluation_requirements =
+                    text_field("evaluationRequirements");
+                const auto safety_requirements =
+                    text_field("safetyRequirements");
+                const auto* storage_field = root.optional("storageAllocationMb");
+                const std::uint64_t storage_allocation_mb =
+                    storage_field
+                        ? static_cast<std::uint64_t>(storage_field->as_integer())
+                        : 0U;
+                const auto compute_allocation_notes =
+                    text_field("computeAllocationNotes");
                 const auto project = ml_projects->create(
                     user->id, name, description, objective, subject_domain,
-                    model_task);
+                    model_task, administrators, approved_data_sources,
+                    security_classification, target_architecture,
+                    target_deployment_environment, success_criteria,
+                    evaluation_requirements, safety_requirements,
+                    storage_allocation_mb, compute_allocation_notes);
                 audit.append("ml.project.create", user->id, "success",
                              project.id);
                 return response(201, "Created", ml_project_json(project));
             } catch (const std::exception& error) {
                 return response(400, "Bad Request",
                                 "{\"error\":\"invalid_ml_project\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
+        }
+        // Phase 93: post-creation edits to the section-5 governance fields
+        // added above -- mirrors the ml.experiments "/notes" route pattern
+        // (fields not supplied fall back to the project's current value,
+        // rather than being cleared).
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/projects/", 0U) == 0U &&
+            request.target.size() > 11U &&
+            request.target.compare(request.target.size() - 11U, 11U,
+                                   "/governance") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.projects.create")) return *denied;
+            const auto id = request.target.substr(
+                20U, request.target.size() - 20U - 11U);
+            const auto existing = ml_projects->find(id);
+            if (!existing) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_project_not_found\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                const auto text_field = [&root](const char* field,
+                                                const std::string& fallback) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : fallback;
+                };
+                const auto administrators =
+                    text_field("administrators", existing->administrators);
+                for (const auto& admin_id : split_pipeline_stages(administrators)) {
+                    if (!users->find_by_id(admin_id)) {
+                        return response(
+                            400, "Bad Request",
+                            "{\"error\":\"unknown_administrator\",\"detail\":\"" +
+                                json_escape(admin_id) + "\"}");
+                    }
+                }
+                const auto* storage_field = root.optional("storageAllocationMb");
+                const std::uint64_t storage_allocation_mb =
+                    storage_field
+                        ? static_cast<std::uint64_t>(storage_field->as_integer())
+                        : existing->storage_allocation_mb;
+                ml_projects->update_governance(
+                    id, administrators,
+                    text_field("approvedDataSources",
+                              existing->approved_data_sources),
+                    text_field("securityClassification",
+                              existing->security_classification),
+                    text_field("targetArchitecture",
+                              existing->target_architecture),
+                    text_field("targetDeploymentEnvironment",
+                              existing->target_deployment_environment),
+                    text_field("successCriteria", existing->success_criteria),
+                    text_field("evaluationRequirements",
+                              existing->evaluation_requirements),
+                    text_field("safetyRequirements",
+                              existing->safety_requirements),
+                    storage_allocation_mb,
+                    text_field("computeAllocationNotes",
+                              existing->compute_allocation_notes));
+                audit.append("ml.project.governance", user->id, "success", id);
+                return response(200, "OK",
+                                ml_project_json(*ml_projects->find(id)));
+            } catch (const std::exception& error) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_ml_project_governance\",\"detail\":\"" +
                                     json_escape(error.what()) + "\"}");
             }
         }
@@ -2855,7 +3180,8 @@ public:
                     user->id, name, text_field("displayName"),
                     text_field("version"), text_field("family"),
                     text_field("task"), text_field("format"),
-                    text_field("source"), text_field("license"));
+                    text_field("source"), text_field("license"),
+                    text_field("quantization"));
                 audit.append("ml.model.import", user->id, "success", entry.id);
                 return response(201, "Created", model_registry_entry_json(entry));
             } catch (const std::exception& error) {
@@ -2941,17 +3267,60 @@ public:
             try {
                 auto root = parse_json(request.body);
                 // Features arrive as an object keyed by column name so a
-                // caller never has to know the model's internal ordering.
+                // caller never has to know the model's internal ordering
+                // -- and, for a categorical column, never has to know its
+                // internal one-hot expansion either: the caller sends the
+                // natural value (e.g. {"record_type":"document"}) and it
+                // is expanded here using model->categorical_encoding, the
+                // exact scheme fitted when this model trained. A column
+                // name is recognized as categorical the same way
+                // model.feature_names itself encodes it -- "column=value"
+                // entries whose "column" prefix is a key in
+                // categorical_encoding.columns (see parse_tabular_csv's
+                // own comment in masterai.hpp).
                 const auto& object = root.required("features").as_object();
                 std::vector<double> features;
                 features.reserve(model->feature_names.size());
+                std::map<std::string, std::string> categorical_choice;
                 for (const auto& name : model->feature_names) {
-                    const auto found = object.find(name);
-                    if (found == object.end()) {
-                        throw std::runtime_error("missing feature \"" + name +
-                                                 "\"");
+                    const auto equals = name.find('=');
+                    const auto column_name = equals == std::string::npos
+                                                  ? std::string{}
+                                                  : name.substr(0, equals);
+                    const auto encoding_entry =
+                        equals == std::string::npos
+                            ? model->categorical_encoding.columns.end()
+                            : model->categorical_encoding.columns.find(column_name);
+                    if (encoding_entry == model->categorical_encoding.columns.end()) {
+                        const auto found = object.find(name);
+                        if (found == object.end()) {
+                            throw std::runtime_error("missing feature \"" + name +
+                                                     "\"");
+                        }
+                        features.push_back(found->second.as_double());
+                        continue;
                     }
-                    features.push_back(found->second.as_double());
+                    const auto category_value = name.substr(equals + 1U);
+                    auto cached = categorical_choice.find(column_name);
+                    if (cached == categorical_choice.end()) {
+                        const auto found = object.find(column_name);
+                        if (found == object.end()) {
+                            throw std::runtime_error("missing feature \"" +
+                                                     column_name + "\"");
+                        }
+                        const auto chosen = found->second.as_string();
+                        const auto& categories = encoding_entry->second;
+                        if (std::find(categories.begin(), categories.end(),
+                                     chosen) == categories.end()) {
+                            throw std::runtime_error(
+                                "feature \"" + column_name + "\" has value \"" +
+                                chosen +
+                                "\" that was not seen while training this model");
+                        }
+                        cached =
+                            categorical_choice.emplace(column_name, chosen).first;
+                    }
+                    features.push_back(cached->second == category_value ? 1.0 : 0.0);
                 }
                 const auto prediction = predict_tabular(*model, features);
                 return response(200, "OK",
@@ -2969,9 +3338,16 @@ public:
         if (request.method == "GET" &&
             request.target == "/api/v1/ml/datasets") {
             if (auto denied = forbidden_unless(user->role, "ml.datasets.view")) return *denied;
+            // Every dataset row carries its real content status (see
+            // datasets_json_with_content_status's own comment) so the web
+            // UI can show "content: ready"/"missing" and disable Train
+            // Now on an empty dataset instead of that only surfacing as
+            // ml_dataset_has_no_content once training is attempted.
             return response(200, "OK",
                             "{\"datasets\":" +
-                                datasets_json(ml_datasets->list()) + "}");
+                                datasets_json_with_content_status(
+                                    ml_datasets->list(), *ml_dataset_content) +
+                                "}");
         }
         if (request.method == "POST" &&
             request.target == "/api/v1/ml/datasets") {
@@ -2983,10 +3359,17 @@ public:
                     const auto* value = root.optional(field);
                     return value ? value->as_string() : std::string{};
                 };
+                // "purpose" picks which validation the content upload runs
+                // below: "tabular" (default) requires a classification/
+                // regression target column; "instruction" is LLM fine-
+                // tuning data and skips that check entirely.
+                const auto* purpose_value = root.optional("purpose");
+                const auto purpose =
+                    purpose_value ? purpose_value->as_string() : std::string{"tabular"};
                 const auto dataset = ml_datasets->create(
                     user->id, name, text_field("description"),
                     text_field("subjectArea"), text_field("source"),
-                    text_field("license"), text_field("dataFormat"));
+                    text_field("license"), text_field("dataFormat"), purpose);
                 audit.append("ml.dataset.import", user->id, "success",
                              dataset.id);
                 return response(201, "Created", dataset_json(dataset));
@@ -3035,8 +3418,78 @@ public:
             }
             // Phase 56: uploaded CSV content dies with its dataset entry.
             ml_dataset_content->remove(id);
+            // Phase 94: so does its version history.
+            ml_dataset_versions->remove_all_for_dataset(id);
             audit.append("ml.dataset.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Phase 94: docs/PLAN.md section 11 (Dataset Versioning) -- every
+        // immutable version this dataset's content has gone through.
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/datasets/", 0U) == 0U &&
+            request.target.size() > 9U &&
+            request.target.compare(request.target.size() - 9U, 9U,
+                                   "/versions") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.datasets.view")) return *denied;
+            const auto id = request.target.substr(
+                20U, request.target.size() - 20U - 9U);
+            if (!ml_datasets->find(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_dataset_not_found\"}");
+            }
+            return response(200, "OK",
+                            "{\"versions\":" +
+                                dataset_versions_json(
+                                    ml_dataset_versions->list_for_dataset(id)) +
+                                "}");
+        }
+        // Phase 94: administrator-declared fields content upload cannot
+        // derive (sensitive-data status, declared train/validation/test
+        // split) -- see Dataset::sensitive_data_status's comment in
+        // masterai.hpp for why this is never auto-detected.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/datasets/", 0U) == 0U &&
+            request.target.size() > 8U &&
+            request.target.compare(request.target.size() - 8U, 8U,
+                                   "/declare") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.datasets.import")) return *denied;
+            const auto id = request.target.substr(
+                20U, request.target.size() - 20U - 8U);
+            const auto existing = ml_datasets->find(id);
+            if (!existing) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_dataset_not_found\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                const auto* sensitive_value = root.optional("sensitiveDataStatus");
+                const auto sensitive_data_status =
+                    sensitive_value ? sensitive_value->as_string()
+                                    : existing->sensitive_data_status;
+                const auto integer_field = [&root](const char* field,
+                                                   std::uint32_t fallback) {
+                    const auto* value = root.optional(field);
+                    return value
+                               ? static_cast<std::uint32_t>(value->as_integer())
+                               : fallback;
+                };
+                const auto train = integer_field(
+                    "trainSplitPercent", existing->train_split_percent);
+                const auto validation = integer_field(
+                    "validationSplitPercent",
+                    existing->validation_split_percent);
+                const auto test = integer_field("testSplitPercent",
+                                                existing->test_split_percent);
+                ml_datasets->update_declared_metadata(
+                    id, sensitive_data_status, train, validation, test);
+                audit.append("ml.dataset.declare", user->id, "success", id);
+                return response(200, "OK",
+                                dataset_json(*ml_datasets->find(id)));
+            } catch (const std::exception& error) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_ml_dataset_declaration\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
         }
         // Phase 56: real dataset content. POST uploads CSV bytes against a
         // registered dataset (validated by a full parse before anything is
@@ -3051,7 +3504,8 @@ public:
             if (auto denied = forbidden_unless(user->role, "ml.datasets.import")) return *denied;
             const auto id = request.target.substr(
                 20U, request.target.size() - 20U - 8U);
-            if (!ml_datasets->find(id)) {
+            const auto dataset = ml_datasets->find(id);
+            if (!dataset) {
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_dataset_not_found\"}");
             }
@@ -3101,11 +3555,41 @@ public:
                                     "{\"error\":\"unknown_dataset_content_format\"}");
                 }
                 // Parse before storing so bad content is rejected now, not
-                // at training time.
+                // at training time. Which validation runs depends on the
+                // Dataset's purpose (see Dataset::purpose in masterai.hpp):
+                // an "instruction" dataset is LLM fine-tuning data with no
+                // notion of a classification/regression target column at
+                // all, so it skips parse_tabular_csv entirely instead of
+                // being forced through checks (like the 64-distinct-label
+                // classification cap) that only make sense for tabular
+                // data. Categorical feature encoding is on for the tabular
+                // path (a fit, immediately discarded -- the real fit that
+                // gets persisted happens once training actually runs,
+                // against the exact dataset the job names) purely so a
+                // text/category feature column (e.g. "record_type") is
+                // accepted at upload time instead of being rejected with
+                // "every feature column must be numeric" for data a real
+                // training run will happily learn from -- see
+                // parse_tabular_csv's own comment in masterai.hpp.
+                if (dataset->purpose == "instruction") {
+                    const auto profile = validate_instruction_dataset_csv(
+                        csv, configuration.tabular_dataset_maximum_csv_bytes);
+                    ml_dataset_content->put(id, csv, target_column);
+                    record_dataset_content_upload(*ml_datasets,
+                                                  *ml_dataset_versions, id,
+                                                  csv, user->id);
+                    audit.append("ml.dataset.content", user->id, "success", id);
+                    return response(200, "OK",
+                                    instruction_dataset_profile_json(id, profile));
+                }
                 const auto parsed = parse_tabular_csv(
                     csv, target_column,
-                    configuration.tabular_dataset_maximum_csv_bytes);
+                    configuration.tabular_dataset_maximum_csv_bytes,
+                    /*encode_categorical_features=*/true);
                 ml_dataset_content->put(id, csv, target_column);
+                record_dataset_content_upload(*ml_datasets,
+                                              *ml_dataset_versions, id, csv,
+                                              user->id);
                 audit.append("ml.dataset.content", user->id, "success", id);
                 return response(200, "OK",
                                 tabular_dataset_profile_json(id, parsed));
@@ -3130,8 +3614,10 @@ public:
                                 "{\"error\":\"ml_dataset_content_not_found\"}");
             }
             try {
-                const auto parsed =
-                    parse_tabular_csv(content->csv, content->target_column);
+                const auto parsed = parse_tabular_csv(
+                    content->csv, content->target_column,
+                    8ULL * 1024ULL * 1024ULL,
+                    /*encode_categorical_features=*/true);
                 return response(200, "OK",
                                 tabular_dataset_profile_json(id, parsed));
             } catch (const std::exception& error) {
@@ -3449,6 +3935,75 @@ public:
                         json_escape(error.what()) + "\"}");
             }
         }
+        // Phase 95: post-creation edits to the section-16 execution-policy
+        // fields added above -- see TrainingJob's comment in masterai.hpp
+        // for which of these genuinely change execute_training_job()'s
+        // behavior vs. stay operator-reference-only.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/training-jobs/", 0U) == 0U &&
+            request.target.size() > 17U &&
+            request.target.compare(request.target.size() - 17U, 17U,
+                                   "/execution-policy") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.training.manage")) return *denied;
+            const auto id = request.target.substr(
+                25U, request.target.size() - 25U - 17U);
+            const auto existing = ml_training_jobs->find(id);
+            if (!existing) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_training_job_not_found\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                const auto text_field = [&root](const char* field,
+                                                const std::string& fallback) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : fallback;
+                };
+                const auto* runtime_value = root.optional("maxRuntimeSeconds");
+                const std::uint64_t max_runtime_seconds =
+                    runtime_value
+                        ? static_cast<std::uint64_t>(runtime_value->as_integer())
+                        : existing->max_runtime_seconds;
+                const auto* checkpoint_value =
+                    root.optional("checkpointFrequencyEpochs");
+                const std::uint32_t checkpoint_frequency_epochs =
+                    checkpoint_value
+                        ? static_cast<std::uint32_t>(checkpoint_value->as_integer())
+                        : existing->checkpoint_frequency_epochs;
+                ml_training_jobs->update_execution_policy(
+                    id, max_runtime_seconds,
+                    text_field("failureRecoveryStrategy",
+                              existing->failure_recovery_strategy),
+                    checkpoint_frequency_epochs,
+                    text_field("outputDirectory", existing->output_directory),
+                    text_field("computeTarget", existing->compute_target),
+                    text_field("hardwareAllocation",
+                              existing->hardware_allocation),
+                    text_field("runtimeEnvironment",
+                              existing->runtime_environment),
+                    text_field("containerImage", existing->container_image),
+                    text_field("environmentVariables",
+                              existing->environment_variables),
+                    text_field("secretsReferences",
+                              existing->secrets_references),
+                    text_field("loggingPolicy", existing->logging_policy),
+                    text_field("notificationPolicy",
+                              existing->notification_policy),
+                    text_field("resourceCeilingNotes",
+                              existing->resource_ceiling_notes),
+                    text_field("costCeilingNotes",
+                              existing->cost_ceiling_notes));
+                audit.append("ml.training_job.execution_policy", user->id,
+                             "success", id);
+                return response(200, "OK",
+                                training_job_json(*ml_training_jobs->find(id)));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_training_job_execution_policy\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
         if (request.method == "POST" &&
             request.target.rfind("/api/v1/ml/training-jobs/", 0U) == 0U &&
             request.target.size() > 7U &&
@@ -3579,7 +4134,8 @@ public:
                 };
                 const auto run = ml_evaluation_runs->create(
                     user->id, model_id, dataset_id, name,
-                    text_field("description"), text_field("category"));
+                    text_field("description"), text_field("category"),
+                    text_field("sensitiveFeatureName"));
                 audit.append("ml.evaluation_run.create", user->id, "success",
                              run.id);
                 return response(201, "Created", evaluation_run_json(run));
@@ -3969,7 +4525,8 @@ public:
             try {
                 auto root = parse_json(request.body);
                 const auto name = root.required("name").as_string();
-                const auto model_id = root.required("modelId").as_string();
+                const auto model_id = resolve_or_register_base_model(
+                    user->id, root.required("modelId").as_string());
                 const auto dataset_id = root.required("datasetId").as_string();
                 const auto text_field = [&root](const char* field) {
                     const auto* value = root.optional(field);
@@ -4210,6 +4767,61 @@ public:
             }
             return response(200, "OK", *result_json);
         }
+        // Live progress for a background LLM LoRA fine-tuning run: while
+        // .../llm-result 404s until the run finishes, this tails whichever
+        // real log file the run is currently writing to on disk -- the
+        // llama-finetune/llama-export-lora child processes' own combined
+        // stdout+stderr, redirected straight to that file by
+        // run_llama_tool() (ml_finetune.cpp), so this is the tool's actual
+        // live output, not a fabricated percentage.
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/ml/fine-tuning-jobs/", 0U) == 0U &&
+            request.target.size() > 13U &&
+            request.target.compare(request.target.size() - 13U, 13U,
+                                   "/llm-progress") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.finetuning.view")) return *denied;
+            const auto id = request.target.substr(
+                28U, request.target.size() - 28U - 13U);
+            const auto job = ml_fine_tuning_jobs->find(id);
+            if (!job) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_fine_tuning_job_not_found\"}");
+            }
+            const auto work_directory =
+                configuration.runtime_root / "ml-finetune" / id;
+            // export-lora only starts once finetune has already produced an
+            // adapter, so its log (when present) is always the more current
+            // stage to show.
+            std::string stage = "queued";
+            std::filesystem::path log_path;
+            if (std::filesystem::is_regular_file(work_directory / "export-lora.log")) {
+                stage = "exporting (llama-export-lora)";
+                log_path = work_directory / "export-lora.log";
+            } else if (std::filesystem::is_regular_file(work_directory / "finetune.log")) {
+                stage = "training (llama-finetune)";
+                log_path = work_directory / "finetune.log";
+            }
+            std::string log_tail;
+            if (!log_path.empty()) {
+                std::ifstream stream(log_path, std::ios::binary);
+                if (stream) {
+                    stream.seekg(0, std::ios::end);
+                    const auto size = static_cast<std::size_t>(stream.tellg());
+                    constexpr std::size_t max_bytes = 4096U;
+                    stream.seekg(static_cast<std::streamoff>(
+                        size > max_bytes ? size - max_bytes : 0U));
+                    std::ostringstream buffer;
+                    buffer << stream.rdbuf();
+                    log_tail = buffer.str();
+                }
+            }
+            return response(
+                200, "OK",
+                "{\"jobId\":\"" + json_escape(id) + "\",\"status\":\"" +
+                    fine_tuning_job_status_name(job->status) + "\",\"stage\":\"" +
+                    json_escape(stage) + "\",\"logTail\":\"" +
+                    json_escape(log_tail) + "\"}");
+        }
         // Phase 46: Model Builder Interface (docs/PLAN.md "Machine Learning
         // Abilities" section 9) at full surface: identity/target-project/
         // base-model/source-type/status fields at creation, plus the
@@ -4236,7 +4848,9 @@ public:
                     return value ? value->as_string() : std::string{};
                 };
                 const auto config = ml_model_builder_configs->create(
-                    user->id, text_field("projectId"), text_field("baseModelId"),
+                    user->id, text_field("projectId"),
+                    resolve_or_register_base_model(
+                        user->id, text_field("baseModelId")),
                     name, text_field("description"), source_type,
                     text_field("datasetId"));
                 audit.append("ml.model_builder_config.create", user->id, "success",
@@ -5748,7 +6362,8 @@ public:
             }
             const auto result = run_hyperparameter_search(
                 *ml_hyperparameter_searches, *ml_training_jobs,
-                *ml_dataset_content, audit, user->id, *existing);
+                *ml_dataset_content, *ml_model_builder_configs, audit,
+                user->id, *existing);
             return response(
                 200, "OK",
                 "{\"status\":" + json_string(result.first) + ",\"detail\":" +
@@ -7122,12 +7737,27 @@ public:
             }
             ml_model_comparisons->set_status(id, ModelComparisonStatus::running);
             try {
-                const auto data =
-                    parse_tabular_csv(content->csv, content->target_column);
+                // Parsed once per model, each in apply mode against that
+                // model's own categorical encoding -- baseline and
+                // candidate can have been trained (and so categorically
+                // encoded) independently, so a single shared parse could
+                // not necessarily match both models' feature layouts at
+                // once. See parse_tabular_csv's own comment in
+                // masterai.hpp.
+                auto baseline_encoding = baseline->categorical_encoding;
+                const auto data_for_baseline = parse_tabular_csv(
+                    content->csv, content->target_column,
+                    8ULL * 1024ULL * 1024ULL, /*encode_categorical_features=*/true,
+                    &baseline_encoding);
+                auto candidate_encoding = candidate->categorical_encoding;
+                const auto data_for_candidate = parse_tabular_csv(
+                    content->csv, content->target_column,
+                    8ULL * 1024ULL * 1024ULL, /*encode_categorical_features=*/true,
+                    &candidate_encoding);
                 const auto baseline_metrics =
-                    evaluate_tabular_model(*baseline, data);
+                    evaluate_tabular_model(*baseline, data_for_baseline);
                 const auto candidate_metrics =
-                    evaluate_tabular_model(*candidate, data);
+                    evaluate_tabular_model(*candidate, data_for_candidate);
                 const auto result_json = tabular_model_comparison_json(
                     *baseline, baseline_metrics, *candidate, candidate_metrics);
                 ml_comparison_results->put(id, result_json);
@@ -7181,12 +7811,28 @@ public:
             // swap. A role that can't reach a section (typed directly or
             // via a stale bookmark) is redirected to chat rather than shown
             // a page whose underlying API calls would 403 anyway.
-            if (target == "/app") {
-                return application_page(*user, "chat");
-            }
-            if (target.rfind("/app/chat/", 0U) == 0U) {
-                return application_page(*user, "chat",
-                                        target.substr(10U));
+            if (target == "/app" || target.rfind("/app/chat/", 0U) == 0U) {
+                // Most recently created chat with a real (model-derived,
+                // not the "New chat" placeholder) title -- fed to the
+                // empty-state greeting so a returning user can be reminded
+                // what they were last doing (see chat_welcome_message's own
+                // comment). Only meaningful on the empty-state landing
+                // ("/app" or a chat URL with no messages yet loaded), but
+                // harmless to compute either way.
+                std::string last_chat_title;
+                std::uint64_t last_chat_created_at = 0U;
+                for (const auto& chat : chats->list_for_owner(user->id)) {
+                    if (chat.title.empty() || chat.title == "New chat") continue;
+                    if (chat.created_at_epoch_seconds >= last_chat_created_at) {
+                        last_chat_created_at = chat.created_at_epoch_seconds;
+                        last_chat_title = chat.title;
+                    }
+                }
+                if (target == "/app") {
+                    return application_page(*user, "chat", "", last_chat_title);
+                }
+                return application_page(*user, "chat", target.substr(10U),
+                                        last_chat_title);
             }
             if (target == "/app/projects") {
                 return can_manage_settings
@@ -7830,14 +8476,68 @@ private:
     };
     TrainingExecution execute_training_job(
         const TrainingJob& job, const DatasetContentStore::Content& content,
-        const TabularTrainingOptions& options, const std::string& user_id) {
+        const TabularTrainingOptions& requested_options, const std::string& user_id) {
+        // Phase 46 (this pass): a fresh run (no warm_start here -- fine-
+        // tuning/checkpoint-resume below inherit architecture through
+        // train_tabular_model()'s own warm_start handling instead) picks up
+        // this job's Model Builder configuration, if any, so a real MLP
+        // architecture/optimizer/schedule genuinely drives training instead
+        // of ModelBuilderSettings staying a read-only record. A job with no
+        // matching ModelBuilderConfig (the overwhelmingly common case --
+        // most training jobs are created directly, not via Model Builder)
+        // gets requested_options back unchanged.
+        const TabularTrainingOptions options = resolve_training_architecture(
+            *ml_model_builder_configs, job.id, requested_options);
         ml_training_jobs->set_status(job.id, TrainingJobStatus::queued);
         ml_training_jobs->set_status(job.id, TrainingJobStatus::preparing);
         TrainedTabularModel model;
         TabularTrainingReport report;
+        // Phase 95: max_runtime_seconds/failure_recovery_strategy are
+        // genuinely enforced here, not just recorded -- see TrainingJob's
+        // comment in masterai.hpp for why these two (and not
+        // compute_target/hardware_allocation/... below them) are the ones
+        // this in-process executor can honestly act on.
+        const std::chrono::steady_clock::time_point deadline =
+            job.max_runtime_seconds > 0U
+                ? std::chrono::steady_clock::now() +
+                      std::chrono::seconds(job.max_runtime_seconds)
+                : std::chrono::steady_clock::time_point::max();
+        const std::uint32_t max_attempts =
+            job.failure_recovery_strategy == "retry_once" ? 2U : 1U;
+        for (std::uint32_t attempt = 1U; attempt <= max_attempts; ++attempt) {
+        model = TrainedTabularModel{};
+        report = TabularTrainingReport{};
         try {
-            const auto data =
-                parse_tabular_csv(content.csv, content.target_column);
+            // A dataset registered with purpose "instruction" (LLM fine-
+            // tuning data, no target column) can never satisfy
+            // parse_tabular_csv below -- the web UI's Training Jobs dataset
+            // picker no longer offers one, but a direct API call can still
+            // reach here, so name the actual problem instead of letting it
+            // fall through to a confusing classification-validation error.
+            if (const auto dataset = ml_datasets->find(job.dataset_id);
+                dataset && dataset->purpose == "instruction") {
+                throw std::runtime_error(
+                    "dataset \"" + dataset->name +
+                    "\" is registered with purpose \"Instruction / "
+                    "fine-tuning text\", which has no target column -- "
+                    "tabular training needs a dataset registered with "
+                    "purpose \"Tabular data\" instead");
+            }
+            // Categorical feature encoding: a feature column that isn't
+            // purely numeric (e.g. a text "record_type" column) is one-hot
+            // encoded here rather than rejected -- see parse_tabular_csv's
+            // own comment in masterai.hpp for the fit/apply distinction.
+            // This is a genuine "fit" call (no pre-existing encoding is
+            // passed in): whatever scheme it settles on is captured into
+            // `model.categorical_encoding` below so evaluation/comparison/
+            // prediction against this exact model can reapply it later
+            // instead of each independently guessing its own.
+            CategoricalEncoding fitted_encoding;
+            const auto data = parse_tabular_csv(
+                content.csv, content.target_column,
+                8ULL * 1024ULL * 1024ULL, /*encode_categorical_features=*/true,
+                &fitted_encoding);
+            model.categorical_encoding = fitted_encoding;
             ml_training_jobs->set_status(job.id, TrainingJobStatus::running);
             // Phase 78 (this pass): real live progress -- begin() marks this
             // job in-flight for any concurrent GET .../live-progress poll on
@@ -7858,7 +8558,14 @@ private:
             // training crosses each stride boundary -- capped at ten
             // checkpoints so a 10000-epoch run doesn't flood the checkpoint
             // list, same cap the old post-hoc logic used.
-            std::size_t checkpoint_stride = options.checkpoint_interval;
+            // Phase 95: job.checkpoint_frequency_epochs, when set, overrides
+            // the Model Builder-derived options.checkpoint_interval above --
+            // an administrator tuning this specific job's checkpoint cadence
+            // without touching its (possibly shared) Model Builder config.
+            std::size_t checkpoint_stride =
+                job.checkpoint_frequency_epochs > 0U
+                    ? job.checkpoint_frequency_epochs
+                    : options.checkpoint_interval;
             if (checkpoint_stride > 0U && options.epochs > 0U) {
                 if (options.epochs / checkpoint_stride > 10U) {
                     checkpoint_stride = options.epochs / 10U;
@@ -7866,9 +8573,15 @@ private:
             }
             report = train_tabular_model(
                 data, options, model, nullptr,
-                [this, &job, &user_id, checkpoint_stride](
+                [this, &job, &user_id, checkpoint_stride, deadline](
                     const std::uint32_t epoch, const double loss,
                     const TrainedTabularModel& live_model) {
+                    if (std::chrono::steady_clock::now() > deadline) {
+                        throw std::runtime_error(
+                            "training exceeded max runtime of " +
+                            std::to_string(job.max_runtime_seconds) +
+                            " second(s) (timeout)");
+                    }
                     ml_training_progress.update(job.id, epoch, loss);
                     const std::uint32_t epoch_number = epoch + 1U;
                     if (checkpoint_stride > 0U &&
@@ -7887,8 +8600,21 @@ private:
                     }
                 });
         } catch (const std::exception&) {
+            // Phase 95: failure_recovery_strategy "retry_once" gets a
+            // genuine second attempt (status cycles back through
+            // queued/preparing/running from the top of the loop) before the
+            // job is actually marked failed -- only the last attempt's
+            // exception is what the job ultimately fails with.
+            if (attempt < max_attempts) {
+                ml_training_jobs->set_status(job.id, TrainingJobStatus::queued);
+                ml_training_jobs->set_status(job.id,
+                                             TrainingJobStatus::preparing);
+                continue;
+            }
             ml_training_jobs->set_status(job.id, TrainingJobStatus::failed);
             throw;
+        }
+        break;
         }
         std::string model_id = job.model_id;
         if (model_id.empty() || !ml_models->find(model_id)) {
@@ -7936,8 +8662,15 @@ private:
         TabularTrainingReport report;
         std::vector<std::string> checkpoint_ids;
         try {
-            const auto data =
-                parse_tabular_csv(content.csv, content.target_column);
+            // Fit categorical feature encoding fresh against this
+            // experiment's own dataset -- see execute_training_job's
+            // identical comment above.
+            CategoricalEncoding fitted_encoding;
+            const auto data = parse_tabular_csv(
+                content.csv, content.target_column,
+                8ULL * 1024ULL * 1024ULL, /*encode_categorical_features=*/true,
+                &fitted_encoding);
+            model.categorical_encoding = fitted_encoding;
             std::size_t checkpoint_stride = options.checkpoint_interval;
             if (checkpoint_stride > 0U && options.epochs > 0U) {
                 if (options.epochs / checkpoint_stride > 10U) {
@@ -8025,8 +8758,18 @@ private:
         TrainedTabularModel model;
         TabularTrainingReport report;
         try {
-            const auto data =
-                parse_tabular_csv(content.csv, content.target_column);
+            // Apply mode: the fine-tuning dataset's categorical feature
+            // columns must line up with the base model's already-trained
+            // feature layout (warm_start continues its exact weight
+            // matrix), so this reuses base_model.categorical_encoding
+            // rather than fitting a fresh one -- see parse_tabular_csv's
+            // own comment in masterai.hpp.
+            auto applied_encoding = base_model.categorical_encoding;
+            const auto data = parse_tabular_csv(
+                content.csv, content.target_column,
+                8ULL * 1024ULL * 1024ULL, /*encode_categorical_features=*/true,
+                &applied_encoding);
+            model.categorical_encoding = base_model.categorical_encoding;
             ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::running);
             // Phase 79: same up-front stride + real weight-snapshot capture
             // execute_training_job uses above -- see its comment for why the
@@ -8099,8 +8842,14 @@ private:
             throw std::runtime_error(
                 "checkpoint has no captured weight snapshot to resume from");
         }
-        const auto data = parse_tabular_csv(content.csv, content.target_column);
+        // Apply mode: resume must stay on the checkpoint's exact feature
+        // layout -- see execute_fine_tuning_job's identical comment above.
+        auto applied_encoding = snapshot->categorical_encoding;
+        const auto data = parse_tabular_csv(
+            content.csv, content.target_column, 8ULL * 1024ULL * 1024ULL,
+            /*encode_categorical_features=*/true, &applied_encoding);
         TrainedTabularModel model;
+        model.categorical_encoding = snapshot->categorical_encoding;
         std::size_t checkpoint_stride = options.checkpoint_interval;
         if (checkpoint_stride > 0U && options.epochs > 0U) {
             if (options.epochs / checkpoint_stride > 10U) {
@@ -8170,8 +8919,138 @@ private:
             const auto merged_entry = ml_models->create(
                 user_id, job.name + "-model", job.name + " (LoRA fine-tuned)",
                 "1", base_model_entry.family, base_model_entry.task,
-                "gguf-lora-merged", result.merged_gguf.string(), "");
+                "gguf-lora-merged", result.merged_gguf.string(), "",
+                base_model_entry.quantization);
             ml_models->set_state(merged_entry.id, ModelRegistryState::evaluation);
+            // Promote the merged GGUF into the real model catalog (the
+            // manifest.json + verification-cache structure find_model()/
+            // ModelRegistry::scan() actually reads for chat/inference) so
+            // it's genuinely usable, not only tracked as ML-pipeline
+            // metadata -- ml_models->create() above registers it for the
+            // ML pipeline's own bookkeeping, but that alone was never
+            // visible to (or loadable by) the chat model picker. Two
+            // sources for architecture/quantization/RAM/license, in order
+            // of preference: the base model's own real catalog manifest
+            // (find_model() succeeds) when it has one; otherwise
+            // ModelRegistryEntry's own fields (whatever a human put on
+            // record when they manually registered that base model) plus
+            // a real size-derived RAM estimate -- see
+            // self_produced_derivative's comment in models.cpp for the
+            // matching validation-side exception this relies on. Best-
+            // effort: any failure here (disk full, permissions, an
+            // unsanitizable field, ...) still leaves the job "completed"
+            // with its real merged GGUF and ML Registry entry intact, just
+            // not catalog-promoted, named in catalogNote.
+            std::string catalog_model_id;
+            std::string catalog_note;
+            try {
+                const auto base_record = find_model(base_model_entry.id);
+                // is_safe_identifier (models.cpp) requires alnum/-/_/.
+                // only, non-empty, <=96 chars -- a manually-registered
+                // ModelRegistryEntry's free-text fields aren't guaranteed
+                // to satisfy that, so a value that doesn't gets replaced
+                // with "unknown" rather than silently truncated/mangled
+                // into something that misrepresents it.
+                const auto safe_or_unknown = [](const std::string& value) {
+                    const bool ok = !value.empty() && value.size() <= 96U &&
+                        value.front() != '.' && value.back() != '.' &&
+                        std::all_of(value.begin(), value.end(), [](const char c) {
+                            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                                   (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+                                   c == '.';
+                        });
+                    return ok ? value : std::string("unknown");
+                };
+                const std::string category =
+                    base_record ? base_record->manifest.category : "conversation";
+                const std::string architecture = base_record
+                    ? base_record->manifest.architecture
+                    : safe_or_unknown(base_model_entry.family);
+                const std::string quantization = base_record
+                    ? base_record->manifest.quantization
+                    : safe_or_unknown(base_model_entry.quantization);
+                const std::string license_id =
+                    base_record ? base_record->manifest.license_id : base_model_entry.license;
+                if (license_id.empty()) {
+                    throw std::runtime_error(
+                        "base model \"" + base_model_entry.id +
+                        "\" has no license on record to inherit (its "
+                        "License field was left blank when it was "
+                        "registered) -- set one on that Model Registry "
+                        "entry, then re-run this fine-tuning job");
+                }
+                catalog_model_id = "finetuned-" + job.id;
+                const auto catalog_directory =
+                    configuration.models_root / category / catalog_model_id;
+                const auto catalog_file = catalog_directory / "model.gguf";
+                std::filesystem::create_directories(catalog_directory);
+                std::filesystem::copy_file(
+                    result.merged_gguf, catalog_file,
+                    std::filesystem::copy_options::overwrite_existing);
+                const auto sha256 = sha256_file_hex(catalog_file);
+                const auto size_bytes =
+                    static_cast<std::uint64_t>(std::filesystem::file_size(catalog_file));
+                // load_manifest() (models.cpp) only accepts a source_url
+                // starting with one of three real download hosts, or the
+                // "masterai-finetune:" marker its self_produced_derivative
+                // exception recognizes. The base's own real source_url is
+                // used when known (honestly naming where the base weights
+                // this is a LoRA derivative of came from); otherwise the
+                // marker, which is what makes the license/source_url
+                // exception above apply during the next scan().
+                const std::string source_url =
+                    base_record ? base_record->manifest.source_url
+                               : "masterai-finetune:" + job.id;
+                const std::string revision = base_record
+                    ? base_record->manifest.source_revision + "-lora-" + job.id
+                    : job.id;
+                std::uint64_t minimum_ram_mib = 0U;
+                std::uint64_t recommended_ram_mib = 0U;
+                if (base_record) {
+                    minimum_ram_mib = base_record->manifest.minimum_ram_mib;
+                    recommended_ram_mib = base_record->manifest.recommended_ram_mib;
+                } else {
+                    // No verified RAM figure exists for a manually-
+                    // registered base, so this is computed directly from
+                    // the merged file's own real size on disk (file size
+                    // plus a fixed runtime/context overhead) rather than
+                    // asserted -- an honest estimate, not a fabricated
+                    // authoritative number.
+                    const std::uint64_t size_mib =
+                        (size_bytes + 1024ULL * 1024ULL - 1ULL) / (1024ULL * 1024ULL);
+                    minimum_ram_mib = size_mib + 512ULL;
+                    recommended_ram_mib = size_mib + 1024ULL;
+                }
+                write_model_manifest(
+                    catalog_directory, catalog_model_id,
+                    job.name + " (LoRA fine-tuned)", category, architecture,
+                    quantization, minimum_ram_mib, recommended_ram_mib,
+                    "model.gguf", size_bytes, sha256, source_url, revision,
+                    license_id);
+                record_verified_model(configuration.models_root,
+                                      catalog_model_id, sha256, size_bytes);
+            } catch (const std::exception& error) {
+                catalog_model_id.clear();
+                catalog_note =
+                    std::string("merged GGUF was not promoted to the "
+                                "model catalog: ") + error.what();
+            }
+            // Non-fatal caution, not a hard block: llama.cpp's finetune
+            // tooling backpropagates against the base GGUF's real weights,
+            // so a base quantized below full/near-full precision (anything
+            // other than F32/F16/BF16/Q8_0) trains against already-lossy
+            // values -- the run still completes and produces a real adapter,
+            // but its quality is unreliable, so the job result names this
+            // honestly instead of only naming it in documentation.
+            const std::string quantization_warning =
+                base_model_entry.quantization.empty() ||
+                        llm_finetune_safe_quantization(base_model_entry.quantization)
+                    ? std::string{}
+                    : "base model quantization \"" + base_model_entry.quantization +
+                          "\" is below the precision LoRA fine-tuning "
+                          "reliably works against (F32, F16, BF16, or "
+                          "Q8_0 recommended); the adapter was still trained, "
+                          "but review its evaluation results carefully";
             const std::string result_json =
                 "{\"status\":\"completed\",\"jobId\":\"" + json_escape(job.id) +
                 "\",\"modelId\":\"" + json_escape(merged_entry.id) +
@@ -8180,7 +9059,11 @@ private:
                 "\",\"finetuneLogTail\":\"" +
                 json_escape(result.finetune_log_tail) +
                 "\",\"exportLoraLogTail\":\"" +
-                json_escape(result.export_lora_log_tail) + "\"}";
+                json_escape(result.export_lora_log_tail) +
+                "\",\"quantizationWarning\":\"" +
+                json_escape(quantization_warning) +
+                "\",\"catalogModelId\":\"" + json_escape(catalog_model_id) +
+                "\",\"catalogNote\":\"" + json_escape(catalog_note) + "\"}";
             ml_llm_finetune_results->put(job.id, result_json);
             ml_fine_tuning_jobs->set_status(
                 job.id, FineTuningJobStatus::awaiting_evaluation);
@@ -8206,9 +9089,18 @@ private:
         const DatasetContentStore::Content& content) {
         ml_evaluation_runs->set_status(run.id, EvaluationRunStatus::running);
         try {
-            const auto data =
-                parse_tabular_csv(content.csv, content.target_column);
-            const auto metrics = evaluate_tabular_model(model, data);
+            // Apply mode: the benchmark dataset's categorical feature
+            // columns must be expanded using the exact scheme the model
+            // was trained with (a fresh fit here could pick a different
+            // category order, or a different category set entirely, and
+            // silently score against the wrong feature layout) -- see
+            // parse_tabular_csv's own comment in masterai.hpp.
+            auto applied_encoding = model.categorical_encoding;
+            const auto data = parse_tabular_csv(
+                content.csv, content.target_column, 8ULL * 1024ULL * 1024ULL,
+                /*encode_categorical_features=*/true, &applied_encoding);
+            const auto metrics = evaluate_tabular_model(
+                model, data, run.sensitive_feature_name);
             const auto metrics_json = tabular_evaluation_metrics_json(metrics);
             ml_evaluation_results->put(run.id, metrics_json);
             ml_evaluation_runs->set_status(run.id,
@@ -8355,8 +9247,10 @@ private:
                 return {"failed", "dataset has no uploaded content"};
             }
             try {
-                const auto data =
-                    parse_tabular_csv(content->csv, content->target_column);
+                const auto data = parse_tabular_csv(
+                    content->csv, content->target_column,
+                    8ULL * 1024ULL * 1024ULL,
+                    /*encode_categorical_features=*/true);
                 return {"completed",
                         "dataset has " + std::to_string(data.features.size()) +
                             " valid row(s) and " +
@@ -8594,6 +9488,10 @@ private:
                 const auto report = clean_tabular_csv(content->csv);
                 ml_dataset_content->put(pipeline.dataset_id, report.csv,
                                         content->target_column);
+                record_dataset_content_upload(*ml_datasets,
+                                              *ml_dataset_versions,
+                                              pipeline.dataset_id, report.csv,
+                                              user_id);
                 return {"completed",
                         std::to_string(report.rows_before) +
                             " row(s) before, " +
@@ -8639,6 +9537,10 @@ private:
                     auto_label_tabular_dataset(content->csv, content->target_column);
                 ml_dataset_content->put(pipeline.dataset_id, report.csv,
                                         content->target_column);
+                record_dataset_content_upload(*ml_datasets,
+                                              *ml_dataset_versions,
+                                              pipeline.dataset_id, report.csv,
+                                              user_id);
                 const auto task = ml_label_tasks->create(
                     user_id, pipeline.dataset_id,
                     pipeline.name + " (automated labeling)",
@@ -9567,6 +10469,39 @@ private:
         return std::nullopt;
     }
 
+    // Fine-tuning jobs and model builder configs both take a "base model"
+    // id that, until now, had to already be a Model Registry (ml_models)
+    // entry -- the only source their creation endpoints checked. That left
+    // no way to pick a model the user has actually downloaded into the
+    // local model catalog (find_model(), GET /api/v1/models) as a training
+    // base without a separate manual registration step first. This
+    // resolves either source transparently: an existing Model Registry id
+    // is returned as-is, and a catalog model id that isn't registered yet
+    // gets a matching ModelRegistryEntry created on the spot -- "source"
+    // pointed at the real GGUF file on disk, exactly what the "llm:"
+    // fine-tuning executor (POST .../fine-tuning-jobs/{id}/run) requires
+    // of a base model's registry entry. An id matching neither source is
+    // returned unchanged so the caller's own existing not-found handling
+    // (ml_models->create/find inside the create call, or the /run guard)
+    // still reports it. An empty id (both base-model fields are optional)
+    // is likewise returned unchanged.
+    std::string resolve_or_register_base_model(const std::string& user_id,
+                                                const std::string& model_id) {
+        if (model_id.empty() || ml_models->find(model_id)) return model_id;
+        const auto catalog_model = find_model(model_id);
+        if (!catalog_model) return model_id;
+        const auto& manifest = catalog_model->manifest;
+        const auto file_path = catalog_model->directory / manifest.model_file;
+        const auto entry = ml_models->create(
+            user_id, manifest.id,
+            manifest.display_name.empty() ? manifest.id
+                                          : manifest.display_name,
+            manifest.source_revision.empty() ? "1" : manifest.source_revision,
+            manifest.architecture, "text-generation", manifest.format,
+            file_path.string(), manifest.license_id, manifest.quantization);
+        return entry.id;
+    }
+
     // Phase 61 resolves VectorStore::embedding_model into one of exactly two
     // executor paths. The authored method stays dependency-free; any other
     // value must be the id of a verified GGUF in the dedicated embeddings
@@ -10052,6 +10987,18 @@ private:
         const std::string& model_id, const std::string& project_id,
         const std::string& required_capability = "generation") const {
         if (runner_pool == nullptr || runner_pool->empty()) return {};
+        // Phase 20 (this pass): AppConfig::local_runner_pool being non-empty
+        // constructs runner_pool below, but only the AdvancedOptimization
+        // Registry's "multiple_warm_runners" admission actually turns pool
+        // routing on for live traffic -- a configured-but-not-yet-admitted
+        // pool (the default, since admission requires an administrator to
+        // record real per-host evidence first) behaves exactly like no pool
+        // at all: every caller here falls back to the single default
+        // `inference` supervisor, unaffected by this pass.
+        if (advanced_optimizations == nullptr ||
+            !advanced_optimizations->is_enabled("multiple_warm_runners")) {
+            return {};
+        }
         RunnerSelectionSignals signals;
         signals.model_id = model_id;
         signals.required_capability = required_capability;
@@ -10827,6 +11774,153 @@ private:
         }
     }
 
+    // A fourth hallucination shape: a small local model emitting a bare
+    // Python/function-call-style attempt with no "[[" prefix at all, e.g.
+    // "list_directory('f:/projects/masterai/models')" or the same wrapped in
+    // a fake argument list like "[..., list_directory('path')]" (as seen in
+    // the field). Unlike find_bare_tool_call_span() this isn't valid JSON, so
+    // it never matches that pass, and unlike find_stray_pseudo_tool_call_span()
+    // it has no "[[" marker to anchor on -- without this pass, the whole
+    // fragment (stray commas/brackets included) leaked straight into the
+    // visible chat bubble as garbled, unexecuted text. Positional arguments
+    // here can't be reliably mapped onto named JSON fields, so -- matching
+    // find_stray_pseudo_tool_call_span()'s policy -- this is stripped, never
+    // executed. Scans for a known tool name immediately followed by "(" or
+    // "{", not itself immediately preceded by "[[" (that shape is already
+    // handled, and executed when well-formed, by the passes above).
+    static std::optional<std::pair<std::size_t, std::size_t>>
+    find_bare_unmarked_call_span(const std::string& text) {
+        std::size_t search_from = 0U;
+        while (true) {
+            const char* matched_name = nullptr;
+            std::size_t name_pos = std::string::npos;
+            for (const char* known : kKnownToolNames) {
+                const auto pos = text.find(known, search_from);
+                if (pos != std::string::npos &&
+                    (name_pos == std::string::npos || pos < name_pos)) {
+                    // Require a real identifier boundary before the name (not
+                    // a letter/digit/underscore) so this never matches inside
+                    // a longer word that merely contains a tool's name.
+                    if (pos == 0U ||
+                        (!std::isalnum(static_cast<unsigned char>(
+                             text[pos - 1U])) &&
+                         text[pos - 1U] != '_')) {
+                        name_pos = pos;
+                        matched_name = known;
+                    }
+                }
+            }
+            if (matched_name == nullptr) return std::nullopt;
+            const auto args_pos = name_pos + std::strlen(matched_name);
+            const bool already_marked =
+                name_pos >= 2U && text.compare(name_pos - 2U, 2U, "[[") == 0;
+            if (already_marked || args_pos >= text.size() ||
+                (text[args_pos] != '(' && text[args_pos] != '{')) {
+                search_from = name_pos + 1U;
+                continue;
+            }
+            const char open_char = text[args_pos];
+            const char close_char = open_char == '(' ? ')' : '}';
+            int depth = 0;
+            bool in_string = false;
+            char string_quote = '\0';
+            bool escape = false;
+            std::size_t args_end = std::string::npos;
+            for (std::size_t i = args_pos; i < text.size(); ++i) {
+                const char c = text[i];
+                if (in_string) {
+                    if (escape) { escape = false; }
+                    else if (c == '\\') { escape = true; }
+                    else if (c == string_quote) { in_string = false; }
+                    continue;
+                }
+                if (c == '\'' || c == '"') { in_string = true; string_quote = c; continue; }
+                if (c == open_char) { ++depth; }
+                else if (c == close_char) {
+                    --depth;
+                    if (depth == 0) { args_end = i + 1U; break; }
+                }
+            }
+            if (args_end == std::string::npos) {
+                return std::make_pair(name_pos, text.size());
+            }
+            // Absorb immediately-adjacent list-literal punctuation left over
+            // from a fake "[call(...), call(...)]" array attempt (a leading
+            // ", " / "[" and a trailing ", " / "]") so no orphaned bracket
+            // debris is left visible either side of the removed call.
+            auto span_start = name_pos;
+            while (span_start > 0U &&
+                  (text[span_start - 1U] == ' ' || text[span_start - 1U] == '\t')) {
+                --span_start;
+            }
+            if (span_start > 0U &&
+               (text[span_start - 1U] == ',' || text[span_start - 1U] == '[')) {
+                --span_start;
+                while (span_start > 0U &&
+                      (text[span_start - 1U] == ' ' || text[span_start - 1U] == '\t')) {
+                    --span_start;
+                }
+            }
+            auto span_end = args_end;
+            while (span_end < text.size() &&
+                  (text[span_end] == ' ' || text[span_end] == '\t')) {
+                ++span_end;
+            }
+            if (span_end < text.size() &&
+               (text[span_end] == ',' || text[span_end] == ']')) {
+                ++span_end;
+            }
+            return std::make_pair(span_start, span_end);
+        }
+    }
+
+    // A sixth hallucination shape: a small local model blending the
+    // "[[name...]]" marker convention with a pipe-delimited positional-
+    // argument call syntax it saw in training, e.g.
+    // "[[list_directory|\"/path/to/project\"]]". Neither
+    // find_stray_pseudo_tool_call_span() (which requires a "{" or "("
+    // immediately after the name) nor find_bare_unmarked_call_span() (which
+    // skips anything already preceded by "[[") recognizes this shape, so it
+    // used to leak straight into the visible chat bubble as raw, unexecuted
+    // text. Like the other stray-call passes, positional pipe-separated
+    // arguments can't be reliably mapped onto named JSON fields, so this is
+    // stripped, never executed -- it exists purely so the text never reaches
+    // the user unexplained.
+    static std::optional<std::pair<std::size_t, std::size_t>>
+    find_stray_pipe_call_span(const std::string& text) {
+        std::size_t search_from = 0U;
+        while (true) {
+            const auto open_pos = text.find("[[", search_from);
+            if (open_pos == std::string::npos) return std::nullopt;
+            const auto name_start = open_pos + 2U;
+            const char* matched_name = nullptr;
+            for (const char* known : kKnownToolNames) {
+                const std::string_view name_view{known};
+                if (text.compare(name_start, name_view.size(), name_view) ==
+                    0) {
+                    matched_name = known;
+                    break;
+                }
+            }
+            if (matched_name == nullptr) {
+                search_from = open_pos + 2U;
+                continue;
+            }
+            const auto pipe_pos = name_start + std::strlen(matched_name);
+            if (pipe_pos >= text.size() || text[pipe_pos] != '|') {
+                search_from = open_pos + 2U;
+                continue;
+            }
+            const auto close_pos = text.find("]]", pipe_pos);
+            if (close_pos == std::string::npos) {
+                // Unterminated -- strip to the end of the text rather than
+                // leave a dangling fragment visible.
+                return std::make_pair(open_pos, text.size());
+            }
+            return std::make_pair(open_pos, close_pos + 2U);
+        }
+    }
+
     // Shared by both passes of detect_and_strip_tool_call() below (the
     // marker-delimited body and the marker-less fallback span) so the parse
     // logic exists in exactly one place.
@@ -10892,6 +11986,20 @@ private:
         while (const auto span = find_stray_pseudo_tool_call_span(text)) {
             text.erase(span->first, span->second - span->first);
         }
+        // Fifth defensive pass: strip any bare, unmarked
+        // "name(...)"/"name{...}" call attempt (see
+        // find_bare_unmarked_call_span()'s comment) -- also never
+        // executable, purely so it never leaks into the visible reply.
+        while (const auto span = find_bare_unmarked_call_span(text)) {
+            text.erase(span->first, span->second - span->first);
+        }
+        // Sixth and final defensive pass: strip any stray "[[name|args]]"
+        // pipe-delimited call attempt (see find_stray_pipe_call_span()'s
+        // comment) -- also never executable, purely so it never leaks into
+        // the visible reply.
+        while (const auto span = find_stray_pipe_call_span(text)) {
+            text.erase(span->first, span->second - span->first);
+        }
         while (!text.empty() &&
               (text.back() == '\n' || text.back() == '\r' ||
                text.back() == ' ' || text.back() == '\t')) {
@@ -10941,13 +12049,17 @@ private:
     // it was really a live-stream-only leak. Built once from the same
     // kKnownToolNames list: "[[read_file{", "[[read_file(",
     // "[[list_directory{", ... one literal open-bracket prefix per tool name
-    // per call-syntax variant a model might hallucinate.
+    // per call-syntax variant a model might hallucinate. Also covers the
+    // pipe-delimited "[[list_directory|" shape find_stray_pipe_call_span()
+    // strips from the completed reply -- without a matching prefix here it
+    // would flash raw on the live stream before that cleanup ever runs.
     static const std::vector<std::string>& stray_pseudo_tool_call_prefixes() {
         static const std::vector<std::string> prefixes = [] {
             std::vector<std::string> result;
             for (const char* name : kKnownToolNames) {
                 result.push_back(std::string("[[") + name + "{");
                 result.push_back(std::string("[[") + name + "(");
+                result.push_back(std::string("[[") + name + "|");
             }
             return result;
         }();
@@ -11350,6 +12462,68 @@ private:
                 "}}");
     }
 
+    // Phase 51 (this pass): a real LLM-as-judge grader, the same pattern
+    // scan_content_with_model_classifier() (ml_safety_scan.cpp) already
+    // proved for content-safety scoring -- a fixed, JSON-only judging
+    // prompt sent through execute_rag_generation(), parsed strictly, never
+    // trusted blind. Falls back to subject_exam_answer_matches()'s plain
+    // text-overlap heuristic (masterai.hpp/ml.cpp) whenever the judge call
+    // itself fails or its reply is not parseable JSON in the required
+    // shape -- an honest degrade, not a silent "assume correct". The
+    // returned `graded_by` ("llm_judge" | "heuristic_fallback") is
+    // persisted per question below so a reviewer can see exactly which
+    // grading path produced each result, never presenting a heuristic
+    // score as if a model judged it.
+    struct ExamAnswerJudgement {
+        bool correct{false};
+        double confidence{0.0};
+        std::string rationale;
+        std::string graded_by;
+    };
+    ExamAnswerJudgement judge_exam_answer(const std::string& target_model_id,
+                                          const std::string& question_text,
+                                          const std::string& expected_answer,
+                                          const std::string& answer_text) {
+        const std::string prompt =
+            "You are a strict exam grader. Judge whether ANSWER correctly "
+            "addresses QUESTION, using EXPECTED_ANSWER as the reference "
+            "for what a correct answer contains. Partial phrasing "
+            "differences are fine; missing or wrong substance is not. "
+            "Reply with ONLY one JSON object, no other text, in exactly "
+            "this shape: {\"correct\":true,\"confidence\":0.0,"
+            "\"rationale\":\"\"} where confidence is 0.0 (not confident) "
+            "to 1.0 (certain) and rationale is one short sentence.\n\n"
+            "QUESTION:\n" + question_text + "\n\nEXPECTED_ANSWER:\n" +
+            expected_answer + "\n\nANSWER:\n" + answer_text;
+        try {
+            const auto reply = execute_rag_generation(target_model_id, prompt).text;
+            const auto open = reply.find('{');
+            const auto close = reply.rfind('}');
+            if (open == std::string::npos || close == std::string::npos || close < open) {
+                throw std::runtime_error("judge reply did not contain a JSON object");
+            }
+            const auto root = parse_json(reply.substr(open, close - open + 1U));
+            ExamAnswerJudgement judgement;
+            judgement.correct = root.required("correct").as_boolean();
+            if (const auto* confidence = root.optional("confidence")) {
+                judgement.confidence = confidence->as_double();
+            }
+            if (const auto* rationale = root.optional("rationale")) {
+                judgement.rationale = rationale->as_string();
+            }
+            judgement.graded_by = "llm_judge";
+            return judgement;
+        } catch (const std::exception& error) {
+            ExamAnswerJudgement judgement;
+            judgement.correct = subject_exam_answer_matches(answer_text, expected_answer);
+            judgement.rationale =
+                std::string("LLM judge unavailable (") + error.what() +
+                "); fell back to text-overlap heuristic";
+            judgement.graded_by = "heuristic_fallback";
+            return judgement;
+        }
+    }
+
     // Phase 51: docs/PLAN.md "Machine Learning Abilities" section 24
     // (Subject Examination System). A member function (not a file-scope
     // free function like run_model_optimization()/run_model_builder_
@@ -11360,18 +12534,17 @@ private:
     // class are members rather than free functions. For each configured
     // question, asks `target_model_id` for a real answer via that same
     // non-chat generation path Phase 76's RAG route and Phase 74's
-    // classifier scan already use, then scores the answer with
-    // subject_exam_answer_matches() -- a plain, inspectable text-overlap
-    // heuristic (masterai.hpp/ml.cpp), deliberately NOT an "AI grading"
-    // claim; this codebase has no LLM-judge scoring path wired for this
-    // purpose, so none is fabricated. A question the model fails to
-    // answer (execute_rag_generation throws, e.g. the model is not
-    // loadable) counts as failed, not skipped, so an exam cannot pass by
-    // silently omitting hard questions. Does not touch the exam's own
-    // SubjectExamStatus -- that five-state field is a reviewer-approval
-    // lifecycle for the exam's authored content, not a run lifecycle, and
-    // an approved exam may legitimately be run many times against
-    // different models without its approval status changing.
+    // classifier scan already use, then grades it with judge_exam_answer()
+    // above -- a real LLM-as-judge with an honest heuristic fallback, not a
+    // fabricated "AI grading" claim layered over the old heuristic-only
+    // path. A question the model fails to answer (execute_rag_generation
+    // throws, e.g. the model is not loadable) counts as failed, not
+    // skipped, so an exam cannot pass by silently omitting hard questions.
+    // Does not touch the exam's own SubjectExamStatus -- that five-state
+    // field is a reviewer-approval lifecycle for the exam's authored
+    // content, not a run lifecycle, and an approved exam may legitimately
+    // be run many times against different models without its approval
+    // status changing.
     struct SubjectExamRunOutcome {
         std::string status;  // "completed" | "failed"
         std::string detail;
@@ -11419,11 +12592,19 @@ private:
         for (const auto& question : questions) {
             bool ok = false;
             std::string answer_text;
+            std::string graded_by = "heuristic_fallback";
+            double judge_confidence = 0.0;
+            std::string judge_rationale;
             try {
                 answer_text = execute_rag_generation(target_model_id,
                                                      question.first)
                                   .text;
-                ok = subject_exam_answer_matches(answer_text, question.second);
+                const auto judgement = judge_exam_answer(
+                    target_model_id, question.first, question.second, answer_text);
+                ok = judgement.correct;
+                graded_by = judgement.graded_by;
+                judge_confidence = judgement.confidence;
+                judge_rationale = judgement.rationale;
             } catch (const std::exception&) {
                 ok = false;
             }
@@ -11434,7 +12615,11 @@ private:
                            ",\"expectedAnswer\":" +
                            json_string(question.second) + ",\"answer\":" +
                            json_string(answer_text) + ",\"passed\":" +
-                           (ok ? "true" : "false") + "}";
+                           (ok ? "true" : "false") + ",\"gradedBy\":" +
+                           json_string(graded_by) + ",\"judgeConfidence\":" +
+                           std::to_string(judge_confidence) +
+                           ",\"judgeRationale\":" +
+                           json_string(judge_rationale) + "}";
         }
         detail_json += "]";
         outcome.questions_total = questions.size();
@@ -12851,6 +14036,19 @@ private:
                     }
                     return response(200, "OK", event.substr(0U, event.size() - 1U));
                 }
+                // Sent to the client *before* the tool actually runs (rather
+                // than bundled with tool_result_event only once it's done)
+                // so a slow tool -- a broad search, a long-running
+                // run_command -- shows "Running <tool>..." on screen right
+                // away instead of leaving the chat looking frozen for
+                // however long the call takes.
+                const std::string tool_call_event =
+                    "{\"type\":\"tool_call\",\"tool\":\"" +
+                    json_escape(tool_call->tool_name) + "\",\"arguments\":" +
+                    json_stringify(tool_call->arguments) + "}\n";
+                if (streaming) {
+                    send_chunk(stream_socket, tool_call_event);
+                }
                 const auto project = projects->find(chat->project_id);
                 std::atomic_bool tool_cancellation{false};
                 const auto outcome =
@@ -12876,21 +14074,25 @@ private:
                     "[Tool result for " + tool_call->tool_name + "]\n" +
                     outcome.result_text;
                 chats->append(chat_id, ChatRole::user, tool_result_turn);
-                const std::string tool_call_event =
-                    "{\"type\":\"tool_call\",\"tool\":\"" +
-                    json_escape(tool_call->tool_name) + "\",\"arguments\":" +
-                    json_stringify(tool_call->arguments) + "}\n";
                 const std::string tool_result_event =
                     "{\"type\":\"tool_result\",\"tool\":\"" +
                     json_escape(tool_call->tool_name) + "\",\"succeeded\":" +
                     std::string(outcome.succeeded ? "true" : "false") +
                     ",\"result\":" + outcome.structured_json + "}\n";
                 if (streaming) {
-                    send_chunk(stream_socket, tool_call_event);
                     send_chunk(stream_socket, tool_result_event);
+                    // "content" carries generated.text *after*
+                    // detect_and_strip_tool_call() cleaned it above -- the
+                    // client's own live-streamed buffer still has the raw,
+                    // pre-cleanup text (including any stray hallucinated
+                    // tool-call fragments), so it swaps this in before doing
+                    // its final markdown render. See readTurnStream()'s
+                    // 'complete' handler in web_ui.cpp.
                     send_chunk(
                         stream_socket,
-                        "{\"type\":\"complete\",\"promptTokens\":" +
+                        "{\"type\":\"complete\",\"content\":\"" +
+                            json_escape(generated.text) +
+                            "\",\"promptTokens\":" +
                             std::to_string(generated.prompt_tokens) +
                             ",\"generatedTokens\":" +
                             std::to_string(generated.generated_tokens) +
@@ -12917,10 +14119,43 @@ private:
                         std::to_string(generated.elapsed_microseconds) +
                         ",\"requestId\":\"" + json_escape(query_id) + "\"}");
             }
+            // A model can still hallucinate a tool-call attempt in a chat
+            // where tools genuinely aren't available (no project bound, not
+            // auto-drive) -- detect_and_strip_tool_call() above already
+            // stripped that text from the reply either way (see its own
+            // comment), but until now the attempt itself vanished with it:
+            // the user was left staring at a reply that trailed off with no
+            // explanation. Surface it as its own notice card instead, naming
+            // the tool/arguments the model tried and telling the user how to
+            // unblock it (bind a project, or just answer with the path/
+            // detail directly) -- streaming-only since the non-streaming
+            // response path returns one JSON object with no room for a
+            // second event.
+            if (streaming && tool_call_detected.has_value() &&
+                !tool_call.has_value()) {
+                const std::string tool_notice_event =
+                    "{\"type\":\"tool_notice\",\"tool\":\"" +
+                    json_escape(tool_call_detected->tool_name) +
+                    "\",\"arguments\":" +
+                    json_stringify(tool_call_detected->arguments) +
+                    ",\"message\":\"The model tried to use the " +
+                    json_escape(tool_call_detected->tool_name) +
+                    " tool, but this chat has no project bound and isn't "
+                    "running auto-drive, so tools aren't available here. "
+                    "Bind a project to this chat, or just tell me the "
+                    "path/details directly and I'll continue.\"}\n";
+                send_chunk(stream_socket, tool_notice_event);
+            }
             if (streaming) {
+                // "content" carries generated.text after
+                // detect_and_strip_tool_call() cleaned it above -- see the
+                // matching comment on the tool-call branch's "complete"
+                // event a few lines up for why the client needs this.
                 send_chunk(
                     stream_socket,
-                    "{\"type\":\"complete\",\"promptTokens\":" +
+                    "{\"type\":\"complete\",\"content\":\"" +
+                        json_escape(generated.text) +
+                        "\",\"promptTokens\":" +
                         std::to_string(generated.prompt_tokens) +
                         ",\"generatedTokens\":" +
                         std::to_string(generated.generated_tokens) +
@@ -13098,6 +14333,28 @@ private:
             // fails closed on a tool that requires an argument it can't find.
         }
 
+        const std::string tool_call_event =
+            "{\"type\":\"tool_call\",\"tool\":\"" +
+            json_escape(approval->tool_name) + "\",\"arguments\":" +
+            json_stringify(arguments) + "}\n";
+        // Header and the "running" event go out before the tool actually
+        // executes (matching the ordinary, non-approval tool-call path
+        // above) so an approved-but-slow tool -- a run_command that takes a
+        // while, say -- shows "Running <tool>..." immediately rather than
+        // leaving the chat looking frozen until it's done.
+        if (stream_socket != invalid_socket) {
+            const std::string header =
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/x-ndjson; charset=utf-8\r\n"
+                "Transfer-Encoding: chunked\r\nConnection: close\r\n"
+                "Cache-Control: no-store\r\n"
+                "X-Content-Type-Options: nosniff\r\n"
+                "X-Frame-Options: DENY\r\n"
+                "Referrer-Policy: no-referrer\r\n\r\n";
+            if (!send_all(stream_socket, header)) return {};
+            send_chunk(stream_socket, tool_call_event);
+        }
+
         std::string result_text;
         std::string structured_json;
         bool succeeded = false;
@@ -13129,26 +14386,12 @@ private:
             "[Tool result for " + approval->tool_name + "]\n" + result_text;
         chats->append(chat_id, ChatRole::user, tool_result_turn);
 
-        const std::string tool_call_event =
-            "{\"type\":\"tool_call\",\"tool\":\"" +
-            json_escape(approval->tool_name) + "\",\"arguments\":" +
-            json_stringify(arguments) + "}\n";
         const std::string tool_result_event =
             "{\"type\":\"tool_result\",\"tool\":\"" +
             json_escape(approval->tool_name) + "\",\"succeeded\":" +
             std::string(succeeded ? "true" : "false") +
             ",\"result\":" + structured_json + "}\n";
         if (stream_socket != invalid_socket) {
-            const std::string header =
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: application/x-ndjson; charset=utf-8\r\n"
-                "Transfer-Encoding: chunked\r\nConnection: close\r\n"
-                "Cache-Control: no-store\r\n"
-                "X-Content-Type-Options: nosniff\r\n"
-                "X-Frame-Options: DENY\r\n"
-                "Referrer-Policy: no-referrer\r\n\r\n";
-            if (!send_all(stream_socket, header)) return {};
-            send_chunk(stream_socket, tool_call_event);
             send_chunk(stream_socket, tool_result_event);
             send_chunk(stream_socket,
                       "{\"type\":\"complete\",\"promptTokens\":0,"
@@ -13244,6 +14487,8 @@ private:
     // Phase 56: the real ML execution layer's stores -- uploaded dataset
     // content, learned weight artifacts, and executed evaluation results.
     std::unique_ptr<DatasetContentStore> ml_dataset_content;
+    // Phase 94: Dataset Versioning (docs/PLAN.md section 11).
+    std::unique_ptr<DatasetVersionStore> ml_dataset_versions;
     std::unique_ptr<TrainedModelStore> ml_trained_models;
     std::unique_ptr<EvaluationResultStore> ml_evaluation_results;
     std::unique_ptr<FineTuningRunResultStore> ml_llm_finetune_results;

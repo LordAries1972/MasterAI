@@ -189,13 +189,19 @@ SpeculativeDecodingPairEvidenceStore::SpeculativeDecodingPairEvidenceStore(
     RecordStore& records)
     : records_(&records) {
     for (const auto& item : records_->list("speculative_decoding_pairs")) {
-        if (item.first.size() != 129U || item.first[64] != '|') {
+        // No separator: both halves are always exactly 64 hex chars, so the
+        // split point is unambiguous, and this keeps the key at exactly 128
+        // characters -- RecordStore::safe_name()'s 128-char/alnum-plus-
+        // "._-" policy would otherwise reject the previous "target|draft"
+        // key (129 chars, and "|" isn't an allowed character) on every
+        // single record() call.
+        if (item.first.size() != 128U) {
             throw std::runtime_error(
                 "persisted speculative-decoding pair record is malformed");
         }
         PairRecord record;
         record.target_model_sha256 = item.first.substr(0U, 64U);
-        record.draft_model_sha256 = item.first.substr(65U);
+        record.draft_model_sha256 = item.first.substr(64U);
         record.acceptance_rate = std::stod(item.second);
         pairs_[item.first] = record;
     }
@@ -204,7 +210,7 @@ SpeculativeDecodingPairEvidenceStore::SpeculativeDecodingPairEvidenceStore(
 std::string SpeculativeDecodingPairEvidenceStore::pair_key(
     const std::string& target_model_sha256,
     const std::string& draft_model_sha256) {
-    return target_model_sha256 + "|" + draft_model_sha256;
+    return target_model_sha256 + draft_model_sha256;
 }
 
 void SpeculativeDecodingPairEvidenceStore::record(

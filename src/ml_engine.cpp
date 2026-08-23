@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <set>
@@ -110,6 +111,117 @@ double parse_number_field(const std::string& text) {
     }
 }
 
+// Phase 46: appended AFTER TrainedModelStore/CheckpointModelStore's
+// original fixed-header-plus-counted-sections layout (see their own
+// comments) rather than inserted into it, so a record written before this
+// pass -- which has none of these trailing fields -- still parses exactly
+// as it always did; read_hidden_layers_fields() below only looks past
+// `original_field_count` when there is anything left to look at. Shared by
+// both stores so the two persisted formats can never drift apart.
+void append_hidden_layers_fields(std::vector<std::string>& fields,
+                                 const TrainedTabularModel& model) {
+    fields.push_back(std::to_string(model.hidden_layers.size()));
+    fields.push_back(model.activation);
+    for (const auto& layer : model.hidden_layers) {
+        fields.push_back(std::to_string(layer.size()));
+        for (const auto& row : layer) {
+            fields.push_back(std::to_string(row.size()));
+            for (const auto weight : row) fields.push_back(number_field(weight));
+        }
+    }
+}
+
+// Returns the cursor position just past the fields it consumed (a
+// pre-Phase-46 record with none of these trailing fields returns
+// `original_field_count` unchanged) instead of asserting it lands exactly
+// on `fields.size()` -- this block is no longer necessarily the last
+// thing in the record now that categorical-encoding fields (see
+// append_categorical_encoding_fields()/read_categorical_encoding_fields()
+// below) can follow it, so only the very last reader in the chain still
+// checks for genuine trailing garbage.
+std::size_t read_hidden_layers_fields(const std::vector<std::string>& fields,
+                                      const std::size_t original_field_count,
+                                      TrainedTabularModel& model) {
+    if (fields.size() <= original_field_count) return original_field_count;
+    std::size_t cursor = original_field_count;
+    const auto next_count = [&]() {
+        if (cursor >= fields.size()) {
+            throw std::runtime_error("persisted MLP architecture is truncated");
+        }
+        return static_cast<std::size_t>(std::stoull(fields[cursor++]));
+    };
+    const auto layer_count = next_count();
+    if (cursor >= fields.size()) {
+        throw std::runtime_error("persisted MLP architecture is truncated");
+    }
+    model.activation = fields[cursor++];
+    model.hidden_layers.assign(layer_count, {});
+    for (std::size_t l = 0; l < layer_count; ++l) {
+        const auto neuron_count = next_count();
+        model.hidden_layers[l].assign(neuron_count, {});
+        for (std::size_t n = 0; n < neuron_count; ++n) {
+            const auto width = next_count();
+            std::vector<double> row;
+            row.reserve(width);
+            for (std::size_t w = 0; w < width; ++w) row.push_back(parse_number_field(fields[cursor++]));
+            model.hidden_layers[l][n] = std::move(row);
+        }
+    }
+    return cursor;
+}
+
+// Categorical-encoding fields (ML dataset categorical feature encoding
+// pass): appended after the hidden-layer fields above, following the same
+// "extend past the end, tolerate a shorter pre-existing record" contract
+// -- see append_hidden_layers_fields's own comment. A record written
+// before this pass has no trailing fields here at all, which
+// read_categorical_encoding_fields below reads back as a model with an
+// empty categorical_encoding, exactly correct since such a model never
+// saw a categorical column.
+void append_categorical_encoding_fields(std::vector<std::string>& fields,
+                                        const TrainedTabularModel& model) {
+    fields.push_back(std::to_string(model.categorical_encoding.columns.size()));
+    for (const auto& [name, categories] : model.categorical_encoding.columns) {
+        fields.push_back(name);
+        fields.push_back(std::to_string(categories.size()));
+        for (const auto& value : categories) fields.push_back(value);
+    }
+}
+
+// Returns the cursor position just past the fields it consumed; the
+// caller checks that this lands exactly on fields.size() since this is
+// currently the last block in the record.
+std::size_t read_categorical_encoding_fields(const std::vector<std::string>& fields,
+                                             const std::size_t original_field_count,
+                                             TrainedTabularModel& model) {
+    if (fields.size() <= original_field_count) return original_field_count;
+    std::size_t cursor = original_field_count;
+    const auto next_count = [&]() {
+        if (cursor >= fields.size()) {
+            throw std::runtime_error("persisted categorical encoding is truncated");
+        }
+        return static_cast<std::size_t>(std::stoull(fields[cursor++]));
+    };
+    const auto column_count = next_count();
+    for (std::size_t c = 0; c < column_count; ++c) {
+        if (cursor >= fields.size()) {
+            throw std::runtime_error("persisted categorical encoding is truncated");
+        }
+        const auto name = fields[cursor++];
+        const auto category_count = next_count();
+        std::vector<std::string> categories;
+        categories.reserve(category_count);
+        for (std::size_t v = 0; v < category_count; ++v) {
+            if (cursor >= fields.size()) {
+                throw std::runtime_error("persisted categorical encoding is truncated");
+            }
+            categories.push_back(fields[cursor++]);
+        }
+        model.categorical_encoding.columns[name] = std::move(categories);
+    }
+    return cursor;
+}
+
 // One CSV line -> fields, honoring double-quoted fields with "" escapes.
 // Deliberately line-scoped: multi-line quoted fields are rejected upstream
 // because a tabular training cell is always a single number or label.
@@ -141,6 +253,35 @@ std::vector<std::string> split_csv_line(const std::string& line) {
     }
     fields.push_back(field);
     return fields;
+}
+
+// Splits CSV text into logical records, honoring quoted fields that
+// legitimately contain embedded newlines (e.g. multi-paragraph scraped
+// article text used as an instruction-tuning "text"/"output" cell) -- a raw
+// split on '\n' would otherwise chop one row into several broken ones.
+// Blank records are dropped, matching every caller's prior line-splitting
+// behavior.
+std::vector<std::string> split_csv_records(const std::string& csv) {
+    std::vector<std::string> records;
+    std::string record;
+    bool quoted = false;
+    for (const char character : csv) {
+        if (character == '"') quoted = !quoted;
+        if (character == '\n' && !quoted) {
+            if (!record.empty() && record.find_first_not_of(" \t\r") !=
+                                        std::string::npos) {
+                records.push_back(record);
+            }
+            record.clear();
+        } else {
+            record += character;
+        }
+    }
+    if (!record.empty() &&
+        record.find_first_not_of(" \t\r") != std::string::npos) {
+        records.push_back(record);
+    }
+    return records;
 }
 
 std::string trim(const std::string& value) {
@@ -199,6 +340,45 @@ std::vector<double> standardize(const TrainedTabularModel& model,
     return standardized;
 }
 
+// Phase 46: activation functions for the real MLP hidden layers. Unknown/
+// empty names fall back to relu, the safest default for a freshly
+// configured architecture.
+double activate(const std::string& name, const double x) {
+    if (name == "tanh") return std::tanh(x);
+    if (name == "sigmoid") return 1.0 / (1.0 + std::exp(-x));
+    return x > 0.0 ? x : 0.0;  // relu (default)
+}
+
+// Derivative of activate() with respect to its pre-activation input `x`,
+// expressed in terms of the already-computed activation `y = activate(x)`
+// (standard backprop convenience -- avoids recomputing exp/tanh).
+double activate_derivative(const std::string& name, const double y) {
+    if (name == "tanh") return 1.0 - y * y;
+    if (name == "sigmoid") return y * (1.0 - y);
+    return y > 0.0 ? 1.0 : 0.0;  // relu
+}
+
+// Phase 46: forwards standardized input features through every hidden
+// layer in order, applying `model.activation` after each one. Returns the
+// unchanged input when `model.hidden_layers` is empty, so every existing
+// caller (compute_metrics, predict_tabular) that was written before hidden
+// layers existed keeps behaving identically for a classic linear model --
+// this is the one seam that lets the whole rest of the persistence/
+// evaluation/checkpoint/comparison/pruning infrastructure work unchanged
+// for both model shapes.
+std::vector<double> forward_hidden(const TrainedTabularModel& model,
+                                   const std::vector<double>& standardized) {
+    std::vector<double> current = standardized;
+    for (const auto& layer : model.hidden_layers) {
+        std::vector<double> next(layer.size());
+        for (std::size_t neuron = 0; neuron < layer.size(); ++neuron) {
+            next[neuron] = activate(model.activation, score_row(layer[neuron], current));
+        }
+        current = std::move(next);
+    }
+    return current;
+}
+
 // Shared by training and standalone evaluation so both report identical
 // metric definitions. `standardized` holds pre-standardized feature rows.
 TabularEvaluationMetrics compute_metrics(
@@ -215,9 +395,10 @@ TabularEvaluationMetrics compute_metrics(
                                  std::vector<std::size_t>(class_count, 0U));
         std::size_t correct = 0U;
         for (std::size_t row = 0; row < standardized.size(); ++row) {
+            const auto hidden = forward_hidden(model, standardized[row]);
             std::vector<double> logits(class_count);
             for (std::size_t klass = 0; klass < class_count; ++klass) {
-                logits[klass] = score_row(model.weights[klass], standardized[row]);
+                logits[klass] = score_row(model.weights[klass], hidden);
             }
             const auto predicted = static_cast<std::size_t>(
                 std::max_element(logits.begin(), logits.end()) - logits.begin());
@@ -260,7 +441,8 @@ TabularEvaluationMetrics compute_metrics(
         double absolute_error = 0.0;
         double target_sum = 0.0;
         for (std::size_t row = 0; row < standardized.size(); ++row) {
-            const double predicted = score_row(model.weights[0], standardized[row]);
+            const double predicted =
+                score_row(model.weights[0], forward_hidden(model, standardized[row]));
             const double error = predicted - targets[row];
             squared_error += error * error;
             absolute_error += std::abs(error);
@@ -312,29 +494,88 @@ std::string number_array_json(const std::vector<double>& values) {
     return result + "]";
 }
 
+// Phase 46: the real MLP architecture, for trained_tabular_model_summary_json
+// -- empty for every plain linear/logistic/softmax model (before this pass
+// and after it, for a config with no hidden layers alike).
+std::string hidden_layer_sizes_json(const TrainedTabularModel& model) {
+    std::string result = "[";
+    for (std::size_t index = 0; index < model.hidden_layers.size(); ++index) {
+        if (index > 0U) result += ",";
+        result += std::to_string(model.hidden_layers[index].size());
+    }
+    return result + "]";
+}
+
 }  // namespace
+
+DatasetContentMetrics compute_dataset_content_metrics(const std::string& csv) {
+    DatasetContentMetrics metrics;
+    metrics.content_hash = sha256_hex(csv);
+    const auto lines = split_csv_records(csv);
+    if (lines.empty()) return metrics;
+    const auto header = split_csv_line(trim(lines.front()));
+    std::vector<bool> column_is_numeric(header.size(), true);
+    std::vector<std::vector<std::string>> rows;
+    rows.reserve(lines.size() > 0 ? lines.size() - 1U : 0U);
+    std::size_t non_empty_cells = 0U;
+    std::size_t total_cells = 0U;
+    for (std::size_t index = 1U; index < lines.size(); ++index) {
+        auto cells = split_csv_line(lines[index]);
+        cells.resize(header.size());
+        for (std::size_t column = 0U; column < header.size(); ++column) {
+            const auto& cell = cells[column];
+            ++total_cells;
+            if (!cell.empty()) ++non_empty_cells;
+            double parsed = 0.0;
+            if (!cell.empty() && !parse_double(cell, parsed)) {
+                column_is_numeric[column] = false;
+            }
+        }
+        rows.push_back(std::move(cells));
+    }
+    metrics.record_count = rows.size();
+    std::string schema;
+    for (std::size_t column = 0U; column < header.size(); ++column) {
+        if (!schema.empty()) schema += ",";
+        schema += header[column] + ":" +
+                  (column_is_numeric[column] ? "numeric" : "categorical");
+    }
+    metrics.schema_summary = schema;
+    if (rows.size() > 1U) {
+        std::set<std::string> seen;
+        std::size_t duplicates = 0U;
+        for (const auto& row : rows) {
+            std::string joined;
+            for (const auto& cell : row) joined += cell + "\x1f";
+            if (!seen.insert(joined).second) ++duplicates;
+        }
+        metrics.duplicate_rate =
+            static_cast<double>(duplicates) / static_cast<double>(rows.size());
+    }
+    const double non_null_ratio =
+        total_cells > 0U
+            ? static_cast<double>(non_empty_cells) / static_cast<double>(total_cells)
+            : 0.0;
+    metrics.data_quality_score =
+        rows.empty() ? 0.0 : non_null_ratio * (1.0 - metrics.duplicate_rate);
+    return metrics;
+}
 
 TabularDataset parse_tabular_csv(const std::string& csv,
                                  const std::string& target_column,
-                                 const std::uint64_t maximum_csv_bytes) {
+                                 const std::uint64_t maximum_csv_bytes,
+                                 const bool encode_categorical_features,
+                                 CategoricalEncoding* const encoding) {
     if (csv.size() > maximum_csv_bytes) {
         throw std::runtime_error(
             "dataset content exceeds the configured " +
             std::to_string(maximum_csv_bytes / (1024ULL * 1024ULL)) +
             " MiB limit");
     }
-    // Split into non-empty lines; \r is trimmed per cell so both LF and
-    // CRLF files parse identically.
-    std::vector<std::string> lines;
-    std::size_t position = 0U;
-    while (position <= csv.size()) {
-        const auto newline = csv.find('\n', position);
-        const auto end = newline == std::string::npos ? csv.size() : newline;
-        std::string line = csv.substr(position, end - position);
-        if (!trim(line).empty()) lines.push_back(std::move(line));
-        if (newline == std::string::npos) break;
-        position = newline + 1U;
-    }
+    // Split into non-empty logical records (quote-aware, so a multi-line
+    // quoted cell doesn't get chopped into broken rows); \r is trimmed per
+    // cell so both LF and CRLF files parse identically.
+    const auto lines = split_csv_records(csv);
     if (lines.size() < 3U) {
         throw std::runtime_error(
             "dataset needs a header row and at least two data rows");
@@ -357,42 +598,168 @@ TabularDataset parse_tabular_csv(const std::string& csv,
     }
     TabularDataset data;
     data.target_name = header[target_index];
-    for (std::size_t column = 0; column < header.size(); ++column) {
-        if (column != target_index) data.feature_names.push_back(header[column]);
-    }
-    // First pass: collect raw cells and decide the task from the target
-    // column (all-numeric -> regression, anything else -> classification).
     std::vector<std::string> raw_targets;
     raw_targets.reserve(lines.size() - 1U);
     bool numeric_target = true;
-    for (std::size_t row = 1; row < lines.size(); ++row) {
-        auto cells = split_csv_line(lines[row]);
-        if (cells.size() != header.size()) {
-            throw std::runtime_error(
-                "row " + std::to_string(row + 1U) + " has " +
-                std::to_string(cells.size()) + " cells but the header has " +
-                std::to_string(header.size()));
+    if (!encode_categorical_features) {
+        // Original strict path, unchanged: every feature column must be
+        // numeric or the whole upload/parse is rejected. Kept as its own
+        // branch (not folded into the categorical-aware path below) so
+        // every caller that doesn't opt in -- every caller before this
+        // capability existed -- gets byte-identical behavior, including
+        // error precedence when a CSV has more than one problem at once.
+        for (std::size_t column = 0; column < header.size(); ++column) {
+            if (column != target_index) data.feature_names.push_back(header[column]);
         }
-        std::vector<double> features;
-        features.reserve(data.feature_names.size());
-        for (std::size_t column = 0; column < cells.size(); ++column) {
-            const auto cell = trim(cells[column]);
-            if (column == target_index) {
-                double numeric = 0.0;
-                if (!parse_double(cell, numeric)) numeric_target = false;
-                raw_targets.push_back(cell);
-                continue;
-            }
-            double value = 0.0;
-            if (!parse_double(cell, value)) {
+        for (std::size_t row = 1; row < lines.size(); ++row) {
+            auto cells = split_csv_line(lines[row]);
+            if (cells.size() != header.size()) {
                 throw std::runtime_error(
-                    "feature column \"" + header[column] + "\" has non-numeric value \"" +
-                    cell + "\" in row " + std::to_string(row + 1U) +
-                    "; every feature column must be numeric");
+                    "row " + std::to_string(row + 1U) + " has " +
+                    std::to_string(cells.size()) + " cells but the header has " +
+                    std::to_string(header.size()));
             }
-            features.push_back(value);
+            std::vector<double> features;
+            features.reserve(data.feature_names.size());
+            for (std::size_t column = 0; column < cells.size(); ++column) {
+                const auto cell = trim(cells[column]);
+                if (column == target_index) {
+                    double numeric = 0.0;
+                    if (!parse_double(cell, numeric)) numeric_target = false;
+                    raw_targets.push_back(cell);
+                    continue;
+                }
+                double value = 0.0;
+                if (!parse_double(cell, value)) {
+                    throw std::runtime_error(
+                        "feature column \"" + header[column] + "\" has non-numeric value \"" +
+                        cell + "\" in row " + std::to_string(row + 1U) +
+                        "; every feature column must be numeric");
+                }
+                features.push_back(value);
+            }
+            data.features.push_back(std::move(features));
         }
-        data.features.push_back(std::move(features));
+    } else {
+        // Categorical-aware path: a feature column that isn't purely
+        // numeric is one-hot encoded instead of rejected -- see this
+        // function's declaration comment in masterai.hpp for the fit/apply
+        // distinction `encoding` drives. Needs two passes over the data
+        // rows (unlike the strict path above) because a categorical
+        // column's one-hot slots can only be sized once every row's raw
+        // value for it is known (fit mode) -- the same reason the
+        // classification target's label set below is collected before any
+        // row's target index is assigned.
+        std::vector<std::size_t> feature_columns;
+        for (std::size_t column = 0; column < header.size(); ++column) {
+            if (column != target_index) feature_columns.push_back(column);
+        }
+        std::vector<std::vector<std::string>> raw_feature_cells;
+        raw_feature_cells.reserve(lines.size() - 1U);
+        for (std::size_t row = 1; row < lines.size(); ++row) {
+            auto cells = split_csv_line(lines[row]);
+            if (cells.size() != header.size()) {
+                throw std::runtime_error(
+                    "row " + std::to_string(row + 1U) + " has " +
+                    std::to_string(cells.size()) + " cells but the header has " +
+                    std::to_string(header.size()));
+            }
+            std::vector<std::string> row_features;
+            row_features.reserve(feature_columns.size());
+            for (std::size_t column = 0; column < cells.size(); ++column) {
+                const auto cell = trim(cells[column]);
+                if (column == target_index) {
+                    double numeric = 0.0;
+                    if (!parse_double(cell, numeric)) numeric_target = false;
+                    raw_targets.push_back(cell);
+                } else {
+                    row_features.push_back(cell);
+                }
+            }
+            raw_feature_cells.push_back(std::move(row_features));
+        }
+        // Decide, per feature column, whether it is numeric or categorical.
+        const bool applying = encoding != nullptr && !encoding->empty();
+        std::vector<bool> column_is_categorical(feature_columns.size(), false);
+        std::vector<std::vector<std::string>> column_categories(feature_columns.size());
+        for (std::size_t index = 0; index < feature_columns.size(); ++index) {
+            const auto& name = header[feature_columns[index]];
+            if (applying) {
+                const auto found = encoding->columns.find(name);
+                if (found != encoding->columns.end()) {
+                    column_is_categorical[index] = true;
+                    column_categories[index] = found->second;
+                    continue;
+                }
+            }
+            bool all_numeric = true;
+            std::set<std::string> unique_values;
+            for (const auto& row : raw_feature_cells) {
+                double probe = 0.0;
+                if (!parse_double(row[index], probe)) all_numeric = false;
+                unique_values.insert(row[index]);
+            }
+            if (!all_numeric) {
+                column_is_categorical[index] = true;
+                column_categories[index].assign(unique_values.begin(), unique_values.end());
+            }
+        }
+        // Build the final feature name list, expanding each categorical
+        // column into one "columnName=value" slot per category, in the
+        // same left-to-right order the header used.
+        std::vector<std::size_t> feature_slot_start(feature_columns.size());
+        for (std::size_t index = 0; index < feature_columns.size(); ++index) {
+            const auto& name = header[feature_columns[index]];
+            feature_slot_start[index] = data.feature_names.size();
+            if (column_is_categorical[index]) {
+                for (const auto& value : column_categories[index]) {
+                    data.feature_names.push_back(name + "=" + value);
+                }
+            } else {
+                data.feature_names.push_back(name);
+            }
+        }
+        data.features.reserve(raw_feature_cells.size());
+        for (std::size_t row = 0; row < raw_feature_cells.size(); ++row) {
+            std::vector<double> features(data.feature_names.size(), 0.0);
+            for (std::size_t index = 0; index < feature_columns.size(); ++index) {
+                const auto& cell = raw_feature_cells[row][index];
+                const auto slot = feature_slot_start[index];
+                if (column_is_categorical[index]) {
+                    const auto& categories = column_categories[index];
+                    const auto found =
+                        std::find(categories.begin(), categories.end(), cell);
+                    if (found == categories.end()) {
+                        throw std::runtime_error(
+                            "feature column \"" + header[feature_columns[index]] +
+                            "\" has value \"" + cell + "\" in row " +
+                            std::to_string(row + 2U) +
+                            " that was not seen while training this model");
+                    }
+                    features[slot + static_cast<std::size_t>(
+                                        found - categories.begin())] = 1.0;
+                } else {
+                    double value = 0.0;
+                    if (!parse_double(cell, value)) {
+                        throw std::runtime_error(
+                            "feature column \"" + header[feature_columns[index]] +
+                            "\" has non-numeric value \"" + cell + "\" in row " +
+                            std::to_string(row + 2U) +
+                            "; every feature column must be numeric");
+                    }
+                    features[slot] = value;
+                }
+            }
+            data.features.push_back(std::move(features));
+        }
+        if (encoding != nullptr && !applying) {
+            for (std::size_t index = 0; index < feature_columns.size(); ++index) {
+                if (column_is_categorical[index]) {
+                    encoding->columns[header[feature_columns[index]]] =
+                        column_categories[index];
+                }
+            }
+        }
     }
     data.classification = !numeric_target;
     if (data.classification) {
@@ -604,16 +971,7 @@ std::string jsonl_to_csv(const std::string& jsonl_text) {
 
 TabularAutoLabelReport auto_label_tabular_dataset(const std::string& csv,
                                                   const std::string& target_column) {
-    std::vector<std::string> raw_lines;
-    std::size_t position = 0U;
-    while (position <= csv.size()) {
-        const auto newline = csv.find('\n', position);
-        const auto end = newline == std::string::npos ? csv.size() : newline;
-        raw_lines.push_back(csv.substr(position, end - position));
-        if (newline == std::string::npos) break;
-        position = newline + 1U;
-    }
-    if (raw_lines.size() > 1U && trim(raw_lines.back()).empty()) raw_lines.pop_back();
+    const auto raw_lines = split_csv_records(csv);
     if (raw_lines.size() < 2U) {
         throw std::runtime_error("dataset needs a header row and at least one data row");
     }
@@ -802,6 +1160,21 @@ TabularPruneReport prune_tabular_model(TrainedTabularModel& model,
             if (weight == 0.0) ++report.weights_pruned;
         }
     }
+    // Phase 46: a hidden-layer MLP has real weights here too -- pruning only
+    // the output layer and leaving every hidden-layer weight untouched
+    // would silently under-report both the total and pruned counts for
+    // these models.
+    for (auto& layer : model.hidden_layers) {
+        for (auto& row : layer) {
+            for (auto& weight : row) {
+                ++report.weights_total;
+                if (std::abs(weight) < threshold) {
+                    weight = 0.0;
+                }
+                if (weight == 0.0) ++report.weights_pruned;
+            }
+        }
+    }
     return report;
 }
 
@@ -872,7 +1245,29 @@ TabularTrainingReport train_tabular_model(
             throw std::runtime_error(
                 "fine-tuning dataset labels do not match the base model");
         }
+        if (warm_start->hidden_layers.empty() && !options.hidden_layer_sizes.empty()) {
+            throw std::runtime_error(
+                "fine-tuning dataset requests an MLP architecture but the base "
+                "model is a plain linear/logistic/softmax model; architecture "
+                "cannot change during fine-tuning");
+        }
     }
+    // Phase 46: fine-tuning/checkpoint-resume of an already-trained MLP
+    // always continues that exact architecture -- warm_start->hidden_layers
+    // wins over options.hidden_layer_sizes here, the same way its already-
+    // learned weights (not zero-init) win below. A caller that omits
+    // options.hidden_layer_sizes when resuming an MLP still gets the right
+    // architecture; one that specifies a *different* shape is silently
+    // overridden to the base model's real shape, not rejected, matching how
+    // warm_start's weights already take priority over fresh init.
+    std::vector<std::uint32_t> effective_hidden_sizes = options.hidden_layer_sizes;
+    if (warm_start != nullptr && !warm_start->hidden_layers.empty()) {
+        effective_hidden_sizes.clear();
+        for (const auto& layer : warm_start->hidden_layers) {
+            effective_hidden_sizes.push_back(static_cast<std::uint32_t>(layer.size()));
+        }
+    }
+    const bool use_mlp = !effective_hidden_sizes.empty();
     const std::size_t row_count = data.features.size();
     const std::size_t feature_count = data.feature_names.size();
 
@@ -935,14 +1330,6 @@ TabularTrainingReport train_tabular_model(
     model.class_labels = data.class_labels;
     const std::size_t output_count =
         data.classification ? data.class_labels.size() : 1U;
-    model.method = !data.classification ? "linear_regression"
-                   : output_count == 2U ? "logistic_regression"
-                                        : "softmax_regression";
-    model.weights.assign(output_count, std::vector<double>(feature_count + 1U, 0.0));
-    // Warm start: continue gradient descent from the base model's learned
-    // weights instead of zero, so this run genuinely fine-tunes it rather
-    // than training a fresh model that happens to reuse the same code path.
-    if (warm_start != nullptr) model.weights = warm_start->weights;
 
     TabularTrainingReport report;
     report.train_rows = train_count;
@@ -950,56 +1337,402 @@ TabularTrainingReport train_tabular_model(
     report.loss_history.reserve(options.epochs);
     const double count = static_cast<double>(train_count);
 
-    // Full-batch gradient descent. Classification minimizes mean
-    // cross-entropy via softmax (2-class softmax is exactly logistic
-    // regression); regression minimizes mean squared error. Gradients are
-    // accumulated per epoch and applied once -- deterministic and stable
-    // for the tabular sizes this endpoint accepts.
-    for (std::uint32_t epoch = 0; epoch < options.epochs; ++epoch) {
-        std::vector<std::vector<double>> gradients(
-            output_count, std::vector<double>(feature_count + 1U, 0.0));
-        double loss = 0.0;
-        for (std::size_t row = 0; row < train_count; ++row) {
-            if (data.classification) {
-                std::vector<double> logits(output_count);
-                for (std::size_t klass = 0; klass < output_count; ++klass) {
-                    logits[klass] = score_row(model.weights[klass], train_rows[row]);
-                }
-                const auto probabilities = softmax(logits);
-                const auto actual = static_cast<std::size_t>(train_targets[row]);
-                loss += -std::log(std::max(probabilities[actual], 1e-12));
-                for (std::size_t klass = 0; klass < output_count; ++klass) {
-                    const double error =
-                        probabilities[klass] - (klass == actual ? 1.0 : 0.0);
-                    for (std::size_t column = 0; column < feature_count; ++column) {
-                        gradients[klass][column] += error * train_rows[row][column];
+    if (!use_mlp) {
+        // ---- Original path: unchanged from before Phase 46. ----
+        model.method = !data.classification ? "linear_regression"
+                       : output_count == 2U ? "logistic_regression"
+                                            : "softmax_regression";
+        model.weights.assign(output_count, std::vector<double>(feature_count + 1U, 0.0));
+        // Warm start: continue gradient descent from the base model's learned
+        // weights instead of zero, so this run genuinely fine-tunes it rather
+        // than training a fresh model that happens to reuse the same code path.
+        if (warm_start != nullptr) model.weights = warm_start->weights;
+
+        // Full-batch gradient descent. Classification minimizes mean
+        // cross-entropy via softmax (2-class softmax is exactly logistic
+        // regression); regression minimizes mean squared error. Gradients are
+        // accumulated per epoch and applied once -- deterministic and stable
+        // for the tabular sizes this endpoint accepts.
+        for (std::uint32_t epoch = 0; epoch < options.epochs; ++epoch) {
+            std::vector<std::vector<double>> gradients(
+                output_count, std::vector<double>(feature_count + 1U, 0.0));
+            double loss = 0.0;
+            for (std::size_t row = 0; row < train_count; ++row) {
+                if (data.classification) {
+                    std::vector<double> logits(output_count);
+                    for (std::size_t klass = 0; klass < output_count; ++klass) {
+                        logits[klass] = score_row(model.weights[klass], train_rows[row]);
                     }
-                    gradients[klass][feature_count] += error;
+                    const auto probabilities = softmax(logits);
+                    const auto actual = static_cast<std::size_t>(train_targets[row]);
+                    loss += -std::log(std::max(probabilities[actual], 1e-12));
+                    for (std::size_t klass = 0; klass < output_count; ++klass) {
+                        const double error =
+                            probabilities[klass] - (klass == actual ? 1.0 : 0.0);
+                        for (std::size_t column = 0; column < feature_count; ++column) {
+                            gradients[klass][column] += error * train_rows[row][column];
+                        }
+                        gradients[klass][feature_count] += error;
+                    }
+                } else {
+                    const double predicted = score_row(model.weights[0], train_rows[row]);
+                    const double error = predicted - train_targets[row];
+                    loss += error * error;
+                    for (std::size_t column = 0; column < feature_count; ++column) {
+                        gradients[0][column] += error * train_rows[row][column];
+                    }
+                    gradients[0][feature_count] += error;
                 }
-            } else {
-                const double predicted = score_row(model.weights[0], train_rows[row]);
-                const double error = predicted - train_targets[row];
-                loss += error * error;
-                for (std::size_t column = 0; column < feature_count; ++column) {
-                    gradients[0][column] += error * train_rows[row][column];
+            }
+            loss /= count;
+            for (std::size_t klass = 0; klass < output_count; ++klass) {
+                for (std::size_t column = 0; column <= feature_count; ++column) {
+                    model.weights[klass][column] -=
+                        options.learning_rate * gradients[klass][column] / count;
                 }
-                gradients[0][feature_count] += error;
+            }
+            if (!std::isfinite(loss)) {
+                throw std::runtime_error(
+                    "training diverged (non-finite loss); lower the learning rate");
+            }
+            report.loss_history.push_back(loss);
+            if (on_epoch) on_epoch(epoch, loss, model);
+        }
+    } else {
+        // ---- Phase 46: real MLP path -- mini-batch backprop through
+        // effective_hidden_sizes hidden layers into the same linear output
+        // layer (softmax/identity) the path above uses. ----
+        model.method = data.classification ? "mlp_classification" : "mlp_regression";
+        model.activation = (options.activation == "tanh" || options.activation == "sigmoid")
+                                ? options.activation : "relu";
+        const bool relu_like = model.activation != "tanh" && model.activation != "sigmoid";
+        std::string init_kind = options.initialisation;
+        if (init_kind != "he" && init_kind != "xavier" && init_kind != "uniform") {
+            init_kind = relu_like ? "he" : "xavier";
+        }
+        // He/Xavier-style fan-in scaled random init. A zero-initialized
+        // hidden layer would leave every neuron in that layer identical
+        // forever (the classic MLP symmetry problem), so -- unlike the
+        // plain path's deliberate zero-init above -- hidden and output
+        // layers always start from real random noise; only warm_start below
+        // ever overrides that. Seeded from `generator` (already seeded from
+        // options.seed), so a fixed seed reproduces the exact same run.
+        const auto init_layer = [&](const std::size_t neurons, const std::size_t inputs) {
+            const double fan_in = static_cast<double>(inputs > 0U ? inputs : 1U);
+            const double scale = init_kind == "he" ? std::sqrt(2.0 / fan_in)
+                                  : init_kind == "uniform" ? 1.0 / std::sqrt(fan_in)
+                                                            : std::sqrt(1.0 / fan_in);
+            std::normal_distribution<double> distribution(0.0, scale);
+            std::vector<std::vector<double>> layer(neurons, std::vector<double>(inputs + 1U, 0.0));
+            for (auto& row : layer) {
+                for (std::size_t index = 0; index < inputs; ++index) {
+                    row[index] = distribution(generator);
+                }
+            }
+            return layer;
+        };
+        model.hidden_layers.assign(effective_hidden_sizes.size(), {});
+        std::size_t previous_width = feature_count;
+        for (std::size_t layer_index = 0; layer_index < effective_hidden_sizes.size();
+             ++layer_index) {
+            model.hidden_layers[layer_index] =
+                init_layer(effective_hidden_sizes[layer_index], previous_width);
+            previous_width = effective_hidden_sizes[layer_index];
+        }
+        model.weights = init_layer(output_count, previous_width);
+        if (warm_start != nullptr) {
+            model.hidden_layers = warm_start->hidden_layers;
+            model.weights = warm_start->weights;
+        }
+        const std::size_t layer_count = model.hidden_layers.size();
+
+        const auto zero_like_layers =
+            [](const std::vector<std::vector<std::vector<double>>>& src) {
+                auto out = src;
+                for (auto& layer : out) {
+                    for (auto& row : layer) std::fill(row.begin(), row.end(), 0.0);
+                }
+                return out;
+            };
+        const auto zero_like_matrix = [](const std::vector<std::vector<double>>& src) {
+            auto out = src;
+            for (auto& row : out) std::fill(row.begin(), row.end(), 0.0);
+            return out;
+        };
+        auto hidden_velocity = zero_like_layers(model.hidden_layers);
+        auto hidden_m = zero_like_layers(model.hidden_layers);
+        auto hidden_v = zero_like_layers(model.hidden_layers);
+        auto output_velocity = zero_like_matrix(model.weights);
+        auto output_m = zero_like_matrix(model.weights);
+        auto output_v = zero_like_matrix(model.weights);
+        std::uint64_t adam_step = 0U;
+
+        // Applies one optimizer step to a single weight matrix in place.
+        // Shared by the output layer and every hidden layer below, so the
+        // optimizer choice is genuinely the same math everywhere in the
+        // network, not just at the output.
+        const auto apply_update = [&](std::vector<std::vector<double>>& weights,
+                                      const std::vector<std::vector<double>>& gradient,
+                                      std::vector<std::vector<double>>& velocity,
+                                      std::vector<std::vector<double>>& m,
+                                      std::vector<std::vector<double>>& v,
+                                      const double lr) {
+            for (std::size_t r = 0; r < weights.size(); ++r) {
+                for (std::size_t c = 0; c < weights[r].size(); ++c) {
+                    const double g = gradient[r][c];
+                    if (options.optimiser == "adam") {
+                        m[r][c] = 0.9 * m[r][c] + 0.1 * g;
+                        v[r][c] = 0.999 * v[r][c] + 0.001 * g * g;
+                        const double m_hat =
+                            m[r][c] / (1.0 - std::pow(0.9, static_cast<double>(adam_step)));
+                        const double v_hat =
+                            v[r][c] / (1.0 - std::pow(0.999, static_cast<double>(adam_step)));
+                        weights[r][c] -= lr * m_hat / (std::sqrt(v_hat) + 1e-8);
+                    } else if (options.optimiser == "sgd_momentum") {
+                        velocity[r][c] = 0.9 * velocity[r][c] + lr * g;
+                        weights[r][c] -= velocity[r][c];
+                    } else {
+                        weights[r][c] -= lr * g;
+                    }
+                }
+            }
+        };
+
+        // Forward-only mean loss over a held-out split, used only by early
+        // stopping below -- never dropout-perturbed, exactly the same
+        // deterministic forward path predict_tabular()/evaluate_tabular_
+        // model() use via forward_hidden().
+        const auto compute_loss = [&](const std::vector<std::vector<double>>& rows,
+                                      const std::vector<double>& targets) {
+            if (rows.empty()) return std::numeric_limits<double>::infinity();
+            double total = 0.0;
+            for (std::size_t row = 0; row < rows.size(); ++row) {
+                const auto hidden = forward_hidden(model, rows[row]);
+                if (data.classification) {
+                    std::vector<double> logits(output_count);
+                    for (std::size_t k = 0; k < output_count; ++k) {
+                        logits[k] = score_row(model.weights[k], hidden);
+                    }
+                    const auto probabilities = softmax(logits);
+                    const auto actual = static_cast<std::size_t>(targets[row]);
+                    total += -std::log(std::max(probabilities[actual], 1e-12));
+                } else {
+                    const double predicted = score_row(model.weights[0], hidden);
+                    const double error = predicted - targets[row];
+                    total += error * error;
+                }
+            }
+            return total / static_cast<double>(rows.size());
+        };
+
+        const double keep_prob = 1.0 - std::max(0.0, std::min(0.95, options.dropout));
+        const std::uint32_t effective_batch_size =
+            options.batch_size > 0U
+                ? std::min<std::uint32_t>(options.batch_size,
+                                          static_cast<std::uint32_t>(train_count))
+                : static_cast<std::uint32_t>(train_count);
+        const std::uint32_t accumulation_steps =
+            std::max<std::uint32_t>(1U, options.gradient_accumulation_steps);
+        std::vector<std::size_t> batch_order(train_count);
+        std::iota(batch_order.begin(), batch_order.end(), 0U);
+
+        double best_validation_loss = std::numeric_limits<double>::infinity();
+        std::uint32_t epochs_without_improvement = 0U;
+
+        for (std::uint32_t epoch = 0; epoch < options.epochs; ++epoch) {
+            std::shuffle(batch_order.begin(), batch_order.end(), generator);
+            double epoch_loss = 0.0;
+
+            // Learning-rate schedule, recomputed once per epoch.
+            double current_lr = options.learning_rate;
+            if (options.lr_schedule == "step") {
+                const std::uint32_t stage_width = std::max<std::uint32_t>(1U, options.epochs / 4U);
+                const std::uint32_t stage = std::min<std::uint32_t>(epoch / stage_width, 3U);
+                current_lr *= std::pow(0.5, static_cast<double>(stage));
+            } else if (options.lr_schedule == "cosine") {
+                current_lr *= 0.5 * (1.0 + std::cos(3.14159265358979323846 *
+                    static_cast<double>(epoch) / static_cast<double>(options.epochs)));
+            }
+
+            auto hidden_grad_accum = zero_like_layers(model.hidden_layers);
+            auto output_grad_accum = zero_like_matrix(model.weights);
+            std::uint32_t batches_since_update = 0U;
+
+            for (std::size_t batch_start = 0; batch_start < train_count;
+                 batch_start += effective_batch_size) {
+                const std::size_t batch_end =
+                    std::min(train_count, batch_start + static_cast<std::size_t>(effective_batch_size));
+                const std::size_t batch_rows = batch_end - batch_start;
+
+                auto hidden_grad = zero_like_layers(model.hidden_layers);
+                auto output_grad = zero_like_matrix(model.weights);
+
+                for (std::size_t offset = batch_start; offset < batch_end; ++offset) {
+                    const std::size_t row_index = batch_order[offset];
+
+                    // ---- forward ----
+                    std::vector<std::vector<double>> activations(layer_count + 1U);
+                    std::vector<std::vector<double>> raw_activations(layer_count);
+                    std::vector<std::vector<double>> dropout_masks(layer_count);
+                    activations[0] = train_rows[row_index];
+                    for (std::size_t l = 0; l < layer_count; ++l) {
+                        const auto& layer = model.hidden_layers[l];
+                        std::vector<double> raw(layer.size());
+                        for (std::size_t n = 0; n < layer.size(); ++n) {
+                            raw[n] = activate(model.activation,
+                                              score_row(layer[n], activations[l]));
+                        }
+                        raw_activations[l] = raw;
+                        std::vector<double> mask(layer.size(), 1.0);
+                        if (options.dropout > 0.0) {
+                            std::bernoulli_distribution keep(keep_prob);
+                            for (std::size_t n = 0; n < layer.size(); ++n) {
+                                mask[n] = keep(generator) ? 1.0 / keep_prob : 0.0;
+                                raw[n] *= mask[n];
+                            }
+                        }
+                        dropout_masks[l] = std::move(mask);
+                        activations[l + 1U] = std::move(raw);
+                    }
+                    const auto& final_hidden = activations[layer_count];
+
+                    // ---- output layer, loss, output delta ----
+                    std::vector<double> output_delta(output_count);
+                    if (data.classification) {
+                        std::vector<double> logits(output_count);
+                        for (std::size_t k = 0; k < output_count; ++k) {
+                            logits[k] = score_row(model.weights[k], final_hidden);
+                        }
+                        const auto probabilities = softmax(logits);
+                        const auto actual = static_cast<std::size_t>(train_targets[row_index]);
+                        epoch_loss += -std::log(std::max(probabilities[actual], 1e-12));
+                        for (std::size_t k = 0; k < output_count; ++k) {
+                            output_delta[k] = probabilities[k] - (k == actual ? 1.0 : 0.0);
+                        }
+                    } else {
+                        const double predicted = score_row(model.weights[0], final_hidden);
+                        const double error = predicted - train_targets[row_index];
+                        epoch_loss += error * error;
+                        output_delta[0] = error;
+                    }
+
+                    // ---- output layer gradient ----
+                    for (std::size_t k = 0; k < output_count; ++k) {
+                        for (std::size_t j = 0; j < final_hidden.size(); ++j) {
+                            output_grad[k][j] += output_delta[k] * final_hidden[j];
+                        }
+                        output_grad[k][final_hidden.size()] += output_delta[k];
+                    }
+
+                    // ---- backprop through hidden layers, output-to-input ----
+                    std::vector<double> next_delta = output_delta;
+                    std::vector<std::vector<double>> next_weights = model.weights;
+                    for (std::size_t l = layer_count; l-- > 0U;) {
+                        const auto& layer = model.hidden_layers[l];
+                        std::vector<double> delta(layer.size(), 0.0);
+                        for (std::size_t n = 0; n < layer.size(); ++n) {
+                            double sum = 0.0;
+                            for (std::size_t k = 0; k < next_weights.size(); ++k) {
+                                sum += next_delta[k] * next_weights[k][n];
+                            }
+                            delta[n] = sum *
+                                      activate_derivative(model.activation, raw_activations[l][n]) *
+                                      dropout_masks[l][n];
+                        }
+                        const auto& inputs_to_layer = activations[l];
+                        for (std::size_t n = 0; n < layer.size(); ++n) {
+                            for (std::size_t j = 0; j < inputs_to_layer.size(); ++j) {
+                                hidden_grad[l][n][j] += delta[n] * inputs_to_layer[j];
+                            }
+                            hidden_grad[l][n][inputs_to_layer.size()] += delta[n];
+                        }
+                        next_delta = delta;
+                        next_weights = layer;
+                    }
+                }
+
+                // Average this mini-batch's summed gradients, then fold into
+                // the accumulation window.
+                const double batch_scale = 1.0 / static_cast<double>(batch_rows);
+                for (auto& row : output_grad) for (auto& g : row) g *= batch_scale;
+                for (auto& layer : hidden_grad) for (auto& row : layer) for (auto& g : row) g *= batch_scale;
+                for (std::size_t r = 0; r < output_grad_accum.size(); ++r) {
+                    for (std::size_t c = 0; c < output_grad_accum[r].size(); ++c) {
+                        output_grad_accum[r][c] += output_grad[r][c];
+                    }
+                }
+                for (std::size_t l = 0; l < hidden_grad_accum.size(); ++l) {
+                    for (std::size_t r = 0; r < hidden_grad_accum[l].size(); ++r) {
+                        for (std::size_t c = 0; c < hidden_grad_accum[l][r].size(); ++c) {
+                            hidden_grad_accum[l][r][c] += hidden_grad[l][r][c];
+                        }
+                    }
+                }
+                ++batches_since_update;
+
+                const bool last_batch_of_epoch = batch_end >= train_count;
+                if (batches_since_update >= accumulation_steps || last_batch_of_epoch) {
+                    const double accum_scale = 1.0 / static_cast<double>(batches_since_update);
+                    for (auto& row : output_grad_accum) for (auto& g : row) g *= accum_scale;
+                    for (auto& layer : hidden_grad_accum) {
+                        for (auto& row : layer) for (auto& g : row) g *= accum_scale;
+                    }
+                    if (options.gradient_clip_norm > 0.0) {
+                        double sum_squares = 0.0;
+                        for (const auto& row : output_grad_accum) {
+                            for (const double g : row) sum_squares += g * g;
+                        }
+                        for (const auto& layer : hidden_grad_accum) {
+                            for (const auto& row : layer) {
+                                for (const double g : row) sum_squares += g * g;
+                            }
+                        }
+                        const double norm = std::sqrt(sum_squares);
+                        if (norm > options.gradient_clip_norm) {
+                            const double clip_scale = options.gradient_clip_norm / norm;
+                            for (auto& row : output_grad_accum) for (auto& g : row) g *= clip_scale;
+                            for (auto& layer : hidden_grad_accum) {
+                                for (auto& row : layer) for (auto& g : row) g *= clip_scale;
+                            }
+                        }
+                    }
+                    ++adam_step;
+                    apply_update(model.weights, output_grad_accum, output_velocity,
+                                output_m, output_v, current_lr);
+                    for (std::size_t l = 0; l < layer_count; ++l) {
+                        apply_update(model.hidden_layers[l], hidden_grad_accum[l],
+                                    hidden_velocity[l], hidden_m[l], hidden_v[l], current_lr);
+                    }
+                    hidden_grad_accum = zero_like_layers(model.hidden_layers);
+                    output_grad_accum = zero_like_matrix(model.weights);
+                    batches_since_update = 0U;
+                }
+            }
+
+            epoch_loss /= count;
+            if (!std::isfinite(epoch_loss)) {
+                throw std::runtime_error(
+                    "training diverged (non-finite loss); lower the learning rate");
+            }
+            report.loss_history.push_back(epoch_loss);
+            if (on_epoch) on_epoch(epoch, epoch_loss, model);
+
+            if (options.early_stopping_patience > 0U) {
+                const double validation_loss =
+                    test_count > 0U ? compute_loss(test_rows, test_targets) : epoch_loss;
+                if (validation_loss < best_validation_loss - 1e-9) {
+                    best_validation_loss = validation_loss;
+                    epochs_without_improvement = 0U;
+                } else {
+                    ++epochs_without_improvement;
+                    if (epochs_without_improvement >= options.early_stopping_patience) {
+                        break;
+                    }
+                }
             }
         }
-        loss /= count;
-        for (std::size_t klass = 0; klass < output_count; ++klass) {
-            for (std::size_t column = 0; column <= feature_count; ++column) {
-                model.weights[klass][column] -=
-                    options.learning_rate * gradients[klass][column] / count;
-            }
-        }
-        if (!std::isfinite(loss)) {
-            throw std::runtime_error(
-                "training diverged (non-finite loss); lower the learning rate");
-        }
-        report.loss_history.push_back(loss);
-        if (on_epoch) on_epoch(epoch, loss, model);
     }
+
     report.final_loss = report.loss_history.back();
     report.evaluated_on_test = test_count > 0U;
     report.metrics = compute_metrics(model,
@@ -1010,8 +1743,17 @@ TabularTrainingReport train_tabular_model(
     return report;
 }
 
-TabularEvaluationMetrics evaluate_tabular_model(const TrainedTabularModel& model,
-                                                const TabularDataset& data) {
+// Phase 96: the primary metric a stability/robustness comparison should
+// read off a TabularEvaluationMetrics -- macro F1 for classification (the
+// same "primary metric" Phase 57's Model Comparison already settled on),
+// R-squared for regression (higher-is-better, unlike MSE/MAE).
+double primary_metric(const TabularEvaluationMetrics& metrics) {
+    return metrics.classification ? metrics.macro_f1 : metrics.r_squared;
+}
+
+TabularEvaluationMetrics evaluate_tabular_model(
+    const TrainedTabularModel& model, const TabularDataset& data,
+    const std::string& sensitive_feature_name) {
     if (data.feature_names != model.feature_names) {
         throw std::runtime_error(
             "evaluation dataset feature columns do not match the trained model");
@@ -1042,7 +1784,115 @@ TabularEvaluationMetrics evaluate_tabular_model(const TrainedTabularModel& model
             targets[row] = data.targets[row];
         }
     }
-    return compute_metrics(model, standardized, targets);
+    // Phase 96: latency/throughput are measured around the exact same
+    // scoring work compute_metrics() below performs -- not a separate,
+    // possibly-different pass -- so the number reported is genuinely what
+    // this call did, not an estimate.
+    const auto started = std::chrono::steady_clock::now();
+    auto metrics = compute_metrics(model, standardized, targets);
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - started)
+                              .count();
+    metrics.latency_ms = elapsed;
+    metrics.throughput_predictions_per_sec =
+        elapsed > 0.0 ? static_cast<double>(standardized.size()) /
+                            (elapsed / 1000.0)
+                      : 0.0;
+    // Resident-memory delta across a second scoring pass, using this
+    // codebase's existing native process-memory probe (platform.cpp) rather
+    // than inventing a new one -- 0 when the pass didn't grow the process's
+    // working set, never a fabricated positive value.
+    const auto memory_before = probe_process_resources();
+    (void)compute_metrics(model, standardized, targets);
+    const auto memory_after = probe_process_resources();
+    metrics.memory_usage_mb =
+        memory_after.resident_memory_bytes > memory_before.resident_memory_bytes
+            ? static_cast<double>(memory_after.resident_memory_bytes -
+                                  memory_before.resident_memory_bytes) /
+                  (1024.0 * 1024.0)
+            : 0.0;
+    const double clean_primary = primary_metric(metrics);
+    if (!standardized.empty()) {
+        // Stability: the same primary metric recomputed on two disjoint
+        // halves of this exact evaluation data (seeded, deterministic
+        // shuffle) -- their spread relative to the mean is the real signal,
+        // not a re-run of training.
+        std::vector<std::size_t> order(standardized.size());
+        std::iota(order.begin(), order.end(), 0U);
+        std::mt19937 rng(12345U);
+        std::shuffle(order.begin(), order.end(), rng);
+        const std::size_t half = order.size() / 2U;
+        if (half > 0U) {
+            std::vector<double> split_metrics;
+            for (const bool second_half : {false, true}) {
+                std::vector<std::vector<double>> subset_features;
+                std::vector<double> subset_targets;
+                for (std::size_t index = second_half ? half : 0U;
+                     index < (second_half ? order.size() : half); ++index) {
+                    subset_features.push_back(standardized[order[index]]);
+                    subset_targets.push_back(targets[order[index]]);
+                }
+                split_metrics.push_back(primary_metric(
+                    compute_metrics(model, subset_features, subset_targets)));
+            }
+            const double mean =
+                (split_metrics[0] + split_metrics[1]) / 2.0;
+            const double variance =
+                (std::pow(split_metrics[0] - mean, 2.0) +
+                 std::pow(split_metrics[1] - mean, 2.0)) /
+                2.0;
+            const double stdev = std::sqrt(variance);
+            metrics.stability_score =
+                1.0 - stdev / std::max(1.0, std::abs(mean));
+        }
+        // Robustness: the same primary metric with small (1% of each
+        // feature's already-standardized scale, i.e. 0.01 standard
+        // deviations) injected Gaussian noise on every feature value,
+        // relative to the clean score -- how much a real, small input
+        // perturbation degrades this model's real accuracy/fit.
+        std::mt19937 noise_rng(67890U);
+        std::normal_distribution<double> noise(0.0, 0.01);
+        std::vector<std::vector<double>> noisy(standardized.size());
+        for (std::size_t row = 0; row < standardized.size(); ++row) {
+            noisy[row] = standardized[row];
+            for (auto& value : noisy[row]) value += noise(noise_rng);
+        }
+        const double noisy_primary =
+            primary_metric(compute_metrics(model, noisy, targets));
+        metrics.robustness_score =
+            clean_primary != 0.0
+                ? std::min(1.0, noisy_primary / clean_primary)
+                : 0.0;
+    }
+    // Bias/fairness: only computed when the caller named a real feature
+    // column present in this dataset -- grouped by that column's exact
+    // (already-encoded) value, since a one-hot-expanded categorical column
+    // is itself a 0/1 "has this category" feature.
+    if (!sensitive_feature_name.empty()) {
+        const auto found = std::find(data.feature_names.begin(),
+                                     data.feature_names.end(),
+                                     sensitive_feature_name);
+        if (found != data.feature_names.end()) {
+            const auto column =
+                static_cast<std::size_t>(found - data.feature_names.begin());
+            std::map<double, std::pair<std::vector<std::vector<double>>,
+                                       std::vector<double>>>
+                groups;
+            for (std::size_t row = 0; row < standardized.size(); ++row) {
+                auto& group = groups[data.features[row][column]];
+                group.first.push_back(standardized[row]);
+                group.second.push_back(targets[row]);
+            }
+            for (auto& [value, rows] : groups) {
+                char label[64];
+                std::snprintf(label, sizeof(label), "%s=%.6g",
+                              sensitive_feature_name.c_str(), value);
+                metrics.bias_fairness_report[label] = primary_metric(
+                    compute_metrics(model, rows.first, rows.second));
+            }
+        }
+    }
+    return metrics;
 }
 
 TabularPrediction predict_tabular(const TrainedTabularModel& model,
@@ -1053,11 +1903,12 @@ TabularPrediction predict_tabular(const TrainedTabularModel& model,
             " feature values but got " + std::to_string(features.size()));
     }
     const auto standardized = standardize(model, features);
+    const auto hidden = forward_hidden(model, standardized);
     TabularPrediction prediction;
     if (model.classification) {
         std::vector<double> logits(model.weights.size());
         for (std::size_t klass = 0; klass < model.weights.size(); ++klass) {
-            logits[klass] = score_row(model.weights[klass], standardized);
+            logits[klass] = score_row(model.weights[klass], hidden);
         }
         prediction.class_probabilities = softmax(logits);
         const auto winner = static_cast<std::size_t>(
@@ -1067,7 +1918,7 @@ TabularPrediction predict_tabular(const TrainedTabularModel& model,
         prediction.value = static_cast<double>(winner);
         prediction.label = model.class_labels[winner];
     } else {
-        prediction.value = score_row(model.weights[0], standardized);
+        prediction.value = score_row(model.weights[0], hidden);
     }
     return prediction;
 }
@@ -1097,6 +1948,8 @@ void TrainedModelStore::put(const TrainedTabularModel& model) {
     for (const auto& row : model.weights) {
         for (const auto weight : row) fields.push_back(number_field(weight));
     }
+    append_hidden_layers_fields(fields, model);
+    append_categorical_encoding_fields(fields, model);
     records_->put("ml_trained_models", model.model_id, pack(fields));
 }
 
@@ -1121,7 +1974,11 @@ std::optional<TrainedTabularModel> TrainedModelStore::find(
     const std::size_t expected = 9U + feature_count + class_count +
                                  2U * feature_count +
                                  output_count * (feature_count + 1U);
-    if (fields.size() != expected) {
+    // Phase 46: `<`, not `!=` -- a record written by this pass has real
+    // trailing hidden-layer fields past `expected` (see
+    // append_hidden_layers_fields()/read_hidden_layers_fields() above); a
+    // pre-Phase-46 record has exactly `expected` fields and none of them.
+    if (fields.size() < expected) {
         throw std::runtime_error("persisted trained model is truncated");
     }
     std::size_t cursor = 9U;
@@ -1143,6 +2000,12 @@ std::optional<TrainedTabularModel> TrainedModelStore::find(
             row.push_back(parse_number_field(fields[cursor++]));
         }
         model.weights.push_back(std::move(row));
+    }
+    const auto after_hidden_layers = read_hidden_layers_fields(fields, expected, model);
+    const auto after_categorical =
+        read_categorical_encoding_fields(fields, after_hidden_layers, model);
+    if (after_categorical != fields.size()) {
+        throw std::runtime_error("persisted trained model has trailing data");
     }
     return model;
 }
@@ -1180,6 +2043,8 @@ void CheckpointModelStore::put(const TrainedTabularModel& model) {
     for (const auto& row : model.weights) {
         for (const auto weight : row) fields.push_back(number_field(weight));
     }
+    append_hidden_layers_fields(fields, model);
+    append_categorical_encoding_fields(fields, model);
     records_->put("ml_checkpoint_models", model.model_id, pack(fields));
 }
 
@@ -1204,7 +2069,7 @@ std::optional<TrainedTabularModel> CheckpointModelStore::find(
     const std::size_t expected = 9U + feature_count + class_count +
                                  2U * feature_count +
                                  output_count * (feature_count + 1U);
-    if (fields.size() != expected) {
+    if (fields.size() < expected) {
         throw std::runtime_error("persisted checkpoint model is truncated");
     }
     std::size_t cursor = 9U;
@@ -1226,6 +2091,12 @@ std::optional<TrainedTabularModel> CheckpointModelStore::find(
             row.push_back(parse_number_field(fields[cursor++]));
         }
         model.weights.push_back(std::move(row));
+    }
+    const auto after_hidden_layers = read_hidden_layers_fields(fields, expected, model);
+    const auto after_categorical =
+        read_categorical_encoding_fields(fields, after_hidden_layers, model);
+    if (after_categorical != fields.size()) {
+        throw std::runtime_error("persisted trained model has trailing data");
     }
     return model;
 }
@@ -1272,6 +2143,23 @@ std::string tabular_evaluation_metrics_json(
                   ",\"mae\":" + json_number(metrics.mae) +
                   ",\"rSquared\":" + json_number(metrics.r_squared);
     }
+    // Phase 96: real-measured metric categories that apply regardless of
+    // classification vs. regression -- see TabularEvaluationMetrics's
+    // comment in masterai.hpp.
+    result += ",\"latencyMs\":" + json_number(metrics.latency_ms) +
+              ",\"throughputPredictionsPerSec\":" +
+              json_number(metrics.throughput_predictions_per_sec) +
+              ",\"memoryUsageMb\":" + json_number(metrics.memory_usage_mb) +
+              ",\"stabilityScore\":" + json_number(metrics.stability_score) +
+              ",\"robustnessScore\":" + json_number(metrics.robustness_score) +
+              ",\"biasFairnessReport\":{";
+    bool first_group = true;
+    for (const auto& [label, value] : metrics.bias_fairness_report) {
+        if (!first_group) result += ",";
+        first_group = false;
+        result += "\"" + json_escape(label) + "\":" + json_number(value);
+    }
+    result += "}";
     return result + "}";
 }
 
@@ -1312,7 +2200,9 @@ std::string trained_tabular_model_summary_json(const TrainedTabularModel& model)
            "\",\"featureColumns\":" + string_array_json(model.feature_names) +
            ",\"targetColumn\":\"" + json_escape(model.target_name) +
            "\",\"classes\":" + string_array_json(model.class_labels) +
-           ",\"trainedAtEpochSeconds\":" +
+           ",\"hiddenLayerSizes\":" + hidden_layer_sizes_json(model) +
+           ",\"activation\":\"" + json_escape(model.activation) +
+           "\",\"trainedAtEpochSeconds\":" +
            std::to_string(model.trained_at_epoch_seconds) + "}";
 }
 

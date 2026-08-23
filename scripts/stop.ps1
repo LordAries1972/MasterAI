@@ -33,10 +33,10 @@ if ($process) {
     # process, which signals every in-flight model download to stop (killing
     # its curl child) before waiting on request threads -- so an active
     # download no longer needs its own separate shutdown step here and is
-    # already covered by this same 30-second wait.
+    # already covered by this same 60-second wait.
     Set-Content -LiteralPath $stopFile -Value 'stop' -NoNewline
-    if (-not $process.WaitForExit(30000)) {
-        throw 'MasterAI did not complete graceful shutdown within 30 seconds.'
+    if (-not $process.WaitForExit(60000)) {
+        throw 'MasterAI did not complete graceful shutdown within 60 seconds.'
     }
 }
 Remove-Item -LiteralPath $pidFile

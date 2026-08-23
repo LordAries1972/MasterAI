@@ -62,6 +62,35 @@ std::vector<std::string> split_csv_line(const std::string& line) {
     return fields;
 }
 
+// Splits CSV text into logical records, honoring quoted fields that
+// legitimately contain embedded newlines (e.g. multi-paragraph scraped
+// article text used as an "instruction"/"output" cell) -- a raw split on
+// '\n' would otherwise chop one training example into several broken rows.
+// Blank records are dropped, matching every caller's prior line-splitting
+// behavior.
+std::vector<std::string> split_csv_records(const std::string& csv) {
+    std::vector<std::string> records;
+    std::string record;
+    bool quoted = false;
+    for (const char character : csv) {
+        if (character == '"') quoted = !quoted;
+        if (character == '\n' && !quoted) {
+            if (!record.empty() && record.find_first_not_of(" \t\r") !=
+                                        std::string::npos) {
+                records.push_back(record);
+            }
+            record.clear();
+        } else {
+            record += character;
+        }
+    }
+    if (!record.empty() &&
+        record.find_first_not_of(" \t\r") != std::string::npos) {
+        records.push_back(record);
+    }
+    return records;
+}
+
 std::string trim(const std::string& value) {
     std::size_t begin = 0U;
     std::size_t end = value.size();
@@ -74,6 +103,35 @@ std::string trim(const std::string& value) {
         --end;
     }
     return value.substr(begin, end - begin);
+}
+
+// Matches ml_engine.cpp's json_escape exactly -- this codebase duplicates
+// this helper per translation unit rather than sharing one, so this file
+// follows that existing convention instead of introducing a shared header.
+std::string json_escape(const std::string& value) {
+    std::string result;
+    result.reserve(value.size() + 16U);
+    for (const unsigned char character : value) {
+        switch (character) {
+            case '"': result += "\\\""; break;
+            case '\\': result += "\\\\"; break;
+            case '\b': result += "\\b"; break;
+            case '\f': result += "\\f"; break;
+            case '\n': result += "\\n"; break;
+            case '\r': result += "\\r"; break;
+            case '\t': result += "\\t"; break;
+            default:
+                if (character < 0x20U) {
+                    static constexpr char hex_digits[] = "0123456789abcdef";
+                    result += "\\u00";
+                    result += hex_digits[(character >> 4U) & 0x0fU];
+                    result += hex_digits[character & 0x0fU];
+                } else {
+                    result += static_cast<char>(character);
+                }
+        }
+    }
+    return result;
 }
 
 std::size_t find_column(const std::vector<std::string>& header,
@@ -225,16 +283,7 @@ std::string log_tail(const std::filesystem::path& log_path, const std::size_t ma
 
 std::filesystem::path write_llm_finetune_training_text(
     const std::string& csv, const std::filesystem::path& output_path) {
-    std::vector<std::string> lines;
-    std::size_t position = 0U;
-    while (position <= csv.size()) {
-        const auto newline = csv.find('\n', position);
-        const auto end = newline == std::string::npos ? csv.size() : newline;
-        std::string line = csv.substr(position, end - position);
-        if (!trim(line).empty()) lines.push_back(std::move(line));
-        if (newline == std::string::npos) break;
-        position = newline + 1U;
-    }
+    const auto lines = split_csv_records(csv);
     if (lines.size() < 2U) {
         throw std::runtime_error(
             "dataset needs a header row and at least one data row");
@@ -277,6 +326,71 @@ std::filesystem::path write_llm_finetune_training_text(
             "no row had both an instruction and a response after trimming");
     }
     return output_path;
+}
+
+// Validate-only counterpart of write_llm_finetune_training_text, used at
+// dataset content upload time: confirms the instruction/response columns
+// exist and at least one usable row is present, without writing a training
+// text file to disk (that happens only once a fine-tuning job actually
+// runs). Mirrors parse_tabular_csv's "reject bad content now, not at
+// training time" role for the tabular path.
+InstructionDatasetProfile validate_instruction_dataset_csv(
+    const std::string& csv, const std::uint64_t maximum_csv_bytes) {
+    if (csv.size() > maximum_csv_bytes) {
+        throw std::runtime_error(
+            "dataset content exceeds the configured " +
+            std::to_string(maximum_csv_bytes / (1024ULL * 1024ULL)) +
+            " MiB limit");
+    }
+    const auto lines = split_csv_records(csv);
+    if (lines.size() < 2U) {
+        throw std::runtime_error(
+            "dataset needs a header row and at least one data row");
+    }
+    auto header = split_csv_line(lines[0]);
+    for (auto& name : header) name = trim(name);
+    const auto instruction_column =
+        find_column(header, {"instruction", "prompt"});
+    if (instruction_column == header.size()) {
+        throw std::runtime_error(
+            "dataset has no \"instruction\" or \"prompt\" column; LLM "
+            "fine-tuning needs a column naming what to ask the model");
+    }
+    const auto response_column =
+        find_column(header, {"response", "output", "completion"});
+    if (response_column == header.size()) {
+        throw std::runtime_error(
+            "dataset has no \"response\", \"output\", or \"completion\" "
+            "column; LLM fine-tuning needs a column naming the answer to "
+            "train toward");
+    }
+    InstructionDatasetProfile profile;
+    profile.instruction_column = header[instruction_column];
+    profile.response_column = header[response_column];
+    for (std::size_t row = 1; row < lines.size(); ++row) {
+        const auto cells = split_csv_line(lines[row]);
+        if (cells.size() != header.size()) continue;
+        if (trim(cells[instruction_column]).empty() ||
+            trim(cells[response_column]).empty()) {
+            continue;
+        }
+        ++profile.rows;
+    }
+    if (profile.rows == 0U) {
+        throw std::runtime_error(
+            "no row had both an instruction and a response after trimming");
+    }
+    return profile;
+}
+
+std::string instruction_dataset_profile_json(
+    const std::string& dataset_id, const InstructionDatasetProfile& profile) {
+    return "{\"datasetId\":\"" + json_escape(dataset_id) +
+           "\",\"rows\":" + std::to_string(profile.rows) +
+           ",\"instructionColumn\":\"" +
+           json_escape(profile.instruction_column) +
+           "\",\"responseColumn\":\"" + json_escape(profile.response_column) +
+           "\",\"task\":\"instruction\"}";
 }
 
 LlmFineTuneResult run_llama_lora_finetune(

@@ -730,6 +730,10 @@ SystemUtilizationSample probe_system_utilization(
         io_after.ReadTransferCount - io_before.ReadTransferCount);
     sample.disk_write_bytes = static_cast<std::uint64_t>(
         io_after.WriteTransferCount - io_before.WriteTransferCount);
+    sample.disk_read_operations = static_cast<std::uint64_t>(
+        io_after.ReadOperationCount - io_before.ReadOperationCount);
+    sample.disk_write_operations = static_cast<std::uint64_t>(
+        io_after.WriteOperationCount - io_before.WriteOperationCount);
 #elif defined(__linux__)
     const auto read_cpu_totals = []() {
         std::array<std::uint64_t, 8> fields{};

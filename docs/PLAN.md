@@ -371,9 +371,22 @@ Current phase status:
   `AppConfig::numa_local_placement_enabled` configuration flag is set. Still
   not admitted by default (an administrator must separately record evidence
   and call `admit()`), and `recommend_thread_placement()` itself still
-  no-ops on any single-NUMA-node host. `numa_affinity` and
-  `multiple_warm_runners` remain the two candidates with no real
-  implementation at all.
+  no-ops on any single-NUMA-node host. **`multiple_warm_runners`'
+  `implementation_available` is now also `true` (2026-08-23)** — its real
+  backing implementation, `LocalRunnerPool` (Phase 33,
+  `src/runner_pool.cpp`), already existed, but `src/server.cpp` was
+  constructing and routing to it purely from
+  `AppConfig::local_runner_pool`'s own presence, independent of this
+  registry. `select_and_warm_pool_runner()` (`src/server.cpp`) — the single
+  chokepoint every generate/embed call site already funnels through — now
+  additionally requires the registry to report `multiple_warm_runners` as
+  enabled before routing to the pool; a configured-but-not-yet-admitted
+  pool now behaves exactly like no pool at all, falling back to the single
+  default runner, until an administrator both records real evidence and
+  admits it. Every one of the six candidates now has a
+  real implementation with a real caller genuinely gated on this registry's
+  admission; none is admitted by default, by design — this phase's own
+  fail-closed evidence/admission contract does not change.
 - Phase 21: Implementation complete (2026-08-05) — native
   asynchronous storage and prefetch engine. `Win32OverlappedFileReader`
   (IOCP) on Windows and a bounded `PosixPreadPoolReader` fallback on POSIX
@@ -1208,6 +1221,60 @@ Current phase status:
   parameter, `set_dataset()`/`attach_training_job()`, their reload/JSON
   round-trip, and direct calls into the now-public
   `validate_model_builder_settings()`.
+  **A real, from-scratch, configurable multi-layer-perceptron (MLP)
+  trainer now exists and is genuinely driven by these settings
+  (2026-08-23)**, closing the permanent scope limit described immediately
+  above for everything except transformer-only concepts. `TabularTraining
+  Options` (`src/masterai.hpp`) gained `hidden_layer_sizes`, `activation`,
+  `dropout`, `optimiser`, `batch_size`, `gradient_clip_norm`,
+  `gradient_accumulation_steps`, `lr_schedule`, `early_stopping_patience`,
+  and `initialisation`; `TrainedTabularModel` gained `hidden_layers` (one
+  weight matrix per hidden layer) and `activation`. `train_tabular_model()`
+  (`src/ml_engine.cpp`) is unchanged byte-for-byte when
+  `hidden_layer_sizes` is empty (every existing linear/logistic/softmax
+  model and test is unaffected); a non-empty `hidden_layer_sizes` instead
+  runs a real forward/backward pass through those hidden layers (He/Xavier
+  initialization, ReLU/tanh/sigmoid activation, inverted dropout at
+  training time only) into the same linear output layer, with real
+  mini-batch gradient descent, three real optimizers (plain SGD, SGD with
+  momentum, Adam with bias correction), global-L2 gradient clipping,
+  gradient accumulation, three learning-rate schedules (constant, step,
+  cosine), and held-out-loss early stopping. `forward_hidden()` is the one
+  seam every existing consumer (`predict_tabular()`, `evaluate_tabular_
+  model()`, and therefore Model Comparison/Checkpoint Management/Fine-
+  Tuning/Pruning, all of which operate on `TrainedTabularModel` generically)
+  now routes standardized features through before scoring, so an MLP model
+  is a first-class citizen of every one of those existing subsystems with
+  no separate code path -- including genuine fine-tuning/checkpoint-resume
+  of an MLP: `warm_start`'s real architecture always wins over a caller's
+  requested one, exactly like its weights already did. `prune_tabular_
+  model()` now also prunes hidden-layer weights, not just the output layer.
+  `TrainedModelStore`/`CheckpointModelStore` persist the new architecture as
+  trailing fields appended after the original fixed-plus-counted layout
+  (never inserted into it), so every model trained before this pass still
+  loads identically -- `read_hidden_layers_fields()` only looks past the
+  original field count when there is real trailing data to read.
+  `resolve_training_architecture()` (`src/server.cpp`) is the new mapping
+  layer: `layer_configuration` (a comma/space-separated list of positive
+  integers, e.g. "256,128,64") is the architecture's source of truth when
+  it parses; otherwise a non-zero `hidden_dimensions` becomes one hidden
+  layer of that size; otherwise the job stays a plain linear model exactly
+  as before this pass. `execute_training_job()` looks this configuration up
+  by the job's own id (via `ModelBuilderConfigStore::list()`, since no
+  reverse index exists yet at this data scale) immediately before calling
+  `train_tabular_model()`, so both the manual `POST .../training-jobs/{id}
+  /run` route and the Phase 69 automation-pipeline "Train model" stage
+  benefit for free. Honestly still unconsumed, by design, not oversight:
+  `attention_configuration`, `vocabulary_tokenizer`, `sequence_length`, and
+  `mixed_precision` describe transformer/sequence-model concepts (attention,
+  tokens, mixed-precision tensor cores) that do not apply to a tabular-row
+  MLP and that this codebase does not implement a from-scratch transformer
+  trainer for; `reproducibility_settings`/`distributed_training_settings`
+  remain descriptive free text with no defined schema to consume them
+  against. No real-hardware benchmark of the new MLP path is recorded by
+  this pass -- this session does not build or run the binary; an
+  administrator training a real MLP model is what turns this into a
+  verified result.
 - Phase 47: Implemented at a scoped-down level (2026-08-04) — Prompt and
   Instruction Training (section 19 below), scoped down to identity, the
   dataset each example targets, a free-text subject classification, and a
@@ -1406,6 +1473,31 @@ Current phase status:
   case-insensitivity/empty-answer behavior, `SubjectExamResultStore`'s
   put/find/remove/overwrite semantics, the new fields' reload/JSON
   round-trip, and legacy-record restore.
+  **Grading is now a real LLM-as-judge, not only the text-overlap heuristic
+  (2026-08-23)**: the new member function `judge_exam_answer()`
+  (`src/server.cpp`) reuses the exact pattern `scan_content_with_model_
+  classifier()` (`src/ml_safety_scan.cpp`) already proved for content-safety
+  scoring -- a fixed, JSON-only prompt through `execute_rag_generation()`
+  asking the target model itself to judge `{"correct","confidence",
+  "rationale"}`, with the reply's outermost `{...}` extracted before strict
+  parsing so prose wrapping the JSON does not break it. `subject_exam_
+  answer_matches()` is not replaced -- it is the honest fallback whenever
+  the judge call throws or its reply is not parseable JSON in the required
+  shape, so a grading run degrades to the original heuristic rather than
+  failing outright or silently fabricating a "correct" verdict. Every
+  persisted per-question record in `SubjectExamResultStore`'s JSON now
+  includes `gradedBy` ("llm_judge" | "heuristic_fallback"), plus the
+  judge's own `judgeConfidence`/`judgeRationale` (zero/empty on a
+  heuristic-fallback question), so a reviewer can see and audit exactly
+  which grading path produced each score -- never presenting a heuristic
+  result as if a model judged it. Section 24's wider metric surface (score
+  by topic/difficulty, unsupported-claim rate, hallucination rate,
+  source-citation quality, reasoning-consistency score, failure categories;
+  the other ten question types beyond plain question/expected-answer;
+  per-subject minimum approval score rather than per-exam
+  `passing_threshold`) remains unimplemented -- only the aggregate
+  passed/total score and the pass/fail decision against `passing_threshold`
+  exist, exactly as before this pass.
 - Phase 52: Implemented at a scoped-down level (2026-08-05) —
   Hyperparameter Optimization (section 26 below), scoped down to identity,
   a mandatory `training_job_id` referencing a `TrainingJobStore` entry (a
@@ -1467,6 +1559,37 @@ Current phase status:
   search_lifecycle` gained coverage for the new `search_space_json`/
   `max_trials` creation parameters and their validation, `record_result()`,
   the new fields' reload/JSON round-trip, and legacy-record restore.
+  **The search space now genuinely widens for an MLP-architecture job
+  (2026-08-23)**: `run_hyperparameter_search()` calls the same
+  `resolve_training_architecture()` Phase 46's real MLP executor uses (via
+  a new `ModelBuilderConfigStore&` parameter) to look up the referenced
+  training job's real architecture, if any. When it has a real hidden-layer
+  shape, batch size, dropout, and optimiser choice (sgd/sgd_momentum/adam)
+  now genuinely vary and are genuinely retrained/scored per trial too --
+  each of them, like `TabularTrainingOptions::batch_size`/`dropout`/
+  `optimiser`, actually changes what the MLP path in `train_tabular_model()`
+  learns (see the Phase 46 status entry above). Rather than a full
+  5-dimensional cartesian grid (which would need `grid_side^5` trials to
+  cover evenly, far past `kMaxHyperparameterTrials`), this deliberately
+  reuses the existing learning-rate/epoch `(i, j)` grid pair: batch size
+  rides `i`'s fraction, dropout rides `j`'s fraction, and optimiser cycles
+  through the three choices by `(i + j)` -- a bounded joint sweep, not an
+  even cartesian one, but every dimension is still genuinely varied and
+  genuinely retrained/scored within the same trial budget as before. A
+  plain (non-MLP) job's search is completely unaffected -- the extra
+  fields are only ever set on a trial's options when a real architecture
+  was found. The winning trial's batch size/dropout/optimiser are not
+  duplicated onto new persisted `HyperparameterSearch` fields (that would
+  have meant another `persist()`/`restore()` schema change); they are
+  surfaced in the route's returned `detail` text and are findable in
+  `trials_json` by matching the same `best_score` value. Section 26's
+  remaining knobs (weight decay, warmup steps, sequence length, data-
+  sampling strategy) stay out of scope -- `TabularTrainingOptions` has no
+  such concepts to tune. Adapter rank specifically belongs to the separate
+  GGUF LoRA fine-tuning path (Phase 73), not this tabular/MLP executor, and
+  is not searched here either. Strategies beyond grid (random, Bayesian,
+  population-based, successive-halving, early-stopping search) remain
+  unimplemented -- `strategy` stays the free-text field it always was.
 - Phase 53: Implemented at a scoped-down level (2026-08-05) — Model
   Optimization (section 28 below), scoped down to identity, a mandatory
   `model_id` referencing a `ModelRegistryStore` entry (an optimization run
@@ -2609,6 +2732,159 @@ Current phase status:
   12.43 tok/s GPU / 6.48 tok/s CPU baseline these changes target); an
   administrator re-running `masterai calibrate` and a generation benchmark
   on real hardware is what turns this into a verified before/after number.
+- Dataset Manager instruction-purpose datasets and multi-line CSV field
+  parsing (section 10 below): `Dataset` gained a `purpose` field
+  (`"tabular"`, the default, or `"instruction"`; schema 8 -> 9, old records
+  restore as `"tabular"`), settable from the Register Dataset form's new
+  "What kind of data is this?" selector and persisted through
+  `DatasetStore::create()`/`dataset_json()` (`src/masterai.hpp`/`src/ml.cpp`).
+  `POST /api/v1/ml/datasets/{id}/content` (`src/server.cpp`) now branches on
+  it: a `"tabular"` dataset is unchanged (`parse_tabular_csv`, requiring a
+  classification/regression target column); an `"instruction"` dataset runs
+  the new `validate_instruction_dataset_csv()` (`src/ml_finetune.cpp`)
+  instead, which only checks for an instruction/prompt column and a
+  response/output/completion column -- it no longer gets forced through
+  classification validation (including the 64-distinct-label cap) that
+  never applied to free-text fine-tuning data in the first place, which
+  previously made an LLM instruction-tuning CSV impossible to upload at all
+  whenever its free-text columns had high cardinality (as they always do).
+  Root-caused from a real upload failure: the uploaded CSV was a correctly-
+  formed LLM fine-tuning export (instruction/input/output/text columns, no
+  classification target by design) rejected by validation meant for a
+  different dataset shape entirely, not a defect in the exporting tool.
+  Also fixed a related latent parsing bug hit by the same investigation:
+  `parse_tabular_csv`, `auto_label_tabular_dataset`, and
+  `write_llm_finetune_training_text`'s row splitting was a raw split on
+  `'\n'`, which silently corrupted any RFC 4180 quoted CSV field that
+  legitimately contains an embedded newline (guaranteed for any multi-
+  paragraph scraped/authored text cell) into multiple broken rows instead of
+  one. All three now split on the new quote-aware `split_csv_records()`
+  (`src/ml_engine.cpp` and, as its own local copy matching that file's
+  existing `split_csv_line()` duplication convention, `src/ml_finetune.cpp`)
+  instead. `tabular_dataset_profile_json()`'s instruction-dataset
+  counterpart, `instruction_dataset_profile_json()`, reports row count plus
+  the detected instruction/response column names; the web UI's upload
+  success message and the Dataset Manager list's new "Purpose" column
+  reflect this instruction-tuning content status too. Honest remaining
+  scope: only the content-upload endpoint is purpose-aware -- the tabular
+  training/evaluation/comparison/auto-label/split endpoints are unchanged
+  and will still (correctly) reject an `"instruction"` dataset's content via
+  their existing `parse_tabular_csv` call if someone tries to tabular-train
+  against one, since that combination genuinely doesn't make sense; and the
+  dataset dropdown on every consuming form still lists every dataset
+  regardless of purpose rather than filtering per form.
+- Model Registry quantization tracking, surfaced at LLM fine-tuning time
+  (section 7/section 2 item 10): `ModelRegistryEntry` gained a
+  `quantization` field (schema 10 -> 11, old records restore with it empty
+  -- "unknown") settable on manual registration and, for a downloaded model
+  promoted into the registry, carried over automatically from its
+  `ModelManifest::quantization` by `resolve_or_register_base_model()`
+  (`src/server.cpp`) -- previously this information existed on disk but was
+  silently dropped the moment a model became a Fine-Tuning Job's base,
+  leaving that page with zero visibility into what precision it was
+  actually training against. `run_llm_fine_tuning_job()` now checks the
+  base model's `quantization` against `llm_finetune_safe_quantization()`
+  (F32/F16/BF16/Q8_0 -- the precisions llama.cpp's finetune tooling
+  backpropagates against reliably) and, when it fails that check, adds a
+  `quantizationWarning` string to the job's `llm-result` JSON naming the
+  concern -- a caution, not a block, since the run still produces a real
+  adapter and the honest answer is "review results carefully," not a
+  guessed hard cutoff. Model Registry's list gained a Quantization column
+  and its registration form a matching field; the Fine-Tuning Jobs page's
+  **Fine-tune now** button, which previously only handled the tabular
+  path's synchronous report and left a real `llm:`-method job's 202
+  "queued" response unrendered (a pre-existing gap this pass also closed,
+  found while wiring the warning through to the UI), now polls
+  `GET .../llm-result` until the run completes or fails and shows the
+  warning inline when present.
+
+- Dataset purpose-aware pickers, a tabular-purpose guard, and real LLM
+  fine-tuning progress (section 10/section 2 item 10, follow-up to the
+  Dataset Manager purpose entry above): Training Jobs/Evaluation Lab/
+  Experiment Tracking/Model Comparison/Automation Pipelines' dataset
+  pickers now filter to purpose="tabular" datasets client-side
+  (`web_ui.cpp`'s `mlTabularDatasets`), so an Instruction/fine-tuning-text
+  dataset that can never satisfy `parse_tabular_csv` is no longer offered
+  there in the first place; Dataset Manager's own content-upload picker and
+  Fine-Tuning Jobs' (which legitimately needs either purpose depending on
+  its Method) still list every dataset. `execute_training_job()`
+  (`src/server.cpp`) also gained a purpose check ahead of
+  `parse_tabular_csv`, naming the real problem for a direct API call that
+  bypasses the now-filtered picker instead of surfacing the generic
+  classification-validation error. Separately, `GET /api/v1/ml/
+  fine-tuning-jobs/{id}/llm-progress` tails whichever real log file
+  (`finetune.log`, then `export-lora.log` once that stage starts) the
+  background LLM LoRA run is currently writing -- `run_llama_tool()`
+  (`ml_finetune.cpp`) already redirects each child process's own combined
+  stdout+stderr straight to that file, so this is genuine live tool output,
+  not a fabricated percentage; the Fine-Tuning Jobs page's **Fine-tune
+  now** poll loop now shows the current stage and the log's last line every
+  three seconds instead of a static "running in the background" message.
+  Explicitly out of scope, stated directly rather than attempted: a
+  tabular-trained model (linear/logistic/softmax/MLP weights, format
+  `masterai-tabular-v1`) cannot be written as GGUF or used as an LLM
+  fine-tuning base -- GGUF encodes transformer weights/attention/tokenizer,
+  which a tabular model has none of, and llama.cpp (the only GGUF consumer
+  in this codebase) could never load one; only a real transformer GGUF
+  (a downloaded model, or a prior LoRA run's merged output) can serve as a
+  fine-tuning base, which already works today.
+- LLM fine-tuning output is now promoted into the real, chat-usable model
+  catalog, closing the gap the GGUF discussion above surfaced: a completed
+  `llm:` fine-tuning run previously only registered its merged GGUF into
+  `ml_models` (the ML pipeline's own tracking store), which is invisible to
+  `find_model()`/`ModelRegistry::scan()` -- the manifest.json + verification-
+  cache structure chat/inference actually reads (`src/models.cpp`). A real
+  merged model therefore existed on disk but had no way to actually be
+  chatted with. `run_llm_fine_tuning_job()` (`src/server.cpp`) now also
+  copies the merged GGUF into `models_root/<category>/finetuned-<jobId>/`,
+  writes a real `manifest.json` via the existing `write_model_manifest()`,
+  and immediately records it verified via `record_verified_model()` (its
+  sha256 is computed fresh from the file MasterAI itself just wrote, the
+  same trust level as running `rehash.ps1` right after) -- category,
+  architecture, quantization, RAM figures, and license are all copied from
+  the base model's own already-validated catalog manifest (`find_model
+  (base_model_entry.id)`), never guessed, since a LoRA-adapted derivative
+  reasonably inherits its base's license terms and no other source in this
+  codebase has a verified license string to offer. When the base model has
+  no catalog manifest (e.g. registered manually with an arbitrary path),
+  promotion is deliberately skipped rather than fabricating a license --
+  the job result's `catalogNote` explains why, naming the merged GGUF's
+  real path for manual registration instead. `catalogModelId` in the job
+  result (and the Fine-Tuning Jobs page's completion message) names the new
+  catalog entry once promoted, so the workflow ends at "usable for chat,"
+  not just "a file exists somewhere."
+- Manually-registered base models can now promote too, and the retrieval
+  MCP-resource toggle is finally exposed in Settings. The model-catalog
+  promotion above originally only ran when the base model had a real
+  catalog manifest (find_model() succeeds); it now also handles a manually-
+  registered base (an arbitrary `source` path, no manifest), inheriting
+  that ModelRegistryEntry's own `family`/`quantization`/`license` fields
+  (falling back to "unknown" for an architecture/quantization string that
+  isn't `is_safe_identifier`-safe) and computing RAM figures from the
+  merged file's own real size when no verified figure exists. This needed
+  a matching, narrowly-scoped exception in `load_manifest()`'s validation
+  (`src/models.cpp`): a manifest whose `source_url` starts with the new
+  internal `"masterai-finetune:"` marker (only ever written by this
+  codebase's own promotion code, never an external download) skips the
+  closed external-host source_url check and the closed SPDX license-id
+  check, trusting whatever non-empty license a human already put on record
+  for that base model -- every other check (identity, category, format,
+  backend, RAM math, digest, `license_accepted`) still applies in full. A
+  base model whose License field was left blank still cannot be promoted --
+  there is genuinely no value to use, not one being withheld. Separately,
+  fixed a real bug in the base-has-manifest path from the same pass: it had
+  set `source_url` to an internal string that the *existing* (pre-exception)
+  host-prefix check would have rejected outright, silently landing the
+  "successful" promotion as `ModelState::invalid`; it now inherits the
+  base's own real (already-valid) `source_url`. Unrelated same-session
+  fix: `retrieval.mcpResourceEnabled` (whether retrieval may call out to a
+  connected outbound MCP server/tool as an evidence source -- Phase 24)
+  has existed in `AppConfig`/`config.cpp` since that phase but was never
+  exposed in the web UI; Settings > System Configuration's Retrieval
+  section now has a checkbox for it (plus the two sibling toggles,
+  `semanticEmbeddingEnabled`/`gitDiffEnabled`, that had the same gap), using
+  the settings form's existing generic `data-path` read/write machinery, no
+  new JS needed.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -5624,7 +5900,12 @@ separate recording from admission, require a wired implementation plus a
 non-regressing result and verified fallback, permit independent disable, audit
 mutations, and always retain the safe Phase 19 profile. No candidate is
 currently admitted; unsupported or unmeasured candidates remain visibly
-disabled rather than becoming implicit performance claims.
+disabled rather than becoming implicit performance claims. **Every one of the
+six candidates now has `implementation_available: true` and a real caller
+genuinely gated on its admission (2026-08-23)** -- `multiple_warm_runners` was
+the last one with no wired implementation; see the top-of-document Phase 20
+status entry for exactly what changed. Admission itself is still always an
+administrator action requiring real per-host evidence, unchanged by this.
 
 Purpose:
 
@@ -6926,6 +7207,43 @@ SSD-NVMe/GPU-offloaded matrix spans storage media and machines this single
 host does not have — an administrator repeats the same runbook on each
 further physical host/storage medium they have access to.
 
+Benchmark-metrics gap pass (2026-08-24): the plan's "Recorded metrics per
+run" list named several fields this record never actually captured.
+`PerformanceCertificationRecord` gained four more real, measured fields
+this pass, all reused from data this codebase already samples rather than
+new external dependencies: `commit_bytes`/`page_faults` (this process's
+own `probe_process_resources()` reading — `page_faults` is honestly
+labeled as a combined soft+hard count, since Windows exposes no
+per-process hard-fault-only counter without ETW tracing, which this
+codebase does not do) and `storage_read_operations`/
+`storage_write_operations` (`IO_COUNTERS::ReadOperationCount`/
+`WriteOperationCount`, read from the exact same sample
+`probe_system_utilization()` already takes for the existing
+`storage_bytes_read` byte count). The CPU-percent sample window was also
+widened from 100ms to 500ms (`average_cpu_percent`, same function) after
+observing two back-to-back real runs against the identical fixture differ
+by ~2x purely from a too-short sampling window, spuriously tripping the
+25% CPU-increase regression threshold with zero actual regression.
+Deliberately still out of scope, and why: `mapped_bytes` (no working-set-
+enumeration native code exists anywhere in this codebase to reuse; would
+need new `VirtualQueryEx`/PSAPI code, not just wiring); `cache_hit_rate`
+(real hit/miss counters exist on `InferenceMetricsStore`, but a
+certification run's quality suite calls `RunnerSupervisor::generate()`
+directly, bypassing the `PromptSessionManager`/cache-decision path
+entirely — snapshotting that store around a cert run would only ever read
+zero, which is not honest evidence of anything); `model_load_time`
+(loading happens out-of-band, before an administrator ever calls
+`POST .../certification` — the runner is handed an already-running
+`RunnerSupervisor`, so there is no load event inside this call to time);
+cancellation/shutdown latency and split retrieval/prompt-assembly/
+tokenization latency (no existing timing instrumentation anywhere in
+those code paths to reuse; each would need new instrumentation added at
+stage boundaries in the request-handling path a certification run
+exercises, not attempted this pass). GPU utilization and power/thermal
+notes remain out of scope by the same standard the plan's other advanced-
+optimization evidence fields already apply: no portable measurement
+exists in this codebase without a new external dependency.
+
 Purpose:
 
 - Prevent a performance-oriented change from shipping without evidence that
@@ -7444,6 +7762,51 @@ Deliverables:
   drift the shared-dispatch design was already supposed to prevent
   (`execute_chat_tool()`'s own comment in `masterai.hpp` said as much) but
   nothing before this fix actually routed MCP through it.
+- 2026-08-23 fix: the 2026-08-20 `scheduleAssistantRender()` fix above only
+  coalesced *how often* the full-reply markdown re-render ran (once per
+  painted frame via `requestAnimationFrame`), not its O(reply length) cost
+  per run — a long streamed reply could still make the main thread miss
+  frames periodically, still reading as the page stalling roughly once a
+  second. `scheduleAssistantRender()` is replaced by `appendStreamToken()`
+  (`src/web_ui.cpp`), which appends each token's raw text directly to a
+  single Text node — O(1) per token, no markdown parsing, no DOM diffing —
+  and defers the real `renderMarkdown()`/`patchMsgBody()` pass entirely
+  until the stream completes. Formatting (code fences, bold, lists, ...)
+  now pops in once the reply finishes rather than rendering live; plain
+  text still streams in immediately either way.
+- 2026-08-23 addition: the per-bubble token titlebar (`setMsgTokens()`,
+  `src/web_ui.cpp`) used to stay blank for the whole generation, only
+  populated once by the final `complete` SSE event. `readTurnStream()`'s
+  `token` event handler now increments a running count and updates the
+  titlebar on every chunk received, so it shows live progress during
+  streaming; the `complete` event still overwrites it with the server's
+  own authoritative `generatedTokens` figure once the turn finishes (a
+  tool-call turn withholds some chunks from the stream entirely via
+  `apply_streaming_marker_holdback()`, so the running client-side count is
+  an approximation of what's on screen, not guaranteed to match the
+  model's real token count mid-stream).
+- 2026-08-23 fix: a model attempting a tool call in a chat where tools
+  genuinely aren't available (no project bound, not auto-drive) had its
+  raw attempt stripped from the reply by `detect_and_strip_tool_call()`
+  (already correct — see the 2026-08-20 fix above) but the parsed attempt
+  itself was then silently discarded rather than surfaced — the user was
+  left staring at a reply that trailed off with no explanation, or, if the
+  model used a hallucinated shape none of the six defensive passes
+  recognized, raw tool-call-shaped text leaking straight into the chat
+  bubble. Two fixes: (1) a new `tool_notice` SSE event
+  (`src/server.cpp`, `send_chat_message`) is emitted whenever a tool call
+  was detected-and-stripped but not executed, naming the tool/arguments
+  attempted and telling the user how to unblock it (bind a project, or
+  just answer with the path/detail directly); `readTurnStream()`
+  (`src/web_ui.cpp`) renders it as its own card, same style as a real tool
+  result. (2) a sixth defensive pass, `find_stray_pipe_call_span()`
+  (`src/server.cpp`), now recognizes and strips a pipe-delimited
+  positional-argument hallucination shape (e.g.
+  `[[list_directory|"/path/to/project"]]`) that none of the existing five
+  passes matched (they all require a `{`/`(` immediately after the tool
+  name, or no `[[` prefix at all); its prefix is also added to the
+  streaming hold-back list so it never flashes raw on the live stream
+  either.
 
 Explicitly out of scope this pass:
 
@@ -7644,18 +8007,565 @@ Exit criteria:
   lists are alphabetically ordered and show quantization; no entry with an
   empty name can appear in any of them.
 
+### Phase 88 — Downloaded models selectable as a fine-tuning/model-builder base, and a live-generation streaming cleanup bug
+
+Status: Implemented (2026-08-23).
+
+Purpose:
+
+- Fine-Tuning Job's and Model Builder Config's "Base model" dropdowns
+  (section 18, section 9) only ever listed entries already in the Model
+  Registry (`ml_models`, `GET /api/v1/ml/models`) — a model already
+  downloaded into the local model catalog (`GET /api/v1/models`, the same
+  inventory the chat model picker uses) had no way to be picked as a
+  training base without a separate, undocumented manual registration step
+  first.
+- Separately, the web UI chat's live-streamed reply could show a stray,
+  garbled fragment of a hallucinated tool-call attempt (e.g. a bare comma
+  and a `list_directory('...')`-shaped fragment, not wrapped in the normal
+  tool-result card) even though the server's own cleanup
+  (`detect_and_strip_tool_call()`) had already removed that text from what
+  it persisted. The client's rendered bubble was built purely from the raw
+  `token` events streamed in *during* generation — before that cleanup
+  runs on the completed reply — and was never reconciled with the server's
+  actual cleaned text afterward.
+
+Deliverables:
+
+- `resolve_or_register_base_model()` (`src/server.cpp`) resolves a
+  "modelId"/"baseModelId" value against either source: an existing Model
+  Registry id is returned unchanged, and a local-catalog model id
+  (`find_model()`) that isn't registered yet gets a matching
+  `ModelRegistryEntry` created transparently, "source" pointed at the
+  real GGUF file on disk — exactly what the "llm:" fine-tuning executor
+  (`POST .../fine-tuning-jobs/{id}/run`) already required of a base
+  model's registry entry. Wired into both `POST
+  /api/v1/ml/fine-tuning-jobs` and `POST
+  /api/v1/ml/model-builder-configs`.
+- Web UI: the "Base model" selects for Fine-Tuning Job and Model Builder
+  Config now merge the Model Registry list with the local model catalog
+  (labelled "(ML registry)" / "(downloaded)" respectively) instead of
+  reading only from the registry, like every other model-picking field on
+  the ML screens still correctly does.
+- Streaming fix: the server's `"complete"` NDJSON event (both the
+  ordinary-turn and the tool-call-turn shape, `src/server.cpp`) now
+  carries the fully-cleaned reply text as a `"content"` field.
+  `readTurnStream()`'s `complete` handler (`src/web_ui.cpp`) swaps this
+  into `assistantEl.dataset.raw` before the final markdown render, so the
+  rendered bubble always matches what the server actually persisted —
+  never the client's own pre-cleanup streaming buffer.
+
+Exit criteria:
+
+- Creating a fine-tuning job or model builder config can target a model
+  that has only ever been downloaded, never previously trained/registered,
+  with no separate registration step.
+- A model reply the server had to strip a hallucinated tool-call attempt
+  out of renders identically to its persisted chat-history text once
+  streaming finishes — no stray bracket/comma/pseudo-call debris left
+  visible in the bubble.
+
+### Phase 89 — Machine Learning web UI clarity pass, part 1: the core training pipeline
+
+Status: Implemented (2026-08-23), core pipeline only. Remaining ML panels
+(Fine-Tuning, Data Labeling/Preparation, Synthetic Data, Prompt/Instruction
+Training, Embeddings/Vector Stores, RAG, Hyperparameter Optimization,
+Subject Examination, Model Optimization, Checkpoints, Deployments, Model
+Comparisons, Inference Endpoints, Compute Nodes, Automation Pipelines,
+Safety/Governance, Monitoring, Audit Logs, Settings, Subject Knowledge
+Manager) are tracked for a follow-up pass and still present as they were
+before this phase.
+
+Purpose:
+
+- An administrator hit `ml_dataset_has_no_content` at training time
+  because nothing on the Datasets or Training Jobs panels distinguished a
+  dataset that only had metadata registered from one that also had real
+  CSV/JSON/JSONL/Parquet rows uploaded — the gap between "Register a
+  dataset" and the separate "Upload dataset content" step was invisible
+  until `POST .../training-jobs/{id}/run` rejected it.
+- More broadly, the five-panel path from nothing to a trained model
+  (Project → Dataset → Dataset content → Training Job → Evaluation/
+  Experiment) had no on-page indication it was one ordered sequence, and
+  several form fields (e.g. "target column", "existing model") assumed
+  ML background the interface's own stated audience does not have.
+
+Deliverables:
+
+- `datasets_json_with_content_status()` (`src/ml.cpp`, declared in
+  `src/masterai.hpp`) adds `hasContent`/`contentRows` to every dataset
+  `GET /api/v1/ml/datasets` returns, computed from `DatasetContentStore`
+  at request time (an approximate newline count, not a full re-parse).
+  `GET /api/v1/ml/datasets` (`src/server.cpp`) now calls this instead of
+  the plain `datasets_json()`.
+- Every dataset-referencing `<select>` across the ML web UI (Training
+  Jobs, Evaluation Runs, Experiments, Fine-Tuning, Label Tasks, Prep Jobs,
+  Instruction Examples, Synthetic Records, Model Comparisons, Automation
+  Pipelines — the one shared `fillMlSelect` loop in `application_script()`
+  populates all of them) now shows "N row(s) ready" or "⚠ no content
+  uploaded yet" next to each dataset's name, and the Registered Datasets
+  table gets its own "Content" status column.
+- Training Jobs' "Train now" button is disabled with an explanatory
+  tooltip when its job's dataset has no uploaded content, instead of only
+  failing after the click (`renderMlTrainingJobs()`, `runBtn()`,
+  `.iconBtn:disabled` CSS).
+- `ml_step_flow()` (`src/web_ui.cpp`) renders a numbered "Step 1 → 2 → 3 →
+  4 → 5" banner (`.mlStepFlow` CSS) at the top of every panel in the core
+  pipeline — Projects (step 1), Datasets' two forms (steps 2 and 3),
+  Training Jobs (step 4), and Evaluation Runs/Experiments (step 5,
+  presented as alternatives) — highlighting whichever step that panel is,
+  so a user landing on any one of them sees the whole sequence first.
+  `.mlPipelineNote`/`.mlPipelineWarning` callouts mark optional steps
+  (Model Registry) and hard requirements (dataset content) inline.
+- Plain-language field hints (the existing `field_hint()`/`.mlHint` "?"
+  badge convention, previously used mainly on Settings/Benchmark/Safety
+  panels) were added to the previously-hint-less core-pipeline fields:
+  project name, model internal name, dataset content's target column and
+  file format, and training job's model/dataset pickers.
+- Sidebar navigation cleanup: "Model Registry" was moved out of "Machine
+  Learning Logs and Settings" (where it was mislabeled "Model Registry
+  (Statistics)", a duplicate-feeling entry for what is actually a full
+  "Register a model" / "Predict with a trained model" panel) into the
+  main pipeline list, positioned beside Dataset Manager; "Hyperparameter
+  Optimization" was moved from before Training Jobs to after Training
+  Jobs/Fine-Tuning/Checkpoints, since a search always targets an existing
+  training job.
+- `.iconBtn:disabled` and checkbox vertical-centering CSS
+  (`input[type="checkbox"]{vertical-align:middle}`, `.mlHint{line-height:1}`)
+  added as general polish alongside the guard-rail work above.
+
+Exit criteria:
+
+- A dataset with no uploaded content is visibly marked "no content
+  uploaded yet" everywhere it can be selected, before a training job
+  targeting it is even created.
+- Train Now cannot be clicked on a job whose dataset has no content; the
+  disabled button's tooltip says why.
+- Every core-pipeline panel (Projects, Model Registry, Dataset Manager,
+  Training Jobs, Evaluation Lab, Experiment Tracking) shows the same
+  step-flow banner with its own stage highlighted.
+
+### Phase 90 — ML web UI clarity pass, part 2: responsive step banner, and automatic categorical feature encoding
+
+Status: Implemented (2026-08-23).
+
+Purpose:
+
+- Phase 89's step-flow banner used a fixed-width, non-wrapping flex row
+  with horizontal scroll; it clipped at the top of the page and broke
+  further on browser resize, and Dataset Manager rendered a second, even
+  narrower copy of it squeezed into the form column. Both are visible,
+  reported regressions of the "must work at any browser size, no
+  duplicated elements" requirement Phase 89 was supposed to satisfy.
+- Separately, uploading a real-world CSV with any text/category feature
+  column (e.g. a `record_type` column with values like `"document"`)
+  was flatly rejected with `invalid_ml_dataset_content` /
+  "every feature column must be numeric" — forcing a non-ML-expert user
+  to manually pre-process their data before MasterAI would accept it at
+  all, which is exactly the "rock science" burden the Machine Learning
+  UI is required not to impose.
+
+Deliverables:
+
+- `.mlStepFlow` (`src/web_ui.cpp` DARK_THEME_CSS) is now a CSS grid with
+  `auto-fit` columns instead of a `flex` row + `overflow-x:auto`; it wraps
+  its own rows at any viewport width/height instead of clipping or
+  scrolling. The connecting arrow glyph between steps was dropped (a
+  wrapping grid has no single "next box" direction to point one at); the
+  number circles alone still state the order.
+- `ml_step_flow()` gained a two-argument (`active_from`, `active_to`)
+  overload so one panel can highlight a *range* of steps instead of
+  needing a second banner instance. Dataset Manager (which genuinely
+  hosts both "register" and "upload content") now renders exactly one
+  banner highlighting steps 2 and 3 together, replacing the squeezed
+  duplicate.
+- Automatic categorical feature encoding: `parse_tabular_csv()`
+  (`src/masterai.hpp`/`src/ml_engine.cpp`) gained an opt-in
+  `encode_categorical_features` flag (default off, byte-for-byte
+  unchanged behavior for every pre-existing caller) plus a
+  `CategoricalEncoding` in/out parameter. On, a non-numeric feature
+  column is one-hot encoded (`"columnName=value"` slots) instead of
+  rejected, in one of two modes: **fit** (encoding empty/absent) fits a
+  fresh scheme from the column's own distinct values, sorted; **apply**
+  (encoding pre-populated) expands every column named in it using
+  exactly that stored value list, so an evaluation/comparison/prediction
+  dataset's feature layout always matches the model it is being scored
+  against — an unrecognized value is a clear "not seen while training
+  this model" error, never a silent guess.
+- `TrainedTabularModel` gained a `categorical_encoding` field, persisted
+  as trailing flat-record fields (`append_categorical_encoding_fields()`/
+  `read_categorical_encoding_fields()`, `src/ml_engine.cpp`) after the
+  existing hidden-layer fields, following the same forward-compatible
+  "extend past the end" contract Phase 46 established — a model
+  persisted before this phase reads back with an empty (correctly empty)
+  encoding.
+- Every real ML surface that parses a dataset now opts in consistently:
+  dataset content upload/GET (fit, discarded — validation only),
+  training/experiment execution (fit, persisted onto the new model),
+  fine-tuning/checkpoint-resume (apply, reusing the base model's/
+  snapshot's own encoding, since warm_start continues that exact weight
+  layout), evaluation runs and automation-pipeline "Evaluate model"
+  (apply, via the shared `execute_evaluation_run()`), model comparison
+  (apply, once per model — baseline and candidate can have been trained,
+  and so encoded, independently), hyperparameter search (fit, discarded —
+  every trial is scored and thrown away, never persisted), and
+  automation-pipeline "Validate data" (fit, discarded).
+- `POST /api/v1/ml/models/{id}/predict` now accepts the natural category
+  value for an encoded column (e.g. `{"record_type":"document"}`) instead
+  of requiring the caller to know the internal `"record_type=document"`
+  one-hot feature name — it expands the request using
+  `model.categorical_encoding` before calling `predict_tabular()`,
+  preserving the endpoint's existing "caller never has to know the
+  model's internal ordering" contract for categorical columns too.
+
+Exit criteria:
+
+- The step-flow banner renders correctly (no clipping, no horizontal
+  scroll, no duplicate instance) at any tested browser width/height.
+- A CSV with a text/category feature column uploads successfully, trains
+  successfully, and predicts successfully by sending that column's
+  natural string value — with zero manual CSV pre-processing.
+- Every parse_tabular_csv call site not touched by this phase (none —
+  audited via a full-file grep) keeps its original strict-numeric
+  behavior unchanged, since `encode_categorical_features` defaults to
+  off.
+
+### Phase 91 — ML web UI clarity pass, part 3: the remaining 21 panels, and an honest capability boundary on every non-real dropdown
+
+Status: Implemented (2026-08-23).
+
+Purpose:
+
+Phases 89/90 gave the seven core training-pipeline panels (Dashboard,
+Projects, Model Registry, Dataset Manager, Training Jobs, Evaluation Lab,
+Experiment Tracking) plain-language field hints, prerequisite guard rails,
+and a responsive step-flow banner. The remaining ~21 ML panels never got
+the same pass, and several of them let an operator type or select a value
+(an `Operation`, a `Search strategy`, an architecture field) that this
+codebase records but has no real executor for — the panel gave no signal
+that the value would do nothing, which is exactly the "professional, not
+misleading" bar the Machine Learning web UI is required to clear.
+
+Deliverables:
+
+- Every one of the 21 remaining panels (Subject Knowledge Manager, Data
+  Labeling, Data Preparation, Synthetic Data Generation, Prompt and
+  Instruction Training, Embeddings and Vector Stores, RAG, Fine-Tuning,
+  Checkpoint Management, Hyperparameter Optimization, Subject Examination,
+  Model Optimization, Model Comparison, Safety and Governance, Deployment
+  Manager, Inference Endpoints, Hardware and Compute, Automation
+  Pipelines, Monitoring, Audit Logs, Machine Learning Settings) reviewed
+  and, where its fields were not already self-explanatory from their
+  label/placeholder, given the same `field_hint()`/`mlPipelineNote`
+  treatment Phases 89/90 established — see each panel's block in
+  `application_page()` (`src/web_ui.cpp`).
+- Honest capability boundary, verified against the real executor code
+  (not assumed from the store's field list) and now stated directly in
+  the form: Model Builder's `Sequence length`/`Attention configuration`/
+  `Vocabulary and tokenizer`/`Mixed precision`/`Validation frequency`
+  fields are marked "not used by this trainer" (confirmed unconsumed in
+  `resolve_training_architecture()`, `src/server.cpp`) and `Sequence
+  length` was moved out of Basic mode into Advanced, since a tabular-MLP
+  trainer showing a transformer-only field in its default view is exactly
+  the fabricated complexity the "nothing complex in training" requirement
+  rules out. Hyperparameter Optimization's `Search strategy` and Model
+  Optimization's `Operation` fields now say plainly that only
+  `grid`/`pruning` actually run (verified: `run_hyperparameter_search()`
+  never reads `search_strategy`; `run_model_optimization()` explicitly
+  fails any non-`pruning` operation with "has no real executor yet").
+  Data Preparation and Data Labeling panels now state up front that they
+  record a status lifecycle only, with no execution/labeling engine
+  behind them yet.
+- Model Builder Configuration's "how do I actually (re)build a model"
+  gap — previously buried in a generic status dropdown — now has an
+  explicit note above its configuration list: setting status to
+  "submitted" creates a real training job from the panel's own
+  architecture fields, then running it (Train now, on Training Jobs) is
+  the model rebuild.
+- Cross-panel prerequisites (a dataset needing uploaded content before
+  Fine-Tuning/Hyperparameter Search can use it, a RAG configuration
+  needing approval before Test retrieval accepts it, a model needing an
+  approved Model Card before Deploy now accepts it, a Vector Store
+  needing to exist before Subject Knowledge Manager can ingest into one)
+  are now stated on the panel that depends on them, not left to be
+  discovered from a failed API call.
+
+Exit criteria:
+
+- Every one of the 21 panels has been reviewed against its real backing
+  executor in `server.cpp`, not just its store's field list.
+- No panel's free-text/dropdown field implies a capability (an execution
+  path, a search strategy, an optimization operation) that the verified
+  code does not actually run.
+- No pre-existing field, id, or JS wiring was removed or renamed —
+  every change is additive HTML (a `field_hint()` call or an
+  `mlPipelineNote`/`mlPipelineWarning` paragraph) using the exact classes
+  and escaping convention (`&quot;`/`&mdash;`, no raw `<`/`>`/literal
+  `&`) Phase 89 established, so no client-side script needed to change.
+
+### Phase 92 — Machine Learning Dashboard consolidation: teaching the five-step pipeline, and closing the roster gap
+
+Status: Implemented (2026-08-23).
+
+Purpose:
+
+The Dashboard (`/app/ml`) is the first page every user lands on, but it
+showed only an acknowledgement line, six stat counts, and one flat,
+alphabetically-unordered table of every interface tagged `available`/
+`planned` — with no indication that five specific pages (Projects, Dataset
+Manager twice, Training Jobs, Evaluation Lab) are the one real, working,
+end-to-end path, and everything else is optional tooling around it. A
+newcomer had to already know the pipeline order to find it. Separately,
+`MachineLearningRegistry`'s roster (`src/ml.cpp`) — the same data this
+table renders from — was missing four interfaces that have had real
+executors since Phases 51/52/53/79 (Subject Examination, Hyperparameter
+Optimization, Model Optimization, Checkpoint Management): a user relying
+on the Dashboard to see what exists would never learn these four pages
+were there at all, despite them being real, working, and linked in the
+sidebar.
+
+Deliverables:
+
+- `ml_pipeline_overview()` (`src/web_ui.cpp`) — reuses `.mlStepFlow`'s
+  five-box grid but renders each box as a real `<a href>` link to that
+  step's own page (`/app/ml/projects`, `/app/ml/datasets` twice, `/app/ml/
+  training-jobs`, `/app/ml/evaluation-runs`), with new `.mlPipelineOverview`
+  CSS neutralizing the global anchor color/underline so a clickable step
+  still reads as plain step-box text. The Dashboard now leads with this
+  overview plus a short plain-language paragraph stating how the five
+  steps connect (the project from Step 1 is picked again in Step 4; Step 2's
+  dataset is empty until Step 3 fills it; Step 4 needs that content; Step 5
+  needs Step 4's trained model).
+- `MachineLearningRegistry`'s roster (`src/ml.cpp`) gained the four missing
+  entries (`checkpoint-management`, `hyperparameter-optimization`,
+  `subject-examination`, `model-optimization`), each `available` with a
+  comment naming its real executor and, where relevant, the same partial-
+  execution caveat (only `pruning`/`grid`) already stated on that page's
+  own field hint (Phase 91). The roster is now the full 29 sidebar
+  interfaces, matching the sidebar exactly.
+- Redundancy removal: the Dashboard's Interfaces table now excludes the
+  five core-pipeline pages (and the Dashboard's own self-listing, which
+  had been listing itself as one of its own interfaces) via
+  `ML_DASHBOARD_CORE_KEYS` in `renderMlDashboard()` — the pipeline overview
+  above already shows those five as real links, so the table no longer
+  repeats them as a sixth, plain-text copy. Every remaining "Additional
+  tools" row is now itself a real link to that page
+  (`ML_DASHBOARD_ROUTE_BY_KEY`), not plain text, since the whole point of
+  a table on a navigation hub is to be navigable. `MachineLearningRegistry`'s
+  own stale class comment in `masterai.hpp` (a Phase-37-era "every
+  interface beyond Dashboard is listed as planned and none of them exist
+  yet" description, no longer true since every interface reached
+  `available`) was corrected to describe the module's actual current
+  state.
+
+Exit criteria:
+
+- Every one of the 29 sidebar interfaces (28 plus Dashboard itself) has a
+  matching `MachineLearningRegistry` roster entry.
+- The Dashboard's pipeline overview and its Interfaces table together list
+  every real page exactly once — no interface appears in both.
+- No pre-existing field, id, route, or JS function was removed or renamed;
+  the change is additive (`ml_pipeline_overview()`, `.mlPipelineOverview`
+  CSS, the two new client-side lookup tables, four new roster entries) plus
+  one corrected stale comment.
+
+### Phase 93 — Projects: the section 5 governance/target fields
+
+Status: Implemented (2026-08-24).
+
+Purpose: Phase 38 scoped Projects (section 5) down to identity/intent/
+classification/lifecycle only. Phases 46/56/57 subsequently gave the
+pipeline real training/evaluation/comparison executors, so the section's
+remaining definition-time fields now describe a project real work is
+actually being done against, not a project that can never mean anything.
+
+Deliverables:
+
+- `MLProject` (`masterai.hpp`) gained `administrators`, `approved_data_
+  sources`, `security_classification`, `target_architecture`, `target_
+  deployment_environment`, `success_criteria`, `evaluation_requirements`,
+  `safety_requirements`, `storage_allocation_mb`, `compute_allocation_
+  notes`. `administrators` is the one field with real logic beyond storage:
+  every id is validated against `UserStore` at write time (`POST /api/v1/
+  ml/projects` and the new `POST .../{id}/governance`), rejecting an
+  unknown account rather than silently storing it.
+- `storage_allocation_mb` is a real declared ceiling; nothing in this
+  codebase enforces per-project disk quota against it yet, so it is
+  descriptive today — the web UI's field hint says so plainly, the same
+  honest-boundary convention Phase 46 already established for Model
+  Builder's non-applicable fields.
+- Web UI (`ml-projects` panel): a new "Governance & targets" form below the
+  Projects table, populated by a "Configure" (gear) button per row, saves
+  via the new `/governance` route. The original create form is unchanged.
+
+Exit criteria:
+
+- Every section-5 field either persists as real administrator-entered data
+  (validated where validation is meaningful) or is documented as
+  descriptive-only, never fabricated as a computed value.
+- No pre-existing field, id, route, or permission was removed or renamed.
+
+### Phase 94 — Dataset Manager: real content-derived metrics, and Dataset Versioning (section 11)
+
+Status: Implemented (2026-08-24).
+
+Purpose: Phase 39 scoped Dataset Manager (section 10) down to identity/
+provenance/approval, deferring record/file count, schema, quality score,
+duplicate rate, split percentages, and a content hash until "an actual
+ingestion pipeline exists to populate the rest" — Phase 56 built that
+pipeline (`DatasetContentStore`, real CSV upload). Section 11 (Dataset
+Versioning) was never implemented at all, for the same reason.
+
+Deliverables:
+
+- `compute_dataset_content_metrics()` (`ml_engine.cpp`) computes
+  `record_count`, `file_count` (always 0 or 1 — one upload is one stored
+  CSV blob), `schema_summary` (per-column numeric/categorical, inferred by
+  attempting to parse every cell), `content_hash` (`sha256_hex` of the
+  exact uploaded bytes), `duplicate_rate` (exact-duplicate data rows /
+  total), and `data_quality_score` (a stated formula — non-null cell ratio
+  × non-duplicate ratio, not a claim about label correctness or any deeper
+  notion of quality) directly from the raw CSV, independent of a dataset's
+  tabular/instruction purpose. `Dataset` (`masterai.hpp`) gained these
+  fields plus administrator-declared `sensitive_data_status` (free text,
+  never auto-detected — real PII scanning is Phase 65/74/83, still
+  Planned) and `train_split_percent`/`validation_split_percent`/
+  `test_split_percent`.
+- `DatasetVersionStore` (new): every successful `POST .../content` — the
+  standalone Dataset Manager upload and both Automation Pipeline stages
+  that write dataset content (clean, auto-label) — now creates one
+  immutable `DatasetVersion` record via the shared
+  `record_dataset_content_upload()` helper (`server.cpp`), instead of only
+  overwriting `DatasetContentStore`'s single current blob. `Dataset::
+  current_version` tracks the latest version number; `GET /api/v1/ml/
+  datasets/{id}/versions` recalls the full history.
+- Web UI (`ml-datasets` panel): the dataset table gained Version/Quality/
+  Duplicates columns (real numbers once content exists, `-` otherwise), a
+  "History" button reporting the version list, a "Configure" button
+  loading the declared fields into a new "Declare metadata" form, saved via
+  `POST .../{id}/declare`.
+
+Exit criteria:
+
+- Every section-10 field is either a real value computed from actual
+  uploaded content, or a real administrator-declared value — never
+  fabricated.
+- Section 11's immutability holds: no route ever mutates an existing
+  `DatasetVersion`; a re-upload only appends a new one.
+- No pre-existing field, id, route, or JS function was removed or renamed.
+
+### Phase 95 — Training Jobs: the section 16 execution-policy fields
+
+Status: Implemented (2026-08-24).
+
+Purpose: Phase 42 scoped Training Jobs (section 16) down to identity/
+target/training-method/status. Phases 46/56 built the real in-process MLP
+training executor (`execute_training_job()`), so a subset of section 16's
+compute/scheduling fields can now genuinely change what that executor
+does, not just describe a job that never runs.
+
+Deliverables:
+
+- `TrainingJob` (`masterai.hpp`) gained fourteen fields, split by whether
+  `execute_training_job()` (`server.cpp`) genuinely enforces them:
+  - Enforced: `max_runtime_seconds` (a real wall-clock deadline checked
+    inside the training `on_epoch` callback — an overshoot aborts the run
+    and fails the job with reason "timeout"); `failure_recovery_strategy`
+    (`"none"` | `"retry_once"` — a real second attempt, cycling the job's
+    status back through queued/preparing/running, before the job is
+    actually marked failed); `checkpoint_frequency_epochs` (overrides the
+    Model Builder-derived checkpoint stride for this specific job).
+  - Descriptive only: `output_directory`, `compute_target`, `hardware_
+    allocation`, `runtime_environment`, `container_image`, `environment_
+    variables`, `secrets_references`, `logging_policy`, `notification_
+    policy`, `resource_ceiling_notes`, `cost_ceiling_notes` — this server
+    always trains in-process on the host it runs on; there is no
+    container/cluster scheduler for these to target, so inventing
+    execution behavior for them would misrepresent what actually runs. The
+    web UI's field hints say so plainly.
+- `POST /api/v1/ml/training-jobs/{id}/execution-policy` (new) edits all
+  fourteen; the Training Jobs table gained Max runtime/Retry columns and a
+  "Configure" button opening a new "Execution policy" form.
+
+Exit criteria:
+
+- `max_runtime_seconds`/`failure_recovery_strategy`/`checkpoint_frequency_
+  epochs` are proven by genuinely changing `execute_training_job()`'s
+  behavior, not just recorded.
+- Every descriptive-only field's web UI hint states plainly that it is not
+  enforced, matching this codebase's established honesty convention.
+- No pre-existing field, id, route, or JS function was removed or renamed.
+
+### Phase 96 — Evaluation Lab: real-measured metrics beyond accuracy/F1/MSE (section 23)
+
+Status: Implemented (2026-08-24).
+
+Purpose: Phase 56's `evaluate_tabular_model()` computes accuracy/macro
+precision/recall/F1/confusion-matrix for classification and MSE/MAE/R² for
+regression — 5 of section 23's 24 listed evaluation categories. This phase
+adds every remaining category that is honestly computable for a tabular
+classifier/regressor, and documents (rather than fabricates) the
+categories that are not.
+
+Deliverables:
+
+- `TabularEvaluationMetrics` (`masterai.hpp`) gained `latency_ms`/
+  `throughput_predictions_per_sec` (measured around the exact scoring pass
+  `compute_metrics()` performs, not a separate estimate), `memory_usage_mb`
+  (resident-memory delta across a second scoring pass, read via this
+  codebase's existing `probe_process_resources()` native probe —
+  platform.cpp — not a new one), `stability_score` (1 minus the normalized
+  spread of the primary metric — macro F1 for classification, R² for
+  regression — across two disjoint, deterministically-shuffled halves of
+  the same evaluation data), `robustness_score` (the primary metric under
+  small injected Gaussian feature noise, relative to the clean score, capped
+  at 1.0), and `bias_fairness_report` (a per-group primary-metric breakdown,
+  populated only when the caller names a real feature column present in
+  the dataset — never auto-detected).
+- `evaluate_tabular_model()` gained an optional `sensitive_feature_name`
+  parameter (default empty, every pre-existing caller unaffected).
+  `EvaluationRun` (`masterai.hpp`) gained `sensitive_feature_name`, set at
+  creation and threaded through `execute_evaluation_run()`; the web UI's
+  New evaluation run form gained an optional matching field.
+- `fmtMlMetrics()` (`web_ui.cpp`, the one shared formatter Training Jobs/
+  Evaluation Lab/Model Comparison/prediction results all already use)
+  appends the new fields for free everywhere a metrics result is shown.
+- Documented boundary (`docs/HowToUse-MachineLearning.md`, and the
+  Evaluation Lab field hints): perplexity, hallucination rate,
+  groundedness, retrieval accuracy, response relevance, code correctness/
+  compilation/unit-test success, and adversarial-prompt resistance are
+  generative/LLM-evaluation categories this tabular classifier/regressor
+  executor does not compute — never approximated or faked.
+
+Exit criteria:
+
+- Every new metric is computed from a real measurement or a real
+  comparison against real re-computed scores — none is a fabricated
+  number.
+- The categories this executor architecture cannot honestly produce are
+  documented as out of scope, not silently absent or invented.
+- No pre-existing field, id, route, or JS function was removed or renamed;
+  every pre-existing `evaluate_tabular_model()` caller is unaffected by the
+  new optional parameter.
+
 Implementation status: Phase 37 (see the phase list above) implements the
 Dashboard interface below at a foundation level — real, zero-valued counts
 and an honest `available`/`planned` tag on every one of the 25 interfaces
 in section 2. Phase 38 implements Projects (section 5) at a scoped-down
 level — identity, intent, subject/task classification, and lifecycle
-status only. Phase 39 implements the Model Registry (section 7) and
-Dataset Manager (section 10), both scoped down the same way — identity,
-provenance, and lifecycle/approval status only, not the full field list
-(evaluation results, safety assessment, hardware/runtime requirements,
-model hash/signature, dataset schema, quality score, versioning) that
+status only (Phase 93 later added the section's remaining governance/
+target fields, once a real pipeline existed to make them meaningful).
+Phase 39 implements the Model Registry (section 7) and Dataset Manager
+(section 10), both scoped down the same way — identity, provenance, and
+lifecycle/approval status only, not the full field list (evaluation
+results, safety assessment, hardware/runtime requirements, model hash/
+signature, dataset schema, quality score, versioning) that
 later training/evaluation/ingestion phases will attach to a registry
-entry or dataset once they exist. The dashboard's models-training,
+entry or dataset once they exist (Phase 94 later added Dataset Manager's
+share of that list — schema, quality score, content hash, and Dataset
+Versioning — once Phase 56's real content pipeline existed to compute them
+from; the Model Registry's own share of that list remains as originally
+scoped). The dashboard's models-training,
 models-awaiting-evaluation, and deployed-models counts are now real,
 drawn from the Model Registry's own state counts. Phase 40 implements the
 Subject Knowledge Manager (section 12) at the same scoped-down level —
@@ -7678,13 +8588,21 @@ training method, and the full eleven-state lifecycle status from section
 allocation, container image, hyperparameters, environment variables,
 secrets, checkpoint/logging/notification policy, resource/cost ceilings,
 failure-recovery strategy) that a real training executor will attach to
-a job once it exists. The dashboard's failed-training-jobs count is now
+a job once it exists (Phase 95 later added this whole field list once
+Phase 46/56's real executor existed — max runtime, retry, and checkpoint
+cadence are genuinely enforced; the rest are recorded for operator
+reference, since this server has no container/cluster scheduler for them
+to target). The dashboard's failed-training-jobs count is now
 real, drawn from Training Jobs in the `failed` state. Phase 43 implements
 the Evaluation Lab (section 23) at the same scoped-down level — identity,
 the model/dataset a run targets, a free-text evaluation category, and a
 lifecycle status, not the benchmark-set/human-evaluation/comparison/
 numeric-score field list that a real evaluation harness will attach to a
-run once it exists. Phase 44 implements Experiment Tracking (section 25)
+run once it exists (Phase 96 later added every metric category beyond
+accuracy/F1/MSE that is honestly computable for a tabular model — latency,
+throughput, memory, stability, robustness, and an optional bias/fairness
+breakdown — while documenting the generative/LLM-only categories this
+executor still does not compute). Phase 44 implements Experiment Tracking (section 25)
 at the same scoped-down level — identity, the project/model/dataset an
 experiment relates to (dataset optional, mirroring Training Jobs' optional
 model id), and a lifecycle status, not the source-code/configuration/
