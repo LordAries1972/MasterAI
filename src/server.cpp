@@ -18,6 +18,8 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <numeric>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -490,6 +492,8 @@ TabularTrainingOptions resolve_training_architecture(
         base.batch_size = static_cast<std::uint32_t>(settings.batch_size);
     }
     base.gradient_clip_norm = settings.gradient_clipping;
+    base.regularization_l1 = settings.l1_regularization;
+    base.regularization_l2 = settings.l2_regularization;
     if (settings.gradient_accumulation > 0U) {
         base.gradient_accumulation_steps =
             static_cast<std::uint32_t>(settings.gradient_accumulation);
@@ -586,6 +590,152 @@ std::pair<std::string, std::string> run_model_builder_config(
         return {"failed", error.what()};
     }
 }
+
+// Forward declaration -- defined below run_hyperparameter_search(), which
+// uses it to interpret HyperparameterSearch::strategy case-insensitively.
+std::string ascii_lower(const std::string& value);
+
+// Phase 52 addendum (2026-08-24): a real sequential-model-based ("Bayesian")
+// search strategy for run_hyperparameter_search() below, alongside the
+// pre-existing deterministic grid and a new uniform-random strategy.
+// Scoped to the same two universal dimensions every strategy already tunes
+// (learning rate, epoch count, both normalized to [0,1] before any kernel
+// computation) -- extending a Gaussian Process cleanly to the extra
+// MLP-only dimensions (batch size/dropout/optimiser) would need a mixed
+// continuous/categorical kernel this codebase has no other use for; those
+// three still ride the winning trial's own normalized position exactly as
+// the grid strategy's own comment already documents (see run_trial() in
+// run_hyperparameter_search()), so an MLP job's search is not left
+// unswept, just not a dimension the GP itself models.
+namespace bayesian_search {
+
+// One observed (normalized learning-rate, normalized epoch) -> real
+// held-out score, used to condition the Gaussian Process below.
+struct Observation {
+    double x0;
+    double x1;
+    double score;
+};
+
+double kernel(const double a0, const double a1, const double b0, const double b1) {
+    // Fixed length-scale/unit-signal-variance squared-exponential kernel --
+    // the two hyperparameters this codebase does not also fit (that would
+    // need its own marginal-likelihood optimization, out of scope for a
+    // search bounded at kMaxHyperparameterTrials observations); 0.3 keeps
+    // the kernel responsive across the full normalized [0,1]^2 square.
+    constexpr double length_scale = 0.3;
+    const double dx = a0 - b0;
+    const double dy = a1 - b1;
+    const double squared_distance = dx * dx + dy * dy;
+    return std::exp(-squared_distance / (2.0 * length_scale * length_scale));
+}
+
+double normal_pdf(const double z) {
+    return std::exp(-0.5 * z * z) / std::sqrt(2.0 * 3.14159265358979323846);
+}
+
+double normal_cdf(const double z) {
+    return 0.5 * (1.0 + std::erf(z / std::sqrt(2.0)));
+}
+
+// A Gaussian Process regressor over the (learning-rate, epoch) unit
+// square, fit fresh on every real trial observed so far. `observations`
+// never exceeds kMaxHyperparameterTrials entries, so fit()'s O(n^3)
+// Cholesky decomposition is always cheap (n <= 20).
+struct GaussianProcess {
+    std::vector<Observation> observations;
+    std::vector<std::vector<double>> cholesky_lower;
+    std::vector<double> alpha;
+
+    // Solves the standard GP training system (K + noise*I) * alpha = y via
+    // Cholesky decomposition (K = L * L^T, then two triangular solves) --
+    // never called with an empty `observations`; predict() below is only
+    // ever reached once fit() has been called on at least one real trial.
+    void fit() {
+        const std::size_t n = observations.size();
+        // Small nugget on the diagonal: real trial scores are themselves
+        // noisy (different random weight-init draws score the exact same
+        // hyperparameters differently), and it keeps the kernel matrix
+        // numerically invertible even when two trials land very close
+        // together in normalized space.
+        constexpr double noise_variance = 1e-3;
+        std::vector<std::vector<double>> covariance(n, std::vector<double>(n, 0.0));
+        for (std::size_t row = 0; row < n; ++row) {
+            for (std::size_t col = 0; col < n; ++col) {
+                covariance[row][col] =
+                    kernel(observations[row].x0, observations[row].x1,
+                          observations[col].x0, observations[col].x1);
+            }
+            covariance[row][row] += noise_variance;
+        }
+        cholesky_lower.assign(n, std::vector<double>(n, 0.0));
+        for (std::size_t row = 0; row < n; ++row) {
+            for (std::size_t col = 0; col <= row; ++col) {
+                double sum = covariance[row][col];
+                for (std::size_t k = 0; k < col; ++k) {
+                    sum -= cholesky_lower[row][k] * cholesky_lower[col][k];
+                }
+                cholesky_lower[row][col] =
+                    row == col ? std::sqrt(std::max(sum, 1e-12))
+                              : sum / cholesky_lower[col][col];
+            }
+        }
+        std::vector<double> y(n);
+        for (std::size_t i = 0; i < n; ++i) y[i] = observations[i].score;
+        std::vector<double> z(n, 0.0);
+        for (std::size_t row = 0; row < n; ++row) {
+            double sum = y[row];
+            for (std::size_t k = 0; k < row; ++k) sum -= cholesky_lower[row][k] * z[k];
+            z[row] = sum / cholesky_lower[row][row];
+        }
+        alpha.assign(n, 0.0);
+        for (std::size_t row = n; row-- > 0U;) {
+            double sum = z[row];
+            for (std::size_t k = row + 1U; k < n; ++k) sum -= cholesky_lower[k][row] * alpha[k];
+            alpha[row] = sum / cholesky_lower[row][row];
+        }
+    }
+
+    // Predictive mean/stddev of the score at (x0, x1) under the fitted GP.
+    void predict(const double x0, const double x1, double& mean,
+                double& stddev) const {
+        const std::size_t n = observations.size();
+        std::vector<double> k_star(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            k_star[i] = kernel(observations[i].x0, observations[i].x1, x0, x1);
+        }
+        mean = 0.0;
+        for (std::size_t i = 0; i < n; ++i) mean += k_star[i] * alpha[i];
+        std::vector<double> v(n, 0.0);
+        for (std::size_t row = 0; row < n; ++row) {
+            double sum = k_star[row];
+            for (std::size_t k = 0; k < row; ++k) sum -= cholesky_lower[row][k] * v[k];
+            v[row] = sum / cholesky_lower[row][row];
+        }
+        double variance = kernel(x0, x1, x0, x1);
+        for (std::size_t i = 0; i < n; ++i) variance -= v[i] * v[i];
+        stddev = std::sqrt(std::max(variance, 1e-12));
+    }
+};
+
+// Expected Improvement acquisition function (maximization convention,
+// matching every trial score here already being "higher is better":
+// accuracy or R-squared). `exploration` is a small additive margin (the
+// standard EI formula's "xi") that keeps the search from stalling once it
+// finds one good point -- without it, EI collapses to ~0 everywhere once
+// the GP is confident, and the search would stop exploring entirely.
+double expected_improvement(const double mean, const double stddev,
+                           const double best_score_so_far,
+                           const double exploration = 0.01) {
+    if (stddev < 1e-9) {
+        return mean > best_score_so_far ? mean - best_score_so_far : 0.0;
+    }
+    const double improvement = mean - best_score_so_far - exploration;
+    const double z = improvement / stddev;
+    return improvement * normal_cdf(z) + stddev * normal_pdf(z);
+}
+
+}  // namespace bayesian_search
 
 // Phase 52: docs/PLAN.md "Machine Learning Abilities" section 26
 // (Hyperparameter Optimization). Hard cap on real trials regardless of a
@@ -717,9 +867,6 @@ std::pair<std::string, std::string> run_hyperparameter_search(
     const std::uint32_t requested_trials =
         std::min(std::max<std::uint32_t>(search.max_trials, 1U),
                  kMaxHyperparameterTrials);
-    std::uint32_t grid_side = static_cast<std::uint32_t>(
-        std::sqrt(static_cast<double>(requested_trials)));
-    if (grid_side < 1U) grid_side = 1U;
     std::string trials_json = "[";
     bool first_trial = true;
     double best_score = -std::numeric_limits<double>::infinity();
@@ -729,73 +876,203 @@ std::pair<std::string, std::string> run_hyperparameter_search(
     double best_dropout = 0.0;
     std::string best_optimiser;
     std::uint32_t trials_run = 0U;
-    for (std::uint32_t i = 0U; i < grid_side; ++i) {
-        const double lr_fraction =
-            grid_side > 1U
-                ? static_cast<double>(i) / static_cast<double>(grid_side - 1U)
-                : 0.0;
-        const double trial_learning_rate =
-            learning_rate_min + (learning_rate_max - learning_rate_min) * lr_fraction;
-        for (std::uint32_t j = 0U; j < grid_side; ++j) {
-            const double epoch_fraction =
-                grid_side > 1U
-                    ? static_cast<double>(j) / static_cast<double>(grid_side - 1U)
+
+    // Runs one real trial at the given (learning_rate, epochs), riding the
+    // same MLP joint-sweep formula every strategy below shares: batch_size
+    // rides the trial's own normalized position within [learning_rate_min,
+    // learning_rate_max], dropout rides its position within [epoch_min,
+    // epoch_max], and optimiser cycles through the fixed three-way choice
+    // by `cycle_index` -- exactly the (i, j)/i+j scheme the grid strategy
+    // used before this pass, just computed from the trial's own values
+    // instead of grid indices so random/Bayesian trials (which are not on
+    // a grid) can share this same function. Returns the real held-out
+    // score (accuracy or R-squared), or NaN if the trial failed to train
+    // (a degenerate learning rate, etc.) -- never a fabricated zero.
+    const auto run_trial = [&](const double trial_learning_rate,
+                               const std::uint32_t trial_epochs,
+                               const std::uint32_t cycle_index) -> double {
+        TabularTrainingOptions options = architecture;
+        options.learning_rate = trial_learning_rate;
+        options.epochs = trial_epochs > 0U ? trial_epochs : 1U;
+        options.checkpoint_interval = 0U;
+        std::uint32_t trial_batch_size = 0U;
+        double trial_dropout = 0.0;
+        std::string trial_optimiser;
+        if (mlp_eligible) {
+            const double lr_fraction =
+                learning_rate_max > learning_rate_min
+                    ? std::clamp((trial_learning_rate - learning_rate_min) /
+                                    (learning_rate_max - learning_rate_min),
+                                0.0, 1.0)
                     : 0.0;
-            const std::uint32_t trial_epochs = epoch_min +
-                static_cast<std::uint32_t>(
-                    static_cast<double>(epoch_max - epoch_min) * epoch_fraction);
-            // Base options: plain TabularTrainingOptions{} for a non-MLP
-            // job (unaffected by this pass, exactly as before), or the
-            // job's real architecture (hidden layers, activation,
-            // initialisation, lr_schedule, gradient clip/accumulation)
-            // when eligible.
-            TabularTrainingOptions options = architecture;
-            options.learning_rate = trial_learning_rate;
-            options.epochs = trial_epochs > 0U ? trial_epochs : 1U;
-            options.checkpoint_interval = 0U;
-            std::uint32_t trial_batch_size = 0U;
-            double trial_dropout = 0.0;
-            std::string trial_optimiser;
+            const double epoch_fraction =
+                epoch_max > epoch_min
+                    ? std::clamp(static_cast<double>(trial_epochs - epoch_min) /
+                                    static_cast<double>(epoch_max - epoch_min),
+                                0.0, 1.0)
+                    : 0.0;
+            trial_batch_size = batch_size_min + static_cast<std::uint32_t>(
+                static_cast<double>(batch_size_max - batch_size_min) * lr_fraction);
+            trial_dropout = kDropoutMin + (kDropoutMax - kDropoutMin) * epoch_fraction;
+            trial_optimiser = kOptimiserChoices[cycle_index % kOptimiserChoices.size()];
+            options.batch_size = trial_batch_size > 0U ? trial_batch_size : 1U;
+            options.dropout = trial_dropout;
+            options.optimiser = trial_optimiser;
+        }
+        TrainedTabularModel model;
+        try {
+            const auto report = train_tabular_model(data, options, model);
+            const double score = report.metrics.classification
+                                      ? report.metrics.accuracy
+                                      : report.metrics.r_squared;
+            ++trials_run;
+            if (!first_trial) trials_json += ",";
+            first_trial = false;
+            trials_json += "{\"learningRate\":" +
+                std::to_string(trial_learning_rate) + ",\"epochs\":" +
+                std::to_string(options.epochs) + ",\"score\":" +
+                std::to_string(score);
             if (mlp_eligible) {
-                trial_batch_size = batch_size_min + static_cast<std::uint32_t>(
-                    static_cast<double>(batch_size_max - batch_size_min) * lr_fraction);
-                trial_dropout = kDropoutMin + (kDropoutMax - kDropoutMin) * epoch_fraction;
-                trial_optimiser = kOptimiserChoices[(i + j) % kOptimiserChoices.size()];
-                options.batch_size = trial_batch_size > 0U ? trial_batch_size : 1U;
-                options.dropout = trial_dropout;
-                options.optimiser = trial_optimiser;
+                trials_json += ",\"batchSize\":" + std::to_string(trial_batch_size) +
+                    ",\"dropout\":" + std::to_string(trial_dropout) +
+                    ",\"optimiser\":" + json_string(trial_optimiser);
             }
-            TrainedTabularModel model;
-            try {
-                const auto report = train_tabular_model(data, options, model);
-                const double score = report.metrics.classification
-                                          ? report.metrics.accuracy
-                                          : report.metrics.r_squared;
-                ++trials_run;
-                if (!first_trial) trials_json += ",";
-                first_trial = false;
-                trials_json += "{\"learningRate\":" +
-                    std::to_string(trial_learning_rate) + ",\"epochs\":" +
-                    std::to_string(options.epochs) + ",\"score\":" +
-                    std::to_string(score);
-                if (mlp_eligible) {
-                    trials_json += ",\"batchSize\":" + std::to_string(trial_batch_size) +
-                        ",\"dropout\":" + std::to_string(trial_dropout) +
-                        ",\"optimiser\":" + json_string(trial_optimiser);
+            trials_json += "}";
+            if (score > best_score) {
+                best_score = score;
+                best_learning_rate = trial_learning_rate;
+                best_epochs = options.epochs;
+                best_batch_size = trial_batch_size;
+                best_dropout = trial_dropout;
+                best_optimiser = trial_optimiser;
+            }
+            return score;
+        } catch (const std::exception&) {
+            // A trial that fails to train (degenerate learning rate, etc.)
+            // is skipped, not counted as a fabricated zero score.
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+    };
+
+    const std::string strategy = ascii_lower(search.strategy);
+    if (strategy == "random") {
+        // Uniform-random search over the same requested ranges the grid
+        // strategy sweeps -- genuinely independent draws instead of an
+        // evenly spaced grid, seeded from this search's own id so
+        // re-running the identical search reproduces the identical
+        // sequence of trials (the same determinism TabularTrainingOptions::
+        // seed already guarantees for a training run).
+        std::seed_seq seed{std::hash<std::string>{}(search.id)};
+        std::mt19937 rng(seed);
+        std::uniform_real_distribution<double> lr_distribution(
+            learning_rate_min, learning_rate_max);
+        std::uniform_int_distribution<std::uint32_t> epoch_distribution(
+            epoch_min, epoch_max);
+        for (std::uint32_t trial = 0U; trial < requested_trials; ++trial) {
+            run_trial(lr_distribution(rng), epoch_distribution(rng), trial);
+        }
+    } else if (strategy == "bayesian") {
+        // Real sequential model-based search -- a Gaussian Process
+        // (bayesian_search::GaussianProcess above) fit on every real trial
+        // observed so far, picking each next trial by maximizing Expected
+        // Improvement over a fine random candidate set rather than a fixed
+        // grid or independent random draws. This is genuinely more
+        // sample-efficient than either alternative once a handful of
+        // trials have been observed: each new pick is chosen because the
+        // model expects it to beat the best score seen yet, not because it
+        // happens to fall on a grid line or a lucky draw.
+        std::seed_seq seed{std::hash<std::string>{}(search.id)};
+        std::mt19937 rng(seed);
+        std::uniform_real_distribution<double> unit_distribution(0.0, 1.0);
+        const auto denormalize_lr = [&](const double unit) {
+            return learning_rate_min + (learning_rate_max - learning_rate_min) * unit;
+        };
+        const auto denormalize_epochs = [&](const double unit) {
+            return epoch_min + static_cast<std::uint32_t>(
+                static_cast<double>(epoch_max - epoch_min) * unit);
+        };
+        bayesian_search::GaussianProcess model;
+        // A GP has nothing to condition on for its first few picks, so an
+        // initial random design (never more than a third of the budget)
+        // seeds it with real observations before Expected Improvement
+        // starts driving where to look next.
+        const std::uint32_t initial_random_trials =
+            std::min(requested_trials, std::max(2U, requested_trials / 3U));
+        for (std::uint32_t trial = 0U; trial < initial_random_trials; ++trial) {
+            const double lr_unit = unit_distribution(rng);
+            const double epoch_unit = unit_distribution(rng);
+            const double score =
+                run_trial(denormalize_lr(lr_unit), denormalize_epochs(epoch_unit), trial);
+            if (std::isfinite(score)) {
+                model.observations.push_back({lr_unit, epoch_unit, score});
+            }
+        }
+        for (std::uint32_t trial = initial_random_trials; trial < requested_trials;
+             ++trial) {
+            if (model.observations.empty()) {
+                // Every initial random trial failed to train (a
+                // pathological search space) -- fall back to one more
+                // random draw rather than fitting a GP on nothing.
+                const double lr_unit = unit_distribution(rng);
+                const double epoch_unit = unit_distribution(rng);
+                const double score = run_trial(denormalize_lr(lr_unit),
+                                               denormalize_epochs(epoch_unit), trial);
+                if (std::isfinite(score)) {
+                    model.observations.push_back({lr_unit, epoch_unit, score});
                 }
-                trials_json += "}";
-                if (score > best_score) {
-                    best_score = score;
-                    best_learning_rate = trial_learning_rate;
-                    best_epochs = options.epochs;
-                    best_batch_size = trial_batch_size;
-                    best_dropout = trial_dropout;
-                    best_optimiser = trial_optimiser;
-                }
-            } catch (const std::exception&) {
-                // A trial that fails to train (degenerate learning rate,
-                // etc.) is skipped, not counted as a fabricated zero score.
                 continue;
+            }
+            model.fit();
+            double best_candidate_lr_unit = 0.5;
+            double best_candidate_epoch_unit = 0.5;
+            double best_acquisition = -std::numeric_limits<double>::infinity();
+            constexpr int kCandidatesPerStep = 400;
+            for (int candidate = 0; candidate < kCandidatesPerStep; ++candidate) {
+                const double candidate_lr_unit = unit_distribution(rng);
+                const double candidate_epoch_unit = unit_distribution(rng);
+                double mean = 0.0;
+                double stddev = 0.0;
+                model.predict(candidate_lr_unit, candidate_epoch_unit, mean, stddev);
+                const double acquisition =
+                    bayesian_search::expected_improvement(mean, stddev, best_score);
+                if (acquisition > best_acquisition) {
+                    best_acquisition = acquisition;
+                    best_candidate_lr_unit = candidate_lr_unit;
+                    best_candidate_epoch_unit = candidate_epoch_unit;
+                }
+            }
+            const double score = run_trial(denormalize_lr(best_candidate_lr_unit),
+                                           denormalize_epochs(best_candidate_epoch_unit),
+                                           trial);
+            if (std::isfinite(score)) {
+                model.observations.push_back(
+                    {best_candidate_lr_unit, best_candidate_epoch_unit, score});
+            }
+        }
+    } else {
+        // Default (including the pre-existing "grid" and any unrecognized
+        // free-text value): the original deterministic grid, unchanged --
+        // an existing search created before this pass, or one that never
+        // set a strategy, behaves exactly as it did before.
+        std::uint32_t grid_side = static_cast<std::uint32_t>(
+            std::sqrt(static_cast<double>(requested_trials)));
+        if (grid_side < 1U) grid_side = 1U;
+        for (std::uint32_t i = 0U; i < grid_side; ++i) {
+            const double lr_fraction =
+                grid_side > 1U
+                    ? static_cast<double>(i) / static_cast<double>(grid_side - 1U)
+                    : 0.0;
+            const double trial_learning_rate =
+                learning_rate_min + (learning_rate_max - learning_rate_min) * lr_fraction;
+            for (std::uint32_t j = 0U; j < grid_side; ++j) {
+                const double epoch_fraction =
+                    grid_side > 1U
+                        ? static_cast<double>(j) / static_cast<double>(grid_side - 1U)
+                        : 0.0;
+                const std::uint32_t trial_epochs = epoch_min +
+                    static_cast<std::uint32_t>(
+                        static_cast<double>(epoch_max - epoch_min) * epoch_fraction);
+                run_trial(trial_learning_rate, trial_epochs, i + j);
             }
         }
     }
@@ -835,6 +1112,479 @@ std::string ascii_lower(const std::string& value) {
             std::tolower(static_cast<unsigned char>(character)));
     }
     return result;
+}
+
+// Ensemble Methods (2026-08-24): docs/PLAN.md "Machine Learning Abilities".
+// Real bagging/boosting/stacking over the tabular/MLP trainer -- every
+// member below is a genuine train_tabular_model() run and every reported
+// score a genuine evaluate_tabular_model()-equivalent held-out metric
+// (computed here directly via predict_tabular() since combining members'
+// predictions, not evaluating one model, is the whole point), never a
+// fabricated or interpolated number. Scoped like Hyperparameter Search and
+// Model Comparison before it: this trains, combines, and scores for real,
+// then reports the outcome -- it does not yet persist a servable composite-
+// model artifact for live prediction (that would need a new multi-model
+// prediction-serving path); training a real production model from the
+// winning configuration is a separate step, exactly as an administrator
+// already does after a winning Hyperparameter Search trial.
+namespace ensemble_methods {
+
+constexpr std::uint32_t kMaxEnsembleMembers = 10U;
+constexpr double kTestFraction = 0.2;
+constexpr double kBoostingShrinkage = 0.3;
+
+// The exact same deterministic shuffle train_tabular_model() itself uses
+// (masterai.hpp/ml_engine.cpp: std::mt19937 seeded from `seed`, test_count
+// = floor(test_fraction * row_count)) -- so every member trained below and
+// the real single-model baseline are evaluated against the exact same
+// held-out rows, keeping the reported comparison apples-to-apples.
+std::pair<std::vector<std::size_t>, std::vector<std::size_t>> train_test_split(
+    const std::size_t row_count, const std::uint32_t seed,
+    const double test_fraction) {
+    std::vector<std::size_t> order(row_count);
+    std::iota(order.begin(), order.end(), 0U);
+    std::mt19937 generator(seed);
+    std::shuffle(order.begin(), order.end(), generator);
+    auto test_count = static_cast<std::size_t>(
+        test_fraction * static_cast<double>(row_count));
+    if (test_count >= row_count) test_count = row_count - 1U;
+    const std::size_t train_count = row_count - test_count;
+    std::vector<std::size_t> train_indices(order.begin(), order.begin() +
+                                                              static_cast<std::ptrdiff_t>(train_count));
+    std::vector<std::size_t> test_indices(order.begin() + static_cast<std::ptrdiff_t>(train_count),
+                                          order.end());
+    return {train_indices, test_indices};
+}
+
+// Builds a TabularDataset containing only `indices` from `source`, in that
+// order -- hands run_ensemble()'s bootstrap-resampled/held-out subsets to
+// train_tabular_model()/predict_tabular() as real, independent datasets.
+TabularDataset subset_dataset(const TabularDataset& source,
+                              const std::vector<std::size_t>& indices) {
+    TabularDataset subset;
+    subset.feature_names = source.feature_names;
+    subset.target_name = source.target_name;
+    subset.classification = source.classification;
+    subset.class_labels = source.class_labels;
+    subset.features.reserve(indices.size());
+    subset.targets.reserve(indices.size());
+    for (const auto index : indices) {
+        subset.features.push_back(source.features[index]);
+        subset.targets.push_back(source.targets[index]);
+    }
+    return subset;
+}
+
+// Real held-out score of one plain model trained with the job's own
+// architecture against exactly `train_indices`/`test_indices` -- the
+// baseline every combination method below is measured against.
+double baseline_score(const TabularDataset& data,
+                      const TabularTrainingOptions& architecture,
+                      const std::vector<std::size_t>& train_indices,
+                      const std::vector<std::size_t>& test_indices) {
+    const auto train_subset = subset_dataset(data, train_indices);
+    const auto test_subset = subset_dataset(data, test_indices);
+    TabularTrainingOptions options = architecture;
+    options.test_fraction = 0.0;
+    options.checkpoint_interval = 0U;
+    TrainedTabularModel model;
+    train_tabular_model(train_subset, options, model);
+    std::size_t correct = 0U;
+    double sum_squared_error = 0.0;
+    double sum_squared_total = 0.0;
+    double target_mean = 0.0;
+    for (const double target : test_subset.targets) target_mean += target;
+    target_mean /= static_cast<double>(std::max<std::size_t>(1U, test_subset.targets.size()));
+    for (std::size_t row = 0; row < test_subset.features.size(); ++row) {
+        const auto prediction = predict_tabular(model, test_subset.features[row]);
+        if (data.classification) {
+            if (static_cast<std::size_t>(prediction.value) ==
+                static_cast<std::size_t>(test_subset.targets[row])) {
+                ++correct;
+            }
+        } else {
+            const double error = prediction.value - test_subset.targets[row];
+            sum_squared_error += error * error;
+            const double deviation = test_subset.targets[row] - target_mean;
+            sum_squared_total += deviation * deviation;
+        }
+    }
+    if (data.classification) {
+        return static_cast<double>(correct) /
+               static_cast<double>(std::max<std::size_t>(1U, test_subset.targets.size()));
+    }
+    return sum_squared_total > 0.0 ? 1.0 - sum_squared_error / sum_squared_total : 0.0;
+}
+
+// Bagging: `member_count` models, each trained on an independent bootstrap
+// resample (sampling train rows with replacement, same size as the train
+// set) of the same architecture, combined by averaging predicted values
+// (regression) or averaging class_probabilities then taking the argmax
+// (classification -- a real soft vote, not a coarser hard majority vote).
+double run_bagging(const TabularDataset& data,
+                   const TabularTrainingOptions& architecture,
+                   const std::vector<std::size_t>& train_indices,
+                   const std::vector<std::size_t>& test_indices,
+                   const std::uint32_t member_count, std::uint32_t& members_trained) {
+    const auto train_subset = subset_dataset(data, train_indices);
+    const auto test_subset = subset_dataset(data, test_indices);
+    const std::size_t class_count = data.classification ? data.class_labels.size() : 1U;
+    std::vector<std::vector<double>> combined(test_subset.features.size(),
+                                              std::vector<double>(class_count, 0.0));
+    std::vector<double> combined_value(test_subset.features.size(), 0.0);
+    std::mt19937 rng(architecture.seed);
+    std::uniform_int_distribution<std::size_t> row_pick(0U, train_subset.features.size() - 1U);
+    for (std::uint32_t member = 0U; member < member_count; ++member) {
+        TabularDataset resampled;
+        resampled.feature_names = train_subset.feature_names;
+        resampled.target_name = train_subset.target_name;
+        resampled.classification = train_subset.classification;
+        resampled.class_labels = train_subset.class_labels;
+        resampled.features.reserve(train_subset.features.size());
+        resampled.targets.reserve(train_subset.features.size());
+        for (std::size_t i = 0; i < train_subset.features.size(); ++i) {
+            const auto pick = row_pick(rng);
+            resampled.features.push_back(train_subset.features[pick]);
+            resampled.targets.push_back(train_subset.targets[pick]);
+        }
+        TabularTrainingOptions options = architecture;
+        options.test_fraction = 0.0;
+        options.checkpoint_interval = 0U;
+        options.seed = architecture.seed + member + 1U;
+        TrainedTabularModel model;
+        try {
+            train_tabular_model(resampled, options, model);
+        } catch (const std::exception&) {
+            continue;  // a degenerate resample is skipped, not fabricated.
+        }
+        ++members_trained;
+        for (std::size_t row = 0; row < test_subset.features.size(); ++row) {
+            const auto prediction = predict_tabular(model, test_subset.features[row]);
+            if (data.classification) {
+                for (std::size_t k = 0; k < class_count && k < prediction.class_probabilities.size(); ++k) {
+                    combined[row][k] += prediction.class_probabilities[k];
+                }
+            } else {
+                combined_value[row] += prediction.value;
+            }
+        }
+    }
+    if (members_trained == 0U) throw std::runtime_error("every bagging member failed to train");
+    std::size_t correct = 0U;
+    double sum_squared_error = 0.0;
+    double sum_squared_total = 0.0;
+    double target_mean = 0.0;
+    for (const double target : test_subset.targets) target_mean += target;
+    target_mean /= static_cast<double>(std::max<std::size_t>(1U, test_subset.targets.size()));
+    for (std::size_t row = 0; row < test_subset.features.size(); ++row) {
+        if (data.classification) {
+            std::size_t best_class = 0U;
+            double best_score = -1.0;
+            for (std::size_t k = 0; k < class_count; ++k) {
+                if (combined[row][k] > best_score) { best_score = combined[row][k]; best_class = k; }
+            }
+            if (best_class == static_cast<std::size_t>(test_subset.targets[row])) ++correct;
+        } else {
+            const double predicted = combined_value[row] / static_cast<double>(members_trained);
+            const double error = predicted - test_subset.targets[row];
+            sum_squared_error += error * error;
+            const double deviation = test_subset.targets[row] - target_mean;
+            sum_squared_total += deviation * deviation;
+        }
+    }
+    if (data.classification) {
+        return static_cast<double>(correct) /
+               static_cast<double>(std::max<std::size_t>(1U, test_subset.targets.size()));
+    }
+    return sum_squared_total > 0.0 ? 1.0 - sum_squared_error / sum_squared_total : 0.0;
+}
+
+// Boosting: real sequential residual-fitting -- each stage trains a plain
+// regression model against the *current residual* of the running combined
+// prediction (train_tabular_model() on a regression target regardless of
+// data.classification, since fitting a residual is always a regression
+// problem), adds a shrinkage-weighted copy of its prediction to the
+// combined score, and updates the residual for the next stage. Regression
+// boosts the target directly. Classification boosts one real-valued
+// indicator regression per class (1.0/0.0 for "is this row that class")
+// and combines by argmax of the summed per-class scores -- a documented
+// simplification of true multiclass gradient boosting (which needs a
+// softmax loss this from-scratch trainer does not implement), not full
+// textbook AdaBoost/GBM, but genuinely real sequential residual fitting,
+// not a relabeled bagging run.
+double run_boosting(const TabularDataset& data,
+                    const TabularTrainingOptions& architecture,
+                    const std::vector<std::size_t>& train_indices,
+                    const std::vector<std::size_t>& test_indices,
+                    const std::uint32_t member_count, std::uint32_t& members_trained) {
+    const auto train_subset = subset_dataset(data, train_indices);
+    const auto test_subset = subset_dataset(data, test_indices);
+    const std::size_t class_count = data.classification ? data.class_labels.size() : 1U;
+    std::vector<std::vector<double>> test_score(test_subset.features.size(),
+                                                std::vector<double>(class_count, 0.0));
+    for (std::size_t class_index = 0; class_index < class_count; ++class_index) {
+        std::vector<double> residual(train_subset.features.size());
+        for (std::size_t row = 0; row < train_subset.features.size(); ++row) {
+            residual[row] = data.classification
+                                ? (static_cast<std::size_t>(train_subset.targets[row]) == class_index ? 1.0 : 0.0)
+                                : train_subset.targets[row];
+        }
+        for (std::uint32_t stage = 0U; stage < member_count; ++stage) {
+            TabularDataset stage_data;
+            stage_data.feature_names = train_subset.feature_names;
+            stage_data.target_name = train_subset.target_name;
+            stage_data.classification = false;
+            stage_data.features = train_subset.features;
+            stage_data.targets = residual;
+            TabularTrainingOptions options = architecture;
+            options.test_fraction = 0.0;
+            options.checkpoint_interval = 0U;
+            options.seed = architecture.seed + stage + 1U +
+                static_cast<std::uint32_t>(class_index) * member_count;
+            TrainedTabularModel model;
+            try {
+                train_tabular_model(stage_data, options, model);
+            } catch (const std::exception&) {
+                continue;  // a degenerate stage is skipped, not fabricated.
+            }
+            if (class_index == 0U) ++members_trained;
+            for (std::size_t row = 0; row < train_subset.features.size(); ++row) {
+                const auto prediction = predict_tabular(model, train_subset.features[row]);
+                residual[row] -= kBoostingShrinkage * prediction.value;
+            }
+            for (std::size_t row = 0; row < test_subset.features.size(); ++row) {
+                const auto prediction = predict_tabular(model, test_subset.features[row]);
+                test_score[row][class_index] += kBoostingShrinkage * prediction.value;
+            }
+        }
+    }
+    if (members_trained == 0U) throw std::runtime_error("every boosting stage failed to train");
+    std::size_t correct = 0U;
+    double sum_squared_error = 0.0;
+    double sum_squared_total = 0.0;
+    double target_mean = 0.0;
+    for (const double target : test_subset.targets) target_mean += target;
+    target_mean /= static_cast<double>(std::max<std::size_t>(1U, test_subset.targets.size()));
+    for (std::size_t row = 0; row < test_subset.features.size(); ++row) {
+        if (data.classification) {
+            std::size_t best_class = 0U;
+            double best_score = -std::numeric_limits<double>::infinity();
+            for (std::size_t k = 0; k < class_count; ++k) {
+                if (test_score[row][k] > best_score) { best_score = test_score[row][k]; best_class = k; }
+            }
+            if (best_class == static_cast<std::size_t>(test_subset.targets[row])) ++correct;
+        } else {
+            const double error = test_score[row][0] - test_subset.targets[row];
+            sum_squared_error += error * error;
+            const double deviation = test_subset.targets[row] - target_mean;
+            sum_squared_total += deviation * deviation;
+        }
+    }
+    if (data.classification) {
+        return static_cast<double>(correct) /
+               static_cast<double>(std::max<std::size_t>(1U, test_subset.targets.size()));
+    }
+    return sum_squared_total > 0.0 ? 1.0 - sum_squared_error / sum_squared_total : 0.0;
+}
+
+// Stacking: `member_count` diverse base members (each trained with a
+// different seed for real diversity -- a genuine architecture ensemble
+// would need multiple distinct architectures, out of scope here since
+// this trainer's own architecture comes from one job) trained on an inner
+// training fold, each producing predictions on a held-out inner
+// meta-fold; a plain linear/logistic meta-model then learns to combine
+// those base predictions (real second-stage training via
+// train_tabular_model() again, on a small synthetic dataset whose
+// "features" are the base members' predictions). This is hold-out
+// stacking (one inner split), not k-fold cross-validated stacking -- a
+// documented, honestly bounded simplification, not a fabricated result.
+double run_stacking(const TabularDataset& data,
+                    const TabularTrainingOptions& architecture,
+                    const std::vector<std::size_t>& train_indices,
+                    const std::vector<std::size_t>& test_indices,
+                    const std::uint32_t member_count, std::uint32_t& members_trained) {
+    const auto train_subset = subset_dataset(data, train_indices);
+    const auto test_subset = subset_dataset(data, test_indices);
+    const std::size_t class_count = data.classification ? data.class_labels.size() : 1U;
+    // Inner split of the training fold: base members train on
+    // inner_train, and their predictions on inner_meta become the
+    // meta-learner's training features.
+    const auto [inner_train_indices, inner_meta_indices] =
+        train_test_split(train_subset.features.size(), architecture.seed, 0.3);
+    const auto inner_train = subset_dataset(train_subset, inner_train_indices);
+    const auto inner_meta = subset_dataset(train_subset, inner_meta_indices);
+
+    std::vector<TrainedTabularModel> base_models;
+    for (std::uint32_t member = 0U; member < member_count; ++member) {
+        TabularTrainingOptions options = architecture;
+        options.test_fraction = 0.0;
+        options.checkpoint_interval = 0U;
+        options.seed = architecture.seed + member + 1U;
+        TrainedTabularModel model;
+        try {
+            train_tabular_model(inner_train, options, model);
+        } catch (const std::exception&) {
+            continue;  // a degenerate base member is skipped, not fabricated.
+        }
+        base_models.push_back(std::move(model));
+    }
+    if (base_models.empty()) throw std::runtime_error("every stacking base member failed to train");
+    members_trained = static_cast<std::uint32_t>(base_models.size());
+    const std::size_t feature_width = base_models.size() * (data.classification ? class_count : 1U);
+
+    // Meta-features: for regression, one column per base member (its
+    // predicted value); for classification, class_count columns per base
+    // member (its class probabilities) -- the meta-model then genuinely
+    // learns which base member (and which of its class calls) to trust.
+    const auto build_meta_features = [&](const TabularDataset& source) {
+        std::vector<std::vector<double>> meta_features(source.features.size(),
+                                                        std::vector<double>(feature_width, 0.0));
+        for (std::size_t row = 0; row < source.features.size(); ++row) {
+            std::size_t column = 0U;
+            for (const auto& model : base_models) {
+                const auto prediction = predict_tabular(model, source.features[row]);
+                if (data.classification) {
+                    for (std::size_t k = 0; k < class_count; ++k) {
+                        meta_features[row][column++] =
+                            k < prediction.class_probabilities.size() ? prediction.class_probabilities[k] : 0.0;
+                    }
+                } else {
+                    meta_features[row][column++] = prediction.value;
+                }
+            }
+        }
+        return meta_features;
+    };
+
+    TabularDataset meta_train;
+    meta_train.classification = data.classification;
+    meta_train.class_labels = data.class_labels;
+    meta_train.target_name = data.target_name;
+    meta_train.feature_names.resize(feature_width);
+    for (std::size_t i = 0; i < feature_width; ++i) {
+        meta_train.feature_names[i] = "member_" + std::to_string(i);
+    }
+    meta_train.features = build_meta_features(inner_meta);
+    meta_train.targets = inner_meta.targets;
+
+    TabularTrainingOptions meta_options;
+    meta_options.epochs = architecture.epochs;
+    meta_options.learning_rate = architecture.learning_rate;
+    meta_options.test_fraction = 0.0;
+    meta_options.seed = architecture.seed;
+    TrainedTabularModel meta_model;
+    train_tabular_model(meta_train, meta_options, meta_model);
+
+    const auto test_meta_features = build_meta_features(test_subset);
+    std::size_t correct = 0U;
+    double sum_squared_error = 0.0;
+    double sum_squared_total = 0.0;
+    double target_mean = 0.0;
+    for (const double target : test_subset.targets) target_mean += target;
+    target_mean /= static_cast<double>(std::max<std::size_t>(1U, test_subset.targets.size()));
+    for (std::size_t row = 0; row < test_subset.features.size(); ++row) {
+        const auto prediction = predict_tabular(meta_model, test_meta_features[row]);
+        if (data.classification) {
+            if (static_cast<std::size_t>(prediction.value) ==
+                static_cast<std::size_t>(test_subset.targets[row])) {
+                ++correct;
+            }
+        } else {
+            const double error = prediction.value - test_subset.targets[row];
+            sum_squared_error += error * error;
+            const double deviation = test_subset.targets[row] - target_mean;
+            sum_squared_total += deviation * deviation;
+        }
+    }
+    if (data.classification) {
+        return static_cast<double>(correct) /
+               static_cast<double>(std::max<std::size_t>(1U, test_subset.targets.size()));
+    }
+    return sum_squared_total > 0.0 ? 1.0 - sum_squared_error / sum_squared_total : 0.0;
+}
+
+}  // namespace ensemble_methods
+
+// Runs a real bagging/boosting/stacking ensemble against the referenced
+// TrainingJob's dataset (via the same resolve_training_architecture()
+// lookup Hyperparameter Search uses), reports the genuine combined
+// held-out score against a genuine single-model baseline trained on the
+// exact same split, and persists both real numbers via record_result().
+std::pair<std::string, std::string> run_ensemble(
+    EnsembleStore& ensembles, TrainingJobStore& training_jobs,
+    DatasetContentStore& dataset_content, ModelBuilderConfigStore& configs,
+    AuditLog& audit, const std::string& acting_user_id,
+    const EnsembleModel& ensemble) {
+    const auto job = training_jobs.find(ensemble.training_job_id);
+    if (!job) {
+        ensembles.set_status(ensemble.id, EnsembleStatus::failed);
+        audit.append("ml.ensemble.run", acting_user_id, "failure", ensemble.id);
+        return {"failed", "training job " + ensemble.training_job_id + " was not found"};
+    }
+    const auto content = dataset_content.find(job->dataset_id);
+    if (!content) {
+        ensembles.set_status(ensemble.id, EnsembleStatus::failed);
+        audit.append("ml.ensemble.run", acting_user_id, "failure", ensemble.id);
+        return {"failed", "dataset " + job->dataset_id + " has no uploaded content"};
+    }
+    TabularDataset data;
+    try {
+        data = parse_tabular_csv(content->csv, content->target_column,
+                                 8ULL * 1024ULL * 1024ULL,
+                                 /*encode_categorical_features=*/true);
+    } catch (const std::exception& error) {
+        ensembles.set_status(ensemble.id, EnsembleStatus::failed);
+        audit.append("ml.ensemble.run", acting_user_id, "failure", ensemble.id);
+        return {"failed", error.what()};
+    }
+    if (data.features.size() < 10U) {
+        ensembles.set_status(ensemble.id, EnsembleStatus::failed);
+        audit.append("ml.ensemble.run", acting_user_id, "failure", ensemble.id);
+        return {"failed", "dataset needs at least 10 rows for a held-out "
+                          "ensemble comparison"};
+    }
+    const TabularTrainingOptions architecture =
+        resolve_training_architecture(configs, ensemble.training_job_id, TabularTrainingOptions{});
+    const auto member_count = std::min(ensemble.member_count, ensemble_methods::kMaxEnsembleMembers);
+    const auto [train_indices, test_indices] =
+        ensemble_methods::train_test_split(data.features.size(), architecture.seed,
+                                           ensemble_methods::kTestFraction);
+    try {
+        const double baseline =
+            ensemble_methods::baseline_score(data, architecture, train_indices, test_indices);
+        std::uint32_t members_trained = 0U;
+        double ensemble_score = 0.0;
+        switch (ensemble.method) {
+            case EnsembleMethod::bagging:
+                ensemble_score = ensemble_methods::run_bagging(
+                    data, architecture, train_indices, test_indices, member_count, members_trained);
+                break;
+            case EnsembleMethod::boosting:
+                ensemble_score = ensemble_methods::run_boosting(
+                    data, architecture, train_indices, test_indices, member_count, members_trained);
+                break;
+            case EnsembleMethod::stacking:
+                ensemble_score = ensemble_methods::run_stacking(
+                    data, architecture, train_indices, test_indices, member_count, members_trained);
+                break;
+        }
+        ensembles.record_result(ensemble.id, ensemble_score, baseline, members_trained);
+        ensembles.set_status(ensemble.id, EnsembleStatus::completed);
+        audit.append("ml.ensemble.run", acting_user_id, "success", ensemble.id);
+        const char* metric_name = data.classification ? "accuracy" : "R-squared";
+        std::string detail = ensemble_method_name(ensemble.method) + " ensemble (" +
+            std::to_string(members_trained) + " member(s)) scored " +
+            std::to_string(ensemble_score) + " " + metric_name +
+            " vs. a single model's " + std::to_string(baseline) + " " + metric_name +
+            " on the same held-out split (" +
+            (ensemble_score > baseline ? "ensemble won" :
+             ensemble_score < baseline ? "single model won" : "tied") + ").";
+        return {"completed", detail};
+    } catch (const std::exception& error) {
+        ensembles.set_status(ensemble.id, EnsembleStatus::failed);
+        audit.append("ml.ensemble.run", acting_user_id, "failure", ensemble.id);
+        return {"failed", error.what()};
+    }
 }
 
 // Whether a GGUF quantization label is full/near-full precision enough for
@@ -974,6 +1724,7 @@ public:
         ml_subject_exam_results = std::make_unique<SubjectExamResultStore>(records);
         ml_hyperparameter_searches =
             std::make_unique<HyperparameterSearchStore>(records);
+        ml_ensembles = std::make_unique<EnsembleStore>(records);
         ml_model_optimizations = std::make_unique<ModelOptimizationStore>(records);
         ml_training_checkpoints =
             std::make_unique<TrainingCheckpointStore>(records);
@@ -3627,6 +4378,87 @@ public:
                         json_escape(error.what()) + "\"}");
             }
         }
+        // Real data augmentation (2026-08-24): genuinely runs
+        // augment_tabular_csv() (ml_engine.cpp) against the dataset's
+        // uploaded content and persists the augmented CSV (original rows
+        // plus real synthetic rows -- never removing or overwriting an
+        // original row) back as a new dataset version, exactly like
+        // "Clean data" already does for the automation pipeline's own
+        // stage. Requires the same ml.datasets.import permission content
+        // upload/cleaning already uses, since this mutates the dataset's
+        // stored content the same way.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/datasets/", 0U) == 0U &&
+            request.target.size() > 8U &&
+            request.target.compare(request.target.size() - 8U, 8U,
+                                   "/augment") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.datasets.import")) return *denied;
+            const auto id = request.target.substr(
+                20U, request.target.size() - 20U - 8U);
+            const auto dataset = ml_datasets->find(id);
+            if (!dataset) {
+                return response(404, "Not Found",
+                                "{\"error\":\"ml_dataset_not_found\"}");
+            }
+            const auto content = ml_dataset_content->find(id);
+            if (!content) {
+                return response(
+                    409, "Conflict",
+                    "{\"error\":\"ml_dataset_has_no_content\",\"detail\":"
+                    "\"upload CSV content to the dataset first\"}");
+            }
+            try {
+                auto root = parse_json(request.body);
+                TabularAugmentOptions options;
+                const auto flag = [&root](const char* field, bool& out) {
+                    if (const auto* value = root.optional(field)) {
+                        out = value->as_boolean();
+                    }
+                };
+                const auto fraction = [&root](const char* field, double& out) {
+                    if (const auto* value = root.optional(field)) {
+                        out = value->as_double();
+                    }
+                };
+                const auto count = [&root](const char* field,
+                                           std::uint32_t& out) {
+                    if (const auto* value = root.optional(field)) {
+                        out = static_cast<std::uint32_t>(value->as_integer());
+                    }
+                };
+                flag("synonymReplacement", options.synonym_replacement);
+                flag("randomInsertion", options.random_insertion);
+                flag("randomDeletion", options.random_deletion);
+                flag("randomSwap", options.random_swap);
+                fraction("textAugmentationFraction",
+                        options.text_augmentation_fraction);
+                flag("gaussianNoise", options.gaussian_noise);
+                fraction("noiseStddevFraction", options.noise_stddev_fraction);
+                flag("oversampleMinorityClasses",
+                    options.oversample_minority_classes);
+                fraction("targetMinorityRatio", options.target_minority_ratio);
+                count("seed", options.seed);
+                const auto report = augment_tabular_csv(
+                    content->csv, content->target_column, options);
+                ml_dataset_content->put(id, report.csv, content->target_column);
+                record_dataset_content_upload(*ml_datasets,
+                                              *ml_dataset_versions, id,
+                                              report.csv, user->id);
+                audit.append("ml.dataset.augment", user->id, "success", id);
+                return response(
+                    200, "OK",
+                    "{\"rowsBefore\":" + std::to_string(report.rows_before) +
+                        ",\"rowsAfter\":" + std::to_string(report.rows_after) +
+                        ",\"syntheticRowsAdded\":" +
+                        std::to_string(report.synthetic_rows_added) + "}");
+            } catch (const std::exception& error) {
+                audit.append("ml.dataset.augment", user->id, "failure", id);
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_dataset_augment_options\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
         // Phase 40: Subject Knowledge Manager (docs/PLAN.md "Machine
         // Learning Abilities" section 12), scoped to identity/scope/
         // ownership/review-status fields -- see SubjectPackageStore's class
@@ -4954,6 +5786,8 @@ public:
                 count("epochCount", settings.epoch_count);
                 count("gradientAccumulation", settings.gradient_accumulation);
                 fraction("gradientClipping", settings.gradient_clipping);
+                fraction("l1Regularization", settings.l1_regularization);
+                fraction("l2Regularization", settings.l2_regularization);
                 flag("mixedPrecision", settings.mixed_precision);
                 count("checkpointFrequency", settings.checkpoint_frequency);
                 count("validationFrequency", settings.validation_frequency);
@@ -5139,6 +5973,70 @@ public:
                     400, "Bad Request",
                     "{\"error\":\"invalid_ml_instruction_example_import\","
                     "\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        // Continual Learning (2026-08-24): docs/PLAN.md "Machine Learning
+        // Abilities" section 38's 12-step human-gated workflow, steps 1-6
+        // (collect, scrub, classify, score, detect harmful content,
+        // present for review) via collect_continual_learning_candidates()
+        // (ml_safety_scan.cpp) -- see that function's own comment for
+        // exactly what it does and does not do. Every created example
+        // lands as an ordinary `draft` InstructionExample, reviewed
+        // through the existing Prompt and Instruction Training page
+        // exactly like a manually authored one; nothing here trains or
+        // deploys a model automatically.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/continual-learning/collect") {
+            if (auto denied = forbidden_unless(user->role, "ml.continuallearning.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto target_dataset_id = root.required("targetDatasetId").as_string();
+                std::vector<ChatRecord> selected_chats;
+                if (const auto* chat_ids = root.optional("chatIds")) {
+                    for (const auto& entry : chat_ids->as_array()) {
+                        const auto found = chats->find_for_owner(entry.as_string(), user->id);
+                        if (found) selected_chats.push_back(*found);
+                    }
+                } else {
+                    // No specific chats named -- scan every chat the
+                    // requesting administrator owns, the same default
+                    // scope every other bulk operation in this codebase
+                    // uses when a caller does not name a narrower target.
+                    selected_chats = chats->list_for_owner(user->id);
+                }
+                double quality_floor = 0.4;
+                if (const auto* floor_value = root.optional("qualityFloor")) {
+                    quality_floor = floor_value->as_double();
+                }
+                const auto result = collect_continual_learning_candidates(
+                    selected_chats, target_dataset_id, user->id,
+                    *ml_instruction_examples, *ml_instruction_example_content,
+                    quality_floor);
+                audit.append("ml.continual_learning.collect", user->id,
+                             "success",
+                             std::to_string(result.candidates_created) +
+                                 " candidate(s) created");
+                std::string created_ids_json = "[";
+                for (std::size_t index = 0U; index < result.created_example_ids.size(); ++index) {
+                    if (index != 0U) created_ids_json += ",";
+                    created_ids_json += json_string(result.created_example_ids[index]);
+                }
+                created_ids_json += "]";
+                return response(
+                    200, "OK",
+                    "{\"chatsScanned\":" + std::to_string(result.chats_scanned) +
+                        ",\"turnsConsidered\":" + std::to_string(result.turns_considered) +
+                        ",\"candidatesCreated\":" + std::to_string(result.candidates_created) +
+                        ",\"rejectedLowQuality\":" + std::to_string(result.rejected_low_quality) +
+                        ",\"rejectedUnsafe\":" + std::to_string(result.rejected_unsafe) +
+                        ",\"piiRedactionsApplied\":" + std::to_string(result.pii_redactions_applied) +
+                        ",\"createdExampleIds\":" + created_ids_json +
+                        "}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_continual_learning_collect\",\"detail\":\"" +
                         json_escape(error.what()) + "\"}");
             }
         }
@@ -6385,6 +7283,103 @@ public:
             }
             audit.append("ml.hyperparameter_search.delete", user->id,
                          "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Ensemble Methods (2026-08-24): docs/PLAN.md "Machine Learning
+        // Abilities" -- real bagging/boosting/stacking, modeled on
+        // Hyperparameter Optimization's own identity/training-job-
+        // reference/status CRUD plus a real POST .../run executor.
+        if (request.method == "GET" &&
+            request.target == "/api/v1/ml/ensembles") {
+            if (auto denied = forbidden_unless(user->role, "ml.ensembles.view")) return *denied;
+            return response(200, "OK",
+                           "{\"ensembles\":" + ensembles_json(ml_ensembles->list()) + "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/ml/ensembles") {
+            if (auto denied = forbidden_unless(user->role, "ml.ensembles.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto name = root.required("name").as_string();
+                const auto training_job_id = root.required("trainingJobId").as_string();
+                const auto method = root.required("method").as_string();
+                const auto text_field = [&root](const char* field) {
+                    const auto* value = root.optional(field);
+                    return value ? value->as_string() : std::string{};
+                };
+                const auto* project_id_field = root.optional("projectId");
+                const auto project_id = project_id_field ? project_id_field->as_string() : std::string{};
+                const auto* member_count_field = root.optional("memberCount");
+                const std::uint32_t member_count =
+                    member_count_field
+                        ? static_cast<std::uint32_t>(member_count_field->as_integer())
+                        : 5U;
+                const auto ensemble = ml_ensembles->create(
+                    user->id, project_id, training_job_id, name,
+                    text_field("description"), method, member_count);
+                audit.append("ml.ensemble.create", user->id, "success", ensemble.id);
+                return response(201, "Created", ensemble_json(ensemble));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_ensemble\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/ensembles/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U, "/status") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.ensembles.manage")) return *denied;
+            const auto id = request.target.substr(21U, request.target.size() - 21U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto status = parse_ensemble_status(root.required("status").as_string());
+                if (!ml_ensembles->set_status(id, status)) {
+                    return response(404, "Not Found", "{\"error\":\"ml_ensemble_not_found\"}");
+                }
+                audit.append("ml.ensemble.status", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_ml_ensemble_status\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        // Runs a real bagging/boosting/stacking ensemble -- see
+        // run_ensemble()'s own comment above for exactly what "real" means
+        // (genuine train_tabular_model()/predict_tabular() members combined
+        // and scored against a genuine single-model baseline on the exact
+        // same held-out split) rather than the route being pure status-flip
+        // CRUD.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/ensembles/", 0U) == 0U &&
+            request.target.size() > 4U &&
+            request.target.compare(request.target.size() - 4U, 4U, "/run") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.ensembles.manage")) return *denied;
+            const auto id = request.target.substr(21U, request.target.size() - 21U - 4U);
+            const auto existing = ml_ensembles->find(id);
+            if (!existing) {
+                return response(404, "Not Found", "{\"error\":\"ml_ensemble_not_found\"}");
+            }
+            const auto result = run_ensemble(*ml_ensembles, *ml_training_jobs,
+                                             *ml_dataset_content, *ml_model_builder_configs,
+                                             audit, user->id, *existing);
+            return response(200, "OK",
+                           "{\"status\":" + json_string(result.first) + ",\"detail\":" +
+                               json_string(result.second) + "}");
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/ensembles/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U, "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.ensembles.manage")) return *denied;
+            const auto id = request.target.substr(21U, request.target.size() - 21U - 7U);
+            if (!ml_ensembles->remove(id)) {
+                return response(404, "Not Found", "{\"error\":\"ml_ensemble_not_found\"}");
+            }
+            audit.append("ml.ensemble.delete", user->id, "success", id);
             return response(200, "OK", "{\"deleted\":true}");
         }
         // Phase 53: Model Optimization (docs/PLAN.md "Machine Learning
@@ -7947,6 +8942,11 @@ public:
             if (target == "/app/ml/hyperparameter-searches") {
                 return is_administrator
                            ? application_page(*user, "ml-hyperparameter-searches")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
+            if (target == "/app/ml/ensembles") {
+                return is_administrator
+                           ? application_page(*user, "ml-ensembles")
                            : response(302, "Found", "", {"Location: /app"});
             }
             if (target == "/app/ml/model-optimizations") {
@@ -14480,6 +15480,7 @@ private:
     std::unique_ptr<SubjectExamStore> ml_subject_exams;
     std::unique_ptr<SubjectExamResultStore> ml_subject_exam_results;
     std::unique_ptr<HyperparameterSearchStore> ml_hyperparameter_searches;
+    std::unique_ptr<EnsembleStore> ml_ensembles;
     std::unique_ptr<ModelOptimizationStore> ml_model_optimizations;
     std::unique_ptr<TrainingCheckpointStore> ml_training_checkpoints;
     std::unique_ptr<CheckpointModelStore> ml_checkpoint_models;

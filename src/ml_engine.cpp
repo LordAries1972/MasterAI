@@ -1073,6 +1073,366 @@ TabularAutoLabelReport auto_label_tabular_dataset(const std::string& csv,
     return report;
 }
 
+namespace {
+
+// A small built-in synonym list (not a full thesaurus/WordNet -- honestly
+// scoped, matching this file's other deliberately-bounded helpers) used by
+// augment_tabular_csv()'s synonym_replacement/random_insertion text
+// operations below. Each inner vector is one cluster of interchangeable
+// words; lookup is case-insensitive on the stored (lowercase) forms.
+const std::vector<std::vector<std::string>>& synonym_clusters() {
+    static const std::vector<std::vector<std::string>> clusters{
+        {"good", "great", "excellent", "wonderful"},
+        {"bad", "poor", "terrible", "awful"},
+        {"big", "large", "huge", "enormous"},
+        {"small", "tiny", "little", "minor"},
+        {"fast", "quick", "rapid", "swift"},
+        {"slow", "sluggish", "gradual", "unhurried"},
+        {"happy", "glad", "pleased", "joyful"},
+        {"sad", "unhappy", "sorrowful", "downcast"},
+        {"easy", "simple", "straightforward", "effortless"},
+        {"hard", "difficult", "challenging", "tough"},
+        {"important", "significant", "crucial", "vital"},
+        {"help", "assist", "aid", "support"},
+        {"start", "begin", "commence", "initiate"},
+        {"end", "finish", "conclude", "complete"},
+        {"make", "create", "produce", "build"},
+        {"use", "utilize", "employ", "apply"},
+        {"show", "demonstrate", "display", "reveal"},
+        {"get", "obtain", "acquire", "receive"},
+        {"want", "desire", "wish", "prefer"},
+        {"need", "require", "demand", "necessitate"},
+        {"think", "believe", "consider", "suppose"},
+        {"say", "state", "mention", "declare"},
+        {"look", "appear", "seem", "resemble"},
+        {"find", "discover", "locate", "identify"},
+        {"give", "provide", "offer", "supply"},
+        {"keep", "maintain", "retain", "preserve"},
+        {"try", "attempt", "endeavor", "strive"},
+        {"change", "modify", "alter", "adjust"},
+        {"improve", "enhance", "upgrade", "refine"},
+        {"increase", "boost", "raise", "expand"},
+        {"decrease", "reduce", "lower", "shrink"},
+        {"problem", "issue", "trouble", "difficulty"},
+        {"answer", "solution", "response", "resolution"},
+        {"question", "query", "inquiry"},
+        {"idea", "concept", "notion", "thought"},
+        {"result", "outcome", "consequence", "effect"},
+        {"reason", "cause", "motive", "basis"},
+        {"different", "distinct", "varied", "dissimilar"},
+        {"same", "identical", "similar", "equivalent"},
+        {"new", "novel", "recent", "modern"},
+        {"old", "aged", "former", "outdated"},
+    };
+    return clusters;
+}
+
+std::string ascii_lower_word(const std::string& value) {
+    std::string result = value;
+    for (char& character : result) {
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    }
+    return result;
+}
+
+// Index into synonym_clusters() of the cluster containing `word` (matched
+// case-insensitively, punctuation-stripped), or -1 if `word` is not in the
+// built-in list.
+int find_synonym_cluster(const std::string& word) {
+    std::string bare;
+    for (const char character : word) {
+        if (std::isalpha(static_cast<unsigned char>(character))) bare += character;
+    }
+    const auto lowered = ascii_lower_word(bare);
+    const auto& clusters = synonym_clusters();
+    for (std::size_t index = 0; index < clusters.size(); ++index) {
+        for (const auto& candidate : clusters[index]) {
+            if (candidate == lowered) return static_cast<int>(index);
+        }
+    }
+    return -1;
+}
+
+std::vector<std::string> split_words(const std::string& text) {
+    std::vector<std::string> words;
+    std::string current;
+    for (const char character : text) {
+        if (character == ' ' || character == '\t') {
+            if (!current.empty()) { words.push_back(current); current.clear(); }
+        } else {
+            current += character;
+        }
+    }
+    if (!current.empty()) words.push_back(current);
+    return words;
+}
+
+std::string join_words(const std::vector<std::string>& words) {
+    std::string text;
+    for (std::size_t index = 0; index < words.size(); ++index) {
+        if (index > 0U) text += " ";
+        text += words[index];
+    }
+    return text;
+}
+
+// The four EDA-style ("Easy Data Augmentation", Wei & Zou) word-level
+// operations augment_tabular_csv() applies to text-looking cells. Each
+// takes the cell already split into words plus how many words to touch
+// (derived from TabularAugmentOptions::text_augmentation_fraction) and
+// returns a new word list -- the original is never modified in place.
+std::vector<std::string> apply_synonym_replacement(std::vector<std::string> words,
+                                                    const std::uint32_t touch_count,
+                                                    std::mt19937& rng) {
+    if (words.empty()) return words;
+    std::vector<std::size_t> order(words.size());
+    std::iota(order.begin(), order.end(), 0U);
+    std::shuffle(order.begin(), order.end(), rng);
+    std::uint32_t replaced = 0U;
+    for (const auto index : order) {
+        if (replaced >= touch_count) break;
+        const int cluster = find_synonym_cluster(words[index]);
+        if (cluster < 0) continue;
+        const auto& options = synonym_clusters()[static_cast<std::size_t>(cluster)];
+        std::uniform_int_distribution<std::size_t> pick(0U, options.size() - 1U);
+        words[index] = options[pick(rng)];
+        ++replaced;
+    }
+    return words;
+}
+
+std::vector<std::string> apply_random_insertion(std::vector<std::string> words,
+                                                 const std::uint32_t touch_count,
+                                                 std::mt19937& rng) {
+    if (words.empty()) return words;
+    for (std::uint32_t attempt = 0U; attempt < touch_count * 4U && attempt < 40U; ++attempt) {
+        std::uniform_int_distribution<std::size_t> word_pick(0U, words.size() - 1U);
+        const int cluster = find_synonym_cluster(words[word_pick(rng)]);
+        if (cluster < 0) continue;
+        const auto& options = synonym_clusters()[static_cast<std::size_t>(cluster)];
+        std::uniform_int_distribution<std::size_t> synonym_pick(0U, options.size() - 1U);
+        std::uniform_int_distribution<std::size_t> position_pick(0U, words.size());
+        words.insert(words.begin() + static_cast<std::ptrdiff_t>(position_pick(rng)),
+                    options[synonym_pick(rng)]);
+    }
+    return words;
+}
+
+std::vector<std::string> apply_random_deletion(std::vector<std::string> words,
+                                               const double delete_fraction,
+                                               std::mt19937& rng) {
+    if (words.size() <= 1U || delete_fraction <= 0.0) return words;
+    std::uniform_real_distribution<double> chance(0.0, 1.0);
+    std::vector<std::string> kept;
+    for (auto& word : words) {
+        if (chance(rng) >= delete_fraction) kept.push_back(std::move(word));
+    }
+    // Deleting every word would turn a real cell into an empty one -- EDA's
+    // own documented fallback is to keep one original word instead.
+    if (kept.empty()) {
+        std::uniform_int_distribution<std::size_t> pick(0U, words.size() - 1U);
+        kept.push_back(words[pick(rng)]);
+    }
+    return kept;
+}
+
+std::vector<std::string> apply_random_swap(std::vector<std::string> words,
+                                           const std::uint32_t touch_count,
+                                           std::mt19937& rng) {
+    if (words.size() < 2U) return words;
+    std::uniform_int_distribution<std::size_t> pick(0U, words.size() - 1U);
+    for (std::uint32_t swap = 0U; swap < touch_count; ++swap) {
+        const auto a = pick(rng);
+        const auto b = pick(rng);
+        std::swap(words[a], words[b]);
+    }
+    return words;
+}
+
+}  // namespace
+
+TabularAugmentReport augment_tabular_csv(const std::string& csv,
+                                         const std::string& target_column,
+                                         const TabularAugmentOptions& options) {
+    const auto raw_lines = split_csv_records(csv);
+    if (raw_lines.size() < 2U) {
+        throw std::runtime_error("dataset needs a header row and at least one data row");
+    }
+    auto header = split_csv_line(trim(raw_lines.front()));
+    for (auto& name : header) name = trim(name);
+    if (header.empty()) throw std::runtime_error("dataset header is empty");
+    std::size_t target_index = header.size() - 1U;
+    if (!target_column.empty()) {
+        const auto found = std::find(header.begin(), header.end(), target_column);
+        if (found == header.end()) {
+            throw std::runtime_error("target column \"" + target_column +
+                                     "\" is not in the CSV header");
+        }
+        target_index = static_cast<std::size_t>(found - header.begin());
+    }
+    std::vector<std::vector<std::string>> rows;
+    for (std::size_t index = 1; index < raw_lines.size(); ++index) {
+        if (trim(raw_lines[index]).empty()) continue;
+        auto cells = split_csv_line(raw_lines[index]);
+        cells.resize(header.size());
+        rows.push_back(std::move(cells));
+    }
+    if (rows.empty()) throw std::runtime_error("dataset has no data rows to augment");
+
+    TabularAugmentReport report;
+    report.rows_before = rows.size();
+
+    // A feature column (never the target) is "numeric" only when every row's
+    // cell parses as a real number -- the same all-or-nothing test
+    // parse_tabular_csv uses to decide one-hot vs. reject. Every other
+    // feature column is treated as text for the word-level operations below.
+    std::vector<bool> is_numeric_column(header.size(), true);
+    std::vector<double> column_mean(header.size(), 0.0);
+    std::vector<double> column_stddev(header.size(), 0.0);
+    for (std::size_t column = 0; column < header.size(); ++column) {
+        if (column == target_index) { is_numeric_column[column] = false; continue; }
+        double sum = 0.0;
+        std::vector<double> values;
+        values.reserve(rows.size());
+        for (const auto& row : rows) {
+            double value = 0.0;
+            if (!parse_double(row[column], value)) {
+                is_numeric_column[column] = false;
+                break;
+            }
+            values.push_back(value);
+            sum += value;
+        }
+        if (!is_numeric_column[column]) continue;
+        const double mean = sum / static_cast<double>(values.size());
+        double variance = 0.0;
+        for (const double value : values) variance += (value - mean) * (value - mean);
+        variance /= static_cast<double>(values.size());
+        column_mean[column] = mean;
+        column_stddev[column] = std::sqrt(variance);
+    }
+
+    std::mt19937 rng(options.seed);
+    const double text_fraction = std::clamp(options.text_augmentation_fraction, 0.0, 1.0);
+    const double noise_fraction = std::max(0.0, options.noise_stddev_fraction);
+
+    // Applies Gaussian noise (when enabled) to a copy of `row`'s numeric
+    // feature columns; text/target columns pass through unchanged. Shared
+    // by every synthetic-row generator below so numeric and text
+    // augmentation compose freely rather than being mutually exclusive.
+    const auto jitter_numeric_columns = [&](std::vector<std::string> row) {
+        if (!options.gaussian_noise) return row;
+        for (std::size_t column = 0; column < header.size(); ++column) {
+            if (!is_numeric_column[column] || column_stddev[column] <= 0.0) continue;
+            double value = 0.0;
+            parse_double(row[column], value);
+            std::normal_distribution<double> noise(
+                0.0, column_stddev[column] * noise_fraction);
+            row[column] = json_number(value + noise(rng));
+        }
+        return row;
+    };
+
+    std::vector<std::vector<std::string>> synthetic_rows;
+
+    // One synthetic row per original row per enabled text operation --
+    // each operation is applied independently to a fresh copy of every
+    // original row's text columns (numeric columns still get the same
+    // jitter_numeric_columns() treatment as any other synthetic row).
+    const bool any_text_operation = options.synonym_replacement ||
+        options.random_insertion || options.random_deletion || options.random_swap;
+    if (any_text_operation) {
+        for (const auto& original_row : rows) {
+            for (std::size_t column = 0; column < header.size(); ++column) {
+                if (is_numeric_column[column] || column == target_index) continue;
+                const auto words = split_words(original_row[column]);
+                if (words.empty()) continue;
+                const auto touch_count = std::max<std::uint32_t>(
+                    words.empty() ? 0U : 1U,
+                    static_cast<std::uint32_t>(
+                        std::round(static_cast<double>(words.size()) * text_fraction)));
+                if (options.synonym_replacement) {
+                    auto candidate = original_row;
+                    candidate[column] = join_words(
+                        apply_synonym_replacement(words, touch_count, rng));
+                    synthetic_rows.push_back(jitter_numeric_columns(std::move(candidate)));
+                }
+                if (options.random_insertion) {
+                    auto candidate = original_row;
+                    candidate[column] = join_words(
+                        apply_random_insertion(words, touch_count, rng));
+                    synthetic_rows.push_back(jitter_numeric_columns(std::move(candidate)));
+                }
+                if (options.random_deletion) {
+                    auto candidate = original_row;
+                    candidate[column] = join_words(
+                        apply_random_deletion(words, text_fraction, rng));
+                    synthetic_rows.push_back(jitter_numeric_columns(std::move(candidate)));
+                }
+                if (options.random_swap) {
+                    auto candidate = original_row;
+                    candidate[column] = join_words(
+                        apply_random_swap(words, touch_count, rng));
+                    synthetic_rows.push_back(jitter_numeric_columns(std::move(candidate)));
+                }
+            }
+        }
+    } else if (options.gaussian_noise) {
+        // No text operation requested -- Gaussian noise alone still adds
+        // one jittered synthetic row per original row so numeric-only
+        // datasets can be augmented too.
+        for (const auto& original_row : rows) {
+            synthetic_rows.push_back(jitter_numeric_columns(original_row));
+        }
+    }
+
+    // Minority-class oversampling: only attempted when the target column
+    // looks categorical (a bounded number of distinct values relative to
+    // the row count -- the same 64-distinct-label order of magnitude
+    // parse_tabular_csv's own classification cap uses), since oversampling
+    // a continuous regression target has no defined "class" to balance.
+    if (options.oversample_minority_classes) {
+        std::map<std::string, std::vector<std::size_t>> rows_by_class;
+        for (std::size_t index = 0; index < rows.size(); ++index) {
+            rows_by_class[rows[index][target_index]].push_back(index);
+        }
+        if (rows_by_class.size() >= 2U && rows_by_class.size() <= 64U) {
+            std::size_t majority_count = 0U;
+            for (const auto& entry : rows_by_class) {
+                majority_count = std::max(majority_count, entry.second.size());
+            }
+            const double ratio = std::clamp(options.target_minority_ratio, 0.0, 1.0);
+            const auto target_count = static_cast<std::size_t>(
+                std::ceil(static_cast<double>(majority_count) * ratio));
+            for (const auto& entry : rows_by_class) {
+                if (entry.second.size() >= target_count) continue;
+                std::uniform_int_distribution<std::size_t> pick(0U, entry.second.size() - 1U);
+                for (std::size_t added = entry.second.size(); added < target_count; ++added) {
+                    const auto& source_row = rows[entry.second[pick(rng)]];
+                    synthetic_rows.push_back(jitter_numeric_columns(source_row));
+                }
+            }
+        }
+        // Too many distinct target values (or only one class present) to
+        // treat as classification -- silently skipped, not an error, since
+        // the other requested augmentation operations may still apply.
+    }
+
+    report.synthetic_rows_added = synthetic_rows.size();
+    std::string rebuilt = trim(raw_lines.front());
+    for (const auto& row : rows) {
+        rebuilt += "\n";
+        rebuilt += join_csv_row(row);
+    }
+    for (const auto& row : synthetic_rows) {
+        rebuilt += "\n";
+        rebuilt += join_csv_row(row);
+    }
+    report.csv = std::move(rebuilt);
+    report.rows_after = rows.size() + synthetic_rows.size();
+    return report;
+}
+
 void TrainingProgressTracker::begin(const std::string& job_id,
                                     const std::uint32_t total_epochs) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1385,6 +1745,26 @@ TabularTrainingReport train_tabular_model(
                 }
             }
             loss /= count;
+            // L1/L2 weight decay: added to the gradient before the update,
+            // scaled the same way the data gradient already is (divided by
+            // `count` below applies to both, since both terms enter the
+            // same update line). Never applied to column `feature_count`,
+            // each row's bias term -- see TabularTrainingOptions::
+            // regularization_l1/regularization_l2's comment.
+            if (options.regularization_l1 > 0.0 || options.regularization_l2 > 0.0) {
+                for (std::size_t klass = 0; klass < output_count; ++klass) {
+                    for (std::size_t column = 0; column < feature_count; ++column) {
+                        const double w = model.weights[klass][column];
+                        if (options.regularization_l1 > 0.0) {
+                            gradients[klass][column] +=
+                                count * options.regularization_l1 * (w > 0.0 ? 1.0 : (w < 0.0 ? -1.0 : 0.0));
+                        }
+                        if (options.regularization_l2 > 0.0) {
+                            gradients[klass][column] += count * 2.0 * options.regularization_l2 * w;
+                        }
+                    }
+                }
+            }
             for (std::size_t klass = 0; klass < output_count; ++klass) {
                 for (std::size_t column = 0; column <= feature_count; ++column) {
                     model.weights[klass][column] -=
@@ -1478,8 +1858,22 @@ TabularTrainingReport train_tabular_model(
                                       std::vector<std::vector<double>>& v,
                                       const double lr) {
             for (std::size_t r = 0; r < weights.size(); ++r) {
+                // Last column of every row is that neuron's bias term (see
+                // TrainedTabularModel's class comment) -- L1/L2 never
+                // penalize it, matching the plain linear/logistic path's
+                // same exclusion just above in this function.
+                const std::size_t bias_column = weights[r].size() - 1U;
                 for (std::size_t c = 0; c < weights[r].size(); ++c) {
-                    const double g = gradient[r][c];
+                    double g = gradient[r][c];
+                    if (c != bias_column) {
+                        const double w = weights[r][c];
+                        if (options.regularization_l1 > 0.0) {
+                            g += options.regularization_l1 * (w > 0.0 ? 1.0 : (w < 0.0 ? -1.0 : 0.0));
+                        }
+                        if (options.regularization_l2 > 0.0) {
+                            g += 2.0 * options.regularization_l2 * w;
+                        }
+                    }
                     if (options.optimiser == "adam") {
                         m[r][c] = 0.9 * m[r][c] + 0.1 * g;
                         v[r][c] = 0.999 * v[r][c] + 0.001 * g * g;

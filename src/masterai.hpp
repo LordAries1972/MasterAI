@@ -4816,6 +4816,12 @@ struct ModelBuilderSettings {
     std::uint64_t epoch_count{0};
     std::uint64_t gradient_accumulation{0};  // accumulation steps
     double gradient_clipping{0.0};           // max gradient norm, 0 = off
+    // L1 (lasso) and L2 (ridge) weight-decay penalty strengths, both
+    // 0 = off. Threaded through to TabularTrainingOptions::
+    // regularization_l1/regularization_l2 by resolve_training_architecture()
+    // (server.cpp) exactly like dropout/gradient_clipping above.
+    double l1_regularization{0.0};
+    double l2_regularization{0.0};
     bool mixed_precision{false};
     std::uint64_t checkpoint_frequency{0};  // checkpoints every N steps
     std::uint64_t validation_frequency{0};  // validations every N steps
@@ -5528,6 +5534,95 @@ std::string hyperparameter_search_json(const HyperparameterSearch& search);
 std::string hyperparameter_searches_json(
     const std::vector<HyperparameterSearch>& searches);
 
+// Ensemble Methods (2026-08-24): docs/PLAN.md "Machine Learning Abilities"
+// -- real bagging/boosting/stacking over the tabular/MLP trainer, closing a
+// gap this codebase had no entity or executor for at all before this pass.
+// Modeled directly on HyperparameterSearch immediately above: a real
+// train-and-evaluate action against an existing TrainingJob's dataset/
+// architecture (via the same resolve_training_architecture() lookup), not
+// a long-running external job, but given the same eleven-state lifecycle
+// every other job-like entity in this family uses for consistency.
+enum class EnsembleMethod { bagging, boosting, stacking };
+std::string ensemble_method_name(EnsembleMethod method);
+EnsembleMethod parse_ensemble_method(const std::string& method);
+
+enum class EnsembleStatus {
+    draft,
+    queued,
+    preparing,
+    running,
+    paused,
+    canceling,
+    canceled,
+    failed,
+    completed,
+    awaiting_evaluation,
+    archived
+};
+std::string ensemble_status_name(EnsembleStatus status);
+EnsembleStatus parse_ensemble_status(const std::string& status);
+
+struct EnsembleModel {
+    std::string id;
+    std::string project_id;
+    std::string training_job_id;
+    std::string name;
+    std::string description;
+    EnsembleMethod method{EnsembleMethod::bagging};
+    std::string owner_id;
+    EnsembleStatus status{EnsembleStatus::draft};
+    // Bagging/boosting: number of members actually trained and combined.
+    // Stacking: number of diverse base members (each trained with a
+    // different seed for diversity) feeding the meta-learner. Always
+    // capped at kMaxEnsembleMembers (server.cpp) regardless of this value.
+    std::uint32_t member_count{5};
+    // Real held-out accuracy (classification) or R-squared (regression) of
+    // the combined ensemble, written by run_ensemble() (server.cpp) --
+    // never a fabricated or interpolated number.
+    double ensemble_score{0.0};
+    // The same metric for one plain model trained on the identical held-out
+    // split with the job's own architecture -- a real, apples-to-apples
+    // baseline so an administrator can see whether ensembling actually
+    // helped on this dataset, not just a bare ensemble number with nothing
+    // to compare it against.
+    double baseline_score{0.0};
+    std::uint32_t members_trained{0};
+    std::uint64_t created_at_epoch_seconds{0};
+    std::uint64_t updated_at_epoch_seconds{0};
+};
+
+class EnsembleStore final {
+public:
+    EnsembleStore() = default;
+    explicit EnsembleStore(RecordStore& records);
+    EnsembleModel create(const std::string& owner_id,
+                         const std::string& project_id,
+                         const std::string& training_job_id,
+                         const std::string& name,
+                         const std::string& description,
+                         const std::string& method,
+                         std::uint32_t member_count = 5U);
+    std::optional<EnsembleModel> find(const std::string& id) const;
+    std::vector<EnsembleModel> list() const;
+    bool set_status(const std::string& id, EnsembleStatus status);
+    // Called by run_ensemble() (server.cpp) once a real ensemble run has
+    // finished -- persists the real ensemble/baseline scores. Returns
+    // false for an unknown id.
+    bool record_result(const std::string& id, double ensemble_score,
+                       double baseline_score, std::uint32_t members_trained);
+    bool remove(const std::string& id);
+
+private:
+    void restore();
+    void persist(const EnsembleModel& ensemble);
+    RecordStore* records_{nullptr};
+    std::map<std::string, EnsembleModel> ensembles_;
+    mutable std::mutex mutex_;
+};
+
+std::string ensemble_json(const EnsembleModel& ensemble);
+std::string ensembles_json(const std::vector<EnsembleModel>& ensembles);
+
 // Phase 53: docs/PLAN.md "Machine Learning Abilities" section 28
 // (Model Optimization). Scoped down from the section's full operation
 // surface (quantization, pruning, distillation, graph optimization,
@@ -5986,6 +6081,21 @@ struct TabularTrainingOptions {
     // initialization scheme. Empty/unrecognized defaults to "he" for relu
     // and "xavier" otherwise.
     std::string initialisation;
+    // L1 (lasso, drives small weights exactly to zero) and L2 (ridge,
+    // shrinks weights proportionally) penalty strengths, applied to every
+    // weight in every layer -- output layer and every hidden layer alike,
+    // in both the plain linear/logistic/softmax path and the MLP path --
+    // but never to a row's bias term (its last column), since penalizing
+    // the bias would bias predictions toward zero rather than regularizing
+    // the model's sensitivity to its inputs. Both 0 = off (unchanged
+    // behavior from before this field existed). Applied as decoupled weight
+    // decay at update time (add lambda*sign(w) for L1 and 2*lambda*w for L2
+    // directly to the gradient before the optimizer step), not folded into
+    // the reported loss -- report.loss_history stays a pure data-fit metric
+    // so early stopping and loss curves remain comparable across different
+    // regularization_l1/regularization_l2 settings.
+    double regularization_l1{0.0};
+    double regularization_l2{0.0};
 };
 
 // The learned model: standardization statistics plus weight rows (one row
@@ -6214,6 +6324,55 @@ struct TabularCleanReport {
     std::size_t duplicate_rows_removed{0};
 };
 TabularCleanReport clean_tabular_csv(const std::string& csv);
+
+// Real data augmentation for tabular datasets (2026-08-24), producing
+// synthetic rows appended to the original data -- never modifying or
+// removing an original row. Two families of real, independent operations,
+// freely composable:
+//   - Word-level text augmentation (the four classic "Easy Data
+//     Augmentation"/EDA operations: synonym replacement, random insertion,
+//     random deletion, random swap), applied to any feature column that
+//     is not fully numeric across the dataset -- the same all-or-nothing
+//     numeric test parse_tabular_csv() already uses to decide one-hot vs.
+//     reject. Synonym replacement/insertion draw from a small built-in
+//     synonym list (see synonym_clusters() in ml_engine.cpp) -- not a full
+//     thesaurus/WordNet, an honestly bounded scope.
+//   - Numeric augmentation: Gaussian noise jitter scaled to each numeric
+//     column's own standard deviation, and classification-only minority-
+//     class oversampling (duplicating, optionally jittered, minority-class
+//     rows toward a target ratio of the majority class's row count).
+// Every random choice this function makes (which words/rows to touch,
+// which synonym/noise draw, which minority row to duplicate) is driven by
+// a single std::mt19937 seeded from TabularAugmentOptions::seed, so the
+// same input CSV and options always produce byte-identical output.
+struct TabularAugmentOptions {
+    bool synonym_replacement{false};
+    bool random_insertion{false};
+    bool random_deletion{false};
+    bool random_swap{false};
+    // Fraction of a text cell's words touched by each enabled word-level
+    // operation above (e.g. 0.1 = roughly one word in ten). [0.0, 1.0].
+    double text_augmentation_fraction{0.1};
+    bool gaussian_noise{false};
+    // Noise stddev as a fraction of each numeric column's own stddev.
+    double noise_stddev_fraction{0.05};
+    // Classification-only (skipped, not an error, when the target column
+    // has more than 64 distinct values or only one): duplicates minority-
+    // class rows until every class reaches at least this fraction of the
+    // majority class's row count. [0.0, 1.0]; 1.0 = fully balanced.
+    bool oversample_minority_classes{false};
+    double target_minority_ratio{0.5};
+    std::uint32_t seed{42};
+};
+struct TabularAugmentReport {
+    std::string csv;
+    std::size_t rows_before{0};
+    std::size_t rows_after{0};
+    std::size_t synthetic_rows_added{0};
+};
+TabularAugmentReport augment_tabular_csv(const std::string& csv,
+                                         const std::string& target_column,
+                                         const TabularAugmentOptions& options);
 
 // Phase 72: Automation Pipeline "Split data" stage support. Parses the CSV
 // for real (so a malformed dataset fails the same way "Validate data"
@@ -7045,6 +7204,89 @@ ModelClassifierReport scan_content_with_model_classifier(
     double confidence_floor = 0.5);
 
 std::string model_classifier_report_json(const ModelClassifierReport& report);
+
+// Continual Learning (2026-08-24): docs/PLAN.md "Machine Learning
+// Abilities" section 38's 12-step human-gated workflow. Steps 8-12
+// (scheduled fine-tuning, evaluation, comparison, approval, controlled
+// rollout) already have real executors elsewhere in this codebase --
+// Fine-Tuning Jobs, Evaluation Lab, Model Comparison, and Deployment
+// Manager -- so this closes steps 1-6 (collect, scrub, classify, score,
+// detect harmful content, present for review) with one real executor
+// rather than duplicating machinery that already exists. Step 7 (add
+// approved examples to a versioned dataset) is exactly what
+// InstructionExample's existing draft/in_review/approved reviewer
+// lifecycle already gates -- collect_continual_learning_candidates()
+// below creates real `draft` InstructionExample records for an
+// administrator to review through that same existing page, never a
+// production model trained automatically from raw conversation content.
+//
+// Hand-rolled character scanning, not std::regex (this codebase does not
+// use <regex> anywhere -- see scan_content_for_risks's own comment),
+// following the same "reproducible pattern match, not a fabricated
+// score" discipline. Deliberately not a full PII/NER model: email
+// addresses, US Social Security numbers, Luhn-valid credit-card-shaped
+// digit runs, and phone-shaped digit runs are the four categories
+// detected. A redacted category is replaced in the scrubbed text with a
+// "[REDACTED_<CATEGORY>]" placeholder; the original text is never
+// persisted anywhere by the caller.
+struct PiiScrubReport {
+    std::string scrubbed_text;
+    // Category name -> count of redactions made for it, e.g.
+    // {"email": 1, "phone": 2}. Empty when nothing was found.
+    std::map<std::string, std::uint32_t> redaction_counts;
+    bool clean() const { return redaction_counts.empty(); }
+};
+PiiScrubReport scrub_pii(const std::string& text);
+
+// Real heuristic classification of one collected instruction/response
+// pair into a small closed set of categories -- deterministic, not a
+// fabricated label: "code" when the response contains a fenced code
+// block; "long_form" when the response exceeds kLongFormCharacterFloor
+// characters (server.cpp-visible via this header's own constant below);
+// "short_qa" otherwise. Documented as a coarse, structural heuristic, not
+// a topic/intent classifier.
+std::string classify_continual_learning_candidate(const std::string& response);
+
+// Real, deterministic quality score in [0.0, 1.0] for one collected
+// candidate, computed from: response non-emptiness (0 if empty), a
+// minimum real length floor, and the absence of a small set of low-value
+// response markers (e.g. the response is just an error/refusal echoed
+// back). Never a fabricated or random number -- every point deducted
+// corresponds to a real, checkable condition on the actual text.
+double score_continual_learning_candidate_quality(
+    const std::string& user_message, const std::string& response);
+
+// Real report from collect_continual_learning_candidates() below -- every
+// count is genuine, computed from the actual chats/messages scanned.
+struct ContinualLearningCollectionReport {
+    std::size_t chats_scanned{0};
+    std::size_t turns_considered{0};
+    std::size_t candidates_created{0};
+    std::size_t rejected_low_quality{0};
+    std::size_t rejected_unsafe{0};
+    std::uint32_t pii_redactions_applied{0};
+    // Ids of every real InstructionExample created, in creation order --
+    // an administrator reviews these through the existing Prompt and
+    // Instruction Training page, exactly like a manually authored example.
+    std::vector<std::string> created_example_ids;
+};
+
+// Scans every user-message/assistant-reply turn pair in `chats`, applying
+// (in order) PII scrubbing, safety scanning (scan_content_for_risks(),
+// same as any other Safety and Governance content scan), quality
+// scoring, and structural classification, then creates a real, `draft`-
+// status InstructionExample (plus its InstructionExampleContent body) in
+// `examples`/`contents` for every turn that clears `quality_floor` and
+// has no safety findings -- never for one that does not, and never
+// auto-approved. A turn below the quality floor or with any safety
+// finding is counted, not silently dropped, so the returned report is a
+// complete, honest accounting of what was scanned versus what became a
+// reviewable candidate.
+ContinualLearningCollectionReport collect_continual_learning_candidates(
+    const std::vector<ChatRecord>& chats, const std::string& target_dataset_id,
+    const std::string& owner_id, InstructionExampleStore& examples,
+    InstructionExampleContentStore& contents, double quality_floor = 0.4,
+    const SafetyPolicy* policy = nullptr);
 
 // Phase 75: remote/fleet Hardware and Compute telemetry -- the "agent
 // process on the node" ComputeNode's class comment said this codebase did

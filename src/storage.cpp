@@ -460,6 +460,17 @@ bool role_allows(const UserRole role, const std::string& permission) {
           // Hyperparameter Optimization): administrator-only, matching
           // every other ml.* permission above.
           "ml.hyperparams.view", "ml.hyperparams.manage",
+          // Ensemble Methods (2026-08-24, docs/PLAN.md "Machine Learning
+          // Abilities"): administrator-only, matching every other ml.*
+          // permission above.
+          "ml.ensembles.view", "ml.ensembles.manage",
+          // Continual Learning (2026-08-24, docs/PLAN.md "Machine
+          // Learning Abilities" section 38): administrator-only, matching
+          // every other ml.* permission above. Collected candidates land
+          // as ordinary InstructionExample drafts, reviewed through the
+          // existing ml.instructions.* permissions -- this permission
+          // only gates triggering a real collection pass.
+          "ml.continuallearning.manage",
           // Phase 53 (docs/PLAN.md "Machine Learning Abilities" section 28,
           // Model Optimization): administrator-only, matching every other
           // ml.* permission above.

@@ -587,7 +587,7 @@ std::string application_script() {
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';"
         "applyHintsPref();try{"
-        "const [me,p,c,mem,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,mlse,mlhs,mlmo,mlck,mldp,mlcmp,mlkd,mlend,mlnode,mlpipe,mlpolicy,mlcard,mlaudit,mlmon,cfg,report]="
+        "const [me,p,c,mem,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,mlse,mlhs,mle,mlmo,mlck,mldp,mlcmp,mlkd,mlend,mlnode,mlpipe,mlpolicy,mlcard,mlaudit,mlmon,cfg,report]="
         "await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
@@ -615,7 +615,7 @@ std::string application_script() {
         "'/api/v1/ml/subjects',{subjects:[]}),"
         "fetchFor('#mlLabelTasksList','/api/v1/ml/label-tasks',{labelTasks:[]}),"
         "fetchFor('#mlPrepJobsList','/api/v1/ml/prep-jobs',{prepJobs:[]}),"
-        "fetchFor('#mlTrainingJobsList,#mlHyperparameterSearchTrainingJobId,#mlCheckpointTrainingJobId','/api/v1/ml/training-jobs',"
+        "fetchFor('#mlTrainingJobsList,#mlHyperparameterSearchTrainingJobId,#mlCheckpointTrainingJobId,#mlEnsembleTrainingJobId','/api/v1/ml/training-jobs',"
         "{trainingJobs:[]}),"
         "fetchFor('#mlEvaluationRunsList','/api/v1/ml/evaluation-runs',"
         "{evaluationRuns:[]}),"
@@ -638,6 +638,7 @@ std::string application_script() {
         "{subjectExams:[]}),"
         "fetchFor('#mlHyperparameterSearchesList',"
         "'/api/v1/ml/hyperparameter-searches',{hyperparameterSearches:[]}),"
+        "fetchFor('#mlEnsemblesList','/api/v1/ml/ensembles',{ensembles:[]}),"
         "fetchFor('#mlModelOptimizationsList',"
         "'/api/v1/ml/model-optimizations',{modelOptimizations:[]}),"
         "fetchFor('#mlCheckpointsList','/api/v1/ml/checkpoints',"
@@ -700,6 +701,7 @@ std::string application_script() {
         "renderMlRagConfigs(mlrag.ragConfigs);"
         "renderMlSubjectExams(mlse.subjectExams);"
         "renderMlHyperparameterSearches(mlhs.hyperparameterSearches);"
+        "renderMlEnsembles(mle.ensembles);"
         "renderMlModelOptimizations(mlmo.modelOptimizations);"
         "renderMlCheckpoints(mlck.checkpoints);"
         "renderMlDeployments(mldp.deployments);"
@@ -778,15 +780,18 @@ std::string application_script() {
         "'#mlExperimentDatasetId','#mlModelComparisonDatasetId','#mlPipelineDatasetId'])"
         "fillMlSelect(id,mlTabularDatasets,'None / choose a tabular dataset',"
         "mlDatasetLabel);"
-        "for(const id of ['#mlDatasetContentId','#mlLabelTaskDatasetId',"
+        "for(const id of ['#mlDatasetContentId','#mlDatasetAugmentId',"
+        "'#mlLabelTaskDatasetId',"
         "'#mlPrepJobDatasetId','#mlFineTuningJobDatasetId',"
         "'#mlInstructionExampleDatasetId','#mlInstructionExampleGenerateDatasetId',"
-        "'#mlInstructionExampleCheckDatasetId',"
+        "'#mlInstructionExampleCheckDatasetId','#mlContinualLearningDatasetId',"
         "'#mlSyntheticRecordDatasetId','#mlSyntheticRecordGenerateDatasetId'])"
         "fillMlSelect(id,mld.datasets,'None / choose a dataset',mlDatasetLabel);"
         "fillMlSelect('#mlHyperparameterSearchTrainingJobId',mltj.trainingJobs,"
         "'Choose a training job',x=>x.name+' ('+x.status+')');"
         "fillMlSelect('#mlCheckpointTrainingJobId',mltj.trainingJobs,"
+        "'Choose a training job',x=>x.name+' ('+x.status+')');"
+        "fillMlSelect('#mlEnsembleTrainingJobId',mltj.trainingJobs,"
         "'Choose a training job',x=>x.name+' ('+x.status+')');"
         "fillMlSelect('#mlLabelTaskAssigneeId',u.users,'Unassigned',"
         "x=>x.displayName+' ('+x.role+')');"
@@ -1671,6 +1676,7 @@ std::string application_script() {
         "'fine-tuning':'/app/ml/fine-tuning-jobs',"
         "'checkpoint-management':'/app/ml/checkpoints',"
         "'hyperparameter-optimization':'/app/ml/hyperparameter-searches',"
+        "'ensemble-methods':'/app/ml/ensembles',"
         "'experiment-tracking':'/app/ml/experiments',"
         "'subject-examination':'/app/ml/subject-exams',"
         "'model-optimization':'/app/ml/model-optimizations',"
@@ -2385,6 +2391,8 @@ std::string application_script() {
         "s.learningRateScheduler||'';"
         "q('#mlMbcGradientAccumulation').value=s.gradientAccumulation||'';"
         "q('#mlMbcGradientClipping').value=s.gradientClipping||'';"
+        "q('#mlMbcL1Regularization').value=s.l1Regularization||'';"
+        "q('#mlMbcL2Regularization').value=s.l2Regularization||'';"
         "q('#mlMbcMixedPrecision').checked=!!s.mixedPrecision;"
         "q('#mlMbcCheckpointFrequency').value=s.checkpointFrequency||'';"
         "q('#mlMbcValidationFrequency').value=s.validationFrequency||'';"
@@ -2725,7 +2733,23 @@ std::string application_script() {
         "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
         "'</option>').join('')+'</select>',"
         "applyBtn('apply-hyperparameter-search-status',x.id),"
+        "runBtn('run-ml-hyperparameter-search',x.id,'Run now'),"
         "deleteBtn('delete-ml-hyperparameter-search',x.id))]));"
+        // "Run now" invokes the real search executor (grid/random/
+        // bayesian, per the search's own strategy) and shows the real
+        // best trial's parameters/score below the table.
+        "for(const btn of el.querySelectorAll("
+        "'[data-run-ml-hyperparameter-search]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const out=q('#mlHyperparameterSearchRunResult');"
+        "if(out)out.textContent='Searching...';btn.disabled=true;"
+        "try{const r=await api('/api/v1/ml/hyperparameter-searches/'+"
+        "encodeURIComponent(btn.dataset.runMlHyperparameterSearch)+"
+        "'/run','POST',{});"
+        "if(out)out.textContent=r.detail;await load();}"
+        "catch(x){if(out)out.textContent='';"
+        "showSystemError('Run hyperparameter search failed: '+x.message);}"
+        "finally{btn.disabled=false;}});}"
         "for(const btn of el.querySelectorAll("
         "'[data-apply-hyperparameter-search-status]')){"
         "btn.addEventListener('click',async()=>{"
@@ -2743,6 +2767,61 @@ std::string application_script() {
         "encodeURIComponent(btn.dataset.deleteMlHyperparameterSearch)+"
         "'/delete','POST');await load();}"
         "catch(x){showSystemError('Delete hyperparameter search failed: '+"
+        "x.message);}});}}"
+        // Ensemble Methods (2026-08-24): an ensemble run executes like any
+        // other job, so it uses the same eleven-state job lifecycle.
+        // "Run now" invokes the real executor and shows the real ensemble
+        // score vs. single-model baseline score below the table.
+        "const ENSEMBLE_STATUSES=['draft','queued','preparing',"
+        "'running','paused','canceling','canceled','failed','completed',"
+        "'awaiting_evaluation','archived'];"
+        "function renderMlEnsembles(ensembles){"
+        "const el=q('#mlEnsemblesList');if(!el)return;"
+        "if(!ensembles.length){el.innerHTML='<p>No ensembles created "
+        "yet.</p>';return;}"
+        "el.innerHTML=table(['Name','Training job ID','Method',"
+        "'Members','Result','Status','Set status'],"
+        "ensembles.map(x=>[esc(x.name),escTrim(x.trainingJobId,16),"
+        "esc(x.method),String(x.memberCount),"
+        "x.membersTrained?('ensemble '+x.ensembleScore.toPrecision(4)+"
+        "' vs. single model '+x.baselineScore.toPrecision(4)+' ('+"
+        "x.membersTrained+' member(s))'):'not run yet',"
+        "'<span class=\"stateTag stateTag-'+esc(x.status)+'\">'+"
+        "esc(x.status)+'</span>',"
+        "toolbar('<select data-ensemble-status-for=\"'+x.id+"
+        "'\">'+ENSEMBLE_STATUSES.map(s=>"
+        "'<option value=\"'+s+'\"'+(s===x.status?' selected':'')+'>'+s+"
+        "'</option>').join('')+'</select>',"
+        "applyBtn('apply-ensemble-status',x.id),"
+        "runBtn('run-ml-ensemble',x.id,'Run now'),"
+        "deleteBtn('delete-ml-ensemble',x.id))]));"
+        "for(const btn of el.querySelectorAll('[data-run-ml-ensemble]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const out=q('#mlEnsembleRunResult');"
+        "if(out)out.textContent='Training and combining members...';"
+        "btn.disabled=true;"
+        "try{const r=await api('/api/v1/ml/ensembles/'+"
+        "encodeURIComponent(btn.dataset.runMlEnsemble)+'/run','POST',{});"
+        "if(out)out.textContent=r.detail;await load();}"
+        "catch(x){if(out)out.textContent='';"
+        "showSystemError('Run ensemble failed: '+x.message);}"
+        "finally{btn.disabled=false;}});}"
+        "for(const btn of el.querySelectorAll("
+        "'[data-apply-ensemble-status]')){"
+        "btn.addEventListener('click',async()=>{"
+        "const id=btn.dataset.applyEnsembleStatus;"
+        "const status=el.querySelector("
+        "'[data-ensemble-status-for=\"'+id+'\"]').value;"
+        "try{await api('/api/v1/ml/ensembles/'+encodeURIComponent(id)+"
+        "'/status','POST',{status});await load();}"
+        "catch(x){showSystemError('Update ensemble status failed: '+"
+        "x.message);}});}"
+        "for(const btn of el.querySelectorAll('[data-delete-ml-ensemble]')){"
+        "btn.addEventListener('click',async()=>{"
+        "try{await api('/api/v1/ml/ensembles/'+"
+        "encodeURIComponent(btn.dataset.deleteMlEnsemble)+'/delete',"
+        "'POST');await load();}"
+        "catch(x){showSystemError('Delete ensemble failed: '+"
         "x.message);}});}}"
         // Model Optimization (docs/PLAN.md "Machine Learning Abilities"
         // section 28): an optimization run executes like a training job, so
@@ -4596,6 +4675,36 @@ std::string application_script() {
         "').');showFormSuccess(out.textContent);await load();}"
         "catch(x){out.textContent='';"
         "showSystemError('Upload dataset content failed: '+x.message);}});"
+        // Real data augmentation (2026-08-24): calls the new /augment route,
+        // which appends genuine synthetic rows (word-level text operations
+        // and/or numeric noise/minority-class oversampling, per the checked
+        // options) to the dataset's content and reports real before/after
+        // row counts -- never a fabricated outcome.
+        "if(q('#newMlDatasetAugment'))q('#newMlDatasetAugment')"
+        ".addEventListener('submit',async e=>{e.preventDefault();"
+        "const out=q('#mlDatasetAugmentResult');"
+        "out.textContent='Augmenting...';"
+        "try{const r=await api('/api/v1/ml/datasets/'+"
+        "encodeURIComponent(q('#mlDatasetAugmentId').value.trim())+'/augment',"
+        "'POST',{"
+        "synonymReplacement:q('#mlDatasetAugmentSynonymReplacement').checked,"
+        "randomInsertion:q('#mlDatasetAugmentRandomInsertion').checked,"
+        "randomDeletion:q('#mlDatasetAugmentRandomDeletion').checked,"
+        "randomSwap:q('#mlDatasetAugmentRandomSwap').checked,"
+        "textAugmentationFraction:"
+        "Number(q('#mlDatasetAugmentTextFraction').value)||0,"
+        "gaussianNoise:q('#mlDatasetAugmentGaussianNoise').checked,"
+        "noiseStddevFraction:"
+        "Number(q('#mlDatasetAugmentNoiseFraction').value)||0,"
+        "oversampleMinorityClasses:"
+        "q('#mlDatasetAugmentOversampleMinority').checked,"
+        "targetMinorityRatio:"
+        "Number(q('#mlDatasetAugmentTargetRatio').value)||0});"
+        "out.textContent=r.rowsBefore+' row(s) before, '+r.rowsAfter+"
+        "' after ('+r.syntheticRowsAdded+' synthetic row(s) added).';"
+        "showFormSuccess(out.textContent);await load();}"
+        "catch(x){out.textContent='';"
+        "showSystemError('Augment dataset failed: '+x.message);}});"
         // Phase 56: live prediction form -- parses the feature JSON locally
         // for a clear error, then calls the real prediction endpoint.
         "if(q('#mlPredictForm'))q('#mlPredictForm')"
@@ -4773,6 +4882,10 @@ std::string application_script() {
         "gradientAccumulation:"
         "Number(q('#mlMbcGradientAccumulation').value)||0,"
         "gradientClipping:Number(q('#mlMbcGradientClipping').value)||0,"
+        "l1Regularization:"
+        "Number(q('#mlMbcL1Regularization').value)||0,"
+        "l2Regularization:"
+        "Number(q('#mlMbcL2Regularization').value)||0,"
         "mixedPrecision:q('#mlMbcMixedPrecision').checked,"
         "checkpointFrequency:"
         "Number(q('#mlMbcCheckpointFrequency').value)||0,"
@@ -4792,6 +4905,28 @@ std::string application_script() {
         "description:q('#mlInstructionExampleDescription').value,"
         "subjectClassification:"
         "q('#mlInstructionExampleSubjectClassification').value})));"
+        // Continual Learning (2026-08-24): calls the real collection
+        // executor and shows its real, honest accounting (scanned/
+        // considered/created/rejected counts) -- then the new drafts are
+        // visible in the Instruction examples table above like any other,
+        // ready for the normal review flow.
+        "if(q('#newMlContinualLearningCollect'))"
+        "q('#newMlContinualLearningCollect').addEventListener("
+        "'submit',async e=>{e.preventDefault();"
+        "const out=q('#mlContinualLearningResult');"
+        "out.textContent='Scanning conversations...';"
+        "try{const r=await api('/api/v1/ml/continual-learning/collect',"
+        "'POST',{targetDatasetId:q('#mlContinualLearningDatasetId').value,"
+        "qualityFloor:Number(q('#mlContinualLearningQualityFloor').value)||0.4});"
+        "out.textContent='Scanned '+r.chatsScanned+' chat(s), '+"
+        "r.turnsConsidered+' turn(s) considered: '+r.candidatesCreated+"
+        "' draft(s) created, '+r.rejectedLowQuality+' rejected (low "
+        "quality), '+r.rejectedUnsafe+' rejected (safety scan), '+"
+        "r.piiRedactionsApplied+' PII redaction(s) applied. Review the new "
+        "draft(s) in the table above.';"
+        "showFormSuccess(out.textContent);await load();}"
+        "catch(x){out.textContent='';"
+        "showSystemError('Collect candidates failed: '+x.message);}});"
         // Phase 81: content save -- upserts the real record body for the
         // example id currently in the form (filled by "Configure" above,
         // or pasted directly).
@@ -4953,6 +5088,14 @@ std::string application_script() {
         "name:q('#mlHyperparameterSearchName').value,"
         "description:q('#mlHyperparameterSearchDescription').value,"
         "strategy:q('#mlHyperparameterSearchStrategy').value})));"
+        "if(q('#newMlEnsemble'))"
+        "q('#newMlEnsemble').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/ml/ensembles',"
+        "()=>({trainingJobId:q('#mlEnsembleTrainingJobId').value,"
+        "name:q('#mlEnsembleName').value,"
+        "description:q('#mlEnsembleDescription').value,"
+        "method:q('#mlEnsembleMethod').value,"
+        "memberCount:Number(q('#mlEnsembleMemberCount').value)||5})));"
         "if(q('#newMlModelOptimization'))"
         "q('#newMlModelOptimization').addEventListener("
         "'submit',e=>submit(e,'/api/v1/ml/model-optimizations',"
@@ -6021,6 +6164,72 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<h2>Registered datasets</h2>"
             "<div id=\"mlDatasetsList\">Loading...</div>"
             "</div><div>"
+            "<h2>Augment dataset (optional)</h2>"
+            "<p>Adds real synthetic rows to help the model generalize -- "
+            "your original rows are never changed or removed, only added "
+            "to. Skip this step entirely if you don't need it.</p>"
+            "<form id=\"newMlDatasetAugment\">"
+            "<label>Dataset" +
+            field_hint("The dataset to augment. Must already have content "
+                       "uploaded in Step 3.") +
+            "<select id=\"mlDatasetAugmentId\" required>"
+            "<option value=\"\">Choose a registered dataset</option>"
+            "</select></label>"
+            "<label>Synonym replacement" +
+            field_hint("For text columns: replaces some words with a "
+                       "similar-meaning word from a small built-in list "
+                       "(e.g. &quot;good&quot; &rarr; &quot;great&quot;).") +
+            "<input id=\"mlDatasetAugmentSynonymReplacement\" "
+            "type=\"checkbox\"></label>"
+            "<label>Random insertion" +
+            field_hint("For text columns: inserts an extra similar-meaning "
+                       "word at a random position.") +
+            "<input id=\"mlDatasetAugmentRandomInsertion\" "
+            "type=\"checkbox\"></label>"
+            "<label>Random deletion" +
+            field_hint("For text columns: randomly drops a few words.") +
+            "<input id=\"mlDatasetAugmentRandomDeletion\" "
+            "type=\"checkbox\"></label>"
+            "<label>Random swap" +
+            field_hint("For text columns: randomly swaps the position of "
+                       "two words.") +
+            "<input id=\"mlDatasetAugmentRandomSwap\" "
+            "type=\"checkbox\"></label>"
+            "<label>Text change amount (0.0 to 1.0)" +
+            field_hint("Roughly what fraction of the words in a text cell "
+                       "each enabled text option above touches. 0.1 = "
+                       "about one word in ten.") +
+            "<input id=\"mlDatasetAugmentTextFraction\" type=\"number\" "
+            "min=\"0\" max=\"1\" step=\"0.05\" value=\"0.1\"></label>"
+            "<label>Add numeric noise" +
+            field_hint("For number columns: adds a synthetic copy of each "
+                       "row with a small random amount added to every "
+                       "number column, scaled to that column's own typical "
+                       "spread.") +
+            "<input id=\"mlDatasetAugmentGaussianNoise\" "
+            "type=\"checkbox\"></label>"
+            "<label>Noise amount (fraction of each column's spread)"
+            "<input id=\"mlDatasetAugmentNoiseFraction\" type=\"number\" "
+            "min=\"0\" step=\"0.01\" value=\"0.05\"></label>"
+            "<label>Balance rare classes" +
+            field_hint("Classification datasets only: duplicates rows "
+                       "from under-represented classes so every class has "
+                       "closer to the same number of rows. Skipped "
+                       "automatically for a regression dataset or one with "
+                       "too many distinct classes to make sense of as "
+                       "categories.") +
+            "<input id=\"mlDatasetAugmentOversampleMinority\" "
+            "type=\"checkbox\"></label>"
+            "<label>Target balance ratio (0.0 to 1.0)" +
+            field_hint("How close to the largest class every other class "
+                       "should be brought, e.g. 0.5 = at least half as "
+                       "many rows as the largest class. 1.0 = fully "
+                       "balanced.") +
+            "<input id=\"mlDatasetAugmentTargetRatio\" type=\"number\" "
+            "min=\"0\" max=\"1\" step=\"0.05\" value=\"0.5\"></label>"
+            "<button title=\"Augment dataset\">" ICON_PLUS_SVG " Augment dataset</button></form>"
+            "<p id=\"mlDatasetAugmentResult\"></p>"
+            "</div><div>"
             "<h2>Declare metadata</h2>"
             "<form id=\"mlDatasetDeclareForm\">"
             "<label>Dataset" +
@@ -6567,6 +6776,23 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Gradient clipping (max norm)<input "
             "id=\"mlMbcGradientClipping\" type=\"number\" min=\"0\" "
             "step=\"0.1\" placeholder=\"0 = disabled\"></label>"
+            "<label>L1 regularization (lasso strength)" +
+            field_hint("Penalizes large weights so the model prefers "
+                       "smaller ones, driving some all the way to zero -- "
+                       "useful when many input columns are irrelevant and "
+                       "you want the model to effectively ignore them. "
+                       "Never applied to bias terms.") +
+            "<input id=\"mlMbcL1Regularization\" type=\"number\" min=\"0\" "
+            "step=\"0.0001\" placeholder=\"0 = disabled\"></label>"
+            "<label>L2 regularization (ridge strength)" +
+            field_hint("Also penalizes large weights, but shrinks them "
+                       "smoothly toward zero instead of forcing them to "
+                       "exactly zero -- the usual first choice against "
+                       "overfitting when training accuracy is much higher "
+                       "than validation accuracy. Never applied to bias "
+                       "terms.") +
+            "<input id=\"mlMbcL2Regularization\" type=\"number\" min=\"0\" "
+            "step=\"0.0001\" placeholder=\"0 = disabled\"></label>"
             "<label>Mixed precision" +
             field_hint("Not used by this trainer -- mixed-precision tensor "
                        "cores are a GPU/transformer-training concept; this "
@@ -6649,6 +6875,28 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</div><div>"
             "<h2>Instruction examples</h2>"
             "<div id=\"mlInstructionExamplesList\">Loading...</div>"
+            "</div><div>"
+            "<h2>Collect from conversations (Continual Learning)</h2>"
+            "<p>Scans your own real chat conversations and turns qualifying "
+            "turns into draft instruction examples below, for you to review "
+            "the normal way -- nothing is ever added to an approved dataset "
+            "or used to train a model automatically.</p>"
+            "<form id=\"newMlContinualLearningCollect\">"
+            "<label>Target dataset" +
+            field_hint("Which dataset the collected drafts are registered "
+                       "against. They still start as drafts either way -- "
+                       "this only decides where an approved one would "
+                       "eventually be added.") +
+            "<select id=\"mlContinualLearningDatasetId\" required>"
+            "<option value=\"\">Choose a dataset</option></select></label>"
+            "<label>Minimum quality score to keep (0.0 to 1.0)" +
+            field_hint("Turns scoring below this are skipped automatically "
+                       "-- for example an empty, very short, or refusal-"
+                       "shaped reply. 0.4 is a reasonable default.") +
+            "<input id=\"mlContinualLearningQualityFloor\" type=\"number\" "
+            "min=\"0\" max=\"1\" step=\"0.05\" value=\"0.4\"></label>"
+            "<button title=\"Collect candidates\">" ICON_PLAY_SVG " Collect candidates</button></form>"
+            "<p id=\"mlContinualLearningResult\"></p>"
             "</div><div>"
             "<h2>Edit content</h2>"
             "<form id=\"mlInstructionExampleContentForm\">"
@@ -7005,20 +7253,79 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "id=\"mlHyperparameterSearchDescription\" rows=\"2\">"
             "</textarea></label>"
             "<label>Search strategy" +
-            field_hint("Only &quot;grid&quot; actually runs a real sweep "
-                       "(a bounded grid over learning rate/epochs, plus "
-                       "batch size/dropout/optimiser for MLP jobs, capped "
-                       "at 20 trials). random/bayesian/other values are "
-                       "recorded but still run the same grid search -- "
-                       "there is no separate executor for them yet.") +
-            "<input "
-            "id=\"mlHyperparameterSearchStrategy\" "
-            "placeholder=\"grid (the only strategy that actually runs)\">"
+            field_hint("All three run a real search over learning rate/"
+                       "epochs (plus batch size/dropout/optimiser for MLP "
+                       "jobs), capped at 20 trials. Grid: evenly spaced "
+                       "values across the whole range -- simple and "
+                       "predictable. Random: independent random draws -- "
+                       "often finds a good setting faster than grid when "
+                       "you only have a small trial budget. Bayesian: "
+                       "learns from each trial's result and picks the next "
+                       "one it expects to do best -- usually the most "
+                       "sample-efficient choice, but each trial takes a "
+                       "little longer to choose.") +
+            "<select id=\"mlHyperparameterSearchStrategy\">"
+            "<option value=\"grid\">Grid (evenly spaced)</option>"
+            "<option value=\"random\">Random (independent draws)</option>"
+            "<option value=\"bayesian\">Bayesian (learns as it goes)"
+            "</option></select>"
             "</label>"
             "<button title=\"Create hyperparameter search\">" ICON_PLUS_SVG " Create hyperparameter search</button></form>"
             "</div><div>"
             "<h2>Hyperparameter searches</h2>"
             "<div id=\"mlHyperparameterSearchesList\">Loading...</div>"
+            "<p id=\"mlHyperparameterSearchRunResult\"></p>"
+            "</div></section>";
+    } else if (section == "ml-ensembles") {
+        // Ensemble Methods (2026-08-24): create and list ensembles and
+        // move them through the same eleven-state job lifecycle every
+        // job-like entity in this family uses. "Run now" invokes the real
+        // executor (run_ensemble(), server.cpp): it genuinely trains and
+        // combines real members, scores the combination against a genuine
+        // single-model baseline on the same held-out split, and shows the
+        // real result below the table.
+        body =
+            "<section id=\"panel-ml-ensembles\" class=\"panel\">"
+            "<div>"
+            "<h2>New ensemble</h2>"
+            "<form id=\"newMlEnsemble\">"
+            "<label>Name<input id=\"mlEnsembleName\" required "
+            "maxlength=\"160\"></label>"
+            "<label>Training job" +
+            field_hint("The ensemble reuses this job's dataset and "
+                       "architecture -- each member is trained the same "
+                       "way a single run of this job would be.") +
+            "<select id=\"mlEnsembleTrainingJobId\" required>"
+            "<option value=\"\">Choose a training job</option></select></label>"
+            "<label>Description<textarea id=\"mlEnsembleDescription\" "
+            "rows=\"2\"></textarea></label>"
+            "<label>Method" +
+            field_hint("Bagging: trains several models on different "
+                       "random resamples of the data and averages their "
+                       "predictions -- reduces variance, a safe default. "
+                       "Boosting: trains models one after another, each "
+                       "one correcting the previous ones' mistakes -- can "
+                       "reach higher accuracy but is more prone to "
+                       "overfitting a small dataset. Stacking: trains "
+                       "several different models, then trains a small "
+                       "final model that learns how to best combine "
+                       "their predictions.") +
+            "<select id=\"mlEnsembleMethod\">"
+            "<option value=\"bagging\">Bagging</option>"
+            "<option value=\"boosting\">Boosting</option>"
+            "<option value=\"stacking\">Stacking</option>"
+            "</select></label>"
+            "<label>Member count (1 to 20)" +
+            field_hint("How many models to train and combine. More "
+                       "members can improve the result but takes longer "
+                       "to run -- 5 is a reasonable starting point.") +
+            "<input id=\"mlEnsembleMemberCount\" type=\"number\" min=\"1\" "
+            "max=\"20\" value=\"5\"></label>"
+            "<button title=\"Create ensemble\">" ICON_PLUS_SVG " Create ensemble</button></form>"
+            "</div><div>"
+            "<h2>Ensembles</h2>"
+            "<div id=\"mlEnsemblesList\">Loading...</div>"
+            "<p id=\"mlEnsembleRunResult\"></p>"
             "</div></section>";
     } else if (section == "ml-model-optimizations") {
         // Phase 53 (docs/PLAN.md "Machine Learning Abilities" section 28):
@@ -8557,8 +8864,9 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "/synthetic-records</td><td>Dataset preparation, curated "
             "instruction examples, synthetic data generation.</td></tr>"
             "<tr><td>/api/v1/ml/training-jobs, /fine-tuning-jobs, "
-            "/hyperparameter-searches</td><td>Training runs, fine-tuning "
-            "jobs, hyperparameter search.</td></tr>"
+            "/hyperparameter-searches, /ensembles</td><td>Training runs, "
+            "fine-tuning jobs, hyperparameter search, bagging/boosting/"
+            "stacking ensembles.</td></tr>"
             "<tr><td>/api/v1/ml/evaluation-runs, /experiments, "
             "/model-comparisons</td><td>Evaluation runs, experiment "
             "tracking, side-by-side model comparison.</td></tr>"
@@ -8882,6 +9190,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
                 nav_link("/app/ml/hyperparameter-searches",
                          "Hyperparameter Optimization",
                          section == "ml-hyperparameter-searches") +
+                // Ensemble Methods (2026-08-24): same reasoning as
+                // Hyperparameter Optimization directly above -- an
+                // ensemble always references an existing training job, so
+                // it is listed right after it.
+                nav_link("/app/ml/ensembles", "Ensemble Methods",
+                         section == "ml-ensembles") +
                 nav_link("/app/ml/evaluation-runs", "Evaluation Lab",
                          section == "ml-evaluation-runs") +
                 nav_link("/app/ml/experiments", "Experiment Tracking",

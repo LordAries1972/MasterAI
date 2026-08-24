@@ -292,4 +292,279 @@ std::string model_classifier_report_json(const ModelClassifierReport& report) {
           ",\"findings\":" + findings_json + "}";
 }
 
+namespace {
+
+bool is_digit_char(const char character) {
+    return std::isdigit(static_cast<unsigned char>(character)) != 0;
+}
+
+// Luhn checksum -- the standard validity check every real payment-card
+// number satisfies, used here only to decide whether a long digit run is
+// credit-card-shaped enough to redact, not to validate a real card.
+bool passes_luhn_check(const std::string& digits) {
+    int sum = 0;
+    bool double_digit = false;
+    for (auto it = digits.rbegin(); it != digits.rend(); ++it) {
+        int digit = *it - '0';
+        if (double_digit) {
+            digit *= 2;
+            if (digit > 9) digit -= 9;
+        }
+        sum += digit;
+        double_digit = !double_digit;
+    }
+    return digits.size() >= 13U && sum % 10 == 0;
+}
+
+// Redacts every case-insensitive occurrence of `needle` category already
+// found at `[start,end)` spans by rebuilding `text` with each span
+// replaced by "[REDACTED_<CATEGORY>]", in one left-to-right pass so
+// earlier spans' replacements never shift later spans' recorded offsets.
+std::string apply_redactions(const std::string& text,
+                             const std::vector<std::pair<std::size_t, std::size_t>>& spans,
+                             const std::string& category) {
+    if (spans.empty()) return text;
+    std::string result;
+    result.reserve(text.size());
+    std::size_t cursor = 0U;
+    for (const auto& span : spans) {
+        result.append(text, cursor, span.first - cursor);
+        result += "[REDACTED_" + category + "]";
+        cursor = span.second;
+    }
+    result.append(text, cursor, text.size() - cursor);
+    return result;
+}
+
+}  // namespace
+
+PiiScrubReport scrub_pii(const std::string& text) {
+    PiiScrubReport report;
+    std::string working = text;
+
+    // Email: a maximal run of characters valid in an address (alnum, '.',
+    // '_', '-', '+') containing exactly one '@' with at least one '.'
+    // somewhere after it -- a practical, not RFC 5322-exact, match.
+    {
+        std::vector<std::pair<std::size_t, std::size_t>> spans;
+        std::size_t index = 0U;
+        const auto is_email_char = [](const char character) {
+            return std::isalnum(static_cast<unsigned char>(character)) != 0 ||
+                   character == '.' || character == '_' || character == '-' ||
+                   character == '+' || character == '@';
+        };
+        while (index < working.size()) {
+            if (!is_email_char(working[index])) { ++index; continue; }
+            std::size_t end = index;
+            while (end < working.size() && is_email_char(working[end])) ++end;
+            const std::string token = working.substr(index, end - index);
+            const auto at = token.find('@');
+            if (at != std::string::npos && token.find('@', at + 1U) == std::string::npos &&
+                token.find('.', at) != std::string::npos && at > 0U && at + 1U < token.size()) {
+                spans.emplace_back(index, end);
+            }
+            index = end;
+        }
+        if (!spans.empty()) {
+            working = apply_redactions(working, spans, "EMAIL");
+            report.redaction_counts["email"] += static_cast<std::uint32_t>(spans.size());
+        }
+    }
+
+    // US Social Security number: exactly NNN-NN-NNNN, dashes required so
+    // a plain 9-digit run (which could be many other things) is not
+    // over-matched here -- it still gets caught by the phone/generic
+    // digit-run scan below if it looks phone-shaped.
+    {
+        std::vector<std::pair<std::size_t, std::size_t>> spans;
+        for (std::size_t index = 0U; index + 11U <= working.size(); ++index) {
+            const auto digits_at = [&](const std::size_t offset, const std::size_t count) {
+                for (std::size_t k = 0U; k < count; ++k) {
+                    if (!is_digit_char(working[offset + k])) return false;
+                }
+                return true;
+            };
+            if (digits_at(index, 3U) && working[index + 3U] == '-' &&
+                digits_at(index + 4U, 2U) && working[index + 6U] == '-' &&
+                digits_at(index + 7U, 4U)) {
+                spans.emplace_back(index, index + 11U);
+                index += 10U;  // skip past this match; loop's ++index lands one past it
+            }
+        }
+        if (!spans.empty()) {
+            working = apply_redactions(working, spans, "SSN");
+            report.redaction_counts["ssn"] += static_cast<std::uint32_t>(spans.size());
+        }
+    }
+
+    // Credit-card-shaped digit run: a maximal run of digits, spaces, and
+    // dashes containing 13-19 digits total (once separators are removed)
+    // that passes the Luhn checksum -- catches both "4111111111111111"
+    // and "4111 1111 1111 1111"/"4111-1111-1111-1111" groupings.
+    {
+        std::vector<std::pair<std::size_t, std::size_t>> spans;
+        std::size_t index = 0U;
+        const auto is_grouped_digit_char = [](const char character) {
+            return is_digit_char(character) || character == ' ' || character == '-';
+        };
+        while (index < working.size()) {
+            if (!is_digit_char(working[index])) { ++index; continue; }
+            std::size_t end = index;
+            std::string digits_only;
+            while (end < working.size() && is_grouped_digit_char(working[end])) {
+                if (is_digit_char(working[end])) digits_only += working[end];
+                ++end;
+            }
+            // Trim trailing separators so the matched span ends on the
+            // last real digit, not a stray trailing space/dash.
+            while (end > index && !is_digit_char(working[end - 1U])) --end;
+            if (digits_only.size() >= 13U && digits_only.size() <= 19U &&
+                passes_luhn_check(digits_only)) {
+                spans.emplace_back(index, end);
+            }
+            index = end > index ? end : index + 1U;
+        }
+        if (!spans.empty()) {
+            working = apply_redactions(working, spans, "CREDIT_CARD");
+            report.redaction_counts["credit_card"] += static_cast<std::uint32_t>(spans.size());
+        }
+    }
+
+    // Phone-shaped digit run: a maximal run of digits and common
+    // separators (space, dash, dot, parens, leading '+') whose digit
+    // count is 10-11 (US-style, with or without a country code) -- a
+    // narrower band than the credit-card scan above, and only applied to
+    // text that scan already left alone (so a real card number is never
+    // double-flagged as a phone number too).
+    {
+        std::vector<std::pair<std::size_t, std::size_t>> spans;
+        std::size_t index = 0U;
+        const auto is_phone_char = [](const char character) {
+            return is_digit_char(character) || character == ' ' || character == '-' ||
+                   character == '.' || character == '(' || character == ')' ||
+                   character == '+';
+        };
+        while (index < working.size()) {
+            if (!is_digit_char(working[index]) && working[index] != '+') { ++index; continue; }
+            std::size_t end = index;
+            std::size_t digit_count = 0U;
+            while (end < working.size() && is_phone_char(working[end])) {
+                if (is_digit_char(working[end])) ++digit_count;
+                ++end;
+            }
+            while (end > index && !is_digit_char(working[end - 1U]) && working[end - 1U] != ')') --end;
+            if (digit_count >= 10U && digit_count <= 11U) {
+                spans.emplace_back(index, end);
+            }
+            index = end > index ? end : index + 1U;
+        }
+        if (!spans.empty()) {
+            working = apply_redactions(working, spans, "PHONE");
+            report.redaction_counts["phone"] += static_cast<std::uint32_t>(spans.size());
+        }
+    }
+
+    report.scrubbed_text = std::move(working);
+    return report;
+}
+
+std::string classify_continual_learning_candidate(const std::string& response) {
+    constexpr std::size_t kLongFormCharacterFloor = 1200U;
+    if (response.find("```") != std::string::npos) return "code";
+    if (response.size() > kLongFormCharacterFloor) return "long_form";
+    return "short_qa";
+}
+
+double score_continual_learning_candidate_quality(const std::string& user_message,
+                                                   const std::string& response) {
+    if (response.empty() || user_message.empty()) return 0.0;
+    double score = 1.0;
+    // A response shorter than a real, substantive reply is a strong
+    // real-world signal of a refusal, a clarifying question, or a
+    // truncated/failed turn -- not automatically wrong, but not a strong
+    // training example either.
+    if (response.size() < 20U) score -= 0.5;
+    static const std::vector<std::string> low_value_markers{
+        "i cannot help with that", "i can't help with that",
+        "i'm not able to", "as an ai language model", "error:",
+        "an error occurred",
+    };
+    const auto lowered = lower(response);
+    for (const auto& marker : low_value_markers) {
+        if (lowered.find(marker) != std::string::npos) {
+            score -= 0.4;
+            break;
+        }
+    }
+    // An answer that is just a near-echo of the question carries little
+    // real training signal -- a coarse, real, checkable proxy (exact
+    // substring containment either way), not a semantic-similarity claim.
+    if (response.size() < user_message.size() * 2U &&
+        (lowered.find(lower(user_message)) != std::string::npos)) {
+        score -= 0.2;
+    }
+    return std::clamp(score, 0.0, 1.0);
+}
+
+ContinualLearningCollectionReport collect_continual_learning_candidates(
+    const std::vector<ChatRecord>& chats, const std::string& target_dataset_id,
+    const std::string& owner_id, InstructionExampleStore& examples,
+    InstructionExampleContentStore& contents, const double quality_floor,
+    const SafetyPolicy* policy) {
+    ContinualLearningCollectionReport report;
+    for (const auto& chat : chats) {
+        ++report.chats_scanned;
+        for (std::size_t index = 0U; index + 1U < chat.messages.size(); ++index) {
+            if (chat.messages[index].role != ChatRole::user ||
+                chat.messages[index + 1U].role != ChatRole::assistant) {
+                continue;
+            }
+            ++report.turns_considered;
+            const auto& user_message = chat.messages[index].content;
+            const auto& assistant_message = chat.messages[index + 1U].content;
+
+            const auto user_scrub = scrub_pii(user_message);
+            const auto response_scrub = scrub_pii(assistant_message);
+            for (const auto& entry : user_scrub.redaction_counts) {
+                report.pii_redactions_applied += entry.second;
+            }
+            for (const auto& entry : response_scrub.redaction_counts) {
+                report.pii_redactions_applied += entry.second;
+            }
+
+            const auto quality =
+                score_continual_learning_candidate_quality(
+                    user_scrub.scrubbed_text, response_scrub.scrubbed_text);
+            if (quality < quality_floor) {
+                ++report.rejected_low_quality;
+                continue;
+            }
+            const auto user_scan = scan_content_for_risks(user_scrub.scrubbed_text, policy);
+            const auto response_scan = scan_content_for_risks(response_scrub.scrubbed_text, policy);
+            if (!user_scan.clean() || !response_scan.clean()) {
+                ++report.rejected_unsafe;
+                continue;
+            }
+
+            const auto classification =
+                classify_continual_learning_candidate(response_scrub.scrubbed_text);
+            const auto created = examples.create(
+                owner_id, target_dataset_id,
+                "conversation-candidate-" + std::to_string(report.candidates_created + 1U),
+                "Collected from a real conversation turn; PII-scrubbed and "
+                "safety-scanned before review (quality score " +
+                    std::to_string(quality) + ").",
+                classification);
+            InstructionExampleContent content;
+            content.user_instruction = user_scrub.scrubbed_text;
+            content.expected_response = response_scrub.scrubbed_text;
+            content.safety_classification = "scanned_clean";
+            contents.put(created.id, content);
+            report.created_example_ids.push_back(created.id);
+            ++report.candidates_created;
+        }
+    }
+    return report;
+}
+
 }  // namespace masterai

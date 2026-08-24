@@ -1275,6 +1275,42 @@ Current phase status:
   this pass -- this session does not build or run the binary; an
   administrator training a real MLP model is what turns this into a
   verified result.
+  **L1/L2 weight regularization now exists (2026-08-24)**, closing a gap
+  the real MLP trainer above was built without: `TabularTrainingOptions`
+  (`src/masterai.hpp`) gained `regularization_l1`/`regularization_l2` (both
+  0.0 = off, the pre-existing behavior for every model trained before this
+  pass). `train_tabular_model()` (`src/ml_engine.cpp`) applies both as
+  weight decay added directly to the gradient before each update -- L1 adds
+  `lambda * sign(w)` (drives small weights exactly to zero), L2 adds
+  `2 * lambda * w` (shrinks weights smoothly) -- in the plain linear/
+  logistic/softmax path's full-batch update and, via the shared
+  `apply_update` closure, in every layer of the MLP path (hidden and output
+  alike) regardless of optimizer choice (sgd/sgd_momentum/adam). Neither
+  term ever touches a row's bias column, matching standard practice (a
+  penalized bias would bias every prediction toward zero rather than
+  regularizing input sensitivity) and is excluded by index in both code
+  paths. Deliberately not folded into `report.loss_history` -- that stays a
+  pure data-fit metric so loss curves and early stopping remain comparable
+  across different regularization strengths, the same reasoning dropout's
+  own comment already documents for keeping dropout out of the deterministic
+  `compute_loss()` path. `ModelBuilderSettings` gained the matching
+  `l1_regularization`/`l2_regularization` fields (`src/masterai.hpp`),
+  validated non-negative by `validate_model_builder_settings()` (`src/
+  ml.cpp`), persisted as two new trailing fields (schema 33 -> 35; a
+  pre-35 record restores both at 0.0, "no override", identical to before
+  this pass), exposed as `l1Regularization`/`l2Regularization` in
+  `model_builder_config_json()` and the configure-settings request parser
+  (`src/server.cpp`), and threaded into training via
+  `resolve_training_architecture()` the same way `gradient_clipping`
+  already was. New "L1 regularization (lasso strength)"/"L2 regularization
+  (ridge strength)" fields in the Model Builder's advanced-settings form
+  (`src/web_ui.cpp`), each with a plain-language field hint explaining what
+  it does and when to reach for it, right after "Gradient clipping" in both
+  the form markup and its load/save JS. Honest gap: not yet measured on a
+  real overfitting dataset (this session does not build or run the
+  binary) -- an administrator training a model with a high train/validation
+  gap, then re-training it with L2 (or L1) turned on and confirming the gap
+  narrows, is what turns this into a verified result.
 - Phase 47: Implemented at a scoped-down level (2026-08-04) — Prompt and
   Instruction Training (section 19 below), scoped down to identity, the
   dataset each example targets, a free-text subject classification, and a
@@ -1587,9 +1623,206 @@ Current phase status:
   sampling strategy) stay out of scope -- `TabularTrainingOptions` has no
   such concepts to tune. Adapter rank specifically belongs to the separate
   GGUF LoRA fine-tuning path (Phase 73), not this tabular/MLP executor, and
-  is not searched here either. Strategies beyond grid (random, Bayesian,
-  population-based, successive-halving, early-stopping search) remain
-  unimplemented -- `strategy` stays the free-text field it always was.
+  is not searched here either.
+  **Random and Bayesian search strategies now have real executors too
+  (2026-08-24)**, closing the "strategies beyond grid remain unimplemented"
+  gap immediately above. `run_hyperparameter_search()` (`src/server.cpp`)
+  now branches on `ascii_lower(search.strategy)`: `"grid"` (or any other/
+  unrecognized value, including every pre-existing search) keeps the
+  original deterministic sweep byte-for-byte; `"random"` draws
+  `requested_trials` independent uniform samples from the same learning-
+  rate/epoch ranges (seeded from `std::hash<std::string>{}(search.id)` via
+  `std::seed_seq`, so re-running the identical search reproduces the
+  identical trial sequence -- the same determinism-from-a-seed convention
+  `TabularTrainingOptions::seed` already establishes for a training run);
+  `"bayesian"` runs a real sequential model-based search -- a small
+  from-scratch Gaussian Process (`bayesian_search::GaussianProcess`, fixed
+  squared-exponential kernel, Cholesky-solved, always cheap since
+  `kMaxHyperparameterTrials` bounds it to at most 20 observations) fit on
+  every real trial observed so far, picking each next trial by maximizing
+  Expected Improvement (`bayesian_search::expected_improvement()`) over 400
+  random candidate points, after an initial random-design warm-up of
+  `max(2, requested_trials/3)` trials the GP needs before it has anything
+  to condition on. All three strategies share one new `run_trial()` lambda
+  (the exact same MLP joint-sweep formula the grid strategy's own comment
+  already documented for batch size/dropout/optimiser, now computed from a
+  trial's own normalized learning-rate/epoch position instead of grid
+  indices `i`/`j`, so it generalizes to trials that are not on a grid) and
+  the exact same scoring/persistence/failure-handling path (a trial that
+  fails to train is still skipped, never counted as a fabricated zero).
+  MLP-only dimensions (batch size, dropout, optimiser) are not modeled by
+  the GP itself -- extending it to a mixed continuous/categorical kernel
+  was judged out of scope for a 20-observation search -- they still ride
+  the chosen trial's own normalized position exactly as under the grid
+  strategy, so an MLP job's search is not left unswept, just not a
+  dimension Bayesian search actively reasons about. The web UI's "Search
+  strategy" field (`src/web_ui.cpp`) changed from a free-text input
+  (placeholder: "grid, the only strategy that actually runs") to a proper
+  three-option dropdown with a field hint explaining each strategy's
+  trade-off in plain language, since all three now do something real.
+  Population-based, successive-halving, and early-stopping-search
+  strategies remain unimplemented and out of scope for this pass. Honest
+  gap: not yet measured against a real dataset showing Bayesian search
+  actually beating grid/random on trial-efficiency (this session does not
+  build or run the binary) -- an administrator running the same search
+  budget under all three strategies against a real dataset and comparing
+  best scores is what turns this into a verified result.
+  **Real data augmentation now exists too (2026-08-24)**, closing a gap
+  this codebase had no executor for at all before this pass. New
+  `augment_tabular_csv()` (`src/ml_engine.cpp`, declared alongside
+  `clean_tabular_csv()`/`split_tabular_csv()` in `src/masterai.hpp`) adds
+  genuine synthetic rows to a dataset's CSV content -- original rows are
+  never modified or removed, only added to -- via two independently
+  composable families of real operations, each driven by a single
+  `std::mt19937` seeded from `TabularAugmentOptions::seed` so the same
+  input and options always produce byte-identical output: (1) the four
+  classic "Easy Data Augmentation" (Wei & Zou) word-level operations --
+  synonym replacement, random insertion, random deletion, random swap --
+  applied to any feature column that is not fully numeric across the
+  dataset (the same all-or-nothing test `parse_tabular_csv()` already uses
+  to decide one-hot vs. reject), drawing from a small built-in ~40-cluster
+  synonym list (`synonym_clusters()`, not a full thesaurus/WordNet -- an
+  honestly bounded scope, matching this file's other deliberately-limited
+  helpers); and (2) numeric augmentation -- Gaussian noise jitter scaled to
+  each numeric column's own standard deviation, and classification-only
+  minority-class oversampling (duplicating minority-class rows toward a
+  target ratio of the majority class's row count, skipped rather than
+  guessed when the target column has more than 64 distinct values or only
+  one, since a continuous regression target has no defined "class" to
+  balance). New `POST /api/v1/ml/datasets/{id}/augment` route (same
+  `ml.datasets.import` permission content upload/cleaning already use,
+  since this mutates stored content the same way) runs the requested
+  operations against the dataset's uploaded content and persists the
+  result as a new dataset version via the existing `record_dataset_
+  content_upload()` path (`src/server.cpp`) -- exactly the "Clean data"
+  automation-pipeline stage's own persist-back convention. New "Augment
+  dataset (optional)" form on the Dataset Manager page (`src/web_ui.cpp`),
+  with a checkbox per operation and a field hint in plain language
+  explaining what each one does, reporting real rows-before/rows-after/
+  synthetic-rows-added counts on success. Honest gap: not yet measured on
+  a real small dataset showing augmentation actually improving held-out
+  metrics (this session does not build or run the binary) -- an
+  administrator training a model before and after augmenting its dataset
+  and comparing evaluation results is what turns this into a verified
+  result.
+- **Ensemble Methods: Implemented (2026-08-24)** — a brand-new entity and
+  real executor this codebase had no prior gap for (not a Phase
+  scoped-down-backfill like most entries above): `EnsembleModel`/
+  `EnsembleStore` (`src/masterai.hpp`/`src/ml.cpp`), modeled directly on
+  `HyperparameterSearch` -- identity, a `training_job_id` reference, a
+  `method` (bagging/boosting/stacking), a `member_count`, and the same
+  eleven-state job lifecycle every job-like entity in this family uses.
+  `run_ensemble()` (`src/server.cpp`) resolves the referenced job's real
+  dataset/architecture (the same `resolve_training_architecture()` lookup
+  Hyperparameter Search uses), splits it with the exact same deterministic
+  shuffle `train_tabular_model()` itself uses so every member and the
+  real single-model baseline are scored against the identical held-out
+  rows, then dispatches to one of three genuinely different combination
+  algorithms in the new `ensemble_methods` namespace: **bagging** trains
+  `member_count` models on independent bootstrap resamples and combines
+  by averaging `predict_tabular()`'s `class_probabilities` (a real soft
+  vote) or averaging predicted values; **boosting** runs real sequential
+  residual-fitting -- each stage's model is trained against the *current
+  residual* of the running combined prediction and its shrinkage-weighted
+  output both updates that residual and adds to the held-out combined
+  score, generalized to multiclass by boosting one real-valued indicator
+  regression per class and combining by argmax (a documented
+  simplification of true softmax gradient boosting, not textbook
+  AdaBoost/GBM, but genuine sequential residual fitting); **stacking**
+  trains diverse base members (different seeds) on an inner training
+  fold, builds meta-features from their predictions on a held-out inner
+  fold, and trains a real linear/logistic meta-model on those
+  meta-features (hold-out stacking, not k-fold, an honestly bounded
+  simplification). Every reported `ensembleScore`/`baselineScore` is a
+  genuine accuracy (classification) or R-squared (regression) computed
+  directly from `predict_tabular()` calls, never fabricated. Scoped like
+  Hyperparameter Search and Model Comparison before it: trains, combines,
+  and scores for real, then reports the outcome, but does not yet persist
+  a servable composite-model artifact for live prediction -- training a
+  real production model from the winning configuration is a separate
+  step, exactly as an administrator already does after a winning
+  Hyperparameter Search trial. New `ml.ensembles.view`/`ml.ensembles.manage`
+  permissions (`src/storage.cpp`) and `GET/POST /api/v1/ml/ensembles`,
+  `POST .../{id}/status`, `POST .../{id}/run`, `POST .../{id}/delete`
+  routes (`src/server.cpp`), all administrator-only matching every other
+  `ml.*` permission. New "Ensemble Methods" page (`src/web_ui.cpp`,
+  `/app/ml/ensembles`, sidebar entry right after Hyperparameter
+  Optimization) with a create form (method dropdown with a plain-language
+  trade-off explanation per method, member count) and a "Run now" button
+  showing the real ensemble score vs. baseline score and which one won.
+  New `ensemble-methods` roster entry (`src/ml.cpp`) reporting
+  `available`, added to `test_machine_learning_foundation_dashboard`'s
+  explicit whitelist. New `test_machine_learning_ensemble_lifecycle`
+  covers the store's create/validation/lifecycle/record-result/reload/
+  remove/JSON-serialization contract, the same testing boundary
+  `run_hyperparameter_search()` itself already has (a server.cpp-internal
+  free function exercised only through the real HTTP route, not called
+  directly from a unit test). While in this area: the pre-existing
+  Hyperparameter Search page had no way to actually trigger a run from the
+  web UI at all (the real `/run` route existed since Phase 52, but nothing
+  in `src/web_ui.cpp` ever called it) -- fixed alongside this pass with a
+  "Run now" button showing the real best-trial detail text, closing a
+  usability gap directly adjacent to this session's hyperparameter-search
+  strategy work. Honest gap: not yet measured on a real dataset showing
+  any method actually beating the single-model baseline (this session does
+  not build or run the binary) -- an administrator running all three
+  methods against a real dataset and comparing the reported scores is what
+  turns this into a verified result.
+- **Continual Learning (section 38): steps 1-6 implemented (2026-08-24)** —
+  the 12-step human-gated workflow's first six steps (collect candidate
+  examples, remove personal information/secrets, classify examples, score
+  quality, detect harmful/malicious examples, present for administrator
+  review) now have one real executor, `collect_continual_learning_
+  candidates()` (`src/ml_safety_scan.cpp`), rather than duplicating
+  machinery that already existed for the workflow's back half: steps 7-12
+  (add approved examples to a versioned dataset, run scheduled fine-
+  tuning, evaluate, compare against production, require approval, deploy
+  with a controlled rollout) already have real executors via
+  InstructionExample's own reviewer-approval lifecycle, Fine-Tuning Jobs,
+  Evaluation Lab, Model Comparison, and Deployment Manager -- this pass
+  only closes the front half those already assumed existed. New
+  `scrub_pii()` (`src/masterai.hpp`/`src/ml_safety_scan.cpp`): real,
+  hand-rolled (no `<regex>`, matching `scan_content_for_risks()`'s own
+  convention) pattern-based redaction of email addresses, US Social
+  Security numbers, Luhn-valid credit-card-shaped digit runs, and
+  phone-shaped digit runs, each replaced with a `[REDACTED_<CATEGORY>]`
+  placeholder -- honestly scoped as pattern-based, not a full PII/NER
+  model. New `classify_continual_learning_candidate()` (structural
+  heuristic: `code` when the response contains a fenced code block,
+  `long_form` past a character floor, `short_qa` otherwise) and
+  `score_continual_learning_candidate_quality()` (a real, deterministic
+  [0,1] score docked for an empty/too-short response, a refusal/error
+  marker, or a response that is mostly an echo of the question -- never a
+  random or fabricated number). `collect_continual_learning_candidates()`
+  scans real `ChatRecord` user/assistant turn pairs, applies all four in
+  order (scrub -> score -> reject below `quality_floor` -> safety-scan via
+  the existing `scan_content_for_risks()` -> reject any finding), and
+  creates a real `draft`-status `InstructionExample` (plus its
+  `InstructionExampleContent` body, already PII-scrubbed) for every
+  turn that clears both bars -- never auto-approved, never training or
+  deploying anything itself. New `POST /api/v1/ml/continual-learning/
+  collect` route (`src/server.cpp`, new administrator-only
+  `ml.continuallearning.manage` permission) accepts an optional
+  `chatIds` array (defaults to every chat the requesting administrator
+  owns) and a `qualityFloor`, returning the real
+  chats-scanned/turns-considered/candidates-created/rejected-low-quality/
+  rejected-unsafe/PII-redactions-applied counts -- a complete, honest
+  accounting, never a fabricated summary. New "Collect from conversations
+  (Continual Learning)" form on the existing Prompt and Instruction
+  Training page (`src/web_ui.cpp`, `/app/ml/instruction-examples`) rather
+  than a separate page, since its output lands directly in that page's own
+  existing table for the administrator to review the normal way. New
+  `test_machine_learning_continual_learning_collection` covers `scrub_pii()`
+  against real email/SSN text, the classify/score heuristics' documented
+  behavior, and an end-to-end collection run proving a low-quality turn is
+  rejected, an unsafe (prompt-injection-flagged) turn is rejected, a
+  genuine qualifying turn becomes a real draft example, and that example's
+  persisted content never contains the original unscrubbed PII. Honest
+  gap: not yet run against a real, large conversation history to confirm
+  the quality/safety filters strike a reasonable balance in practice (this
+  session does not build or run the binary) -- an administrator running a
+  real collection pass over their own chat history and reviewing what
+  qualifies is what turns this into a verified result.
 - Phase 53: Implemented at a scoped-down level (2026-08-05) — Model
   Optimization (section 28 below), scoped down to identity, a mandatory
   `model_id` referencing a `ModelRegistryStore` entry (an optimization run
@@ -2732,6 +2965,33 @@ Current phase status:
   12.43 tok/s GPU / 6.48 tok/s CPU baseline these changes target); an
   administrator re-running `masterai calibrate` and a generation benchmark
   on real hardware is what turns this into a verified before/after number.
+- Phase 85 addendum: Implemented (2026-08-24) — GPU scheduling-priority
+  drop for the runner process, closing a whole-PC stutter reported on every
+  reply with GPU offload enabled. `RunnerSupervisor::load()`
+  (`src/inference.cpp`) already dropped the runner to
+  `BELOW_NORMAL_PRIORITY_CLASS`/`nice(5)` for CPU scheduling, but that only
+  affects CPU time-slicing, not the WDDM GPU scheduler's engine-priority
+  timeslicing between processes — a GPU-offloaded generation's compute
+  kernel ran at the same GPU priority as the desktop compositor, so the
+  whole desktop (not just MasterAI) could stutter for the duration of every
+  reply, not only at cold load. `lower_gpu_scheduling_priority()`
+  (Windows-only, `src/inference.cpp`) now calls the undocumented but stable
+  (Windows 8+) `D3DKMTSetProcessSchedulingPriorityClass` gdi32.dll export —
+  the same one used by GPU-priority utilities such as Process Lasso and
+  Special K — right after the runner process launches, dropping it one
+  notch below normal for GPU scheduling too. Resolved via `GetProcAddress`
+  at runtime rather than the WDK's `d3dkmthk.h` header, since this project
+  only depends on the public Windows SDK; a missing export (older Windows,
+  a driver with no registered GPU engine for the process) leaves GPU
+  scheduling at its inherited default, exactly like every prior build.
+  Best-effort and silent on failure, matching the existing CPU priority
+  call's own error-handling contract — this is a responsiveness nicety,
+  never something generation correctness depends on. No Linux equivalent
+  exists (WDDM is Windows-specific); Linux GPU compute scheduling is left
+  unchanged. Honest gap: not yet measured on real hardware with GPU offload
+  under load (this session does not build or run the binary) — an
+  administrator confirming the stutter is gone during a live GPU-offloaded
+  chat reply is what turns this into a verified fix.
 - Dataset Manager instruction-purpose datasets and multi-line CSV field
   parsing (section 10 below): `Dataset` gained a `purpose` field
   (`"tabular"`, the default, or `"instruction"`; schema 8 -> 9, old records

@@ -126,15 +126,25 @@ MachineLearningRegistry::MachineLearningRegistry() {
         // pass) despite having had a real executor since Phase 79.
         {"checkpoint-management", "Checkpoint Management", "available"},
         // Phase 52: POST .../run genuinely sweeps learning rate/epochs (and
-        // batch size/dropout/optimiser for a real Model Builder MLP job) via
-        // a bounded grid search -- see run_hyperparameter_search's comment
-        // in server.cpp. Only the "grid" strategy has a real executor; other
-        // recorded strategy values still run this same search (see that
-        // page's own field hint). Was missing from this roster entirely
-        // (Phase 92 consolidation pass) despite having had a real executor
-        // since Phase 52.
+        // batch size/dropout/optimiser for a real Model Builder MLP job) --
+        // see run_hyperparameter_search's comment in server.cpp. Three
+        // strategies now have real executors (2026-08-24 addendum):
+        // "grid" (the original bounded deterministic sweep), "random"
+        // (independent uniform draws), and "bayesian" (a real Gaussian
+        // Process + Expected Improvement sequential search). Any other
+        // recorded strategy value falls back to "grid". Was missing from
+        // this roster entirely (Phase 92 consolidation pass) despite having
+        // had a real executor since Phase 52.
         {"hyperparameter-optimization", "Hyperparameter Optimization",
          "available"},
+        // Ensemble Methods (2026-08-24): POST .../run genuinely trains and
+        // combines real bagging/boosting/stacking members against the
+        // referenced training job's dataset, scored against a genuine
+        // single-model baseline on the same held-out split -- see
+        // run_ensemble()'s comment in server.cpp. A new roster entry
+        // (this codebase had no Ensemble entity at all before this pass),
+        // not a Phase 92-style backfill of a pre-existing gap.
+        {"ensemble-methods", "Ensemble Methods", "available"},
         {"evaluation-lab", "Evaluation Lab", "available"},
         // Phase 80: POST .../run genuinely trains and evaluates the
         // experiment's dataset via the same real tabular engine Training
@@ -2387,6 +2397,14 @@ void validate_model_builder_settings(const ModelBuilderSettings& settings) {
         throw std::invalid_argument(
             "model builder gradient clipping must not be negative");
     }
+    if (settings.l1_regularization < 0.0) {
+        throw std::invalid_argument(
+            "model builder L1 regularization must not be negative");
+    }
+    if (settings.l2_regularization < 0.0) {
+        throw std::invalid_argument(
+            "model builder L2 regularization must not be negative");
+    }
 }
 
 ModelBuilderConfigStore::ModelBuilderConfigStore(RecordStore& records) : records_(&records) {
@@ -2399,11 +2417,13 @@ void ModelBuilderConfigStore::restore() {
         // 7 fields is the legacy scoped-down Phase 46 record (identity/
         // project/base-model/source-type/status only); 31 is the full-
         // surface record with the 24 ModelBuilderSettings fields appended;
-        // 33 (this pass) adds dataset_id/resulting_training_job_id for the
-        // real submission executor. Legacy records restore with default
-        // (unset) settings/dataset/job-id so existing databases keep
+        // 33 adds dataset_id/resulting_training_job_id for the real
+        // submission executor; 35 (this pass) appends l1_regularization/
+        // l2_regularization. Legacy records restore with default (unset)
+        // settings/dataset/job-id/regularization so existing databases keep
         // working without a migration step.
-        if (fields.size() != 7U && fields.size() != 31U && fields.size() != 33U) {
+        if (fields.size() != 7U && fields.size() != 31U && fields.size() != 33U &&
+            fields.size() != 35U) {
             throw std::runtime_error(
                 "persisted model builder config record field count is wrong");
         }
@@ -2416,7 +2436,7 @@ void ModelBuilderConfigStore::restore() {
         config.source_type = fields[4];
         config.owner_id = fields[5];
         config.status = parse_model_builder_config_status(fields[6]);
-        if (fields.size() == 31U || fields.size() == 33U) {
+        if (fields.size() == 31U || fields.size() == 33U || fields.size() == 35U) {
             auto& s = config.settings;
             s.configuration_mode = fields[7];
             s.architecture = fields[8];
@@ -2443,9 +2463,13 @@ void ModelBuilderConfigStore::restore() {
             s.reproducibility_settings = fields[29];
             s.distributed_training_settings = fields[30];
         }
-        if (fields.size() == 33U) {
+        if (fields.size() == 33U || fields.size() == 35U) {
             config.dataset_id = fields[31];
             config.resulting_training_job_id = fields[32];
+        }
+        if (fields.size() == 35U) {
+            config.settings.l1_regularization = std::stod(fields[33]);
+            config.settings.l2_regularization = std::stod(fields[34]);
         }
         configs_[config.id] = config;
     }
@@ -2472,7 +2496,9 @@ void ModelBuilderConfigStore::persist(const ModelBuilderConfig& config) {
              std::to_string(s.validation_frequency),
              s.early_stopping ? "1" : "0", std::to_string(s.random_seed),
              s.reproducibility_settings, s.distributed_training_settings,
-             config.dataset_id, config.resulting_training_job_id}));
+             config.dataset_id, config.resulting_training_job_id,
+             format_settings_double(s.l1_regularization),
+             format_settings_double(s.l2_regularization)}));
 }
 
 ModelBuilderConfig ModelBuilderConfigStore::create(
@@ -2610,6 +2636,10 @@ std::string model_builder_config_json(const ModelBuilderConfig& config) {
            std::to_string(s.gradient_accumulation) +
            ",\"gradientClipping\":" +
            format_settings_double(s.gradient_clipping) +
+           ",\"l1Regularization\":" +
+           format_settings_double(s.l1_regularization) +
+           ",\"l2Regularization\":" +
+           format_settings_double(s.l2_regularization) +
            ",\"mixedPrecision\":" + (s.mixed_precision ? "true" : "false") +
            ",\"checkpointFrequency\":" +
            std::to_string(s.checkpoint_frequency) +
@@ -3944,6 +3974,209 @@ std::string hyperparameter_searches_json(
         if (!first) body += ",";
         first = false;
         body += hyperparameter_search_json(search);
+    }
+    return body + "]";
+}
+
+std::string ensemble_method_name(const EnsembleMethod method) {
+    switch (method) {
+        case EnsembleMethod::bagging: return "bagging";
+        case EnsembleMethod::boosting: return "boosting";
+        case EnsembleMethod::stacking: return "stacking";
+    }
+    throw std::runtime_error("invalid ensemble method");
+}
+
+EnsembleMethod parse_ensemble_method(const std::string& method) {
+    if (method == "bagging") return EnsembleMethod::bagging;
+    if (method == "boosting") return EnsembleMethod::boosting;
+    if (method == "stacking") return EnsembleMethod::stacking;
+    throw std::invalid_argument(
+        "ensemble method must be bagging, boosting, or stacking");
+}
+
+std::string ensemble_status_name(const EnsembleStatus status) {
+    switch (status) {
+        case EnsembleStatus::draft: return "draft";
+        case EnsembleStatus::queued: return "queued";
+        case EnsembleStatus::preparing: return "preparing";
+        case EnsembleStatus::running: return "running";
+        case EnsembleStatus::paused: return "paused";
+        case EnsembleStatus::canceling: return "canceling";
+        case EnsembleStatus::canceled: return "canceled";
+        case EnsembleStatus::failed: return "failed";
+        case EnsembleStatus::completed: return "completed";
+        case EnsembleStatus::awaiting_evaluation: return "awaiting_evaluation";
+        case EnsembleStatus::archived: return "archived";
+    }
+    throw std::runtime_error("invalid ensemble status");
+}
+
+EnsembleStatus parse_ensemble_status(const std::string& status) {
+    if (status == "draft") return EnsembleStatus::draft;
+    if (status == "queued") return EnsembleStatus::queued;
+    if (status == "preparing") return EnsembleStatus::preparing;
+    if (status == "running") return EnsembleStatus::running;
+    if (status == "paused") return EnsembleStatus::paused;
+    if (status == "canceling") return EnsembleStatus::canceling;
+    if (status == "canceled") return EnsembleStatus::canceled;
+    if (status == "failed") return EnsembleStatus::failed;
+    if (status == "completed") return EnsembleStatus::completed;
+    if (status == "awaiting_evaluation") return EnsembleStatus::awaiting_evaluation;
+    if (status == "archived") return EnsembleStatus::archived;
+    throw std::runtime_error("stored ensemble status is invalid");
+}
+
+EnsembleStore::EnsembleStore(RecordStore& records) : records_(&records) {
+    restore();
+}
+
+void EnsembleStore::restore() {
+    for (const auto& item : records_->list("ml_ensembles")) {
+        const auto fields = unpack(item.second);
+        if (fields.size() != 13U) {
+            throw std::runtime_error("persisted ensemble record field count is wrong");
+        }
+        EnsembleModel ensemble;
+        ensemble.id = item.first;
+        ensemble.project_id = fields[0];
+        ensemble.training_job_id = fields[1];
+        ensemble.name = fields[2];
+        ensemble.description = fields[3];
+        ensemble.method = parse_ensemble_method(fields[4]);
+        ensemble.owner_id = fields[5];
+        ensemble.status = parse_ensemble_status(fields[6]);
+        ensemble.member_count = static_cast<std::uint32_t>(std::stoul(fields[7]));
+        ensemble.ensemble_score = std::stod(fields[8]);
+        ensemble.baseline_score = std::stod(fields[9]);
+        ensemble.members_trained = static_cast<std::uint32_t>(std::stoul(fields[10]));
+        ensemble.created_at_epoch_seconds = std::stoull(fields[11]);
+        ensemble.updated_at_epoch_seconds = std::stoull(fields[12]);
+        ensembles_[ensemble.id] = ensemble;
+    }
+}
+
+void EnsembleStore::persist(const EnsembleModel& ensemble) {
+    records_->put(
+        "ml_ensembles", ensemble.id,
+        pack({ensemble.project_id, ensemble.training_job_id, ensemble.name,
+             ensemble.description, ensemble_method_name(ensemble.method),
+             ensemble.owner_id, ensemble_status_name(ensemble.status),
+             std::to_string(ensemble.member_count),
+             std::to_string(ensemble.ensemble_score),
+             std::to_string(ensemble.baseline_score),
+             std::to_string(ensemble.members_trained),
+             std::to_string(ensemble.created_at_epoch_seconds),
+             std::to_string(ensemble.updated_at_epoch_seconds)}));
+}
+
+EnsembleModel EnsembleStore::create(
+    const std::string& owner_id, const std::string& project_id,
+    const std::string& training_job_id, const std::string& name,
+    const std::string& description, const std::string& method,
+    const std::uint32_t member_count) {
+    if (name.empty() || name.size() > 160U) {
+        throw std::invalid_argument("ensemble name is invalid");
+    }
+    if (training_job_id.empty()) {
+        throw std::invalid_argument("ensemble training job id is required");
+    }
+    if (member_count < 1U || member_count > 20U) {
+        throw std::invalid_argument("ensemble member count must be between 1 and 20");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    EnsembleModel ensemble;
+    ensemble.id = random_id();
+    ensemble.project_id = project_id;
+    ensemble.training_job_id = training_job_id;
+    ensemble.name = name;
+    ensemble.description = description;
+    ensemble.method = parse_ensemble_method(method);
+    ensemble.owner_id = owner_id;
+    ensemble.member_count = member_count;
+    ensemble.status = EnsembleStatus::draft;
+    ensemble.created_at_epoch_seconds = epoch_seconds();
+    ensemble.updated_at_epoch_seconds = ensemble.created_at_epoch_seconds;
+    ensembles_[ensemble.id] = ensemble;
+    if (records_) persist(ensemble);
+    return ensemble;
+}
+
+std::optional<EnsembleModel> EnsembleStore::find(const std::string& id) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = ensembles_.find(id);
+    return found != ensembles_.end() ? std::optional<EnsembleModel>(found->second)
+                                     : std::nullopt;
+}
+
+std::vector<EnsembleModel> EnsembleStore::list() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<EnsembleModel> result;
+    result.reserve(ensembles_.size());
+    for (const auto& item : ensembles_) result.push_back(item.second);
+    return result;
+}
+
+bool EnsembleStore::set_status(const std::string& id, const EnsembleStatus status) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = ensembles_.find(id);
+    if (found == ensembles_.end()) return false;
+    found->second.status = status;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool EnsembleStore::record_result(const std::string& id,
+                                  const double ensemble_score,
+                                  const double baseline_score,
+                                  const std::uint32_t members_trained) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = ensembles_.find(id);
+    if (found == ensembles_.end()) return false;
+    found->second.ensemble_score = ensemble_score;
+    found->second.baseline_score = baseline_score;
+    found->second.members_trained = members_trained;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool EnsembleStore::remove(const std::string& id) {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = ensembles_.find(id);
+    if (found == ensembles_.end()) return false;
+    ensembles_.erase(found);
+    if (records_) records_->erase("ml_ensembles", id);
+    return true;
+}
+
+std::string ensemble_json(const EnsembleModel& ensemble) {
+    return "{\"id\":\"" + json_escape(ensemble.id) + "\",\"projectId\":\"" +
+           json_escape(ensemble.project_id) + "\",\"trainingJobId\":\"" +
+           json_escape(ensemble.training_job_id) + "\",\"name\":\"" +
+           json_escape(ensemble.name) + "\",\"description\":\"" +
+           json_escape(ensemble.description) + "\",\"method\":\"" +
+           ensemble_method_name(ensemble.method) + "\",\"ownerId\":\"" +
+           json_escape(ensemble.owner_id) + "\",\"status\":\"" +
+           ensemble_status_name(ensemble.status) + "\",\"memberCount\":" +
+           std::to_string(ensemble.member_count) + ",\"ensembleScore\":" +
+           std::to_string(ensemble.ensemble_score) + ",\"baselineScore\":" +
+           std::to_string(ensemble.baseline_score) + ",\"membersTrained\":" +
+           std::to_string(ensemble.members_trained) +
+           ",\"createdAtEpochSeconds\":" +
+           std::to_string(ensemble.created_at_epoch_seconds) +
+           ",\"updatedAtEpochSeconds\":" +
+           std::to_string(ensemble.updated_at_epoch_seconds) + "}";
+}
+
+std::string ensembles_json(const std::vector<EnsembleModel>& ensembles) {
+    std::string body = "[";
+    bool first = true;
+    for (const auto& ensemble : ensembles) {
+        if (!first) body += ",";
+        first = false;
+        body += ensemble_json(ensemble);
     }
     return body + "]";
 }

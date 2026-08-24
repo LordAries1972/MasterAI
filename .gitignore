@@ -37,6 +37,7 @@ Testing/
 # and all generated runtime data (record store, sessions, audit log, logs).
 /config/
 /runtime/
+/datasets/
 
 # Locally generated certificate/key material (TLS certs, SSH host keys).
 # Already covered by /config/ above, but listed explicitly so these can

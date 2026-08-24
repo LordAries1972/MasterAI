@@ -55,6 +55,51 @@ void close_socket(const NativeSocket socket) noexcept {
 #endif
 }
 
+#if defined(_WIN32)
+// D3DKMTSetProcessSchedulingPriorityClass is an undocumented but stable
+// (Windows 8+) gdi32.dll export -- the same one GPU-priority utilities like
+// Process Lasso and Special K use -- that tells the WDDM GPU scheduler how
+// to timeslice one process's GPU engine work against everyone else's. There
+// is no public SDK header for it (it ships only in the WDK's d3dkmthk.h),
+// so the enum and function pointer are declared by hand and resolved via
+// GetProcAddress at runtime; a missing export (older Windows, a driver that
+// never registered a GPU engine for this process) just leaves GPU
+// scheduling at its inherited default, exactly like today.
+enum class D3dkmtSchedulingPriorityClass : int {
+    idle = 0,
+    below_normal = 1,
+    normal = 2,
+    above_normal = 3,
+    high = 4,
+    realtime = 5,
+};
+
+using PfnD3dkmtSetProcessSchedulingPriorityClass =
+    LONG(APIENTRY*)(HANDLE, D3dkmtSchedulingPriorityClass);
+
+// Lowers the runner process's GPU scheduling priority one notch below
+// normal, the GPU-side counterpart of the SetPriorityClass(BELOW_NORMAL)
+// call already made for CPU scheduling below. Without this, a GPU-offloaded
+// generation's compute work runs at the same GPU engine priority as the
+// desktop compositor, so a long-running kernel can make the whole desktop
+// (not just this app) stutter for the duration of every reply -- the CPU
+// priority drop alone does nothing to prevent that, since it only affects
+// how the OS schedules CPU time, not how the WDDM GPU scheduler timeslices
+// the GPU itself. Best-effort and silent on failure: this is a
+// responsiveness nicety, never something generation correctness depends on.
+void lower_gpu_scheduling_priority(const HANDLE process_handle) noexcept {
+    const HMODULE gdi32 = GetModuleHandleW(L"gdi32.dll");
+    if (gdi32 == nullptr) return;
+    const auto set_priority =
+        reinterpret_cast<PfnD3dkmtSetProcessSchedulingPriorityClass>(
+            reinterpret_cast<void*>(GetProcAddress(
+                gdi32, "D3DKMTSetProcessSchedulingPriorityClass")));
+    if (set_priority == nullptr) return;
+    set_priority(process_handle,
+                D3dkmtSchedulingPriorityClass::below_normal);
+}
+#endif
+
 // Phase 26: wall-clock epoch seconds used to stamp WarmModelTracker activity
 // (idle-timeout accounting), matching the same
 // system_clock::now().time_since_epoch() pattern calibration.cpp already
@@ -617,6 +662,13 @@ public:
         // a failure here just leaves the process at its inherited default
         // priority, which is what every prior build already did.
         SetPriorityClass(handle_, BELOW_NORMAL_PRIORITY_CLASS);
+        // GPU-offloaded generation runs a long-lived compute kernel on every
+        // reply, not just at cold load -- the CPU priority drop above does
+        // nothing to stop that from starving the desktop compositor's own
+        // share of the GPU, which is what surfaces as the whole PC (not
+        // just this app) stuttering on every single reply when GPU offload
+        // is in use. See lower_gpu_scheduling_priority()'s comment above.
+        lower_gpu_scheduling_priority(handle_);
 #else
         const int log = open(log_path.c_str(), O_CREAT | O_WRONLY | O_APPEND, 0600);
         if (log < 0) throw std::runtime_error("runner log could not be opened");
