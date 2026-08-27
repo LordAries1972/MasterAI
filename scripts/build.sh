@@ -9,9 +9,11 @@ case "${build_type}" in
     *) echo "Build type must be Debug or Release." >&2; exit 2 ;;
 esac
 
+# ADR-0004: Darwin-arm64 (Apple Silicon macOS) joins the two Linux targets;
+# no Darwin-x86_64 -- macOS support is scoped to Apple Silicon only.
 case "${platform}" in
-    Linux-x86_64|Linux-arm64) ;;
-    *) echo "Platform must be Linux-x86_64 or Linux-arm64." >&2; exit 2 ;;
+    Linux-x86_64|Linux-arm64|Darwin-arm64) ;;
+    *) echo "Platform must be Linux-x86_64, Linux-arm64, or Darwin-arm64." >&2; exit 2 ;;
 esac
 
 project_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"

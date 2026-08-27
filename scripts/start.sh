@@ -5,7 +5,12 @@ set -eu
 project_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 settings="${1:-${project_root}/config/settings.json}"
 build_type="${2:-Release}"
-binary="${project_root}/build/Linux-x86_64/${build_type}/masterai"
+# ADR-0004: was hardcoded to Linux-x86_64, which silently looked in the
+# wrong build directory for Linux-arm64 or Darwin-arm64 (macOS) builds.
+# Platform is the 4th positional argument (after --foreground) so the
+# existing 3-argument invocation contract is unchanged.
+platform="${4:-Linux-x86_64}"
+binary="${project_root}/build/${platform}/${build_type}/masterai"
 test -x "${binary}" || { echo "MasterAI binary is missing: ${binary}" >&2; exit 1; }
 if [ ! -f "${settings}" ]; then
     if [ ! -t 0 ]; then

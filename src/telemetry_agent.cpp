@@ -19,14 +19,14 @@
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #else
-#error "MasterAI supports only Windows and Linux."
+#error "MasterAI supports only Windows, Linux, and macOS (Apple Silicon)."
 #endif
 
 namespace masterai {

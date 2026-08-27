@@ -174,6 +174,26 @@ Security-partitioned cache in front of retrieval results (`CacheManager`).
 | `enabled` | boolean | `true` | Master on/off switch for the retrieval-result cache. |
 | `maximumBytesPerCategory` | integer | `67108864` (64 MiB); `4294967296` (4 GiB) | Per-category disk budget; segmented LRU eviction keeps each category under this. |
 
+## `chatTools` (optional)
+
+Bounds on the six built-in project tools (`read_file`, `list_directory`,
+`search`, `write_file`, `delete_file`, `run_command`) shared verbatim by the
+web-ui chat tool loop and by every MCP client (VS Code, Visual Studio, ...)
+calling the same tools through `tools/call` -- see `execute_chat_tool()` in
+`src/tool_exec.cpp`. Raising these lets the AI's directory listings,
+searches, and command output come back more complete before being cut off;
+lowering them trades that off against a single tool call being able to stall
+the request thread longer or return a larger response.
+
+| Field | Type | Default; ceiling | Meaning |
+|---|---|---|---|
+| `readFileMaximumBytes` | integer | `1048576` (1 MiB); `268435456` (256 MiB) | Largest single file `read_file` will read; also the per-file size cutoff `search` applies before scanning a file's lines. |
+| `searchMaximumFiles` | integer | `512`; `100000` | Most files `search` will walk before stopping. |
+| `searchMaximumResults` | integer | `50`; `100000` | Most matching lines `search` will return. |
+| `listDirectoryMaximumEntries` | integer | `4000`; `1000000` | Most files/folders `list_directory` will enumerate in one recursive tree walk before it reports the listing as truncated and asks for a narrower subdirectory. |
+| `commandTimeoutSeconds` | integer | `30`; `3600` | How long `run_command` lets the sandboxed process run before it is killed as hung. |
+| `commandMaximumOutputBytes` | integer | `262144` (256 KiB); `268435456` (256 MiB) | Most combined stdout/stderr bytes `run_command` will capture from one process before cutting it off. |
+
 ## `session` (optional)
 
 Runner prompt-prefix / KV-cache session reuse (`PromptSessionManager`). Off

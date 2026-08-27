@@ -21,7 +21,7 @@
 #include <windows.h>
 #include <processthreadsapi.h>
 #include <psapi.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 #include <arpa/inet.h>
 #include <csignal>
 #include <cstdlib>
@@ -32,7 +32,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #else
-#error "MasterAI supports only Windows and Linux."
+#error "MasterAI supports only Windows, Linux, and macOS (Apple Silicon)."
 #endif
 
 namespace masterai {
@@ -869,6 +869,7 @@ void RunnerSupervisor::load(const ModelRecord& model,
     metrics_.model_id = model.manifest.id;
     metrics_.requested_gpu_layers = tuning.gpu_layers;
     metrics_.accelerator_policy = accelerator_policy;
+    metrics_.context_length = context_length;
     port_ = port;
     // Phase 26: LoadingMetadata -- manifest/model record already validated
     // by the caller, launch spec about to be built. Legal from Cold
@@ -912,7 +913,19 @@ void RunnerSupervisor::load(const ModelRecord& model,
                               std::chrono::seconds(startup_timeout_seconds);
         bool ready = false;
         bool crashed = false;
+        bool aborted_for_shutdown = false;
         while (std::chrono::steady_clock::now() < deadline) {
+            // Checked every poll tick (~100ms) rather than only once, so a
+            // shutdown requested mid-wait releases mutex_ promptly instead
+            // of running out the rest of startup_timeout_seconds -- see
+            // request_shutdown()'s comment for why this matters: unload(),
+            // called from this object's own destructor during shutdown,
+            // blocks on this same mutex_ until this loop exits one way or
+            // another.
+            if (stopping_.load()) {
+                aborted_for_shutdown = true;
+                break;
+            }
             if (!process_->running()) {
                 crashed = true;
                 break;
@@ -928,6 +941,13 @@ void RunnerSupervisor::load(const ModelRecord& model,
                 // The runner may still be loading model weights.
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (aborted_for_shutdown) {
+            // The catch block just below already calls process_->stop(1U)
+            // for every failure exit from this try (crash, readiness
+            // timeout, or this) -- no need to duplicate it here.
+            throw std::runtime_error(
+                "runner load aborted: server is shutting down");
         }
         if (!ready) {
             // A crash reported as the same generic "timed out" message as a

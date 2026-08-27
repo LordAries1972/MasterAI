@@ -59,7 +59,6 @@ add_library(masterai_core STATIC
     ../src/ml.cpp
     ../src/ml_engine.cpp
     ../src/ml_knowledge.cpp
-    ../src/ml_finetune.cpp
     ../src/ml_safety_scan.cpp
     ../src/telemetry_agent.cpp
     ../src/inference_metrics.cpp
@@ -119,6 +118,35 @@ if(MSVC)
         ../third_party/ADLX/SDK/Platform/Windows/WinAPIs.cpp)
     target_include_directories(masterai_core PRIVATE
         ../third_party/ADLX/SDK/Include)
+elseif(APPLE)
+    # ADR-0004: macOS support is scoped to Apple Silicon (arm64) only -- no
+    # Intel/x86-64 Mac, no Rosetta path. Fail the configure step outright
+    # rather than silently producing an unsupported binary.
+    if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
+        message(FATAL_ERROR "MasterAI on macOS supports Apple Silicon (arm64) only.")
+    endif()
+    target_compile_options(masterai_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    # No -ldl needed: dlopen/dlclose live in libSystem on Darwin. Security
+    # framework backs Keychain-based secret storage (storage.cpp), IOKit and
+    # CoreFoundation back hardware probing (platform.cpp), CoreServices
+    # backs FSEvents-based project watching (project_watcher.cpp).
+    target_link_libraries(masterai_core PUBLIC
+        pthread
+        "-framework Security"
+        "-framework IOKit"
+        "-framework CoreFoundation"
+        "-framework CoreServices")
+    # macOS still ships PAM headers/libpam, usable for local account
+    # password verification (see identity.cpp) -- same probe as Linux below.
+    find_path(MASTERAI_PAM_INCLUDE_DIR security/pam_appl.h)
+    find_library(MASTERAI_PAM_LIBRARY pam)
+    if(MASTERAI_PAM_INCLUDE_DIR AND MASTERAI_PAM_LIBRARY)
+        target_compile_definitions(masterai_core PUBLIC MASTERAI_HAS_PAM=1)
+        target_include_directories(masterai_core PRIVATE ${MASTERAI_PAM_INCLUDE_DIR})
+        target_link_libraries(masterai_core PUBLIC ${MASTERAI_PAM_LIBRARY})
+    else()
+        message(WARNING "PAM development files unavailable: OS identity fails closed")
+    endif()
 else()
     target_compile_options(masterai_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     target_link_libraries(masterai_core PUBLIC pthread dl)

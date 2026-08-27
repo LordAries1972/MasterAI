@@ -8,14 +8,14 @@
 
 #if defined(_WIN32)
 #include <windows.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 #include <csignal>
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #else
-#error "MasterAI supports only Windows and Linux."
+#error "MasterAI supports only Windows, Linux, and macOS (Apple Silicon)."
 #endif
 
 namespace masterai {

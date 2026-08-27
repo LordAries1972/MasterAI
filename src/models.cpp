@@ -190,20 +190,17 @@ ModelManifest load_manifest(
     }
     manifest.required_gpu_backend = hardware.required("gpuBackend").as_string();
 
-    // A model this codebase itself produces (an LLM LoRA fine-tuning run's
-    // merged output -- see run_llm_fine_tuning_job()'s model-catalog
-    // promotion in server.cpp) has no external download URL and, when its
-    // base model was registered manually rather than downloaded, no
-    // pre-approved SPDX license id to check against the closed
-    // allowed_licenses list below either. Both checks are narrowly skipped
-    // for exactly this case (source_url starting with the internal
-    // "masterai-finetune:" marker, never something an external download
-    // writes), trusting whatever non-empty license the human who manually
-    // registered that base model already put on record for it -- not
-    // fabricated here, and every other check (identity, category, format,
-    // backend, RAM math, digest, license_accepted) still applies in full.
+    // A user's own local GGUF brought in via POST /api/v1/model-imports
+    // (server.cpp, marker "masterai-local-import:") writes a manifest with
+    // no external download URL and no pre-approved SPDX license id to
+    // check against the closed allowed_licenses list below. That check is
+    // narrowly skipped for exactly this marker (never something an
+    // external download writes), trusting whatever non-empty license the
+    // human on record already declared for it -- not fabricated here, and
+    // every other check (identity, category, format, backend, RAM math,
+    // digest, license_accepted) still applies in full.
     const bool self_produced_derivative =
-        manifest.source_url.rfind("masterai-finetune:", 0U) == 0U;
+        manifest.source_url.rfind("masterai-local-import:", 0U) == 0U;
     if (manifest.schema_version != 1 || !is_safe_identifier(manifest.id) ||
         manifest.id != model_directory.filename().string() ||
         manifest.category != expected_category ||
@@ -803,11 +800,12 @@ LaunchSpec LlamaCppAdapter::build_launch_spec(const ModelRecord& model,
     // extra copy of the KV cache, on the *same device* the KV cache lives
     // on (GPU, when gpu_layers > 0). Its own default of 32 checkpoints
     // silently multiplies GPU KV-cache memory 32x on top of what
-    // select_gpu_layers() budgeted for (which only accounts for model
-    // weights, not this), reliably OOM-crashing the runner on small-VRAM
-    // cards even though the model itself fits comfortably. Capping this
-    // low keeps the rewind feature usable without blowing the VRAM budget
-    // calibration actually reasoned about.
+    // select_gpu_layers() budgets for (its single-copy KV-cache estimate,
+    // kConservativeKvCacheBytesPerToken in calibration.cpp), reliably
+    // OOM-crashing the runner on small-VRAM cards even though the model
+    // itself fits comfortably. Capping this low keeps the rewind feature
+    // usable without blowing the VRAM budget calibration actually reasoned
+    // about.
     arguments.emplace_back("--ctx-checkpoints");
     arguments.emplace_back("2");
     // Phase 32: the real dual-model (draft + target) launch path. Empty

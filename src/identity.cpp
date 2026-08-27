@@ -10,7 +10,12 @@
 
 #if defined(_WIN32)
 #include <windows.h>
-#elif defined(__linux__) && defined(MASTERAI_HAS_PAM)
+#elif (defined(__linux__) || defined(__APPLE__)) && defined(MASTERAI_HAS_PAM)
+// ADR-0004: macOS still ships PAM headers/libpam, usable the same way as
+// Linux to verify a password against the OS's own local account -- this is
+// authentication against the OS user, not MasterAI's own secret storage
+// (that's Keychain Services, see storage.cpp), so PAM is the right fit
+// here rather than a new Keychain-based scheme.
 #include <security/pam_appl.h>
 #endif
 
@@ -107,7 +112,7 @@ int pam_conversation(const int message_count, const pam_message** messages,
 }  // namespace
 
 bool OsIdentityProvider::available() const noexcept {
-#if defined(_WIN32) || (defined(__linux__) && defined(MASTERAI_HAS_PAM))
+#if defined(_WIN32) || ((defined(__linux__) || defined(__APPLE__)) && defined(MASTERAI_HAS_PAM))
     return true;
 #else
     return false;
@@ -179,7 +184,7 @@ AuthenticationResult OsIdentityProvider::authenticate(
         result.status = AuthenticationStatus::system_error;
         result.diagnostic = "Windows identity verification was unavailable.";
     }
-#elif defined(__linux__) && defined(MASTERAI_HAS_PAM)
+#elif (defined(__linux__) || defined(__APPLE__)) && defined(MASTERAI_HAS_PAM)
     PamCredential credential{password.c_str()};
     pam_conv conversation{pam_conversation, &credential};
     pam_handle_t* handle = nullptr;

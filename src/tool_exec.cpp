@@ -42,8 +42,21 @@
 
 #if defined(_WIN32)
 #include <windows.h>
-#else
+#elif defined(__linux__)
 #include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
+#elif defined(__APPLE__)
+// ADR-0004: <sys/prctl.h>/PR_SET_NO_NEW_PRIVS is Linux-only -- there is no
+// Darwin equivalent syscall (macOS's closest primitive, sandbox_init(), is
+// a heavier per-process sandbox profile mechanism, not a drop-in "never
+// gain privileges" flag), so run_sandboxed_process() below skips that one
+// hardening step on macOS and documents the gap at its call site instead
+// of silently doing less. The setrlimit()-based resource caps stay in
+// effect on every POSIX platform including this one.
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <fcntl.h>
@@ -838,11 +851,19 @@ ToolProcessResult run_sandboxed_process(
         const rlimit memory_limit{512ULL * 1024ULL * 1024ULL,
                                   512ULL * 1024ULL * 1024ULL};
         const rlimit process_limit{1U, 1U};
+        // Note: on macOS, RLIMIT_AS is accepted by setrlimit() but is not
+        // actually enforced by the XNU kernel the way Linux enforces it --
+        // a known Darwin platform gap, not a MasterAI bug. The other three
+        // limits (CPU time, output file size, process count) are enforced
+        // identically on both POSIX platforms.
         if (setrlimit(RLIMIT_CPU, &cpu_limit) != 0 ||
             setrlimit(RLIMIT_FSIZE, &file_limit) != 0 ||
             setrlimit(RLIMIT_AS, &memory_limit) != 0 ||
-            setrlimit(RLIMIT_NPROC, &process_limit) != 0 ||
-            prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+            setrlimit(RLIMIT_NPROC, &process_limit) != 0
+#if defined(__linux__)
+            || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+#endif
+            ) {
             _exit(126);
         }
         std::vector<std::string> values;
@@ -918,11 +939,12 @@ ToolProcessResult run_sandboxed_process(
 
 namespace {
 
-constexpr std::uint64_t kToolReadMaxBytes = 1024ULL * 1024ULL;
-constexpr std::size_t kToolSearchMaxFiles = 512U;
-constexpr std::size_t kToolSearchMaxResults = 50U;
-constexpr std::uint64_t kToolCommandTimeoutSeconds = 30ULL;
-constexpr std::uint64_t kToolCommandMaxOutputBytes = 256ULL * 1024ULL;
+// Actual bounds for these six tools now live in AppConfig's chat_tool_*
+// fields (masterai.hpp, see their comments there) so an operator can tune
+// them without a rebuild -- these were previously fixed constexpr constants
+// here. tool_list_directory() still says plainly when it stopped short of
+// the configured entry cap instead of silently dropping the rest, so the
+// listing stays truthful about what it did and didn't cover.
 
 // Canonicalizes and contains one project-relative path exactly the way
 // read_project_text_file() already does for reads (masterai.hpp/
@@ -949,16 +971,26 @@ std::filesystem::path resolve_project_path(const ProjectRecord& project,
 }
 
 ChatToolCallResult tool_read_file(const JsonValue& arguments,
-                                  const ProjectRecord& project) {
+                                  const ProjectRecord& project,
+                                  const AppConfig& config) {
     const auto path = arguments.required("path").as_string();
-    const auto file = read_project_text_file(project, path, kToolReadMaxBytes);
+    const auto file = read_project_text_file(
+        project, path, config.chat_tool_read_file_maximum_bytes);
     return {true, file.content,
             "{\"path\":" + json_string(path) +
                 ",\"content\":" + json_string(file.content) + "}"};
 }
 
+// Walks `directory` (and every subdirectory beneath it, project-relative
+// symlinks aside) and renders the whole thing as one indented tree -- not
+// just the immediate entries -- so a "list the project" request gets the
+// real, full picture in one call instead of the model having to walk it one
+// folder at a time. Stops at config.chat_tool_list_directory_maximum_entries
+// and says so plainly rather than silently truncating, so the listing is
+// always truthful about what it did and didn't cover.
 ChatToolCallResult tool_list_directory(const JsonValue& arguments,
-                                       const ProjectRecord& project) {
+                                       const ProjectRecord& project,
+                                       const AppConfig& config) {
     std::string relative_text = ".";
     if (const auto* path_field = arguments.optional("path")) {
         relative_text = path_field->as_string();
@@ -981,24 +1013,57 @@ ChatToolCallResult tool_list_directory(const JsonValue& arguments,
     std::string structured = "{\"entries\":[";
     bool first = true;
     std::size_t count = 0U;
-    for (const auto& entry : std::filesystem::directory_iterator(
-             directory, std::filesystem::directory_options::skip_permission_denied,
-             error)) {
-        if (count >= 512U) break;
+    bool truncated = false;
+    std::filesystem::recursive_directory_iterator iterator(
+        directory, std::filesystem::directory_options::skip_permission_denied,
+        error);
+    const std::filesystem::recursive_directory_iterator end;
+    while (!error && iterator != end) {
+        if (count >= config.chat_tool_list_directory_maximum_entries) {
+            truncated = true;
+            break;
+        }
+        const auto entry = *iterator;
         std::error_code entry_error;
-        if (entry.is_symlink(entry_error)) continue;
+        if (entry.is_symlink(entry_error)) {
+            if (entry.is_directory(entry_error)) {
+                iterator.disable_recursion_pending();
+            }
+            iterator.increment(error);
+            continue;
+        }
+        const auto entry_relative = std::filesystem::relative(
+            entry.path(), directory, entry_error);
+        if (entry_error) {
+            iterator.increment(error);
+            continue;
+        }
         const auto name = entry.path().filename().string();
         const bool is_directory = entry.is_directory(entry_error);
-        listing_text += std::string(is_directory ? "[dir]  " : "[file] ") +
+        const std::string indent(static_cast<std::size_t>(
+                                      std::max(0, iterator.depth())) * 2U,
+                                  ' ');
+        listing_text += indent + (is_directory ? "[dir]  " : "[file] ") +
                         name + "\n";
         if (!first) structured += ",";
         first = false;
-        structured += "{\"name\":" + json_string(name) +
+        structured += "{\"path\":" +
+                      json_string(entry_relative.generic_string()) +
+                      ",\"name\":" + json_string(name) +
                       ",\"isDirectory\":" + (is_directory ? "true" : "false") +
-                      "}";
+                      ",\"depth\":" + std::to_string(iterator.depth()) + "}";
         ++count;
+        iterator.increment(error);
     }
-    structured += "]}";
+    if (truncated) {
+        listing_text += "...(truncated after " +
+                        std::to_string(
+                            config.chat_tool_list_directory_maximum_entries) +
+                        " entries -- list a narrower subdirectory for the "
+                        "rest)\n";
+    }
+    structured += "],\"truncated\":" + std::string(truncated ? "true" : "false") +
+                  "}";
     return {true, listing_text.empty() ? "(empty directory)" : listing_text,
             structured};
 }
@@ -1008,7 +1073,8 @@ ChatToolCallResult tool_list_directory(const JsonValue& arguments,
 // than reused across that module boundary -- see this file's header
 // comment on why AllowedCommandStore's pack/unpack is likewise private.
 ChatToolCallResult tool_search(const JsonValue& arguments,
-                               const ProjectRecord& project) {
+                               const ProjectRecord& project,
+                               const AppConfig& config) {
     const auto query = arguments.required("query").as_string();
     if (query.empty() || query.size() > 256U) {
         throw std::invalid_argument("search query is outside policy");
@@ -1023,8 +1089,9 @@ ChatToolCallResult tool_search(const JsonValue& arguments,
         project.root, std::filesystem::directory_options::skip_permission_denied,
         error);
     const std::filesystem::recursive_directory_iterator end;
-    while (!error && iterator != end && visited < kToolSearchMaxFiles &&
-           matches < kToolSearchMaxResults) {
+    while (!error && iterator != end &&
+           visited < config.chat_tool_search_maximum_files &&
+           matches < config.chat_tool_search_maximum_results) {
         const auto entry = *iterator;
         std::error_code entry_error;
         if (entry.is_symlink(entry_error)) {
@@ -1036,11 +1103,11 @@ ChatToolCallResult tool_search(const JsonValue& arguments,
         }
         if (entry.is_regular_file(entry_error)) {
             const auto size = entry.file_size(entry_error);
-            if (!entry_error && size <= kToolReadMaxBytes) {
+            if (!entry_error && size <= config.chat_tool_read_file_maximum_bytes) {
                 std::ifstream input(entry.path(), std::ios::binary);
                 std::string line;
                 std::size_t line_number = 0U;
-                while (matches < kToolSearchMaxResults &&
+                while (matches < config.chat_tool_search_maximum_results &&
                       std::getline(input, line)) {
                     ++line_number;
                     if (line.find(query) == std::string::npos) continue;
@@ -1126,7 +1193,8 @@ ChatToolCallResult tool_delete_file(const JsonValue& arguments,
 ChatToolCallResult tool_run_command(const JsonValue& arguments,
                                     const ProjectRecord& project,
                                     AllowedCommandStore& allowed_commands,
-                                    std::atomic_bool& cancellation) {
+                                    std::atomic_bool& cancellation,
+                                    const AppConfig& config) {
     const auto executable_name = arguments.required("executable").as_string();
     std::vector<std::string> args;
     if (const auto* args_field = arguments.optional("arguments")) {
@@ -1150,8 +1218,9 @@ ChatToolCallResult tool_run_command(const JsonValue& arguments,
                 "{\"error\":\"project_not_allowed\"}"};
     }
     const auto result = run_sandboxed_process(
-        allowed->executable, args, project.root, kToolCommandTimeoutSeconds,
-        kToolCommandMaxOutputBytes, cancellation);
+        allowed->executable, args, project.root,
+        config.chat_tool_command_timeout_seconds,
+        config.chat_tool_command_maximum_output_bytes, cancellation);
     const std::string summary =
         "exit " + std::to_string(result.exit_code) + "\n" +
         result.standard_output;
@@ -1166,20 +1235,23 @@ ChatToolCallResult execute_chat_tool(const std::string& tool_name,
                                      const JsonValue& arguments,
                                      const ProjectRecord& project,
                                      AllowedCommandStore& allowed_commands,
-                                     std::atomic_bool& cancellation) {
+                                     std::atomic_bool& cancellation,
+                                     const AppConfig& config) {
     try {
-        if (tool_name == "read_file") return tool_read_file(arguments, project);
-        if (tool_name == "list_directory") {
-            return tool_list_directory(arguments, project);
+        if (tool_name == "read_file") {
+            return tool_read_file(arguments, project, config);
         }
-        if (tool_name == "search") return tool_search(arguments, project);
+        if (tool_name == "list_directory") {
+            return tool_list_directory(arguments, project, config);
+        }
+        if (tool_name == "search") return tool_search(arguments, project, config);
         if (tool_name == "write_file") return tool_write_file(arguments, project);
         if (tool_name == "delete_file") {
             return tool_delete_file(arguments, project);
         }
         if (tool_name == "run_command") {
             return tool_run_command(arguments, project, allowed_commands,
-                                    cancellation);
+                                    cancellation, config);
         }
         return {false, "Unknown tool '" + tool_name + "'.",
                 "{\"error\":\"unknown_tool\"}"};

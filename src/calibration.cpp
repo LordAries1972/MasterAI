@@ -303,14 +303,32 @@ ModelLoadMode select_load_mode(const StorageLatencyProfile& storage,
 // See the declaration in masterai.hpp for the full rationale. Fraction of
 // detected VRAM actually offered to a model's weights: the remainder is
 // deliberately left unallocated as headroom for the backend's own CUDA/HIP/
-// Vulkan context overhead plus any KV-cache/activation memory the runner
-// will also need on the GPU during generation, neither of which this
-// function has evidence about at load-selection time.
+// Vulkan context overhead, independent of the KV-cache estimate subtracted
+// below.
 constexpr double kUsableVramFraction = 0.7;
+
+// Conservative (deliberately over-estimated, never measured per-model)
+// upper bound on GPU KV-cache bytes per token of --ctx-size, across every
+// parallel slot combined. ModelManifest does not carry a model's real layer
+// count, KV-head count, or head dimension (see the kGpuLayersOffloadAll
+// comment in masterai.hpp for why that also limits this function to an
+// all-or-nothing offload decision), so an exact per-model KV-cache size
+// cannot be computed here. 0.5 MiB/token comfortably covers K+V at fp16 for
+// dense transformer architectures up to roughly the 7B-parameter class
+// (e.g. Llama-2-7B: 32 layers x 4096 hidden x 2 (K,V) x 2 bytes = 512 KiB/
+// token exactly); smaller models such as the 2B/3B class this bit the
+// hardest on real-world VRAM budgets use meaningfully less, so this errs
+// toward under-offloading rather than the CUDA "launch timed out" crash an
+// under-estimate would risk. --ctx-size is already the *total* context
+// budget llama-server divides across --parallel slots (confirmed by its own
+// "n_ctx is not divisible by n_seq_max" log line), so no separate
+// parallel_slots multiplier is needed here.
+constexpr std::uint64_t kConservativeKvCacheBytesPerToken = 512ULL * 1024ULL;
 
 unsigned int select_gpu_layers(const HardwareInfo& hardware,
                                const std::string& required_gpu_backend,
-                               const std::uint64_t model_size_bytes) noexcept {
+                               const std::uint64_t model_size_bytes,
+                               const unsigned int context_length) noexcept {
     if (model_size_bytes == 0U) return 0U;
     if (hardware.gpu_backends.empty()) return 0U;
     if (!required_gpu_backend.empty() &&
@@ -323,7 +341,20 @@ unsigned int select_gpu_layers(const HardwareInfo& hardware,
     const auto usable_vram_bytes = static_cast<std::uint64_t>(
         static_cast<double>(hardware.gpu_memory_mib) * 1024.0 * 1024.0 *
         kUsableVramFraction);
-    if (model_size_bytes > usable_vram_bytes) return 0U;
+    const auto estimated_kv_cache_bytes =
+        static_cast<std::uint64_t>(context_length) *
+        kConservativeKvCacheBytesPerToken;
+    // Both the weights and the estimated KV cache live in the same VRAM
+    // budget; requiring their sum to fit (rather than checking weights
+    // alone, as before) is exactly what was missing when a small-VRAM card
+    // was asked to fully offload a model with several parallel slots'
+    // worth of context -- see models.cpp's build_launch_spec() comment on
+    // --ctx-checkpoints for the closely related fix to this same class of
+    // VRAM-oversubscription crash.
+    if (estimated_kv_cache_bytes >= usable_vram_bytes) return 0U;
+    if (model_size_bytes > usable_vram_bytes - estimated_kv_cache_bytes) {
+        return 0U;
+    }
     return kGpuLayersOffloadAll;
 }
 
@@ -671,7 +702,8 @@ TuningProfile CalibrationService::resolve(
     profile.recommended_gpu_layers =
         accelerator_policy_ == "cpu_only"
             ? 0U
-            : select_gpu_layers(hardware_, required_gpu_backend, model_size_bytes);
+            : select_gpu_layers(hardware_, required_gpu_backend, model_size_bytes,
+                                profile.recommended_context_length);
     profile.recommended_thread_count = select_thread_count(hardware_);
     profile.recommended_ubatch_tokens =
         select_ubatch_tokens(profile.recommended_context_length);
@@ -719,7 +751,8 @@ TuningProfile CalibrationService::calibrate(
         accelerator_policy_ == "cpu_only"
             ? 0U
             : select_gpu_layers(hardware_, model.manifest.required_gpu_backend,
-                                model.manifest.model_size_bytes);
+                                model.manifest.model_size_bytes,
+                                profile.recommended_context_length);
     profile.recommended_thread_count = select_thread_count(hardware_);
     profile.recommended_ubatch_tokens =
         select_ubatch_tokens(profile.recommended_context_length);

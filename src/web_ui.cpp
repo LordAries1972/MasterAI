@@ -761,21 +761,10 @@ std::string application_script() {
         "const mlDatasetLabel=x=>x.name+(x.hasContent?"
         "' \\u2014 '+x.contentRows+' row(s) ready':"
         "' \\u2014 \\u26a0 no content uploaded yet');"
-        // Dataset purpose filtering: Training Jobs/Evaluation Lab/
-        // Experiment Tracking/Model Comparison/Automation Pipelines only
-        // ever run parse_tabular_csv against the dataset's content (see
-        // those same endpoints in server.cpp) -- picking an
-        // Instruction/fine-tuning-text-purpose dataset there was
-        // previously only caught at run/evaluate time with a raw
-        // classification-validation error, even though it can never work.
-        // Their pickers now only list Tabular-purpose datasets so that
-        // dead end is no longer offered in the first place. Dataset
-        // Manager's own content-upload picker, and Fine-Tuning Jobs'
-        // (whose Method decides which purpose it actually needs -- a plain
-        // method trains tabular, an \"llm:\" method fine-tunes an
-        // Instruction dataset), still list every dataset regardless of
-        // purpose.
-        "const mlTabularDatasets=mld.datasets.filter(x=>x.purpose!=='instruction');"
+        // "tabular" is the only supported Dataset purpose (see
+        // Dataset::purpose in masterai.hpp), so every dataset is a tabular
+        // dataset; this alias just keeps the picker wiring below readable.
+        "const mlTabularDatasets=mld.datasets;"
         "for(const id of ['#mlTrainingJobDatasetId','#mlEvaluationRunDatasetId',"
         "'#mlExperimentDatasetId','#mlModelComparisonDatasetId','#mlPipelineDatasetId'])"
         "fillMlSelect(id,mlTabularDatasets,'None / choose a tabular dataset',"
@@ -982,8 +971,24 @@ std::string application_script() {
         "updateChatToolModeNote();}"
         "if(q('#chatProject'))q('#chatProject').disabled=true;"
         "const box=q('#chatMessages');box.replaceChildren();"
-        "for(const message of chat.messages)"
-        "appendMessage(box,message.role,message.content,message.tokenCount);"
+        // A tool-directive turn (Phase 98/99 in server.cpp, or the ordinary
+        // model-mediated [[TOOL_CALL]] path) persists its result as a plain
+        // user-role message reading '[Tool result for <tool>]\\n<output>' --
+        // live streaming already renders that as a titled, scrollable
+        // appendToolCard() container (see the 'tool_result' NDJSON handler
+        // above), but reopening the chat later used to fall through to the
+        // generic bubble and dump the raw '[Tool result for ...]' text
+        // straight into it. Matching the same persisted shape here on
+        // reload keeps history looking exactly like it did when it
+        // streamed in, instead of only on that first live turn.
+        "const TOOL_RESULT_RE=/^\\[Tool result for ([^\\]]+)\\]\\n"
+        "([\\s\\S]*)$/;"
+        "for(const message of chat.messages){"
+        "const toolMatch=TOOL_RESULT_RE.exec(message.content||'');"
+        "if(toolMatch){appendToolCard(box,'Tool result ('+toolMatch[1]+')',"
+        "toolMatch[2]);}"
+        "else{appendMessage(box,message.role,message.content,"
+        "message.tokenCount);}}"
         "box.scrollTop=box.scrollHeight;"
         // Warming used to be a side effect of the GET above (fired the
         // instant a chat was opened, mid-load -- before the browser had
@@ -1430,6 +1435,8 @@ std::string application_script() {
         "'iconBtn-apply');}"
         "function deleteBtn(attr,id){return iconBtn('trash','Delete',attr,"
         "id,'iconBtn-delete');}"
+        "function fixSourceBtn(id){return iconBtn('pencil','Fix source',"
+        "'fix-source',id);}"
         "function approveBtn(attr,id){return iconBtn('check','Approve',"
         "attr,id,'iconBtn-apply');}"
         "function rejectBtn(attr,id){return iconBtn('x','Reject',attr,id,"
@@ -1774,9 +1781,20 @@ std::string application_script() {
         "if(!el)return;"
         "if(!models.length){el.innerHTML='<p>No models registered yet.</p>';"
         "return;}"
-        "el.innerHTML=table(['Name','Version','Family','Task','Quantization','State','Set state'],"
+        "el.innerHTML=table(['Name','Version','Family','Task','Quantization','Source','State','Set state'],"
         "models.map(x=>[esc(x.displayName||x.name),esc(x.version),"
         "esc(x.family),esc(x.task),esc(x.quantization||'unknown'),"
+        // A source that isn't a real file only surfaces today as a
+        // confusing error at Fine-Tuning run time (see
+        // ml_fine_tuning_base_model_file_missing in server.cpp); flagging
+        // it here, before that run, is what closes the gap. This is a
+        // best-effort client-side look (non-empty and not literally the
+        // word "Various" from the old bug) -- the server's own existence
+        // check at registration/fix-source time is the real guard.
+        "'<span class=\"stateTag stateTag-'+"
+        "(x.source&&x.source!=='Various'?'ready':'missing')+'\">'+"
+        "(x.source?esc(x.source):'not set')+'</span>'+"
+        "toolbar(fixSourceBtn(x.id)),"
         "'<span class=\"stateTag stateTag-'+esc(x.state)+'\">'+esc(x.state)+"
         "'</span>',"
         "toolbar('<select data-state-for=\"'+x.id+'\">'+MODEL_STATES.map(s=>"
@@ -1795,7 +1813,14 @@ std::string application_script() {
         "try{await api('/api/v1/ml/models/'+"
         "encodeURIComponent(btn.dataset.deleteMlModel)+'/delete','POST');"
         "await load();}"
-        "catch(x){showSystemError('Delete model failed: '+x.message);}});}}"
+        "catch(x){showSystemError('Delete model failed: '+x.message);}});}"
+        "for(const btn of el.querySelectorAll('[data-fix-source]')){"
+        "btn.addEventListener('click',async()=>{const id=btn.dataset.fixSource;"
+        "const source=prompt('Real file path for this model (used as-is by "
+        "Fine-Tuning):');if(source===null)return;"
+        "try{await api('/api/v1/ml/models/'+encodeURIComponent(id)+'/source',"
+        "'POST',{source});await load();}"
+        "catch(x){showSystemError('Fix source failed: '+x.message);}});}}"
         // Dataset Manager (docs/PLAN.md "Machine Learning Abilities"
         // section 10): each row shows its approval status plus Approve,
         // Reject, and Delete actions.
@@ -1806,7 +1831,7 @@ std::string application_script() {
         "el.innerHTML=table(['Name','Purpose','Subject area','Format','Content',"
         "'Version','Quality','Duplicates','Approval',''],"
         "datasets.map(x=>[esc(x.name),"
-        "x.purpose==='instruction'?'Instruction / fine-tuning':'Tabular',"
+        "'Tabular',"
         "esc(x.subjectArea),esc(x.dataFormat),"
         // ML forms clarity pass: makes the exact gap that used to only
         // surface as a raw ml_dataset_has_no_content error at training
@@ -2291,49 +2316,13 @@ std::string application_script() {
         "const jobId=btn.dataset.runMlFineTuningJob;"
         "try{const r=await api('/api/v1/ml/fine-tuning-jobs/'+"
         "encodeURIComponent(jobId)+'/run','POST',{});"
-        // A real LLM LoRA run (Method starting "llm:") answers 202
-        // "queued" immediately and finishes on a detached background
-        // thread -- poll GET .../llm-result until it reports completed or
-        // failed instead of expecting the tabular path's synchronous report
-        // shape (r.method/r.finalLoss/...).
-        "if(r.status==='queued'){"
-        "if(out)out.textContent='LLM fine-tuning running in the "
-        "background (this can take a while)...';"
-        "let tries=0;"
-        "while(tries<600){"
-        "await new Promise(res=>setTimeout(res,3000));tries++;"
-        // Real progress, not a spinner: tails whichever llama.cpp tool's
-        // own log file the background run is currently writing to (see
-        // GET .../llm-progress's own comment in server.cpp) so the user
-        // sees the actual write operation's live output.
-        "try{const prog=await api('/api/v1/ml/fine-tuning-jobs/'+"
-        "encodeURIComponent(jobId)+'/llm-progress','GET');"
-        "if(out){const lastLine=(prog.logTail||'').trim().split('\\n').pop()||"
-        "'starting...';"
-        "out.textContent='LLM fine-tuning: '+prog.stage+' -- '+lastLine;}}"
-        "catch(e){}"
-        "let poll;try{poll=await api('/api/v1/ml/fine-tuning-jobs/'+"
-        "encodeURIComponent(jobId)+'/llm-result','GET');}"
-        "catch(e){continue;}"
-        "if(poll.status==='completed'){"
-        "if(out)out.textContent='LLM fine-tuning complete. Adapted model "
-        "ID: '+poll.modelId+'.'+(poll.catalogModelId?"
-        "' Ready to chat with as model \\''+poll.catalogModelId+'\\'.':"
-        "(poll.catalogNote?' '+poll.catalogNote:''))+"
-        "(poll.quantizationWarning?' \\u26a0 '+poll.quantizationWarning:'');"
-        "await load();break;}"
-        "if(poll.status==='failed'){"
-        "if(out)out.textContent='';"
-        "showSystemError('LLM fine-tuning failed: '+poll.error);break;}"
-        "}"
-        "}else{"
         "if(out)out.textContent='Fine-tuned '+r.method+' over '+r.epochs+"
         "' epochs on '+r.trainRows+' rows (final loss '+"
         "Number(r.finalLoss).toPrecision(4)+'). '+"
         "(r.evaluatedOnTest?'Held-out ('+r.testRows+' rows): '"
         ":'No held-out rows; metrics use training data: ')+"
         "fmtMlMetrics(r.metrics)+' Adapted model ID: '+r.modelId;"
-        "await load();}}"
+        "await load();}"
         "catch(x){if(out)out.textContent='';"
         "showSystemError('Fine-tuning failed: '+x.message);}"
         "finally{btn.disabled=false;}});}"
@@ -3471,6 +3460,26 @@ std::string application_script() {
         "minimumRamMiB:Number(q('#downloadMinRam').value),"
         "recommendedRamMiB:Number(q('#downloadRecRam').value)};"
         "const r=await api('/api/v1/model-downloads','POST',body);"
+        // Bring-your-own-model: unlike queueDownload above, this is a
+        // single synchronous call -- a local disk-to-disk copy, not a
+        // network transfer -- so the model is either Ready or the request
+        // failed by the time this returns; there is no separate progress
+        // poll to start.
+        "async function importLocalModel(e){e.preventDefault();"
+        "const s=q('#importStatus');s.textContent='Importing...';"
+        "try{const body={sourcePath:q('#importSourcePath').value,"
+        "category:q('#importCategory').value,modelId:q('#importModelId').value,"
+        "displayName:q('#importDisplayName').value,"
+        "architecture:q('#importArchitecture').value,"
+        "quantization:q('#importQuantization').value,"
+        "license:q('#importLicense').value,"
+        "trusted:q('#importTrusted').checked};"
+        "const r=await api('/api/v1/model-imports','POST',body);"
+        "s.textContent='Imported \"'+r.id+'\" into '+r.category+"
+        "' (sha256 '+r.sha256.slice(0,12)+'..., '+"
+        "Math.round(r.sizeBytes/1024/1024)+' MiB). Ready now.';"
+        "e.target.reset();}"
+        "catch(x){s.textContent='Import failed: '+x.message;}}"
         // Only trust a preset's known total size for the progress bar when
         // the form still matches that preset (the operator may have edited
         // the source URL by hand after loading a suggestion).
@@ -3671,6 +3680,21 @@ std::string application_script() {
         "const codeEl=document.createElement('code');codeEl.textContent=body;"
         "pre.append(codeEl);card.append(pre);addCodeCopyButtons(card);}"
         "box.append(card);box.scrollTop=box.scrollHeight;return card;}"
+        // Turns a non-OK chat-send response body into the same Error shape
+        // the streaming NDJSON 'error'/'warning' events use (message =
+        // the stable code, cause = the human-readable detail) instead of
+        // throwing the raw, unparsed JSON text -- without this, a
+        // non-streaming failure (e.g. the RAM-ceiling admission denial
+        // returned before generation ever starts streaming) rendered as a
+        // literal '{\"warning\":...}' blob in the chat card instead of a
+        // clean sentence, and could never be told apart from a genuine
+        // 'error' by the catch block below. Falls back to the raw text
+        // verbatim only when the body isn't the expected shape at all.
+        "function parseFailedResponseError(text){try{"
+        "const parsed=JSON.parse(text);"
+        "const code=parsed.warning||parsed.error;"
+        "if(code)return new Error(code,{cause:parsed.detail});"
+        "}catch(e){}return new Error(text);}"
         "function summarizeToolArguments(args){try{"
         "const text=JSON.stringify(args);"
         "return text&&text.length>200?text.slice(0,200)+'...':text;}"
@@ -3678,9 +3702,10 @@ std::string application_script() {
         // Tool results vary in shape by tool (run_command's {exitCode,output},
         // read_file's plain text, an {error:...} failure, ...) -- this picks
         // out whichever field actually holds human-readable output instead
-        // of always falling back to a truncated JSON.stringify blob, and
-        // gives it a much larger cap since the <pre> block scrolls instead
-        // of clipping.
+        // of always falling back to a JSON.stringify blob. Shown in full,
+        // uncapped -- the AI's real interaction with the project (directory
+        // listings, command output, file contents, ...) must always be
+        // visible to the user exactly as it happened, never clipped.
         "function formatToolResultBody(result){try{"
         "if(result==null)return '';"
         "if(typeof result==='string')return result;"
@@ -3690,9 +3715,7 @@ std::string application_script() {
         "return prefix+result.output;}"
         "if(typeof result.error==='string')return result.error;"
         "if(typeof result.content==='string')return result.content;}"
-        "const text=JSON.stringify(result,null,2);"
-        "return text&&text.length>8000?text.slice(0,8000)+'\\n...(truncated)':"
-        "(text||'');}catch(e){return '';}}"
+        "return JSON.stringify(result,null,2)||'';}catch(e){return '';}}"
         "function appendApprovalCard(box,chatId,event){"
         "const card=document.createElement('div');"
         "card.className='chatMsg chatMsg-assistant chatMsg-error';"
@@ -3772,10 +3795,23 @@ std::string application_script() {
         "requestAnimationFrame(()=>{body.style.maxHeight='0px';body.style.opacity='0';});"
         "setTimeout(()=>{details.open=false;body.style.maxHeight='';"
         "body.style.overflow='';body.style.transition='';body.style.opacity='';},240);}"
-        "function ensureAnswerNode(el){if(el.answerTextNode)return el.answerTextNode;"
-        "const bodyEl=el.querySelector('.msgBody');"
-        "el.answerTextNode=document.createTextNode('');bodyEl.appendChild(el.answerTextNode);"
-        "return el.answerTextNode;}"
+        // Renders the answer portion of a still-streaming reply through the
+        // real Markdown block parser (same renderMarkdownBlocks() the
+        // authoritative 'complete' render uses) into its own container
+        // sibling to the thinking panel, diffed in place via patchMsgBody so
+        // a fenced code block gets its real <pre><code> element -- and the
+        // Copy/Save buttons addCodeCopyButtons() attaches to it -- while it
+        // is still being typed, not only once the reply finishes. Coalesced
+        // to once per animation frame by its caller below rather than once
+        // per token, matching how the scroll-follow call just beneath it is
+        // already throttled, so a fast stream still only re-parses/diffs the
+        // accumulated answer text up to ~60 times a second.
+        "function renderLiveAnswer(el){const bodyEl=el.querySelector('.msgBody');"
+        "if(!bodyEl)return;"
+        "if(!el.answerContainer){el.answerContainer=document.createElement('div');"
+        "bodyEl.appendChild(el.answerContainer);bodyEl.style.whiteSpace='';}"
+        "patchMsgBody(el.answerContainer,renderMarkdownBlocks(el.answerRawText||''));"
+        "addCodeCopyButtons(el.answerContainer);}"
         // Feeds one streamed chunk of confirmed thinking-block content into
         // the live panel above, watching for the closing "</think>" tag
         // arriving split across separate token events via a small tail
@@ -3790,7 +3826,7 @@ std::string application_script() {
         "collapseThinkBlock(el);"
         "const after=el.thinkTailBuffer.slice(closeIdx+8);"
         "el.thinkTailBuffer='';el.streamPhase='answer';"
-        "if(after)ensureAnswerNode(el).appendData(after);}"
+        "if(after)el.answerRawText=(el.answerRawText||'')+after;}"
         "else{const keep=Math.min(el.thinkTailBuffer.length,8);"
         "const flush=el.thinkTailBuffer.slice(0,el.thinkTailBuffer.length-keep);"
         "if(flush)el.thinkTextNode.appendData(flush);"
@@ -3824,10 +3860,19 @@ std::string application_script() {
         "if(/^<think>/i.test(trimmed)){el.streamPhase='thinking';"
         "feedThinkingChunk(el,trimmed.slice(7));}"
         "else{el.streamPhase='answer';"
-        "ensureAnswerNode(el).appendData(el.prefixBuffer);}"
+        "el.answerRawText=(el.answerRawText||'')+el.prefixBuffer;}"
         "el.prefixBuffer='';}}"
         "else if(el.streamPhase==='thinking'){feedThinkingChunk(el,content);}"
-        "else{ensureAnswerNode(el).appendData(content);}"
+        "else{el.answerRawText=(el.answerRawText||'')+content;}"
+        // Coalesced to once per animation frame, same as the scroll-follow
+        // call below -- re-parsing/diffing the answer on every single token
+        // would reintroduce the per-token cost this function was written to
+        // avoid (see its class comment above); once per frame keeps a
+        // fenced code block's real, copyable <pre><code> container showing
+        // up live while the reply is still being typed without paying that
+        // cost on every token.
+        "if(el.streamPhase==='answer'&&!el.renderPending){el.renderPending=true;"
+        "requestAnimationFrame(()=>{el.renderPending=false;renderLiveAnswer(el);});}"
         // scrollTo(...,{behavior:'smooth'}) rather than a hard scrollTop
         // jump -- still coalesced to once per animation frame below, but
         // now the box eases toward the new bottom each time instead of
@@ -3899,6 +3944,16 @@ std::string application_script() {
         "event.generatedTokens||0);"
         "if(event.memorySaved)refreshMemories().catch(()=>{});}"
         "if(event.type==='error')throw new Error(event.error,"
+        "{cause:event.detail});"
+        // A 'warning' event (e.g. insufficient_memory -- a retryable
+        // resource-pressure admission denial, not a genuine generation
+        // failure) is carried through the same throw/catch plumbing an
+        // 'error' event uses, purely to reuse streamMessage()'s single
+        // card-rendering catch block below -- the message text itself
+        // ('insufficient_memory') is what that catch block keys off of to
+        // pick the warm-toned warning card over the red error card, so this
+        // is not actually treated as an application error.
+        "if(event.type==='warning')throw new Error(event.warning,"
         "{cause:event.detail});}}"
         // The stream is finished here; appendStreamToken() above only ever
         // appended plain text (either straight to a bare answer Text node,
@@ -3941,7 +3996,7 @@ std::string application_script() {
         "effort:q('#modelEffort')?q('#modelEffort').value:'medium',"
         "thinking:q('#modelThinking')?q('#modelThinking').value:'off'}),"
         "signal:generation.signal});"
-        "if(!r.ok)throw new Error(await r.text());"
+        "if(!r.ok)throw parseFailedResponseError(await r.text());"
         "const completeEvent=await readTurnStream(r,box,chatId,userEl,assistantEl);"
         "if(completeEvent&&completeEvent.autoDriveState==='continue'&&"
         "!autoDriveAborted&&autoDriveTurns<AUTO_DRIVE_MAX_TURNS){"
@@ -3956,7 +4011,7 @@ std::string application_script() {
         "'/tool-approvals/'+encodeURIComponent(approvalId),"
         "{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},"
         "body:JSON.stringify({decision}),signal:generation.signal});"
-        "if(!r.ok)throw new Error(await r.text());"
+        "if(!r.ok)throw parseFailedResponseError(await r.text());"
         "const completeEvent=await readTurnStream(r,box,chatId,null,null);"
         "if(completeEvent&&completeEvent.autoDriveState==='continue'&&"
         "!autoDriveAborted&&autoDriveTurns<AUTO_DRIVE_MAX_TURNS){"
@@ -4021,14 +4076,22 @@ std::string application_script() {
         "box.scrollTop=box.scrollHeight;"
         "await runTurn(chatId,content,attachmentIds,autoDrive,box,userEl);}"
         "catch(x){const cancelled=x.name==='AbortError';"
-        // The server used to fold every generation-time exception (model not
-        // loaded, runner crash, degraded model producing an empty reply,
-        // etc.) into the single opaque 'generation_failed' code with no way
-        // to tell them apart. It now also sends the real exception text as
-        // `detail` (carried here via Error's `cause`) -- show that when
-        // present instead of guessing, and fall back to the old generic
-        // wording only if an older server/response omitted it.
-        "if(x.message==='generation_failed')x.message=x.cause||"
+        // A RAM-ceiling/OS-safety-reserve admission denial (memory.cpp's
+        // MemoryBudgetManager::reserve(), surfaced by the server as the
+        // 'warning'/'insufficient_memory' code -- see server.cpp's chat
+        // generation catch block) is an expected, retryable resource-
+        // pressure decision, not a crash: checked here by the stable code
+        // itself rather than by matching against the human-readable detail
+        // sentence, which can be reworded without breaking this check.
+        // Everything else still folds the server's opaque 'generation_failed'
+        // code down to the real exception text (`detail`, carried here via
+        // Error's `cause`) when present, same as before.
+        "const isRamWarning=x.message==='insufficient_memory';"
+        "if(isRamWarning)x.message=x.cause||"
+        "'MasterAI is temporarily out of RAM headroom to generate a reply. "
+        "This is not an error -- try again shortly, close another chat/"
+        "model, or reduce context length.';"
+        "else if(x.message==='generation_failed')x.message=x.cause||"
         "'The model failed to generate a reply. It may still be loading, "
         "downloading, or unable to run on this machine -- check Model "
         "inventory and try again.';"
@@ -4039,11 +4102,18 @@ std::string application_script() {
         // user already read. A real failure, though, previously left an
         // empty bubble with the only explanation in the easy-to-miss status
         // line above the composer; showing it as its own card puts it where
-        // a reply would have appeared.
+        // a reply would have appeared. Deliberately does not disable the
+        // composer or stop any other in-progress work (retrieval,
+        // indexing, ...) for a warning: the user can immediately retry,
+        // free memory elsewhere, or wait for pressure to drop -- there is
+        // nothing here to "recover" from.
         "if(!cancelled){const el=appendMessage(box,'assistant','');"
-        "el.className='chatMsg chatMsg-assistant chatMsg-error';el.replaceChildren();"
+        "el.className='chatMsg chatMsg-assistant '+"
+        "(isRamWarning?'chatMsg-ramWarning':'chatMsg-error');el.replaceChildren();"
         "const title=document.createElement('div');"
-        "title.className='chatMsg-errorTitle';title.textContent='SYSTEM ERROR!';"
+        "title.className=isRamWarning?'chatMsg-ramWarningTitle':"
+        "'chatMsg-errorTitle';"
+        "title.textContent=isRamWarning?'RESOURCE WARNING':'SYSTEM ERROR!';"
         "const body=document.createElement('div');body.textContent=x.message;"
         // Same reusable clipboard helper the reply/code copy buttons use --
         // dataset.raw is what addMessageCopyButton() would normally read,
@@ -4522,6 +4592,8 @@ std::string application_script() {
         "q('#applyHfSource').addEventListener('click',applyHfSource);"
         "q('#applyGithubSource').addEventListener('click',applyGithubSource);"
         "q('#applyMsSource').addEventListener('click',applyMsSource);}"
+        "if(q('#newModelImport'))q('#newModelImport').addEventListener("
+        "'submit',importLocalModel);"
         "if(q('#newUser'))q('#newUser').addEventListener('submit',createUser);"
         "if(q('#newAllowedCommand')){"
         "q('#newAllowedCommand').addEventListener('submit',addAllowedCommand);"
@@ -5208,6 +5280,10 @@ std::string application_script() {
         "license:q('#mlModelCardLicense').value})));}});";
 }
 
+// Forward-declared so login_page() below can use it -- its own definition
+// sits later in this file (see field_hint's own comment for what it does).
+std::string field_hint(const std::string& text);
+
 // Presents the native OS account sign-in form without embedding credentials.
 std::string login_page() {
     return html_response(
@@ -5224,9 +5300,17 @@ std::string login_page() {
         "<section id=\"setupSection\" hidden><h2>First-time setup</h2>"
         "<p>Create the local administrator account. The one-time setup token "
         "was printed to the server's log/console when it started.</p>"
-        "<form id=\"setupForm\"><label for=\"setupToken\">Setup token</label>"
+        "<form id=\"setupForm\"><label for=\"setupToken\">Setup token" +
+        field_hint("A one-time code printed to the server's own log or "
+                   "console output when it started -- not emailed or shown "
+                   "anywhere in the browser. Look in the terminal/log where "
+                   "you launched MasterAI.") +
+        "</label>"
         "<input id=\"setupToken\" required>"
-        "<label for=\"setupUsername\">Username</label>"
+        "<label for=\"setupUsername\">Username" +
+        field_hint("The sign-in name for this administrator account. "
+                   "Letters, numbers, '-', '_', and '.' only, no spaces.") +
+        "</label>"
         "<input id=\"setupUsername\" required pattern=\"[A-Za-z0-9_.-]+\">"
         "<label for=\"setupDisplay\">Display name</label>"
         "<input id=\"setupDisplay\" required>"
@@ -5618,11 +5702,20 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<button type=\"button\" id=\"modelSettingsClose\" "
             "class=\"modelSettingsClose\" aria-label=\"Close model settings\">"
             "&#215;</button></div>"
-            "<label>Effort<select id=\"modelEffort\">"
+            "<label>Effort" +
+            field_hint("How much the model deliberates before answering. "
+                       "Higher effort tends to produce more thorough, "
+                       "accurate replies but takes longer per response.") +
+            "<select id=\"modelEffort\">"
             "<option value=\"low\">Low</option>"
             "<option value=\"medium\" selected>Medium</option>"
             "<option value=\"high\">High</option></select></label>"
-            "<label>Thinking<select id=\"modelThinking\">"
+            "<label>Thinking" +
+            field_hint("When on, the model works through its reasoning "
+                       "step by step before replying, which can improve "
+                       "answers on harder questions at the cost of extra "
+                       "response time.") +
+            "<select id=\"modelThinking\">"
             "<option value=\"off\" selected>Off</option>"
             "<option value=\"on\">On</option></select></label>"
             "<p id=\"modelSettingsNote\" class=\"modelSettingsNote\"></p>"
@@ -5632,7 +5725,13 @@ std::string application_page(const UserRecord& user, const std::string& section,
             // shared client script -- so it stays correct across devices
             // and controls what actually gets sent/executed server-side,
             // not just a client-side sampling hint.
-            "<label>Tool execution<select id=\"chatToolMode\">"
+            "<label>Tool execution" +
+            field_hint("Controls whether MasterAI may run tools (file "
+                       "edits, commands, searches) on its own. Auto runs "
+                       "safe actions automatically; Confirm every action "
+                       "pauses for your approval each time; Off disables "
+                       "tool use entirely for this chat.") +
+            "<select id=\"chatToolMode\">"
             "<option value=\"auto\" selected>Auto</option>"
             "<option value=\"confirm_all\">Confirm every action</option>"
             "<option value=\"off\">Off</option></select></label>"
@@ -5647,7 +5746,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
         body =
             "<section id=\"panel-projects\" class=\"panel\"><div>"
             "<h2>Projects</h2>"
-            "<form id=\"newProject\"><label>Project ID<input id=\"projectId\" "
+            "<form id=\"newProject\"><label>Project ID" +
+            field_hint("A permanent identifier used in URLs and file "
+                       "paths -- letters, numbers, '.', '_' and '-' only. "
+                       "Choose it carefully: it cannot be changed after "
+                       "the project is created.") +
+            "<input id=\"projectId\" "
             "required pattern=\"[A-Za-z0-9_.-]+\"></label><label>Name"
             "<input id=\"projectName\" required></label>"
             "<button title=\"Create project\">" ICON_PLUS_SVG " Create project</button></form>"
@@ -5810,7 +5914,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
             // hard-coded preset so the operator never has to hand-type a
             // commit hash or a 64-character digest to get a working model.
             "<h3>Or pick a curated suggestion</h3>"
-            "<label>Filter suggestions by available RAM<select id=\"downloadTier\">"
+            "<label>Filter suggestions by available RAM" +
+            field_hint("Narrows the suggested-model list below to models "
+                       "that comfortably fit the RAM you choose, so you "
+                       "don't have to know a model's footprint in "
+                       "advance.") +
+            "<select id=\"downloadTier\">"
             "<option value=\"test\">Tiny test model (~1 MB) - any hardware</option>"
             "<option value=\"1\">1 GB</option>"
             "<option value=\"2\">2 GB</option>"
@@ -5826,7 +5935,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<button type=\"button\" id=\"applyPreset\">Reset form to suggestion"
             "</button>"
             "<form id=\"newDownload\">"
-            "<label>Category<select id=\"downloadCategory\">"
+            "<label>Category" +
+            field_hint("How the model will be classified in the model "
+                       "inventory and default model pickers -- pick "
+                       "whichever best matches the model's intended "
+                       "workload.") +
+            "<select id=\"downloadCategory\">"
             "<option value=\"general-programming\">general-programming</option>"
             "<option value=\"code-completion\">code-completion</option>"
             "<option value=\"code-review\">code-review</option>"
@@ -5835,21 +5949,48 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<option value=\"embeddings-code-search\">embeddings-code-search"
             "</option><option value=\"conversation\">conversation</option>"
             "</select></label>"
-            "<label>Model ID<input id=\"downloadModelId\" required "
+            "<label>Model ID" +
+            field_hint("The internal identifier used to reference this "
+                       "model afterward (in chat model pickers, API "
+                       "calls, and its manifest.json). Letters, numbers, "
+                       "'.', '_' and '-' only.") +
+            "<input id=\"downloadModelId\" required "
             "pattern=\"[A-Za-z0-9_.-]+\"></label>"
-            "<label>Filename<input id=\"downloadFilename\" required "
+            "<label>Filename" +
+            field_hint("The exact filename the downloaded model file will "
+                       "be saved as on disk.") +
+            "<input id=\"downloadFilename\" required "
             "pattern=\"[A-Za-z0-9_.-]+\"></label>"
             "<label>Source URL (Hugging Face, GitHub release, or ModelScope resolve URL)"
             "<input id=\"downloadSourceUrl\" type=\"url\" required></label>"
             "<label>Immutable revision (commit hash or release tag)"
             "<input id=\"downloadRevision\" required></label>"
-            "<label>Expected SHA-256<input id=\"downloadSha256\" required "
+            "<label>Expected SHA-256" +
+            field_hint("The file's known-good SHA-256 checksum. After "
+                       "downloading, MasterAI recomputes the hash and "
+                       "rejects the file if it does not match exactly -- "
+                       "this is what protects against a tampered or "
+                       "corrupted download.") +
+            "<input id=\"downloadSha256\" required "
             "pattern=\"[0-9a-fA-F]{64}\"></label>"
-            "<label>File size (bytes)<input id=\"downloadSizeBytes\" "
+            "<label>File size (bytes)" +
+            field_hint("The expected size of the downloaded file in "
+                       "bytes, used as a sanity check before the SHA-256 "
+                       "verification runs.") +
+            "<input id=\"downloadSizeBytes\" "
             "type=\"number\" min=\"1\" required></label>"
-            "<label>Minimum RAM (MiB)<input id=\"downloadMinRam\" type=\"number\" "
+            "<label>Minimum RAM (MiB)" +
+            field_hint("The least system RAM this model needs to load at "
+                       "all. MasterAI uses this to warn or block loading "
+                       "on machines that fall short.") +
+            "<input id=\"downloadMinRam\" type=\"number\" "
             "min=\"1\" required></label>"
-            "<label>Recommended RAM (MiB)<input id=\"downloadRecRam\" "
+            "<label>Recommended RAM (MiB)" +
+            field_hint("The RAM needed for comfortable performance "
+                       "(headroom for context and other processes), used "
+                       "when suggesting or filtering models by hardware "
+                       "fit.") +
+            "<input id=\"downloadRecRam\" "
             "type=\"number\" min=\"1\" required></label>"
             // These four exist so a manifest.json can be written the
             // moment the file lands -- without one ModelRegistry never
@@ -5857,10 +5998,17 @@ std::string application_page(const UserRecord& user, const std::string& section,
             // never reach Ready or be chatted with.
             "<label>Display name<input id=\"downloadDisplayName\" required "
             "maxlength=\"160\"></label>"
-            "<label>Architecture (e.g. qwen2, llama, gemma, phi3)"
+            "<label>Architecture (e.g. qwen2, llama, gemma, phi3)" +
+            field_hint("The model's underlying architecture family, "
+                       "written into the manifest so the inference runner "
+                       "loads it with the correct settings.") +
             "<input id=\"downloadArchitecture\" required "
             "pattern=\"[A-Za-z0-9_.-]+\"></label>"
-            "<label>Quantization (e.g. Q4_K_M)<input id=\"downloadQuantization\" "
+            "<label>Quantization (e.g. Q4_K_M)" +
+            field_hint("The compression scheme used for this file's "
+                       "weights. Lower-bit quantizations use less RAM and "
+                       "run faster but can be less accurate.") +
+            "<input id=\"downloadQuantization\" "
             "required pattern=\"[A-Za-z0-9_.-]+\"></label>"
             "<label>License<select id=\"downloadLicenseSpdx\" required>"
             "<option value=\"\">Choose the model's actual license</option>"
@@ -5878,6 +6026,90 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "type=\"checkbox\" required> "
             "I have reviewed and accept this model's license</label>"
             "<button title=\"Queue download\">" ICON_DOWNLOAD_SVG " Queue download</button></form>"
+            // Bring-your-own-model: a GGUF the operator already has on
+            // local disk, copied straight into the catalog instead of
+            // fetched from a URL. Unlike the download form above, the
+            // license is free text (not one of the closed download-license
+            // list) and the SHA-256/RAM figures are computed server-side
+            // from the real file, not typed in here -- see the
+            // "masterai-local-import:" marker in POST /api/v1/model-imports
+            // (server.cpp) and its self_produced_derivative exception in
+            // models.cpp.
+            "<h2>Import a local model</h2>"
+            "<p>Already have a GGUF file on this machine -- your own "
+            "fine-tune, conversion, or a file you trust from elsewhere? "
+            "Bring it into the catalog directly, verified and ready to "
+            "chat with or use as a Fine-Tuning base, without hand-editing "
+            "any files. Fill in every field below, then Import model.</p>"
+            "<form id=\"newModelImport\">"
+            "<label>Local file path" +
+            field_hint("The full path to the .gguf file already on this "
+                       "machine, e.g. F:\\models\\my-model.gguf. The file "
+                       "is copied into MasterAI's own model folder -- your "
+                       "original file is left untouched.") +
+            "<input id=\"importSourcePath\" required "
+            "placeholder=\"e.g. F:\\models\\my-model.gguf\"></label>"
+            "<label>Category" +
+            field_hint("Which shelf this model is filed under in the "
+                       "catalog. Purely organizational -- it doesn't "
+                       "restrict what you can later use the model for.") +
+            "<select id=\"importCategory\">"
+            "<option value=\"general-programming\">general-programming</option>"
+            "<option value=\"code-completion\">code-completion</option>"
+            "<option value=\"code-review\">code-review</option>"
+            "<option value=\"debugging\">debugging</option>"
+            "<option value=\"documentation\">documentation</option>"
+            "<option value=\"embeddings-code-search\">embeddings-code-search"
+            "</option><option value=\"conversation\">conversation</option>"
+            "</select></label>"
+            "<label>Model ID" +
+            field_hint("A short internal identifier for this model, e.g. "
+                       "my-custom-model. Letters, numbers, '-', '_', and "
+                       "'.' only, no spaces. This becomes part of the "
+                       "folder name MasterAI stores the file under, and "
+                       "must not already be used by another model in the "
+                       "same category.") +
+            "<input id=\"importModelId\" required "
+            "pattern=\"[A-Za-z0-9_.-]+\" "
+            "placeholder=\"e.g. my-custom-model\"></label>"
+            "<label>Display name" +
+            field_hint("The friendly name shown for this model everywhere "
+                       "in MasterAI's own screens -- chat's model picker, "
+                       "Model Registry, Fine-Tuning. Any text is fine.") +
+            "<input id=\"importDisplayName\" required maxlength=\"160\" "
+            "placeholder=\"e.g. My Custom Model\"></label>"
+            "<label>Architecture" +
+            field_hint("The model family/architecture this GGUF was built "
+                       "from -- check where you got the file if you're not "
+                       "sure. Recorded for reference; MasterAI does not "
+                       "validate it against the file's actual contents.") +
+            "<input id=\"importArchitecture\" required "
+            "pattern=\"[A-Za-z0-9_.-]+\" "
+            "placeholder=\"e.g. qwen2, llama, gemma, phi3\"></label>"
+            "<label>Quantization" +
+            field_hint("The GGUF's quantization level, e.g. F16 (full "
+                       "precision) or Q4_K_M (4-bit, smaller and faster "
+                       "but lower quality).") +
+            "<input id=\"importQuantization\" required "
+            "pattern=\"[A-Za-z0-9_.-]+\" "
+            "placeholder=\"e.g. Q4_K_M, F16\"></label>"
+            "<label>License" +
+            field_hint("This model is yours, so its license doesn't have to "
+                       "be one of the pre-approved list used for downloads "
+                       "above -- just describe it honestly (for example "
+                       "\"Personal use only\" or \"Apache-2.0\").") +
+            "<input id=\"importLicense\" required maxlength=\"160\" "
+            "placeholder=\"e.g. Personal use only, or Apache-2.0\"></label>"
+            "<label class=\"checkboxLabel\"><input id=\"importTrusted\" "
+            "type=\"checkbox\" required> I trust this file and have the "
+            "right to use it" +
+            field_hint("MasterAI does not scan an imported file's contents "
+                       "for safety -- it only verifies the file's own "
+                       "integrity (SHA-256) after copying it in. Only "
+                       "import a GGUF from a source you trust.") +
+            "</label>"
+            "<button title=\"Import model\">" ICON_PLUS_SVG " Import model</button></form>"
+            "<p id=\"importStatus\"></p>"
             // Active downloads lives at the bottom of this same page --
             // queueing a download and watching it run are one continuous
             // task, not two separate destinations.
@@ -5958,8 +6190,17 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "rows=\"2\"></textarea></label>"
             "<label>Objective<textarea id=\"mlProjectObjective\" "
             "rows=\"2\"></textarea></label>"
-            "<label>Subject domain<input id=\"mlProjectSubjectDomain\"></label>"
-            "<label>Model task<input id=\"mlProjectModelTask\"></label>"
+            "<label>Subject domain" +
+            field_hint("The subject-matter area this project's model "
+                      "will work in, e.g. &quot;customer support&quot; or "
+                      "&quot;code review&quot; -- recorded for reference "
+                      "and shown alongside the project.") +
+            "<input id=\"mlProjectSubjectDomain\"></label>"
+            "<label>Model task" +
+            field_hint("The kind of task the trained model will perform, "
+                      "e.g. &quot;classification&quot; or "
+                      "&quot;text-generation&quot;.") +
+            "<input id=\"mlProjectModelTask\"></label>"
             "<button title=\"Create project\">" ICON_PLUS_SVG " Create project</button></form>"
             "</div><div>"
             "<h2>Projects</h2><div id=\"mlProjectsList\">Loading...</div>"
@@ -5979,21 +6220,54 @@ std::string application_page(const UserRecord& user, const std::string& section,
                       "is rejected.") +
             "<input id=\"mlProjectAdministrators\" "
             "placeholder=\"user-id-1, user-id-2\"></label>"
-            "<label>Approved data sources<input "
+            "<label>Approved data sources" +
+            field_hint("Comma-separated names or locations of datasets "
+                      "this project is allowed to draw from -- recorded "
+                      "for governance review, not enforced automatically "
+                      "against dataset creation.") +
+            "<input "
             "id=\"mlProjectApprovedDataSources\" "
             "placeholder=\"comma-separated\"></label>"
-            "<label>Security classification<input "
+            "<label>Security classification" +
+            field_hint("Free-text sensitivity label for this project's "
+                      "data and model, e.g. &quot;internal&quot; or "
+                      "&quot;confidential&quot; -- for operator reference "
+                      "only.") +
+            "<input "
             "id=\"mlProjectSecurityClassification\"></label>"
-            "<label>Target architecture<input "
+            "<label>Target architecture" +
+            field_hint("The model architecture this project is aiming "
+                      "for, e.g. &quot;qwen2&quot; or &quot;llama&quot; "
+                      "-- documentation only, does not constrain which "
+                      "models can actually be trained or registered.") +
+            "<input "
             "id=\"mlProjectTargetArchitecture\"></label>"
-            "<label>Target deployment environment<input "
+            "<label>Target deployment environment" +
+            field_hint("Where the finished model is meant to run, e.g. "
+                      "&quot;on-premise server&quot; or &quot;edge "
+                      "device&quot; -- recorded for planning, not used to "
+                      "configure deployment.") +
+            "<input "
             "id=\"mlProjectTargetDeploymentEnvironment\"></label>"
-            "<label>Success criteria<textarea "
+            "<label>Success criteria" +
+            field_hint("What result would count as this project "
+                      "succeeding, e.g. a target accuracy or latency. "
+                      "Kept alongside the project as a reference when "
+                      "reviewing evaluation runs.") +
+            "<textarea "
             "id=\"mlProjectSuccessCriteria\" rows=\"2\"></textarea></label>"
-            "<label>Evaluation requirements<textarea "
+            "<label>Evaluation requirements" +
+            field_hint("What kind of evaluation this project's models "
+                      "must pass before being considered done, e.g. "
+                      "specific benchmark datasets or thresholds.") +
+            "<textarea "
             "id=\"mlProjectEvaluationRequirements\" rows=\"2\">"
             "</textarea></label>"
-            "<label>Safety requirements<textarea "
+            "<label>Safety requirements" +
+            field_hint("Any safety review, content restrictions, or "
+                      "governance sign-off this project's models must "
+                      "satisfy before deployment.") +
+            "<textarea "
             "id=\"mlProjectSafetyRequirements\" rows=\"2\"></textarea></label>"
             "<label>Storage allocation (MB)" +
             field_hint("A declared ceiling recorded for operator "
@@ -6001,7 +6275,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
                       "per-project disk quota against it.") +
             "<input id=\"mlProjectStorageAllocationMb\" type=\"number\" "
             "min=\"0\" step=\"1\"></label>"
-            "<label>Compute allocation notes<textarea "
+            "<label>Compute allocation notes" +
+            field_hint("Free-text notes on which hardware or compute "
+                      "budget this project is expected to use -- for "
+                      "operator reference only.") +
+            "<textarea "
             "id=\"mlProjectComputeAllocationNotes\" rows=\"2\">"
             "</textarea></label>"
             "<button title=\"Save governance\">" ICON_PLUS_SVG " Save governance</button></form>"
@@ -6037,17 +6315,20 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "placeholder=\"e.g. GGUF, ONNX, safetensors\"></label>"
             "<label>Quantization" +
             field_hint("The GGUF's quantization level, e.g. &quot;F16&quot;, "
-                       "&quot;Q8_0&quot;, or &quot;Q4_K_M&quot;. Matters most "
-                       "if this model will be used as a Fine-Tuning base: "
-                       "LoRA fine-tuning is only reliable against a "
-                       "full/near-full precision base (F32, F16, BF16, or "
-                       "Q8_0) -- a more heavily quantized base still runs "
-                       "but the Fine-Tuning result will carry a quality "
-                       "warning. Leave blank if unknown.") +
+                       "&quot;Q8_0&quot;, or &quot;Q4_K_M&quot;. Leave "
+                       "blank if unknown.") +
             "<input id=\"mlModelQuantization\" "
             "placeholder=\"e.g. F16, Q8_0, Q4_K_M\"></label>"
-            "<label>Source<input id=\"mlModelSource\" "
-            "placeholder=\"where this model came from\"></label>"
+            "<label>Source" +
+            field_hint("A real, existing file path on this machine (e.g. "
+                       "F:\\models\\my-model.gguf), not a free-text "
+                       "description. To add a GGUF you have on disk with "
+                       "less manual effort, use \"Import a local model\" "
+                       "on the Download a model page instead -- it fills "
+                       "this field in correctly for you and verifies the "
+                       "file immediately.") +
+            "<input id=\"mlModelSource\" "
+            "placeholder=\"e.g. F:\\models\\my-model.gguf\"></label>"
             "<label>License<input id=\"mlModelLicense\"></label>"
             "<button title=\"Register model\">" ICON_PLUS_SVG " Register model</button></form>"
             // Phase 56: live prediction against a trained model's persisted
@@ -6088,18 +6369,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Name<input id=\"mlDatasetName\" required "
             "maxlength=\"160\"></label>"
             "<label>What kind of data is this?" +
-            field_hint("Tabular picks rows of numbers/categories with one "
-                       "column to predict (classification or regression), "
-                       "e.g. spreadsheet-style data. Instruction / "
-                       "fine-tuning text picks rows of question-and-answer "
-                       "or prompt-and-response text used to fine-tune an "
-                       "LLM &mdash; no column to predict is needed, so a "
-                       "\"target column\" does not apply.") +
+            field_hint("Rows of numbers/categories with one column to "
+                       "predict (classification or regression), e.g. "
+                       "spreadsheet-style data.") +
             "<select id=\"mlDatasetPurpose\">"
             "<option value=\"tabular\">Tabular data (classification / "
             "regression)</option>"
-            "<option value=\"instruction\">Instruction / fine-tuning text "
-            "(LLM training)</option>"
             "</select></label>"
             "<label>Description<textarea id=\"mlDatasetDescription\" "
             "rows=\"2\"></textarea></label>"
@@ -6134,17 +6409,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<option value=\"\">Choose a registered dataset</option>"
             "</select></label>"
             "<label>Target column (the column to predict; blank uses the "
-            "last column; ignored for an Instruction / fine-tuning text "
-            "dataset)" +
+            "last column)" +
             field_hint("The column of values the model should learn to "
                        "predict from every other column, e.g. "
                        "&quot;price&quot; or &quot;label&quot;. Leave "
-                       "blank to use the file's last column. Ignored "
-                       "entirely for a dataset registered as Instruction / "
-                       "fine-tuning text -- that data needs "
-                       "&quot;instruction&quot;/&quot;prompt&quot; and "
-                       "&quot;response&quot;/&quot;output&quot;/"
-                       "&quot;completion&quot; columns instead.") +
+                       "blank to use the file's last column.") +
             "<input id=\"mlDatasetContentTarget\"></label>"
             "<label>Dataset file -- .csv, .json, .jsonl, or .parquet" +
             field_hint("A CSV/JSONL row or JSON array entry is one "
@@ -6175,51 +6444,60 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<select id=\"mlDatasetAugmentId\" required>"
             "<option value=\"\">Choose a registered dataset</option>"
             "</select></label>"
-            "<label>Synonym replacement" +
+            "<label class=\"checkboxLabel\"><input "
+            "id=\"mlDatasetAugmentSynonymReplacement\" "
+            "type=\"checkbox\"> Synonym replacement" +
             field_hint("For text columns: replaces some words with a "
                        "similar-meaning word from a small built-in list "
                        "(e.g. &quot;good&quot; &rarr; &quot;great&quot;).") +
-            "<input id=\"mlDatasetAugmentSynonymReplacement\" "
-            "type=\"checkbox\"></label>"
-            "<label>Random insertion" +
+            "</label>"
+            "<label class=\"checkboxLabel\"><input "
+            "id=\"mlDatasetAugmentRandomInsertion\" "
+            "type=\"checkbox\"> Random insertion" +
             field_hint("For text columns: inserts an extra similar-meaning "
                        "word at a random position.") +
-            "<input id=\"mlDatasetAugmentRandomInsertion\" "
-            "type=\"checkbox\"></label>"
-            "<label>Random deletion" +
+            "</label>"
+            "<label class=\"checkboxLabel\"><input "
+            "id=\"mlDatasetAugmentRandomDeletion\" "
+            "type=\"checkbox\"> Random deletion" +
             field_hint("For text columns: randomly drops a few words.") +
-            "<input id=\"mlDatasetAugmentRandomDeletion\" "
-            "type=\"checkbox\"></label>"
-            "<label>Random swap" +
+            "</label>"
+            "<label class=\"checkboxLabel\"><input "
+            "id=\"mlDatasetAugmentRandomSwap\" "
+            "type=\"checkbox\"> Random swap" +
             field_hint("For text columns: randomly swaps the position of "
                        "two words.") +
-            "<input id=\"mlDatasetAugmentRandomSwap\" "
-            "type=\"checkbox\"></label>"
+            "</label>"
             "<label>Text change amount (0.0 to 1.0)" +
             field_hint("Roughly what fraction of the words in a text cell "
                        "each enabled text option above touches. 0.1 = "
                        "about one word in ten.") +
             "<input id=\"mlDatasetAugmentTextFraction\" type=\"number\" "
             "min=\"0\" max=\"1\" step=\"0.05\" value=\"0.1\"></label>"
-            "<label>Add numeric noise" +
+            "<label class=\"checkboxLabel\"><input "
+            "id=\"mlDatasetAugmentGaussianNoise\" "
+            "type=\"checkbox\"> Add numeric noise" +
             field_hint("For number columns: adds a synthetic copy of each "
                        "row with a small random amount added to every "
                        "number column, scaled to that column's own typical "
                        "spread.") +
-            "<input id=\"mlDatasetAugmentGaussianNoise\" "
-            "type=\"checkbox\"></label>"
-            "<label>Noise amount (fraction of each column's spread)"
+            "</label>"
+            "<label>Noise amount (fraction of each column's spread)" +
+            field_hint("Only applies when Add numeric noise is checked. "
+                       "0.05 = the added random amount is typically about "
+                       "5% of that column's own spread of values.") +
             "<input id=\"mlDatasetAugmentNoiseFraction\" type=\"number\" "
             "min=\"0\" step=\"0.01\" value=\"0.05\"></label>"
-            "<label>Balance rare classes" +
+            "<label class=\"checkboxLabel\"><input "
+            "id=\"mlDatasetAugmentOversampleMinority\" "
+            "type=\"checkbox\"> Balance rare classes" +
             field_hint("Classification datasets only: duplicates rows "
                        "from under-represented classes so every class has "
                        "closer to the same number of rows. Skipped "
                        "automatically for a regression dataset or one with "
                        "too many distinct classes to make sense of as "
                        "categories.") +
-            "<input id=\"mlDatasetAugmentOversampleMinority\" "
-            "type=\"checkbox\"></label>"
+            "</label>"
             "<label>Target balance ratio (0.0 to 1.0)" +
             field_hint("How close to the largest class every other class "
                        "should be brought, e.g. 0.5 = at least half as "
@@ -6278,7 +6556,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label>Scope<textarea id=\"mlSubjectScope\" rows=\"2\" "
             "placeholder=\"what this subject does and does not cover\">"
             "</textarea></label>"
-            "<label>Target audience<input id=\"mlSubjectTargetAudience\"></label>"
+            "<label>Target audience" +
+            field_hint("Who this knowledge is written for, e.g. "
+                      "&quot;support agents&quot; or &quot;developers&quot; "
+                      "-- recorded for reference only.") +
+            "<input id=\"mlSubjectTargetAudience\"></label>"
             "<button title=\"Create subject package\">" ICON_PLUS_SVG " Create subject package</button></form>"
             "<h2>Ingest a knowledge file</h2>"
             "<p>Select a real local text source. MasterAI hashes it, creates "
@@ -6453,9 +6735,17 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<option value=\"none\">None</option>"
             "<option value=\"retry_once\">Retry once</option></select></label>"
             "<label>Checkpoint frequency (epochs, 0 = use the job's own "
-            "default)<input id=\"mlTrainingJobCheckpointFrequencyEpochs\" "
+            "default)" +
+            field_hint("Genuinely enforced: the training executor saves a "
+                      "checkpoint after every N epochs you set here.") +
+            "<input id=\"mlTrainingJobCheckpointFrequencyEpochs\" "
             "type=\"number\" min=\"0\" step=\"1\"></label>"
-            "<label>Output directory<input "
+            "<label>Output directory" +
+            field_hint("Genuinely enforced: where the trained model and "
+                      "checkpoints are written. Leave blank to use the "
+                      "default location under this project's data "
+                      "folder.") +
+            "<input "
             "id=\"mlTrainingJobOutputDirectory\"></label>"
             "<label>Compute target" +
             field_hint("Recorded for operator reference -- this build "
@@ -6463,25 +6753,57 @@ std::string application_page(const UserRecord& user, const std::string& section,
                       "MasterAI; there is no container/cluster scheduler "
                       "for this field to actually target.") +
             "<input id=\"mlTrainingJobComputeTarget\"></label>"
-            "<label>Hardware allocation<input "
+            "<label>Hardware allocation" +
+            field_hint("Recorded for operator reference only (e.g. "
+                      "&quot;4 CPU cores&quot;) -- not enforced against "
+                      "the actual training run.") +
+            "<input "
             "id=\"mlTrainingJobHardwareAllocation\"></label>"
-            "<label>Runtime environment<input "
+            "<label>Runtime environment" +
+            field_hint("Recorded for operator reference only -- not "
+                      "enforced or provisioned by this build.") +
+            "<input "
             "id=\"mlTrainingJobRuntimeEnvironment\"></label>"
-            "<label>Container image<input "
+            "<label>Container image" +
+            field_hint("Recorded for operator reference only -- training "
+                      "always runs in-process, not inside a container.") +
+            "<input "
             "id=\"mlTrainingJobContainerImage\"></label>"
-            "<label>Environment variables<textarea "
+            "<label>Environment variables" +
+            field_hint("Recorded for operator reference only -- not "
+                      "actually applied to the training process's "
+                      "environment.") +
+            "<textarea "
             "id=\"mlTrainingJobEnvironmentVariables\" rows=\"2\">"
             "</textarea></label>"
-            "<label>Secrets references<textarea "
+            "<label>Secrets references" +
+            field_hint("Recorded for operator reference only, e.g. names "
+                      "of secrets stored elsewhere -- do not paste actual "
+                      "secret values here, this field is not encrypted.") +
+            "<textarea "
             "id=\"mlTrainingJobSecretsReferences\" rows=\"2\"></textarea>"
             "</label>"
-            "<label>Logging policy<input "
+            "<label>Logging policy" +
+            field_hint("Recorded for operator reference only -- does not "
+                      "change what the training run actually logs.") +
+            "<input "
             "id=\"mlTrainingJobLoggingPolicy\"></label>"
-            "<label>Notification policy<input "
+            "<label>Notification policy" +
+            field_hint("Recorded for operator reference only -- this "
+                      "build does not send notifications on job "
+                      "completion.") +
+            "<input "
             "id=\"mlTrainingJobNotificationPolicy\"></label>"
-            "<label>Resource ceiling notes<input "
+            "<label>Resource ceiling notes" +
+            field_hint("Free-text notes on intended resource limits -- "
+                      "not enforced. Use Max runtime above for an actually "
+                      "enforced limit.") +
+            "<input "
             "id=\"mlTrainingJobResourceCeilingNotes\"></label>"
-            "<label>Cost ceiling notes<input "
+            "<label>Cost ceiling notes" +
+            field_hint("Free-text notes on an intended cost budget -- "
+                      "recorded for reference only.") +
+            "<input "
             "id=\"mlTrainingJobCostCeilingNotes\"></label>"
             "<button title=\"Save execution policy\">" ICON_PLUS_SVG " Save execution policy</button></form>"
             "</div></section>";
@@ -6563,7 +6885,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "maxlength=\"160\"></label>"
             "<label>Description<textarea id=\"mlExperimentDescription\" "
             "rows=\"2\"></textarea></label>"
-            "<label>Hyperparameters (JSON, optional)"
+            "<label>Hyperparameters (JSON, optional)" +
+            field_hint("A JSON object of the settings this experiment "
+                       "run should use, e.g. epoch count or learning "
+                       "rate. Stored with the experiment and passed to "
+                       "the run so results are reproducible.") +
             "<textarea id=\"mlExperimentHyperparameters\" rows=\"2\" "
             "placeholder=\"{&quot;epochs&quot;:200}\"></textarea></label>"
             "<label>Random seed (optional)<input type=\"number\" min=\"0\" "
@@ -6672,7 +6998,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<div>"
             "<h2>New model builder configuration</h2>"
             "<form id=\"newMlModelBuilderConfig\">"
-            "<label>Source type<input id=\"mlModelBuilderConfigSourceType\" "
+            "<label>Source type" +
+            field_hint("Where this configuration's starting point comes "
+                       "from -- a blank template, an imported base model, "
+                       "or an embedding model. Recorded with the "
+                       "configuration for reference.") +
+            "<input id=\"mlModelBuilderConfigSourceType\" "
             "required placeholder=\"e.g. template, imported_base_model, "
             "embedding_model\"></label>"
             "<label>Base model (optional)<select "
@@ -6713,11 +7044,25 @@ std::string application_page(const UserRecord& user, const std::string& section,
                        "does not choose it.") +
             "<input id=\"mlMbcLossFunction\" "
             "placeholder=\"e.g. cross_entropy, mse\"></label>"
-            "<label>Optimiser<input id=\"mlMbcOptimiser\" "
+            "<label>Optimiser" +
+            field_hint("The gradient-descent algorithm used to update "
+                       "weights during training, e.g. &quot;adamw&quot; "
+                       "or &quot;sgd&quot;. Genuinely selects the "
+                       "optimiser the trainer uses.") +
+            "<input id=\"mlMbcOptimiser\" "
             "placeholder=\"e.g. adamw, sgd\"></label>"
-            "<label>Batch size<input id=\"mlMbcBatchSize\" type=\"number\" "
+            "<label>Batch size" +
+            field_hint("How many rows are processed together before each "
+                       "weight update. Larger batches train faster per "
+                       "epoch but use more memory and can need a higher "
+                       "learning rate.") +
+            "<input id=\"mlMbcBatchSize\" type=\"number\" "
             "min=\"0\" placeholder=\"0 = executor default\"></label>"
-            "<label>Epoch count<input id=\"mlMbcEpochCount\" "
+            "<label>Epoch count" +
+            field_hint("How many full passes over the training data to "
+                       "run. More epochs can improve accuracy up to a "
+                       "point, then start overfitting.") +
+            "<input id=\"mlMbcEpochCount\" "
             "type=\"number\" min=\"0\" placeholder=\"0 = executor default\">"
             "</label>"
             "<div id=\"mlMbcAdvanced\" style=\"display:none\">"
@@ -6758,22 +7103,47 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<input "
             "id=\"mlMbcVocabularyTokenizer\" placeholder=\"not used by "
             "this trainer\"></label>"
-            "<label>Activation functions<input "
+            "<label>Activation functions" +
+            field_hint("The non-linear function applied between hidden "
+                       "layers, e.g. &quot;silu&quot; or &quot;gelu&quot;. "
+                       "Genuinely used to build the network.") +
+            "<input "
             "id=\"mlMbcActivationFunctions\" placeholder=\"e.g. silu, "
             "gelu\"></label>"
-            "<label>Dropout (0.0 to 1.0)<input id=\"mlMbcDropout\" "
+            "<label>Dropout (0.0 to 1.0)" +
+            field_hint("Fraction of hidden units randomly disabled during "
+                       "each training step, to reduce overfitting. 0 "
+                       "disables it; typical values are 0.1 to 0.5.") +
+            "<input id=\"mlMbcDropout\" "
             "type=\"number\" min=\"0\" max=\"1\" step=\"0.01\" "
             "placeholder=\"0 = disabled\"></label>"
-            "<label>Initialisation strategy<input "
+            "<label>Initialisation strategy" +
+            field_hint("How the network's starting weights are chosen "
+                       "before training begins, e.g. &quot;xavier&quot; "
+                       "or &quot;kaiming&quot;.") +
+            "<input "
             "id=\"mlMbcInitialisationStrategy\" placeholder=\"e.g. xavier, "
             "kaiming\"></label>"
-            "<label>Learning-rate scheduler<input "
+            "<label>Learning-rate scheduler" +
+            field_hint("How the learning rate changes over the course of "
+                       "training, e.g. &quot;cosine with warmup&quot;. "
+                       "Leave blank for a constant learning rate.") +
+            "<input "
             "id=\"mlMbcLearningRateScheduler\" placeholder=\"e.g. cosine "
             "with warmup\"></label>"
-            "<label>Gradient accumulation steps<input "
+            "<label>Gradient accumulation steps" +
+            field_hint("Accumulates gradients over this many steps before "
+                       "applying a weight update, simulating a larger "
+                       "batch size without the extra memory. 0 disables "
+                       "it.") +
+            "<input "
             "id=\"mlMbcGradientAccumulation\" type=\"number\" min=\"0\" "
             "placeholder=\"0 = disabled\"></label>"
-            "<label>Gradient clipping (max norm)<input "
+            "<label>Gradient clipping (max norm)" +
+            field_hint("Caps how large a single weight update can be, "
+                       "which helps prevent training from diverging. 0 "
+                       "disables it.") +
+            "<input "
             "id=\"mlMbcGradientClipping\" type=\"number\" min=\"0\" "
             "step=\"0.1\" placeholder=\"0 = disabled\"></label>"
             "<label>L1 regularization (lasso strength)" +
@@ -6793,14 +7163,19 @@ std::string application_page(const UserRecord& user, const std::string& section,
                        "terms.") +
             "<input id=\"mlMbcL2Regularization\" type=\"number\" min=\"0\" "
             "step=\"0.0001\" placeholder=\"0 = disabled\"></label>"
-            "<label>Mixed precision" +
+            "<label class=\"checkboxLabel\"><input "
+            "id=\"mlMbcMixedPrecision\" "
+            "type=\"checkbox\"> Mixed precision" +
             field_hint("Not used by this trainer -- mixed-precision tensor "
                        "cores are a GPU/transformer-training concept; this "
                        "build's tabular MLP trainer always runs in plain "
                        "precision.") +
-            "<input id=\"mlMbcMixedPrecision\" "
-            "type=\"checkbox\"></label>"
-            "<label>Checkpoint frequency (steps)<input "
+            "</label>"
+            "<label>Checkpoint frequency (steps)" +
+            field_hint("Saves a checkpoint every N training steps, in "
+                       "addition to the per-epoch Checkpoint frequency set "
+                       "on the training job's Execution policy.") +
+            "<input "
             "id=\"mlMbcCheckpointFrequency\" type=\"number\" min=\"0\" "
             "placeholder=\"0 = executor default\"></label>"
             "<label>Validation frequency (steps)" +
@@ -6809,9 +7184,18 @@ std::string application_page(const UserRecord& user, const std::string& section,
                        "configurable step interval.") +
             "<input id=\"mlMbcValidationFrequency\" type=\"number\" min=\"0\" "
             "placeholder=\"not used by this trainer\"></label>"
-            "<label>Early stopping<input id=\"mlMbcEarlyStopping\" "
-            "type=\"checkbox\"></label>"
-            "<label>Random seed<input id=\"mlMbcRandomSeed\" "
+            "<label class=\"checkboxLabel\"><input id=\"mlMbcEarlyStopping\" "
+            "type=\"checkbox\"> Early stopping" +
+            field_hint("Stops training automatically once validation "
+                       "performance stops improving, instead of always "
+                       "running the full epoch count.") +
+            "</label>"
+            "<label>Random seed" +
+            field_hint("Fixes the random number generator so this run's "
+                       "weight initialization and data shuffling are "
+                       "reproducible. 0 leaves it unfixed (a different "
+                       "result each run).") +
+            "<input id=\"mlMbcRandomSeed\" "
             "type=\"number\" min=\"0\" placeholder=\"0 = not fixed\">"
             "</label>"
             "<label>Reproducibility settings" +
@@ -7708,7 +8092,8 @@ std::string application_page(const UserRecord& user, const std::string& section,
                     "Rollback"};
                 std::string html;
                 for (const char* stage : stages) {
-                    html += "<label><input type=\"checkbox\" "
+                    html += "<label class=\"checkboxLabel\">"
+                            "<input type=\"checkbox\" "
                             "class=\"mlPipelineStage\" value=\"";
                     html += stage;
                     html += "\"> ";
@@ -7865,19 +8250,25 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "page) -- unchecking this is saved to this browser only"
             "</label>"
             "<form id=\"systemConfigForm\">"
-            "<label>Tabular dataset upload limit, bytes &mdash; the "
-            "Dataset Manager's CSV content-upload cap"
+            "<label>Tabular dataset upload limit, bytes" +
+            field_hint("The Dataset Manager's CSV content-upload cap -- a "
+                       "CSV larger than this is rejected before parsing.") +
             "<input id=\"cfgTabularDatasetMaximumCsvBytes\" type=\"number\" "
             "min=\"1\" "
             "data-path=\"machineLearning.tabularDatasetMaximumCsvBytes\">"
             "</label>"
-            "<label>Knowledge document upload limit, bytes &mdash; the "
-            "Subject Knowledge Manager's ingestion cap"
+            "<label>Knowledge document upload limit, bytes" +
+            field_hint("The Subject Knowledge Manager's ingestion cap -- "
+                       "applies to every supported knowledge media type, "
+                       "not just Parquet.") +
             "<input id=\"cfgKnowledgeMaximumDocumentBytes\" type=\"number\" "
             "min=\"1\" data-path=\"knowledge.maximumDocumentBytes\"></label>"
-            "<label>Parquet helper executable (restart required) &mdash; "
-            "the DuckDB CLI path used to convert Parquet knowledge and "
-            "dataset uploads; leave empty to disable Parquet ingestion"
+            "<label>Parquet helper executable (restart required)" +
+            field_hint("The DuckDB CLI path used to convert Parquet "
+                       "knowledge and dataset uploads to text before "
+                       "chunking. Leave empty to disable Parquet ingestion "
+                       "-- other supported knowledge media types are "
+                       "unaffected.") +
             "<input id=\"cfgParquetHelperExecutable\" type=\"text\" "
             "data-path=\"knowledge.parquetHelperExecutable\"></label>"
             "<button title=\"Save Machine Learning settings\">" ICON_SAVE_SVG " Save Machine Learning settings</button>"
@@ -7976,7 +8367,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "only take effect the next time MasterAI is started.</p>"
             "<form id=\"systemConfigForm\">"
             "<h3>Hardware</h3>"
-            "<label>Accelerator policy"
+            "<label>Accelerator policy" +
+            field_hint("Controls whether MasterAI may use a GPU for "
+                       "inference. auto uses one if present, cpu_only "
+                       "forces CPU-only execution even on GPU hardware, "
+                       "gpu_allowed requires GPU allocation to succeed.") +
             "<select id=\"cfgAcceleratorPolicy\" "
             "data-path=\"hardware.acceleratorPolicy\">"
             "<option value=\"auto\">auto (use GPU when available)</option>"
@@ -7984,20 +8379,36 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<option value=\"gpu_allowed\">gpu_allowed</option>"
             "</select></label>"
             "<h3>Memory (restart required)</h3>"
-            "<label>Resource profile"
+            "<label>Resource profile" +
+            field_hint("A preset memory footprint. minimal keeps only one "
+                       "request's worth of memory resident (smallest "
+                       "footprint, slowest under concurrent load); "
+                       "performance keeps more resident for faster "
+                       "repeated requests at a higher memory cost; "
+                       "balanced sits between the two.") +
             "<select id=\"cfgResourceProfile\" data-path=\"memory.profile\">"
             "<option value=\"minimal\">minimal (one request, smallest "
             "footprint)</option>"
             "<option value=\"balanced\">balanced</option>"
             "<option value=\"performance\">performance</option>"
             "</select></label>"
-            "<label>Hard memory limit, MiB (0 = automatic)"
+            "<label>Hard memory limit, MiB (0 = automatic)" +
+            field_hint("An absolute ceiling on MasterAI's own memory "
+                       "usage. 0 lets it size itself automatically from "
+                       "available system RAM instead of a fixed number.") +
             "<input id=\"cfgMemoryHardLimitMiB\" type=\"number\" min=\"0\" "
             "max=\"1048576\" data-path=\"memory.hardLimitMiB\"></label>"
-            "<label>Minimum free RAM percent"
+            "<label>Minimum free RAM percent" +
+            field_hint("MasterAI tries to keep at least this percentage "
+                       "of total system RAM free, trimming its own caches "
+                       "first when it starts to run short.") +
             "<input id=\"cfgMinimumFreePercent\" type=\"number\" min=\"0\" "
             "max=\"50\" data-path=\"memory.minimumFreePercent\"></label>"
-            "<label>Critical pressure percent"
+            "<label>Critical pressure percent" +
+            field_hint("Once system RAM usage reaches this percentage, "
+                       "MasterAI takes more aggressive action (e.g. "
+                       "unloading models) to avoid the system running out "
+                       "of memory entirely.") +
             "<input id=\"cfgCriticalPercent\" type=\"number\" min=\"80\" "
             "max=\"99\" data-path=\"memory.criticalPressurePercent\"></label>"
             "<h3>Inference</h3>"
@@ -8015,19 +8426,26 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<input id=\"cfgChatMaxReplyTokens\" type=\"number\" min=\"1\" "
             "max=\"32768\" data-path=\"inference.chatMaxReplyTokens\">"
             "</label>"
-            "<label>Runner startup timeout, seconds (restart required)"
+            "<label>Runner startup timeout, seconds (restart required)" +
+            field_hint("How long MasterAI waits for the inference runner "
+                       "process to finish starting before giving up and "
+                       "reporting a startup failure.") +
             "<input id=\"cfgStartupTimeout\" type=\"number\" min=\"1\" "
             "max=\"3600\" data-path=\"inference.startupTimeoutSeconds\">"
             "</label>"
-            "<label>Runner stall timeout, seconds"
+            "<label>Runner stall timeout, seconds" +
+            field_hint("How long a generation may run with no forward "
+                       "progress before MasterAI treats the runner as "
+                       "stalled and aborts the request.") +
             "<input id=\"cfgStallTimeout\" type=\"number\" min=\"1\" "
             "max=\"3600\" data-path=\"inference.stallTimeoutSeconds\">"
             "</label>"
             "<h3>Storage</h3>"
-            "<label>PageFile location (restart required) &mdash; a folder "
-            "MasterAI uses instead of the system pagefile/temp area for its "
-            "own disk-backed cache and model data; leave empty to use the "
-            "default cache folder"
+            "<label>PageFile location (restart required)" +
+            field_hint("A folder MasterAI uses instead of the system "
+                       "pagefile/temp area for its own disk-backed cache "
+                       "and model data; leave empty to use the default "
+                       "cache folder.") +
             "<input id=\"cfgPageFileRoot\" type=\"text\" "
             "placeholder=\"(default cache folder)\" "
             "data-path=\"storage.pageFileRoot\"></label>"
@@ -8035,7 +8453,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label class=\"checkboxLabel\"><input id=\"cfgNumaPlacement\" "
             "type=\"checkbox\" data-path=\"topology.numaLocalPlacementEnabled\" "
             "data-type=\"bool\"> Pin worker threads to the nearest NUMA "
-            "node</label>" +
+            "node" +
             field_hint("On multi-socket/multi-NUMA-node hardware, keeps "
                       "each connection's worker thread on the same memory "
                       "node as the model it is serving, reducing cross-node "
@@ -8045,11 +8463,12 @@ std::string application_page(const UserRecord& user, const std::string& section,
                       "Performance &rarr; Benchmarks &amp; Regression first "
                       "-- this checkbox alone does not enable pinning "
                       "without real per-host benchmark evidence.") +
+            "</label>"
             "<h3>Model tiering (routing)</h3>"
             "<label class=\"checkboxLabel\"><input "
             "id=\"cfgModelRoutingEnabled\" type=\"checkbox\" "
             "data-path=\"modelRouting.enabled\" data-type=\"bool\"> "
-            "Tiered auto-routing enabled</label>" +
+            "Tiered auto-routing enabled" +
             field_hint("When on and at least one tier below has a model "
                       "assigned, chats can select an \"Auto (Tiered)\" "
                       "model option that routes each message to the "
@@ -8057,6 +8476,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
                       "larger tier only when the smaller one's answer looks "
                       "unreliable. Existing chats pinned to a specific "
                       "model are never affected by this setting.") +
+            "</label>"
             "<label>Tier assignments (JSON: tier name &rarr; list of model "
             "IDs)" +
             field_hint("Valid tier names: deterministic_processing, "
@@ -8075,17 +8495,32 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<h3>Retrieval</h3>"
             "<label class=\"checkboxLabel\"><input id=\"cfgRetrievalEnabled\" "
             "type=\"checkbox\" data-path=\"retrieval.enabled\" "
-            "data-type=\"bool\"> Retrieval enabled</label>"
-            "<label>Retrieval deadline, milliseconds"
+            "data-type=\"bool\"> Retrieval enabled" +
+            field_hint("When off, chats never gather project/knowledge "
+                       "evidence before answering -- every setting below "
+                       "in this section is ignored.") +
+            "</label>"
+            "<label>Retrieval deadline, milliseconds" +
+            field_hint("The maximum time retrieval is allowed to spend "
+                       "gathering evidence before giving up and answering "
+                       "with whatever it already found.") +
             "<input id=\"cfgRetrievalDeadline\" type=\"number\" min=\"1\" "
             "data-path=\"retrieval.deadlineMilliseconds\"></label>"
-            "<label>Retrieval maximum context, bytes"
+            "<label>Retrieval maximum context, bytes" +
+            field_hint("A hard cap on how many bytes of gathered evidence "
+                       "can be added to a single prompt.") +
             "<input id=\"cfgRetrievalMaxContext\" type=\"number\" min=\"1\" "
             "data-path=\"retrieval.maximumContextBytes\"></label>"
-            "<label>Retrieval maximum chunks per source"
+            "<label>Retrieval maximum chunks per source" +
+            field_hint("Caps how many evidence chunks may come from any "
+                       "one source (e.g. one file or one vector store) in "
+                       "a single retrieval pass.") +
             "<input id=\"cfgRetrievalMaxChunksPerSource\" type=\"number\" "
             "min=\"1\" data-path=\"retrieval.maximumChunksPerSource\"></label>"
-            "<label>Retrieval maximum total chunks"
+            "<label>Retrieval maximum total chunks" +
+            field_hint("Caps the total number of evidence chunks across "
+                       "all sources combined for a single retrieval "
+                       "pass.") +
             "<input id=\"cfgRetrievalMaxTotalChunks\" type=\"number\" "
             "min=\"1\" data-path=\"retrieval.maximumTotalChunks\"></label>"
             "<label class=\"checkboxLabel\"><input id=\"cfgRetrievalMcpResource\" "
@@ -8105,29 +8540,108 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "</label>"
             "<label class=\"checkboxLabel\"><input id=\"cfgRetrievalSemanticEmbedding\" "
             "type=\"checkbox\" data-path=\"retrieval.semanticEmbeddingEnabled\" "
-            "data-type=\"bool\"> Semantic embedding search enabled</label>"
+            "data-type=\"bool\"> Semantic embedding search enabled" +
+            field_hint("Lets retrieval match evidence by meaning (vector "
+                       "similarity), not just keyword overlap. Off falls "
+                       "back to keyword-only matching.") +
+            "</label>"
             "<label class=\"checkboxLabel\"><input id=\"cfgRetrievalGitDiff\" "
             "type=\"checkbox\" data-path=\"retrieval.gitDiffEnabled\" "
-            "data-type=\"bool\"> Git diff evidence enabled</label>"
+            "data-type=\"bool\"> Git diff evidence enabled" +
+            field_hint("Lets retrieval include the current uncommitted "
+                       "git diff of a project as evidence, when the chat "
+                       "is scoped to a project that is a git repository.") +
+            "</label>"
+            "<h3>Chat/MCP tools</h3>"
+            "<p>Bounds on the six built-in project tools (read file, list "
+            "directory, search, write file, delete file, run command) "
+            "shared by the web-ui chat and by every MCP client (VS Code, "
+            "Visual Studio, ...) calling the same tools. Raising these lets "
+            "the AI's directory listings, searches, and command output "
+            "come back more complete before being cut off.</p>"
+            "<label>Read-file maximum size, bytes" +
+            field_hint("Largest single file the read_file tool will read "
+                       "in one call; also the per-file size cutoff the "
+                       "search tool applies before scanning a file's "
+                       "lines.") +
+            "<input id=\"cfgChatToolReadMaxBytes\" type=\"number\" min=\"1\" "
+            "max=\"268435456\" data-path=\"chatTools.readFileMaximumBytes\">"
+            "</label>"
+            "<label>Search maximum files scanned" +
+            field_hint("Most files the search tool will walk before "
+                       "stopping, even if the maximum results below has "
+                       "not been reached yet.") +
+            "<input id=\"cfgChatToolSearchMaxFiles\" type=\"number\" "
+            "min=\"1\" max=\"100000\" "
+            "data-path=\"chatTools.searchMaximumFiles\"></label>"
+            "<label>Search maximum results" +
+            field_hint("Most matching lines the search tool will return "
+                       "across every file it scans.") +
+            "<input id=\"cfgChatToolSearchMaxResults\" type=\"number\" "
+            "min=\"1\" max=\"100000\" "
+            "data-path=\"chatTools.searchMaximumResults\"></label>"
+            "<label>List-directory maximum entries" +
+            field_hint("Most files and folders the list_directory tool "
+                       "will enumerate in one recursive tree walk before "
+                       "it reports the listing as truncated and asks for "
+                       "a narrower subdirectory instead of silently "
+                       "dropping the rest.") +
+            "<input id=\"cfgChatToolListMaxEntries\" type=\"number\" "
+            "min=\"1\" max=\"1000000\" "
+            "data-path=\"chatTools.listDirectoryMaximumEntries\"></label>"
+            "<label>Run-command timeout, seconds" +
+            field_hint("How long the run_command tool lets the sandboxed "
+                       "process run before it is killed as hung.") +
+            "<input id=\"cfgChatToolCommandTimeout\" type=\"number\" "
+            "min=\"1\" max=\"3600\" "
+            "data-path=\"chatTools.commandTimeoutSeconds\"></label>"
+            "<label>Run-command maximum output, bytes" +
+            field_hint("Most combined stdout/stderr bytes the run_command "
+                       "tool will capture from one process before cutting "
+                       "it off -- raise this to see more of a long build "
+                       "or test run's output in full.") +
+            "<input id=\"cfgChatToolCommandMaxOutput\" type=\"number\" "
+            "min=\"1\" max=\"268435456\" "
+            "data-path=\"chatTools.commandMaximumOutputBytes\"></label>"
             "<h3>Cache</h3>"
             "<label class=\"checkboxLabel\"><input id=\"cfgCacheEnabled\" "
             "type=\"checkbox\" data-path=\"cache.enabled\" "
-            "data-type=\"bool\"> Retrieval/prompt cache enabled</label>"
+            "data-type=\"bool\"> Retrieval/prompt cache enabled" +
+            field_hint("Reuses previously computed retrieval evidence and "
+                       "prompt prefixes when the same query repeats, "
+                       "reducing latency. Off recomputes everything on "
+                       "every request.") +
+            "</label>"
             "<h3>Session reuse</h3>"
             "<label class=\"checkboxLabel\"><input id=\"cfgSessionEnabled\" "
             "type=\"checkbox\" data-path=\"session.enabled\" "
-            "data-type=\"bool\"> Prompt-prefix/KV session reuse enabled"
+            "data-type=\"bool\"> Prompt-prefix/KV session reuse enabled" +
+            field_hint("Keeps a model's computed context (KV cache) "
+                       "around between messages in the same chat so a "
+                       "reply does not have to reprocess the whole "
+                       "conversation from scratch each time.") +
             "</label>"
-            "<label>Maximum reusable slots (restart required)"
+            "<label>Maximum reusable slots (restart required)" +
+            field_hint("How many chats' KV sessions can be kept resident "
+                       "at once. More slots reuse more context across "
+                       "concurrent chats but use more memory.") +
             "<input id=\"cfgSessionMaxSlots\" type=\"number\" min=\"1\" "
             "data-path=\"session.maxSlots\"></label>"
-            "<label>Idle retention, seconds (restart required)"
+            "<label>Idle retention, seconds (restart required)" +
+            field_hint("How long an idle chat's reusable KV session is "
+                       "kept before it is freed and the next message must "
+                       "reprocess context from scratch.") +
             "<input id=\"cfgSessionIdleRetention\" type=\"number\" min=\"1\" "
             "data-path=\"session.idleRetentionSeconds\"></label>"
             "<h3>Performance</h3>"
             "<label class=\"checkboxLabel\"><input id=\"cfgAutoTune\" "
             "type=\"checkbox\" data-path=\"performance.autoTune\" "
-            "data-type=\"bool\"> Automatic calibration enabled</label>"
+            "data-type=\"bool\"> Automatic calibration enabled" +
+            field_hint("Lets the adaptive performance controller adjust "
+                       "runtime settings on its own based on measured "
+                       "load. Turn off to keep whatever mode you pick "
+                       "below fixed.") +
+            "</label>"
             "<h3>Sign-in</h3>"
             "<label class=\"checkboxLabel\"><input "
             "id=\"cfgAuthenticationEnabled\" type=\"checkbox\" "
@@ -8144,17 +8658,32 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<label class=\"checkboxLabel\"><input "
             "id=\"cfgAllowLocalPasswordAccounts\" type=\"checkbox\" "
             "data-path=\"auth.allowLocalPasswordAccounts\" "
-            "data-type=\"bool\"> Allow locally stored password accounts"
+            "data-type=\"bool\"> Allow locally stored password accounts" +
+            field_hint("Opt-in accounts with a username/password stored "
+                       "by MasterAI itself, separate from Windows sign-in. "
+                       "Turning this off does not delete existing local "
+                       "accounts, only stops new sign-ins through this "
+                       "path.") +
             "</label>"
             "<label class=\"checkboxLabel\"><input "
             "id=\"cfgAllowOsIdentityAccounts\" type=\"checkbox\" "
             "data-path=\"auth.allowOsIdentityAccounts\" data-type=\"bool\"> "
-            "Allow OS-integrated sign-in</label>"
+            "Allow OS-integrated sign-in" +
+            field_hint("Lets a user sign in using their existing Windows "
+                       "login instead of a MasterAI-specific password. "
+                       "Both this and local password accounts can be "
+                       "enabled at the same time.") +
+            "</label>"
             "<h3>Server</h3>"
-            "<label>Rate limit, requests per minute"
+            "<label>Rate limit, requests per minute" +
+            field_hint("Caps how many API requests a single client may "
+                       "make per minute before receiving a 429 response.") +
             "<input id=\"cfgRateLimit\" type=\"number\" min=\"1\" "
             "data-path=\"server.rateLimitPerMinute\"></label>"
-            "<label>Maximum request size, bytes"
+            "<label>Maximum request size, bytes" +
+            field_hint("The largest HTTP request body the server will "
+                       "accept -- a larger upload or payload is rejected "
+                       "outright before processing.") +
             "<input id=\"cfgMaxRequestBytes\" type=\"number\" min=\"1024\" "
             "data-path=\"server.maxRequestBytes\"></label>"
             "<button title=\"Save configuration\">" ICON_SAVE_SVG " Save configuration</button>"
@@ -8188,7 +8717,16 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "dedicated telemetry route exists for those.</p>"
             "<div class=\"reportSection\"><h3>Adaptive controller</h3>"
             "<div id=\"perfAdaptive\">Loading...</div>"
-            "<form id=\"perfModeForm\"><label>Mode<select id=\"perfMode\">"
+            "<form id=\"perfModeForm\"><label>Mode" +
+            field_hint("Automatic lets the adaptive controller pick "
+                       "settings for you based on live load. The other "
+                       "modes bias it toward a specific goal (lowest "
+                       "latency, maximum throughput, minimal memory, "
+                       "battery saver, quiet/thermal conservative). "
+                       "Administrator Custom stops automatic adjustment "
+                       "entirely and holds whatever values are currently "
+                       "set.") +
+            "<select id=\"perfMode\">"
             "<option value=\"automatic\">Automatic</option>"
             "<option value=\"balanced\">Balanced</option>"
             "<option value=\"minimal_memory\">Minimal Memory</option>"
@@ -8944,9 +9482,9 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "UTF-8 source file from an authorized project.</td></tr>"
             "<tr><td>masterai.project.search</td><td>Find literal text in "
             "bounded source files inside an authorized project.</td></tr>"
-            "<tr><td>masterai.project.list_directory</td><td>List one "
-            "bounded directory's immediate entries in an authorized "
-            "project.</td></tr>"
+            "<tr><td>masterai.project.list_directory</td><td>List a "
+            "bounded directory and every subdirectory beneath it, as one "
+            "tree, in an authorized project.</td></tr>"
             "<tr><td>masterai.project.write_file</td><td>Create or "
             "overwrite one bounded UTF-8 file (requires "
             "<code>projects.write</code>; refused if it would blank an "
@@ -9033,11 +9571,20 @@ std::string application_page(const UserRecord& user, const std::string& section,
         body =
             "<section id=\"panel-admin-create\" class=\"panel\">"
             "<div><h2>Create user</h2>"
-            "<form id=\"newUser\"><label>Username"
+            "<form id=\"newUser\"><label>Username" +
+            field_hint("The sign-in id for this local account -- letters, "
+                       "numbers, '.', '_' and '-' only. Cannot be changed "
+                       "after the account is created.") +
             "<input id=\"newUserName\" required "
             "pattern=\"[A-Za-z0-9_.-]+\"></label>"
             "<label>Display name<input id=\"newUserDisplay\" required></label>"
-            "<label>Role<select id=\"newUserRole\">"
+            "<label>Role" +
+            field_hint("administrator can manage users, system "
+                       "configuration, and every Machine Learning "
+                       "interface; developer can chat and use projects "
+                       "but not manage the server; viewer has read-only "
+                       "access.") +
+            "<select id=\"newUserRole\">"
             "<option value=\"administrator\">administrator</option>"
             "<option value=\"developer\">developer</option>"
             "<option value=\"viewer\">viewer</option></select></label>"
@@ -9503,6 +10050,17 @@ std::string application_page(const UserRecord& user, const std::string& section,
         ".chatMsg-error{background:#3a0a0a;border:1px solid #ffd54a;color:#ffd54a}"
         ".chatMsg-errorTitle{font-weight:800;letter-spacing:.03em;"
         "margin-bottom:.25rem}"
+        // Resource-pressure warning (RAM ceiling / OS safety reserve
+        // admission denial): deliberately distinct from .chatMsg-error's red
+        // "something broke" styling -- this is an expected, retryable
+        // admission-control decision, not a failure, so it reads as a
+        // caution notice (warm browns/oranges) rather than an alarm. Very
+        // dark brown body with a slightly lighter brown border, titlebar in
+        // shades of orange.
+        ".chatMsg-ramWarning{background:#241407;border:1px solid #6b4a2e;"
+        "color:#ffcc80}"
+        ".chatMsg-ramWarningTitle{font-weight:800;letter-spacing:.03em;"
+        "margin-bottom:.25rem;color:#ff9800}"
         ".chatMsg-modelChange{margin:0 auto;background:rgba(40,167,69,.12);"
         "border:1px solid rgba(40,167,69,.5);color:#4ade80;font-size:.82rem;"
         "text-align:center}"

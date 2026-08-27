@@ -4,7 +4,7 @@
 in ISO C++17.**
 
 [![Language: C++17](https://img.shields.io/badge/language-ISO%20C%2B%2B17-00599C.svg)](docs/architecture/ADR-0001-cpp17-native-architecture.md)
-[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-4C8BF5.svg)](docs/architecture/platform-matrix.md)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-4C8BF5.svg)](docs/architecture/platform-matrix.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Status: Active development](https://img.shields.io/badge/status-active%20development-orange.svg)](docs/PLAN.md)
 
@@ -110,7 +110,8 @@ can be replaced without changing MasterAI's external contract.
 
 - Strict ISO C++17 for application source; optional Assembly only when profiling
   proves a benefit and a C++17 boundary is retained.
-- Native Windows and Linux operation without a container runtime.
+- Native Windows, Linux, and macOS (Apple Silicon) operation without a
+  container runtime.
 - Loopback-only network binding by default.
 - Authentication and authorization even in local-only mode.
 - Canonical, authorized filesystem paths with symlink traversal denied by
@@ -196,6 +197,66 @@ The current source includes native implementations for:
   high-risk is refused rather than executed unattended (MCP has no
   Approve/Deny UI of its own yet), so completing that specific action still
   means using the web chat — see docs/PLAN.md Phase 84.
+- How a tool actually runs — and why the model can't just do it: every one
+  of the six tools is ordinary MasterAI server code (`execute_chat_tool()`
+  in `src/tool_exec.cpp`), not something the loaded model has any direct
+  access to. A local model is just text in, text out — it cannot open a
+  file, touch the filesystem, or spawn a process by itself. `read_file`/
+  `list_directory`/`search`/`write_file`/`delete_file` all resolve their
+  path against the project root first and reject anything absolute or
+  outside it, and `run_command` will only launch an executable that is
+  already on the admin allow-list, run with no shell (so no argument can be
+  interpreted as shell syntax) inside the same sandbox outbound MCP servers
+  use — a Windows Job Object or Linux rlimit/`PR_SET_NO_NEW_PRIVS` cap, a
+  wall-clock timeout, and a combined stdout+stderr byte cap. Because the
+  model can't reach any of that directly, there are exactly three ways a
+  tool call actually happens, and every one of them goes through the
+  server, never the model in isolation:
+  1. **The model requests one (Phase 84).** Mid-reply, the model ends its
+     text with one `[[TOOL_CALL]]{"tool":"<name>","arguments":{...}}
+     [[/TOOL_CALL]]` block — a plain text convention it was told about in
+     its own prompt, nothing more. `send_chat_message()` parses that block
+     out of the generated text, classifies the call's risk, and only then
+     either runs it for real and feeds the model back the real result on
+     the next turn, or — for anything destructive, or any chat set to
+     Confirm every action — pauses on an Approve/Deny card until a human
+     decides. A model that emits a malformed block, or names a tool that
+     isn't one of the six, gets nothing executed at all.
+  2. **MasterAI recognizes the request itself and skips the model
+     entirely (Phase 98).** A bounded table of plain-English phrasings —
+     "list the files in ...", "read the file ...", "search the project
+     for ...", "run the command ..." — is checked against every message
+     the instant it arrives, before the model is ever asked to generate
+     anything. A match executes immediately through the exact same
+     `execute_chat_tool()` path and the exact same risk/approval gate as
+     path 1 above; the model is only brought in afterward, to comment on
+     the real result in its own words. `write_file` and `delete_file` are
+     deliberately excluded from this table — a write needs real content
+     only the model can produce, and a delete is destructive enough that
+     reaching for it should stay a considered model decision.
+  3. **MasterAI answers a question about its own tooling without
+     executing anything (Phase 99).** A separate, broader phrase table —
+     "what tools are you authorised to use", "which commands can you
+     run", "what's on your allow-list", and many more (see
+     `is_capability_disclosure_query()` in `src/server.cpp`) — is checked
+     the same way, immediately and before the model runs. A match answers
+     straight from the real, live server configuration (the six real
+     tools, plus the actual currently-enabled `run_command` allow-list for
+     that project) instead of asking the model to describe its own setup
+     from memory, which is exactly the failure this closed: a small local
+     model asked directly would otherwise guess at a plausible-looking
+     list, or simply truncate mid-answer once it ran out of reply budget.
+     Nothing is ever executed for this path — it only ever discloses
+     configuration, the same way `save to memory: ...` (above) answers
+     without invoking the model.
+
+  In short: the model can only ever *ask*, through one narrow, parsed text
+  convention (path 1) or by matching a fixed phrase MasterAI already
+  recognizes on its own (paths 2 and 3) — every actual filesystem read,
+  filesystem write, or process launch happens in MasterAI's own server
+  code, gated by the project-root/allow-list checks above and, for
+  anything destructive, a human's explicit approval. See docs/PLAN.md
+  Phases 84, 98, and 99 for the full implementation detail.
 - Resumable, journaled, hash-verified model downloads with quarantine on
   integrity failure.
 - Quick, standard, and extended benchmark profiles with compatible comparison
@@ -423,6 +484,11 @@ The current source includes native implementations for:
   developer routes: `GET`/`POST /api/v1/performance/certification`,
   `GET`/`POST /api/v1/performance/certification/thresholds`, rendered on
   the new "Benchmarks & Regression" page (`/app/performance/benchmarks`).
+  Real evidence now spans two model/profile combinations on this host
+  (`llama32-1b-instruct-q4km` `quick`, 2026-08-18; `granite31-2b-instruct-
+  q4km` `standard`, 2026-08-26), each accepted with a clean matching-
+  fingerprint comparison -- see
+  [docs/validation/phase-36-certification-runbook.md](docs/validation/phase-36-certification-runbook.md).
   What remains outside this control plane's reach: the plan's full
   physical matrix (multiple storage media, multiple machines, GPU-
   offloaded hardware) requires an administrator to actually run this page
@@ -444,7 +510,9 @@ The current source includes native implementations for:
   `masterai speculative-benchmark` CLI command
   (`docs/performance/phase-32-speculative-matrix.md`): on this low-VRAM
   test host the dual-model path measured 22.5% *slower* than the
-  single-model baseline, an honest negative result -- the launch path
+  single-model baseline (`qwen25-coder` pair), corroborated 2026-08-26 by a
+  second, unrelated pair (`llama32-3b`/`llama32-1b`) measuring 40.5%
+  *slower* -- an honest negative result, twice over -- the launch path
   itself works, but this host lacks the compute/VRAM headroom for it to
   pay off.
 - A native asynchronous storage and prefetch engine (`IAsyncFileReader`):
@@ -535,13 +603,13 @@ The current source includes native implementations for:
   from persisted weight artifacts, ingests and hashes approved text files,
   persists either authored hashing vectors or validated learned vectors from
   a verified local embedding GGUF, and executes ranked, cited retrieval/
-  context assembly. LLM LoRA fine-tuning (Phase 73), generative RAG answers
-  (Phase 76), exam administration with real LLM-as-judge grading (Phase 51),
-  hyperparameter search execution (Phase 52), and deployment promotion
-  (Phase 82) all run for real too -- see the Project status table below for
-  each one's own honest boundary (e.g. Phase 73's LoRA CLI flags are pinned
-  to a historical llama.cpp interface). Every ML executor not explicitly
-  named across Phases 56-82 remains `Planned`.
+  context assembly. Generative RAG answers (Phase 76), exam administration
+  with real LLM-as-judge grading (Phase 51), hyperparameter search execution
+  (Phase 52), and deployment promotion (Phase 82) all run for real too --
+  see the Project status table below for each one's own honest boundary.
+  Every ML executor not explicitly named across Phases 56-82 remains
+  `Planned`. (Phase 73, real LLM LoRA fine-tuning, was implemented and later
+  removed -- see its row in the table below.)
 
 Implementation does not automatically mean operational certification. The next
 section records the distinction.
@@ -572,7 +640,7 @@ Status below reflects the evidence recorded in
 | 16 | Deadline-bound hybrid retrieval | Complete; authored hybrid-vs-full-text evaluation passes |
 | 17 | Security-partitioned cache hierarchy | Complete; representative cache latency benchmark passes |
 | 18 | Prompt-prefix and KV/session reuse | Complete; real repeated-turn prefix reuse validated |
-| 19 | Hardware/model calibration | Comparative Qwen 3B offload/throughput matrix validated; broader semantic-quality scoring remains forward work |
+| 19 | Hardware/model calibration | Comparative Qwen 3B offload/throughput matrix validated; broadened 2026-08-26 to a smaller (~2B) and a larger (~6.7B) model on the same host; broader semantic-quality scoring and a second physical host remain forward work |
 | 20 | Optional advanced throughput | Complete admission layer; every candidate (including `multiple_warm_runners`, closed 2026-08-23) now has a real implementation and a real caller gated on this registry; all candidates remain disabled by default until an administrator records real evidence and admits one |
 | 21 | Native asynchronous storage and prefetch engine | Implementation complete; bounded IOCP/`pread` fallback, mapped regions, coalescing, cancellation |
 | 22 | Hierarchical content and model-data caching | Implementation complete; immutable resident L1 and streaming-aware segmented eviction |
@@ -599,7 +667,7 @@ Status below reflects the evidence recorded in
 | 42 | Training Jobs | Implemented; real tabular training executor (Phase 56); Phase 95 (2026-08-24) added the section 16 execution-policy fields, with max runtime, retry-once failure recovery, and checkpoint cadence genuinely enforced by the executor |
 | 43 | Evaluation Lab | Implemented; real tabular scoring harness (Phase 56); Phase 96 (2026-08-24) added latency, throughput, memory use, a stability score, a robustness score, and an optional bias/fairness breakdown -- every metric category honestly computable for a tabular model; LLM-only categories (perplexity, hallucination rate, ...) remain out of scope |
 | 44 | Experiment Tracking | Implemented at a scoped-down level initially; Phase 80 adds a real training/evaluation executor and side-by-side comparison |
-| 45 | Fine-Tuning Interface | Implemented; Phase 70 adds a warm-start executor that continues gradient descent from an existing tabular model's learned weights, and Phase 73 adds a real LLM LoRA fine-tuning executor via the pinned llama.cpp `finetune`/`export-lora` CLI (triggered by a `llm:`-prefixed method) |
+| 45 | Fine-Tuning Interface | Implemented; Phase 70 adds a warm-start executor that continues gradient descent from an existing tabular model's learned weights. (Phase 73 added a real LLM LoRA fine-tuning executor via the `llama.cpp` `finetune`/`export-lora` CLI, triggered by a `llm:`-prefixed method; removed -- see Phase 73's row below.) |
 | 46 | Model Builder | Fully implemented (full section 9 design sheet, basic/advanced modes); `POST .../run` hands a submitted configuration off to a real `TrainingJob`, which now trains against a real from-scratch, configurable multi-layer-perceptron (MLP) trainer when the settings specify a hidden-layer architecture, genuinely consuming layer/activation/dropout/optimiser/batch-size/gradient-clip/accumulation/LR-schedule/early-stopping/init/epoch/seed/checkpoint settings (2026-08-23); attention/tokenizer/sequence-length/mixed-precision fields stay honestly unconsumed as transformer-only concepts this tabular-row engine does not implement |
 | 47 | Prompt and Instruction Training | Implemented at a scoped-down metadata level initially; Phase 81 adds the real content record, generation, multi-model testing, duplicate/contradiction detection, and structured-output validation |
 | 48 | Synthetic Data Generation | Implemented at a scoped-down metadata level initially; Phase 82 adds a real generation executor |
@@ -627,7 +695,7 @@ Status below reflects the evidence recorded in
 | 70 | Fine-Tuning real executor | Implemented; genuine warm-start gradient descent from a base model's trained weights, registered as a new model |
 | 71 | Automation Pipelines: more real stages and live progress | Implemented; "Validate data"/"Validate model"/"Safety tests"/"Request approval"/"Deploy staging"/"Deploy production"/"Rollback"/"Monitor" all genuinely execute (Import/clean/label/split data, optimize, and staging tests remain honestly skipped); a run now executes on a background thread and reports live per-stage progress the web UI renders as a progress bar |
 | 72 | Automation Pipelines: final six real stages | Implemented; all six stages genuinely execute, including "Label data", which now runs a real heuristic auto-labeler (quantile-binning or existing-label validation) when no completed labeling task is on record |
-| 73 | Real LLM LoRA fine-tuning | Implemented when `llama_finetune_executable`/`llama_export_lora_executable` are configured (administrator-vendored, same manual-placement convention as `llama-server`); a `"llm:"`-prefixed fine-tuning job method runs a real LoRA train-and-merge pipeline on a background thread |
+| 73 | Real LLM LoRA fine-tuning | Removed (2026-08-25). Depended on `llama.cpp`'s `finetune`/`export-lora` CLI tools, which upstream removed from all releases on 2024-07-25 (PR #8669) -- no compatible binary has existed since, and any build old enough to still have them predates model architectures added afterward (e.g. Qwen3), so the feature could never load this codebase's own models. The executor, its `AppConfig` fields, HTTP routes, and web UI were deleted rather than kept as permanently-broken dead code; Phase 70's tabular warm-start fine-tuning is unaffected |
 | 74 | Safety and Governance real content scanning | Implemented; local heuristic secret/prompt-injection/restricted-term scanning (`scan_content_for_risks`) plus a real LLM-as-judge ML classifier pass (`scan_content_with_model_classifier`) for bias/hallucination/subtler harmful content |
 | 75 | Hardware and Compute remote telemetry agent | Implemented; `masterai telemetry-agent` run on a remote node, polled for real by a `ComputeNode` with a matching `agentUrl` |
 | 76 | RAG real answer generation | Implemented; the RAG query route's optional `"generate":true` mode produces a real generated answer grounded in the same retrieved context |
@@ -646,6 +714,7 @@ Status below reflects the evidence recorded in
 | 90 | ML web UI clarity pass, part 2: responsive step banner, and automatic categorical feature encoding | Implemented; `.mlStepFlow` is now a CSS grid that wraps at any browser width/height (was a fixed-width scrolling flex row that clipped on resize), and Dataset Manager renders one banner spanning steps 2–3 instead of a squeezed duplicate copy; `parse_tabular_csv()` gained an opt-in `encode_categorical_features` flag (default off, every prior caller unchanged) that one-hot encodes a text/category feature column instead of rejecting it with "every feature column must be numeric" — fit mode for a fresh training/experiment run, apply mode (reusing the trained model's own persisted `categorical_encoding`) for evaluation/comparison/fine-tuning/checkpoint-resume, so a dataset like one with a `record_type` text column now uploads, trains, and predicts (via its natural value, e.g. `{"record_type":"document"}`) with zero manual CSV pre-processing |
 | 91 | Dataset Manager instruction-purpose datasets, and quote-aware CSV row parsing | Implemented; a `Dataset` now carries a `purpose` ("Tabular data" or "Instruction / fine-tuning text", chosen at registration and shown as a Dataset Manager list column) that the content-upload endpoint validates against — a Tabular dataset is unchanged (classification/regression target column, up to 64 distinct labels); an Instruction dataset skips that entirely and instead just checks for an instruction/prompt column and a response/output/completion column, since LLM fine-tuning data has no target-column concept and was previously forced through — and could fail — classification validation that never applied to it. Also fixes a real parsing bug the same investigation surfaced: CSV row splitting in `parse_tabular_csv`, `auto_label_tabular_dataset`, and the LLM fine-tuning text writer was a raw split on `\n`, silently corrupting any RFC 4180 quoted field with an embedded newline (any multi-paragraph text cell) into multiple broken rows; all three now use a quote-aware row splitter |
 | 92 | Model Registry quantization tracking | Implemented; `ModelRegistryEntry` gained a `quantization` field, auto-carried over from a downloaded model's manifest when it becomes a Fine-Tuning base (previously silently dropped), settable manually otherwise, and shown as a Model Registry list column. The real LLM LoRA fine-tuning executor now checks it against the precisions llama.cpp's finetune tooling trains against reliably (F32/F16/BF16/Q8_0) and adds a non-blocking `quantizationWarning` to the job's result when the base is more heavily quantized. Also closes a pre-existing gap found while wiring that warning to the UI: the Fine-Tuning Jobs page's "Fine-tune now" button previously only handled the tabular path's synchronous response and left a real (`llm:`-method) job's 202 "queued" response completely unrendered — it now polls the job's result until it completes or fails |
+| 98 | Instant natural-language execution for mechanical chat tools | Implemented; a plain request like "show me the directory of ..."/"list files in ..."/"search the project for ..."/"run the command ..." is now matched against a bounded natural-language phrase table and, when matched, its `list_directory`/`read_file`/`search`/`run_command` tool call executes immediately — before the message ever reaches the model — instead of waiting on a full generation just to decide to call a tool a fixed phrase already answers unambiguously. Destructive/high-risk calls (and any chat set to "Confirm every action") still pause for an explicit Approve/Deny click exactly as the model-mediated tool path does; a safe call still triggers one real model turn afterward so it can comment on the result. `write_file`/`delete_file` and unmatched/ambiguous phrasing are untouched, falling straight through to the normal model-mediated `[[TOOL_CALL]]` path |
 
 Current validation includes Windows x64 Debug and Release builds and tests under
 strict C++17, plus a Linux x86-64 Release build and test run under Ubuntu 26.04
@@ -735,9 +804,9 @@ reused on later turns and after restart.
 The honest remaining boundary: the authored fallback is still lexical
 feature hashing, and no learned embedding GGUF is installed in this
 checkout for model-specific semantic-quality or latency evidence. RAG
-generation (Phase 76) and LLM LoRA fine-tuning (Phase 73) both run for
-real now -- see the Project status table above for each one's own
-boundary. For the concepts, current workflows, exact capability boundary,
+generation (Phase 76) runs for real now -- see the Project status table
+above for its own boundary. For the concepts, current workflows, exact
+capability boundary,
 and a sequential teaching guide, read
 [How to Use Machine Learning and Models with MasterAI](docs/HowToUse-MachineLearning.md).
 
@@ -752,14 +821,24 @@ The release 1 target matrix is:
 - Windows 11 x86-64
 - Windows Server 2022 x86-64
 - Ubuntu Server 24.04 LTS x86-64
+- Ubuntu Server 24.04 LTS arm64 (ADR-0004; code-complete, not yet build/run
+  validated on real ARM64 Linux hardware)
 - Debian 13 x86-64
+- macOS 15+ (Sequoia or later) on Apple Silicon (arm64) only, no Intel Mac
+  (ADR-0004; code-complete, not yet build/run validated on real Apple
+  Silicon hardware). Any M-series chip is in scope, with the newer
+  M4/M5/M6-class chips as the primary chipsets this support targets
 
-Other distributions, ARM64, WSL, and containers are experimental build or
-validation environments rather than supported release targets.
+Other distributions, Intel/x86-64 macOS, WSL, and containers are
+experimental build or validation environments rather than supported release
+targets. See [the platform matrix](docs/architecture/platform-matrix.md) for
+per-target validation status.
 
 Release 1 baseline hardware:
 
-- x86-64 CPU with SSE4.2 and at least four logical processors
+- x86-64 CPU with SSE4.2 and at least four logical processors on Windows and
+  x86-64 Linux; Apple Silicon and ARM64 Linux targets have no equivalent
+  SSE4.2 floor (NEON is detected instead)
 - 16 GiB physical RAM, retaining at least 2 GiB for the operating system
 - 20 GiB free storage plus model and backup requirements
 - Optional GPU; CPU inference remains the compatibility baseline
@@ -767,7 +846,8 @@ Release 1 baseline hardware:
   driver, and at least 8 GiB dedicated VRAM. Dedicated VRAM size is
   auto-detected on Windows (DXGI); the largest real (non-software) adapter
   found decides whether a given model's weights are recommended for full
-  GPU offload.
+  GPU offload. Discrete-GPU vendor telemetry (NVML/ADLX) is Windows-only;
+  Apple Silicon has no discrete GPU or comparable vendor SDK to probe.
 
 Individual model manifests may require more capable hardware. MasterAI reports
 `Unsupported`, `Memory Risk`, `Slow`, `Usable`, or `Recommended` and blocks
@@ -797,6 +877,13 @@ Linux development uses:
 - A supported build tool generated by CMake
 - POSIX `sh`
 
+macOS development (Apple Silicon only -- see below) uses:
+
+- Xcode Command Line Tools (Clang with C++17 support)
+- CMake
+- A supported build tool generated by CMake (Ninja or Unix Makefiles)
+- POSIX `sh`
+
 The project owns its CMake entry point under `scripts/CMakeLists.txt`.
 
 ### Windows x64
@@ -821,15 +908,48 @@ currently expects the Visual Studio-integrated Ninja path configured in
 [Visual Studio guidance](docs/ide/visual-studio.md) if local tool discovery
 needs adjustment.
 
-### Linux x86-64
+### Linux x86-64 and Linux ARM64
 
 ```sh
 sh ./scripts/build.sh Release Linux-x86_64
 sh ./scripts/test.sh Release Linux-x86_64
 ```
 
-`Linux-arm64` is accepted by the build helper as an experimental validation
-target, not a release 1 supported platform.
+`Linux-arm64` is a supported release target as of ADR-0004:
+
+```sh
+sh ./scripts/build.sh Release Linux-arm64
+sh ./scripts/test.sh Release Linux-arm64
+```
+
+It is code-complete but not yet build/run-validated -- no ARM64 Linux
+hardware was available to verify it. See
+[the platform matrix](docs/architecture/platform-matrix.md).
+
+### macOS (Apple Silicon)
+
+macOS support targets Apple Silicon (arm64) only -- chips in the M-series
+line, with the newer M4/M5/M6-class chips as the primary target this support
+was written for. There is no Intel/x86-64 Mac support and no Rosetta path;
+`scripts/CMakeLists.txt` fails the configure step outright on a non-arm64
+Mac.
+
+```sh
+sh ./scripts/build.sh Release Darwin-arm64
+sh ./scripts/test.sh Release Darwin-arm64
+```
+
+Like Linux ARM64, this is code-complete but not yet build/run-validated --
+no Apple Silicon hardware was available to verify it. Every macOS-specific
+code path (Keychain-based secret storage, PAM-based identity, CommonCrypto
+hashing, FSEvents file watching, `launchd` service scripts) is a real
+implementation, not a stub -- see
+[ADR-0004](docs/architecture/ADR-0004-linux-arm64-and-macos-apple-silicon.md)
+for the full decision record and
+[the platform matrix](docs/architecture/platform-matrix.md) for current
+validation status. To run MasterAI as a background service on macOS, use
+`scripts/install-launchd.sh` (see the script reference table below) instead
+of the Linux-only `install-systemd.sh`.
 
 ### Cleaning generated builds
 
@@ -880,22 +1000,22 @@ order.
 > for the revision MasterAI's own Phase 4 validation was pinned against).
 
 > [!NOTE]
-> **Where to get `llama-finetune` / `llama-export-lora` (optional, real LLM
-> LoRA fine-tuning only).** Machine Learning's Fine-Tuning page can adapt an
-> LLM with real LoRA training when a `FineTuningJob`'s method starts with
-> `llm:` (e.g. `llm:code assistant`) — everything else in this module trains
-> the tabular linear/logistic models Phase 56 implements instead, which
-> needs neither of these tools. Like `llama-server` above, MasterAI does not
-> vendor or build these: download them from the same
-> `ggml-org/llama.cpp` GitHub Releases page and place them alongside
-> `llama-server.exe` in `tools/llama.cpp/` (or wherever you keep it), then
-> point `llama_finetune_executable` / `llama_export_lora_executable` in
-> `config/settings.json` at their full paths. Their exact command-line flags
-> have changed across `llama.cpp` releases; if a fine-tuning run fails,
-> check `GET /api/v1/ml/fine-tuning-jobs/{id}/llm-result` for the tool's own
-> error output, and use each job's `extraFinetuneArguments` /
-> `extraExportLoraArguments` request fields to adapt to whatever your
-> vendored build actually expects.
+> **Real LLM LoRA fine-tuning (formerly Phase 73) has been removed.** It
+> shelled out to `llama.cpp`'s `finetune`/`export-lora` example tools via a
+> `FineTuningJob` whose method started with `llm:` (e.g. `llm:code
+> assistant`). Upstream `llama.cpp` removed those tools on 2024-07-25 (PR
+> #8669); no release since then ships the binaries, so the feature could
+> never actually run against a modern `llama.cpp` build. The only way to get
+> compatible binaries would be building `llama.cpp` from a commit before
+> that date, which also predates model architectures added afterward (e.g.
+> Qwen3, from 2025) and so cannot load a base GGUF using one of those newer
+> architectures at all — permanently unworkable for this codebase's own
+> models, so the executor, its `AppConfig` fields
+> (`llama_finetune_executable`/`llama_export_lora_executable`), its HTTP
+> routes, and its web UI were deleted rather than left as dead code. Machine
+> Learning's Fine-Tuning page still runs Phase 70's real tabular warm-start
+> fine-tuning (continuing gradient descent from an existing trained model's
+> weights), which needs none of this and is unaffected.
 
 ### 1. Build the binary
 
@@ -920,10 +1040,18 @@ server executable and at least one GGUF model with a valid manifest.
   `manifest.json` next to it that validates against
   [models/manifest.schema.json](models/manifest.schema.json). The manifest
   must declare the model's exact size, SHA-256 digest, license, and
-  approved source (Hugging Face, GitHub releases, or ModelScope).
+  approved source (Hugging Face, GitHub releases, or ModelScope) — or, for a
+  self-produced model (see below), an internal `masterai-*:` marker instead.
 - Optional: an approved `curl` executable, only if you want MasterAI to
   manage model downloads itself (`masterai download-model`) instead of
   placing files manually.
+- Already have a GGUF on local disk instead — your own fine-tune, a
+  conversion, or a file you trust? `POST /api/v1/model-imports` (or the web
+  UI's **Import a local model** form on `/app/models/download`) copies it
+  into the catalog and writes a correct manifest for you, computing the real
+  SHA-256 and marking it Ready immediately — no manual manifest editing and
+  no separate `verify-models` pass needed. See
+  `docs/HowToUse-MachineLearning.md` Section 11 for the guided walkthrough.
 
 ### 3. Run the configuration wizard
 
@@ -1236,10 +1364,12 @@ The native service provides browser workflows for:
 HTTP APIs are versioned under `/api/v1/`. Implemented capability areas include
 authentication, users, projects, chats, user memories (`GET/POST
 /api/v1/memories` and `POST /api/v1/memories/{id}/delete`), models, downloads (including
-`.../model-downloads/{id}/pause`, `.../cancel`, and `.../remove`),
-benchmarks, resources, memory, request metrics, project indexes, MCP
-integrations, IDE connections, and administrator-only Machine Learning
-records under `/api/v1/ml/*`.
+`.../model-downloads/{id}/pause`, `.../cancel`, and `.../remove`), local
+model import (`POST /api/v1/model-imports`), benchmarks, resources, memory,
+request metrics, project indexes, MCP integrations, IDE connections, and
+administrator-only Machine Learning records under `/api/v1/ml/*` (including
+`POST /api/v1/ml/models/{id}/source` to correct a Model Registry entry's
+source file path in place).
 
 Two additional routes exist specifically so a third-party client (e.g. the
 separate Agent-Coder VS Code extension) can use a running MasterAI instance
@@ -1373,11 +1503,13 @@ real magnitude-pruning pass against the pipeline's model's actual learned
 weights, "Staging tests" reuses the same real evaluation executor "Evaluate
 model" calls, and "Label data" either references a completed real labeling
 task or runs a real deterministic heuristic labeler
-(percentile-threshold-based) when none exists. Phase 73 added a real LLM
-LoRA fine-tuning executor (the pinned llama.cpp `finetune`/`export-lora`
-CLI, triggered by a `llm:`-prefixed Fine-Tuning method) and Phase 76 added
-real generative RAG answers, both summarized in the Project status table
-above.
+(percentile-threshold-based) when none exists. Phase 76 added real
+generative RAG answers, summarized in the Project status table above.
+(Phase 73 added a real LLM LoRA fine-tuning executor via the pinned
+llama.cpp `finetune`/`export-lora` CLI, triggered by a `llm:`-prefixed
+Fine-Tuning method; it was later removed once those CLI tools turned out
+to be permanently unavailable from any current `llama.cpp` release -- see
+Phase 73's row in the table above.)
 
 The honest boundary that remains: creating or advancing the other job types
 (section 2's interfaces this README's Project status table above still
@@ -1385,9 +1517,7 @@ marks `Planned`) records administrative intent and state, not execution.
 Creating an empty vector-store record alone does not populate it. The
 authored embedding fallback is not a learned semantic embedding model, and
 learned-adapter quality depends on the verified embedding GGUF an
-administrator installs. Phase 73's LoRA fine-tuning CLI flags are pinned to
-a historical llama.cpp interface and may need administrator-supplied extra
-arguments if that interface drifts.
+administrator installs.
 Approved externally trained models must still be deliberately packaged
 as verified GGUF artifacts in the inference model tree before MasterAI can
 serve them for chat.
@@ -1486,24 +1616,29 @@ agree with what the running server actually uses.
 
 ## Scripts reference
 
-Every `scripts/*.ps1` (Windows) has a matching `scripts/*.sh` (Linux) with the
-same behavior and argument order unless noted. Run them from the repository
-root. `[settings-file]` always defaults to `config/settings.json` when
-omitted; `[BuildType]` always defaults to `Release` except where noted.
+Every `scripts/*.ps1` (Windows) has a matching `scripts/*.sh` (Linux/macOS)
+with the same behavior and argument order unless noted. Run them from the
+repository root. `[settings-file]` always defaults to `config/settings.json`
+when omitted; `[BuildType]` always defaults to `Release` except where noted.
+`[Platform]` (the `.sh` scripts only) always defaults to `Linux-x86_64` when
+omitted; pass `Linux-arm64` or `Darwin-arm64` (macOS, Apple Silicon) to
+target those builds instead.
 
 | Script | Arguments | Purpose |
 |---|---|---|
-| `build.ps1` / `build.sh` | `-BuildType <Debug\|Release>` `-Platform <Windows-x64>` `-VerifyModels` `-ModelsRoot <path>` &nbsp;/&nbsp; `<BuildType> <Platform>` | Configures CMake (Ninja) and builds `masterai`, `masterai_core`, and the test binaries. Default `BuildType` is **Debug**. `-VerifyModels`/`-Platform Linux-x86_64\|Linux-arm64` runs `verify-models` after a successful build. |
-| `configure.ps1` / `configure.sh` | `[settings-file] [BuildType]` (`.ps1` takes `-Settings`/`-BuildType` named params) | Runs the interactive first-run/update/reset configuration wizard (`masterai configure`) and writes validated settings. Requires the binary from `build` to already exist. |
-| `start.ps1` / `start.sh` | `[settings-file] [BuildType] [-Foreground\|--foreground]` | Starts `masterai serve`. Runs `configure` automatically first if settings are missing (interactive terminals only). Without `-Foreground`/`--foreground`, launches detached and records the PID under `<runtime-root>/run/masterai.pid`. |
-| `stop.ps1` / `stop.sh` | `[settings-file] [BuildType]` | Requests graceful shutdown of the PID recorded by `start` and waits for exit. |
+| `build.ps1` / `build.sh` | `-BuildType <Debug\|Release>` `-Platform <Windows-x64>` `-VerifyModels` `-ModelsRoot <path>` &nbsp;/&nbsp; `<BuildType> <Platform>` | Configures CMake (Ninja on Windows; the platform's default generator on Linux/macOS) and builds `masterai`, `masterai_core`, and the test binaries. Default `BuildType` is **Debug**. `-VerifyModels` runs `verify-models` after a successful build. `build.sh`'s `<Platform>` accepts `Linux-x86_64`, `Linux-arm64`, or `Darwin-arm64` (macOS). |
+| `configure.ps1` / `configure.sh` | `[settings-file] [BuildType]` (`.ps1` takes `-Settings`/`-BuildType` named params); `configure.sh` also takes an optional trailing `[Platform]` | Runs the interactive first-run/update/reset configuration wizard (`masterai configure`) and writes validated settings. Requires the binary from `build` to already exist. |
+| `start.ps1` / `start.sh` | `[settings-file] [BuildType] [-Foreground\|--foreground]`; `start.sh` also takes an optional trailing `[Platform]` (after `--foreground`) | Starts `masterai serve`. Runs `configure` automatically first if settings are missing (interactive terminals only). Without `-Foreground`/`--foreground`, launches detached and records the PID under `<runtime-root>/run/masterai.pid`. |
+| `stop.ps1` / `stop.sh` | `[settings-file] [BuildType]`; `stop.sh` also takes an optional trailing `[Platform]` | Requests graceful shutdown of the PID recorded by `start` and waits for exit. |
 | `test.ps1` / `test.sh` | `-BuildType <Debug\|Release> -Platform <Windows-x64>` &nbsp;/&nbsp; `<BuildType> <Platform>` | Runs `ctest` (the full native suite, `masterai_core_tests`) against an already-built tree. Default `BuildType` is **Debug**. |
-| `diagnose.ps1` / `diagnose.sh` | `[settings-file] [BuildType]` | Runs `masterai security-status` against the settings' configured runtime root. |
-| `rehash.ps1` (Windows only; Linux: run `masterai verify-models` directly) | `-Settings <path> -BuildType <Debug\|Release> -ModelsRoot <path>` | Hashes every file under `models-root` against its manifest and refreshes the verification cache (`models_root/.verified-cache.json`). Run after adding, replacing, or removing model files. When `-ModelsRoot` is omitted it resolves `workspace.modelsRoot` via `masterai models-root <settings>` (see above) rather than re-implementing the path resolution in PowerShell, so it always finds the same directory the server uses. Prints live `NN%` progress lines while hashing any file 256 MB or larger, instead of going silent until the whole model finishes. |
-| `clean.ps1` / `clean.sh` | `-WhatIf` &nbsp;/&nbsp; `--dry-run` | Deletes only the generated `build/` tree. Source, configuration, runtime data, and models are untouched. |
+| `diagnose.ps1` / `diagnose.sh` | `[settings-file] [BuildType]`; `diagnose.sh` also takes an optional trailing `[Platform]` | Runs `masterai security-status` against the settings' configured runtime root. |
+| `rehash.ps1` (Windows only; Linux/macOS: run `masterai verify-models` directly) | `-Settings <path> -BuildType <Debug\|Release> -ModelsRoot <path>` | Hashes every file under `models-root` against its manifest and refreshes the verification cache (`models_root/.verified-cache.json`). Run after adding, replacing, or removing model files. When `-ModelsRoot` is omitted it resolves `workspace.modelsRoot` via `masterai models-root <settings>` (see above) rather than re-implementing the path resolution in PowerShell, so it always finds the same directory the server uses. Prints live `NN%` progress lines while hashing any file 256 MB or larger, instead of going silent until the whole model finishes. |
+| `clean.ps1` / `clean.sh` | `-WhatIf` &nbsp;/&nbsp; `--dry-run` | Deletes only the generated `build/` tree (every platform's build output under it). Source, configuration, runtime data, and models are untouched. |
 | `verify-objectives.ps1` / `verify-objectives.sh` | none | Fails if `docs/objectives.md` has changed without a corresponding reassessed and re-cached hash in `docs/objectives.sha256`. |
 | `install-systemd.sh` (Linux only) | `<binary> <settings> <runtime-root> <models-root> <service-user>` | Installs and enables a hardened `masterai.service` systemd unit from fixed absolute paths. Does not build, download, create users, or modify settings. |
 | `uninstall-systemd.sh` (Linux only, run as root) | none | Disables and removes the installed systemd unit. Runtime data, settings, models, backups, and credentials are preserved. |
+| `install-launchd.sh` (macOS only) | `<binary> <settings> <runtime-root> <models-root> <service-user>` | Installs and bootstraps a `com.masterai.server` `launchd` daemon plist from fixed absolute paths, mirroring `install-systemd.sh`'s contract. launchd has no equivalent to systemd's kernel-level hardening keys (`ProtectSystem=strict`, `NoNewPrivileges=`, etc.) -- see [ADR-0004](docs/architecture/ADR-0004-linux-arm64-and-macos-apple-silicon.md) for that gap. Does not build, download, create users, or modify settings. |
+| `uninstall-launchd.sh` (macOS only, run as root) | none | Disables and removes the installed `launchd` plist. Runtime data, settings, models, backups, and credentials are preserved. |
 
 ## Persistence, operations, and recovery
 
@@ -1708,16 +1843,20 @@ sh ./scripts/verify-objectives.sh
 
 Near-term work is:
 
-1. Author the Phase 16 retrieval-quality evaluation set demonstrating
-   improvement over full-text-only retrieval.
-2. Author the Phase 17 representative-query latency benchmark comparing
-   cached against uncached retrieval preparation time.
+1. ~~Author the Phase 16 retrieval-quality evaluation set demonstrating
+   improvement over full-text-only retrieval~~ — done (2026-08-05): see
+   [docs/performance/phase-16-retrieval-evaluation.md](docs/performance/phase-16-retrieval-evaluation.md),
+   2/2 hybrid hits versus 0/2 literal full-query hits.
+2. ~~Author the Phase 17 representative-query latency benchmark comparing
+   cached against uncached retrieval preparation time~~ — done
+   (2026-08-05): see [docs/performance/phase-17-cache-benchmark.md](docs/performance/phase-17-cache-benchmark.md).
 3. ~~Complete the Phase 19 comparative calibration evidence and the Phase 30A
    matched `auto`-versus-`cpu_only` real-model benchmark matrix~~ — done
    (2026-08-13): GPU utilization/thermal-trend probing is wired into
    `CalibrationService` with real measured evidence, and both `auto`/
    `cpu_only` states now persist a `TuningProfile` on the same pinned host/
-   model, see [docs/performance/phase-19-qwen3b-matrix.md](docs/performance/phase-19-qwen3b-matrix.md).
+   model; broadened 2026-08-26 to a smaller and a larger model beyond the
+   original Qwen 3B, see [docs/performance/phase-19-qwen3b-matrix.md](docs/performance/phase-19-qwen3b-matrix.md).
 4. Evaluate Phase 20 throughput options independently after prerequisite
    evidence closes; use the durable admission API and never enable an
    unavailable, regressing, or fallback-unverified candidate.
@@ -1730,17 +1869,26 @@ Near-term work is:
 7. Phases 31-36 (storage tiering, speculative decoding, distributed local
    and intranet-worker runners, the adaptive performance controller,
    performance administration, and the full benchmark matrix/regression
-   gate) are all now implemented -- Phase 32's dual-model launch path is
-   still unvalidated on real hardware, and Phase 36's cross-device physical
-   matrix still needs an administrator to run it on each real target host
-   (see docs/PLAN.md). Remaining forward work: wire `IntranetWorkerPool`
+   gate) are all now implemented. Phase 32's dual-model launch path now has
+   real-hardware evidence (2026-08-18, corroborated 2026-08-26) across two
+   compatible model pairs on this low-VRAM host -- both a real, honest
+   *negative* result (speculative decoding measured slower here, not
+   faster), which is a valid closed measurement, not an open gap; see
+   [docs/performance/phase-32-speculative-matrix.md](docs/performance/phase-32-speculative-matrix.md).
+   Phase 36's single-host software-controllable matrix now covers two
+   model/profile combinations (2026-08-26); its cross-device physical
+   matrix (other storage media, other physical machines/GPUs) still needs
+   an administrator to run it on each further real target host (see
+   docs/PLAN.md). Remaining forward work: wire `IntranetWorkerPool`
    into the live chat-generation dispatch path the way `LocalRunnerPool`
    already is, and extend the Phase 35 administration page toward the
    plan's remaining named pages (Query Traces, Runner Configuration, Model
    Comparison).
-8. LLM LoRA fine-tuning (Phase 73) and generated-answer RAG (Phase 76) are
-   now implemented -- remaining forward work is the ML executors the
-   Project status table above still marks `Planned` (e.g. safety/
+8. Generated-answer RAG (Phase 76) is now implemented (LLM LoRA
+   fine-tuning, Phase 73, was implemented and later removed -- see its
+   row in the Project status table above) -- remaining forward work is
+   the ML executors the Project status table above still marks
+   `Planned` (e.g. safety/
    governance's PII/copyright/data-poisoning detectors and retention/
    export/network policy enforcement, section 2's interfaces with no
    phase of their own yet), without allowing lifecycle state to

@@ -164,8 +164,7 @@ MemoryAdmission MemoryBudgetManager::reserve(
         (!interactive && state_->current.pressure >= MemoryPressure::high) ||
         after > state_->policy.hard_limit_bytes ||
         requested > os_safe_available) {
-        result.diagnostic =
-            "request exceeds the active RAM ceiling or OS safety reserve";
+        result.diagnostic = kMemoryAdmissionResourcePressureDiagnostic;
         result.corrective_actions = {
             "reduce_context", "reduce_concurrency", "use_smaller_model",
             "unload_idle_model"};

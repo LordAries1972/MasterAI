@@ -101,8 +101,9 @@ std::string tools_catalogue() {
         "\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true,"
         "\"destructiveHint\":false}},"
         "{\"name\":\"masterai.project.list_directory\",\"title\":\"List "
-        "project directory\",\"description\":\"List one bounded directory's "
-        "immediate entries inside an authorized project.\","
+        "project directory\",\"description\":\"List a bounded directory and "
+        "every subdirectory beneath it, as one tree, inside an authorized "
+        "project.\","
         "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"projectId\":{"
         "\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":["
         "\"projectId\"],\"additionalProperties\":false},\"annotations\":{"
@@ -230,7 +231,7 @@ std::optional<std::string> handle_project_tool_call(
     const std::string& id, const std::string& name, const JsonValue& arguments,
     const JsonValue::Object& argument_object, const McpIdentity& identity,
     ProjectCatalog& projects, AllowedCommandStore& allowed_commands,
-    std::atomic_bool& cancellation) {
+    std::atomic_bool& cancellation, const AppConfig& config) {
     static const std::string project_tool_prefix{"masterai.project."};
     if (name.compare(0U, project_tool_prefix.size(), project_tool_prefix) !=
         0) {
@@ -306,7 +307,8 @@ std::optional<std::string> handle_project_tool_call(
                 "{\"error\":\"approval_required\"}", true);
         }
         const auto result = execute_chat_tool(
-            tool_name, arguments, *project, allowed_commands, cancellation);
+            tool_name, arguments, *project, allowed_commands, cancellation,
+            config);
         const std::string structured =
             result.structured_json.empty() ? "{}" : result.structured_json;
         return tool_result(id, result.result_text, structured,
@@ -326,10 +328,11 @@ const char* mcp_protocol_version() noexcept { return "2025-11-25"; }
 McpInboundServer::McpInboundServer(ProjectCatalog& projects,
                                    std::filesystem::path models_root,
                                    const std::uint64_t memory_reserve_mib,
-                                   AllowedCommandStore& allowed_commands)
+                                   AllowedCommandStore& allowed_commands,
+                                   const AppConfig& config)
     : projects_(projects), models_root_(std::move(models_root)),
       memory_reserve_mib_(memory_reserve_mib),
-      allowed_commands_(allowed_commands) {
+      allowed_commands_(allowed_commands), config_(config) {
     if (models_root_.empty()) {
         throw std::invalid_argument("MCP model root is required");
     }
@@ -475,7 +478,7 @@ std::string McpInboundServer::handle(const std::string& request_json,
         }
         if (const auto response = handle_project_tool_call(
                 id, name, arguments, argument_object, identity, projects_,
-                allowed_commands_, cancellation)) {
+                allowed_commands_, cancellation, config_)) {
             return *response;
         }
         return rpc_error(id, -32602, "Unknown tool");

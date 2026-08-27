@@ -147,6 +147,18 @@
         "maximumBytesPerCategory": {"type": "integer", "minimum": 1, "maximum": 4294967296}
       }
     },
+    "chatTools": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "readFileMaximumBytes": {"type": "integer", "minimum": 1, "maximum": 268435456},
+        "searchMaximumFiles": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "searchMaximumResults": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "listDirectoryMaximumEntries": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "commandTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "commandMaximumOutputBytes": {"type": "integer", "minimum": 1, "maximum": 268435456}
+      },
+      "$comment": "Bounds on the six built-in project tools (read_file, list_directory, search, write_file, delete_file, run_command) shared by the web-ui chat tool loop and every MCP client (VS Code, Visual Studio, ...) calling the same tools through tools/call. All fields are optional and default to 1048576 (1 MiB), 512, 50, 4000, 30, and 262144 (256 KiB) respectively when the section or field is omitted -- see docs/architecture/configuration.md."
+    },
     "session": {
       "type": "object", "additionalProperties": false,
       "required": ["enabled", "maxSlots", "idleRetentionSeconds"],

@@ -263,15 +263,6 @@ struct AppConfig {
     std::string accelerator_policy{"auto"};
     std::filesystem::path llama_server_executable;
     std::filesystem::path curl_executable;
-    // Phase 73: optional, administrator-vendored llama.cpp LoRA tooling
-    // (same manual-placement convention as llama_server_executable above --
-    // see README.md's "Where to get llama-server" section for the download
-    // instructions this mirrors). Empty disables real LLM LoRA fine-tuning;
-    // a FineTuningJob whose method names an LLM target then fails clearly
-    // with "llama-finetune/llama-export-lora not configured" rather than
-    // silently falling back to the tabular path.
-    std::filesystem::path llama_finetune_executable;
-    std::filesystem::path llama_export_lora_executable;
     // Phase: process-isolated DuckDB CLI backend (rule 15's second named
     // exception) used solely to convert Parquet knowledge-document uploads
     // to text before chunking (parquet_bridge.cpp). Empty disables Parquet
@@ -345,6 +336,30 @@ struct AppConfig {
     // fresh RetrievalPlanner run, no reuse).
     bool cache_enabled{true};
     std::uint64_t cache_maximum_bytes_per_category{64ULL * 1024ULL * 1024ULL};
+    // Limits on the six built-in project tools (read_file, list_directory,
+    // search, write_file, delete_file, run_command -- see execute_chat_tool()
+    // in tool_exec.cpp) shared verbatim by the web-ui chat tool loop and by
+    // every MCP client (VS Code, Visual Studio, ...) calling the same tools
+    // through tools/call. Previously fixed constexpr constants in
+    // tool_exec.cpp with no operator control; moved here because they
+    // directly decide whether the AI's directory listings, searches, and
+    // command output come back complete or get cut short on both surfaces.
+    //   readFileMaximumBytes: largest single file read_file will read.
+    //   searchMaximumFiles: most files search will walk before stopping.
+    //   searchMaximumResults: most matching lines search will return.
+    //   listDirectoryMaximumEntries: most files/folders list_directory will
+    //     enumerate in one recursive tree walk before it reports the listing
+    //     as truncated and asks for a narrower subdirectory.
+    //   commandTimeoutSeconds: how long run_command lets the sandboxed
+    //     process run before it is killed as hung.
+    //   commandMaximumOutputBytes: most combined stdout/stderr bytes
+    //     run_command will capture from one process before cutting it off.
+    std::uint64_t chat_tool_read_file_maximum_bytes{1024ULL * 1024ULL};
+    std::uint32_t chat_tool_search_maximum_files{512U};
+    std::uint32_t chat_tool_search_maximum_results{50U};
+    std::uint32_t chat_tool_list_directory_maximum_entries{4000U};
+    std::uint32_t chat_tool_command_timeout_seconds{30U};
+    std::uint64_t chat_tool_command_maximum_output_bytes{256ULL * 1024ULL};
     // Chat reply length policy: the previous unconfigurable
     // GenerationOptions::max_tokens default (512) cut replies off well
     // before the model's own end-of-turn token instead of letting them run
@@ -2298,17 +2313,24 @@ ModelLoadMode select_load_mode(const StorageLatencyProfile& storage,
 // counts -- only a total weight size. Without that, a layer count between
 // "none" and "all" cannot honestly be computed (it would be a guess dressed
 // up as a measurement), so this function only ever decides the two cases it
-// really can reason about from size alone: the whole model comfortably fits
-// in the VRAM left after a headroom reservation (offload everything), or it
-// doesn't (offload nothing, the always-safe CPU-only fallback). Returns 0
-// whenever GPU offload cannot be justified: no GPU backend detected, the
-// model declares a required_gpu_backend the host doesn't have, VRAM size is
-// unknown (0 -- probing failed or is unsupported on this host), or
-// model_size_bytes is unknown (0). Never throws.
+// really can reason about from size alone: the whole model plus its
+// estimated GPU KV cache (see kConservativeKvCacheBytesPerToken,
+// calibration.cpp) comfortably fit in the VRAM left after a headroom
+// reservation (offload everything), or they don't (offload nothing, the
+// always-safe CPU-only fallback). `context_length` is the total --ctx-size
+// a launch would request (already the sum across every --parallel slot, not
+// per-slot) -- passing 0 skips the KV-cache term entirely, matching the
+// pre-existing weights-only behavior for a caller that genuinely has no
+// context length decided yet. Returns 0 whenever GPU offload cannot be
+// justified: no GPU backend detected, the model declares a
+// required_gpu_backend the host doesn't have, VRAM size is unknown (0 --
+// probing failed or is unsupported on this host), or model_size_bytes is
+// unknown (0). Never throws.
 constexpr unsigned int kGpuLayersOffloadAll = 999U;
 unsigned int select_gpu_layers(const HardwareInfo& hardware,
                                const std::string& required_gpu_backend,
-                               std::uint64_t model_size_bytes) noexcept;
+                               std::uint64_t model_size_bytes,
+                               unsigned int context_length = 0U) noexcept;
 
 // Phase 85: evidence-based --threads/--ubatch-size recommendations. See
 // their definitions in calibration.cpp for the full rationale; declared here
@@ -2538,6 +2560,14 @@ struct RunnerMetrics {
     unsigned int requested_gpu_layers{0U};
     std::string accelerator_policy;
     std::uint64_t last_activity_epoch_seconds{0U};
+    // Phase 100: the context_length load() was actually launched with --
+    // this can be smaller than AppConfig::chat_context_length (an admin
+    // ceiling) whenever a calibration profile or AdaptiveController's
+    // memory-pressure shrink chose a smaller value for this particular
+    // launch. Zero means "no runner has ever loaded" (or a pre-Phase-100
+    // metrics snapshot), which callers treat as "unknown, fall back to the
+    // configured ceiling" rather than a real zero-token context.
+    unsigned int context_length{0U};
 };
 
 class RunnerSupervisor final {
@@ -2587,6 +2617,20 @@ public:
     // MemoryBudgetManager pressure sampling) rather than on every request.
     bool apply_idle_timeout(std::uint64_t now_epoch_seconds,
                             std::uint32_t idle_unload_seconds);
+    // Told once, from HttpServer::stop(), before it starts waiting on
+    // in-flight request threads to finish -- lets load()'s readiness-poll
+    // loop notice a process shutdown and release mutex_ within a poll tick
+    // instead of running out its full startup_timeout_seconds window
+    // uninterrupted. Without this, a load() that was mid-retry against an
+    // already-crashed backend (e.g. after the GPU driver killed a prior
+    // runner process, see calibration.cpp's KV-cache-aware select_gpu_
+    // layers()) held mutex_ for up to startup_timeout_seconds, and unload()
+    // -- called from this same object's destructor during shutdown -- had
+    // to wait out that same window before it could even start, since it
+    // takes the identical lock. Irreversible by design: once a process is
+    // shutting down, no later load() on this object should ever proceed
+    // again, so there is no matching "un-stop".
+    void request_shutdown() noexcept { stopping_.store(true); }
 
 private:
     class Process;
@@ -2595,6 +2639,11 @@ private:
     LlamaCppAdapter adapter_;
     std::unique_ptr<Process> process_;
     mutable std::mutex mutex_;
+    // See request_shutdown() above. Checked (not guarded by mutex_ -- it
+    // only ever transitions false -> true, so a torn read is impossible)
+    // inside load()'s readiness-poll loop, which otherwise holds mutex_
+    // uninterrupted for the entire loop.
+    std::atomic_bool stopping_{false};
     RunnerMetrics metrics_;
     unsigned int port_{0};
     // Phase 26: layered warm-model state (see WarmModelTracker/WarmModelState
@@ -3929,6 +3978,12 @@ public:
     // already `approved` or `staging`. Every other transition is allowed --
     // there is no evaluation/approval workflow yet to validate against.
     bool set_state(const std::string& id, ModelRegistryState state);
+    // Lets a bad `source` (e.g. free text typed where a file path was
+    // expected) be corrected in place instead of deleting and recreating the
+    // entry, which would orphan any Fine-Tuning job that already references
+    // this entry's id. Throws std::invalid_argument under the same rule
+    // create() enforces: a non-empty source must be a real, existing file.
+    bool set_source(const std::string& id, const std::string& source);
     bool remove(const std::string& id);
 
 private:
@@ -3966,11 +4021,9 @@ struct Dataset {
     std::string data_format;
     std::string owner_id;
     DatasetApprovalStatus approval_status{DatasetApprovalStatus::pending};
-    // "tabular" (default) means content upload validates a classification/
-    // regression target column; "instruction" means content is LLM fine-
-    // tuning data (instruction/prompt + response/output/completion columns)
-    // and skips that target-column validation entirely -- see the content
-    // upload endpoint in server.cpp.
+    // "tabular" (default, the only supported value) means content upload
+    // validates a classification/regression target column -- see the
+    // content upload endpoint in server.cpp.
     std::string purpose{"tabular"};
     // Phase 94: docs/PLAN.md section 10's remaining fields, computed for
     // real from the actual uploaded content (DatasetContentStore) every
@@ -4669,92 +4722,6 @@ private:
 
 std::string fine_tuning_job_json(const FineTuningJob& job);
 std::string fine_tuning_jobs_json(const std::vector<FineTuningJob>& jobs);
-
-// Phase 73: real LLM LoRA fine-tuning, distinguished from Phase 70's
-// tabular fine-tuning path by a `FineTuningJob.method` value starting with
-// the "llm:" prefix (e.g. "llm:code assistant") -- a free-text convention,
-// matching this codebase's existing "free text, not a closed enum" choice
-// for `method` itself, rather than a second status/type field. Everything
-// below shells out to administrator-vendored llama.cpp tooling
-// (AppConfig::llama_finetune_executable / llama_export_lora_executable);
-// this codebase does not implement transformer backpropagation itself.
-// Exact CLI flags are version-dependent -- llama.cpp's finetune/
-// export-lora tooling interface has changed across releases -- so
-// LlmFineTuneOptions::extra_finetune_arguments/extra_export_lora_arguments
-// let an administrator adapt to whatever their vendored build actually
-// expects; a non-zero exit from either tool surfaces that tool's own
-// stderr tail as the error, never a fabricated success.
-struct LlmFineTuneOptions {
-    std::uint32_t epochs{1};
-    double learning_rate{1e-4};
-    std::string extra_finetune_arguments;
-    std::string extra_export_lora_arguments;
-};
-
-struct LlmFineTuneResult {
-    std::filesystem::path adapter_gguf;
-    std::filesystem::path merged_gguf;
-    std::string finetune_log_tail;
-    std::string export_lora_log_tail;
-};
-
-// Runs llama-finetune against base_model_gguf/training_text_path to
-// produce a LoRA adapter under output_directory, then llama-export-lora to
-// merge that adapter into a new standalone GGUF (also under
-// output_directory). Throws std::runtime_error -- naming which tool and
-// why -- if either executable is not configured, does not exist, or exits
-// non-zero.
-LlmFineTuneResult run_llama_lora_finetune(
-    const AppConfig& configuration, const std::filesystem::path& base_model_gguf,
-    const std::filesystem::path& training_text_path,
-    const std::filesystem::path& output_directory,
-    const LlmFineTuneOptions& options, const std::atomic_bool& cancellation);
-
-// Converts a dataset's stored CSV content into the plain instruction/
-// response text format llama.cpp's finetune tooling consumes (one
-// "### Instruction:\n<...>\n### Response:\n<...>\n\n" block per row).
-// Scoped-down and honest: only meaningful for datasets whose CSV header
-// already has a column named "instruction" or "prompt" and one named
-// "response", "output", or "completion" (case-insensitive) -- throws
-// std::runtime_error naming the missing column otherwise, rather than
-// guessing which columns to use.
-std::filesystem::path write_llm_finetune_training_text(
-    const std::string& csv, const std::filesystem::path& output_path);
-
-// Result of validating a dataset's CSV content against the same
-// instruction/response column rules write_llm_finetune_training_text
-// enforces, without writing anything to disk -- used at dataset content
-// upload time for a purpose="instruction" Dataset (see the Dataset::purpose
-// comment above) so bad content is rejected at upload, not at training time.
-struct InstructionDatasetProfile {
-    std::size_t rows{0};
-    std::string instruction_column;
-    std::string response_column;
-};
-
-InstructionDatasetProfile validate_instruction_dataset_csv(
-    const std::string& csv, std::uint64_t maximum_csv_bytes);
-std::string instruction_dataset_profile_json(
-    const std::string& dataset_id, const InstructionDatasetProfile& profile);
-
-// Persisted outcome of the most recent LLM LoRA fine-tuning attempt for one
-// FineTuningJob, keyed by job id -- the async counterpart to
-// EvaluationResultStore above, since a real llama.cpp finetune run can take
-// far longer than the HTTP request timeout and therefore runs on a
-// detached background thread (see run_llm_fine_tuning_job in server.cpp),
-// with this store as the only way a caller polling GET .../llm-result
-// learns the outcome.
-class FineTuningRunResultStore final {
-public:
-    FineTuningRunResultStore() = default;
-    explicit FineTuningRunResultStore(RecordStore& records);
-    void put(const std::string& job_id, const std::string& result_json);
-    std::optional<std::string> find(const std::string& job_id) const;
-    bool remove(const std::string& job_id);
-
-private:
-    RecordStore* records_{nullptr};
-};
 
 // Phase 46: docs/PLAN.md "Machine Learning Abilities" section 9 (Model
 // Builder Interface), now implemented at full surface. The interface guides
@@ -7599,6 +7566,18 @@ struct MemoryAdmission {
     std::vector<std::string> corrective_actions;
 };
 
+// The exact MemoryAdmission::diagnostic text MemoryBudgetManager::reserve()
+// (memory.cpp) sets when it declines admission purely because of live
+// resource pressure (the configured hard limit, the OS safety reserve, or
+// pressure-tier throttling) -- as opposed to a caller-side bug like a zero
+// or overflowed MemoryEstimate. A caller that re-throws admission.diagnostic
+// as an exception (e.g. server.cpp's chat generation path) can compare its
+// caught message against this constant to tell "temporarily out of
+// resources, safe to retry" apart from a genuine failure, without parsing
+// prose or duplicating the literal text at each comparison site.
+constexpr const char* kMemoryAdmissionResourcePressureDiagnostic =
+    "request exceeds the active RAM ceiling or OS safety reserve";
+
 struct MemoryStatus {
     MemoryPressure pressure{MemoryPressure::normal};
     std::uint64_t hard_limit_bytes{0};
@@ -9654,7 +9633,8 @@ public:
     McpInboundServer(ProjectCatalog& projects,
                      std::filesystem::path models_root,
                      std::uint64_t memory_reserve_mib,
-                     AllowedCommandStore& allowed_commands);
+                     AllowedCommandStore& allowed_commands,
+                     const AppConfig& config);
 
     std::string handle(const std::string& request_json,
                        const McpIdentity& identity,
@@ -9665,6 +9645,7 @@ private:
     std::filesystem::path models_root_;
     std::uint64_t memory_reserve_mib_{0};
     AllowedCommandStore& allowed_commands_;
+    const AppConfig& config_;
 };
 
 const char* mcp_protocol_version() noexcept;
@@ -9871,9 +9852,9 @@ private:
 };
 
 // Outcome of one execute_chat_tool() call: `result_text` is what gets shown
-// back to the model as the tool's result (and, truncated, in the chat
-// transcript's tool-result card); `structured_json` is the same result in a
-// machine-shaped form for the `tool_result` NDJSON event / MCP
+// back to the model as the tool's result, and shown in full, uncapped, in
+// the chat transcript's tool-result card; `structured_json` is the same
+// result in a machine-shaped form for the `tool_result` NDJSON event / MCP
 // structuredContent.
 struct ChatToolCallResult {
     bool succeeded{false};
@@ -9892,12 +9873,15 @@ struct ChatToolCallResult {
 // registered, enabled, project-authorized entry); the other five tools are
 // always available, bounded only by the project root containment every
 // project file operation in this codebase already enforces (see
-// read_project_text_file()).
+// read_project_text_file()). `config`'s chat_tool_* fields (AppConfig,
+// above) bound how much read_file/search/list_directory/run_command can
+// return per call -- see those fields' comments for what each one does.
 ChatToolCallResult execute_chat_tool(const std::string& tool_name,
                                      const JsonValue& arguments,
                                      const ProjectRecord& project,
                                      AllowedCommandStore& allowed_commands,
-                                     std::atomic_bool& cancellation);
+                                     std::atomic_bool& cancellation,
+                                     const AppConfig& config);
 
 struct BackupReport {
     std::filesystem::path backup_path;

@@ -106,12 +106,6 @@ void apply_values(AppConfig& config,
         } else if (item.first == "curlExecutable" ||
                    item.first == "MASTERAI_CURL") {
             config.curl_executable = item.second;
-        } else if (item.first == "llamaFinetuneExecutable" ||
-                   item.first == "MASTERAI_LLAMA_FINETUNE") {
-            config.llama_finetune_executable = item.second;
-        } else if (item.first == "llamaExportLoraExecutable" ||
-                   item.first == "MASTERAI_LLAMA_EXPORT_LORA") {
-            config.llama_export_lora_executable = item.second;
         } else if (item.first == "parquetHelperExecutable" ||
                    item.first == "MASTERAI_PARQUET_HELPER") {
             config.parquet_helper_executable = item.second;
@@ -244,8 +238,8 @@ AppConfig ConfigurationManager::load(
         require_only(root, {"schemaVersion", "server", "tls", "auth",
                             "workspace", "models", "inference", "downloads",
                             "knowledge", "memory", "hardware", "indexing",
-                            "retrieval", "cache", "session", "performance",
-                            "storage", "machineLearning",
+                            "retrieval", "cache", "chatTools", "session",
+                            "performance", "storage", "machineLearning",
                             // Phase 33 (LOCAL-ONLY slice): optional, absent
                             // in every pre-Phase-33 settings file.
                             "localRunnerPool",
@@ -396,23 +390,10 @@ AppConfig ConfigurationManager::load(
             require_only(*inference,
                          {"llamaServerExecutable", "runnerPort",
                           "chatMaxReplyTokens", "chatContextLength",
-                          "startupTimeoutSeconds", "stallTimeoutSeconds",
-                          "llamaFinetuneExecutable",
-                          "llamaExportLoraExecutable"},
+                          "startupTimeoutSeconds", "stallTimeoutSeconds"},
                          "inference.");
             config.llama_server_executable =
                 inference->required("llamaServerExecutable").as_string();
-            // Phase 73: optional -- empty disables real LLM LoRA
-            // fine-tuning (see LlmFineTuneOptions in masterai.hpp).
-            if (inference->optional("llamaFinetuneExecutable") != nullptr) {
-                config.llama_finetune_executable =
-                    inference->required("llamaFinetuneExecutable").as_string();
-            }
-            if (inference->optional("llamaExportLoraExecutable") != nullptr) {
-                config.llama_export_lora_executable =
-                    inference->required("llamaExportLoraExecutable")
-                        .as_string();
-            }
             config.runner_port = static_cast<std::uint16_t>(
                 positive(*inference, "runnerPort", 65535U));
             if (inference->optional("chatMaxReplyTokens") != nullptr) {
@@ -711,6 +692,48 @@ AppConfig ConfigurationManager::load(
             config.cache_maximum_bytes_per_category = positive(
                 *cache, "maximumBytesPerCategory", 4ULL * 1024ULL * 1024ULL * 1024ULL);
         }
+
+        // Limits on the six built-in project tools shared by the web-ui chat
+        // tool loop and every MCP client (VS Code, Visual Studio, ...) --
+        // see AppConfig's chat_tool_* field comments (masterai.hpp) for what
+        // each one does.
+        if (const auto* chat_tools = root.optional("chatTools")) {
+            require_only(*chat_tools,
+                         {"readFileMaximumBytes", "searchMaximumFiles",
+                          "searchMaximumResults",
+                          "listDirectoryMaximumEntries",
+                          "commandTimeoutSeconds",
+                          "commandMaximumOutputBytes"},
+                         "chatTools.");
+            if (chat_tools->optional("readFileMaximumBytes") != nullptr) {
+                config.chat_tool_read_file_maximum_bytes = positive(
+                    *chat_tools, "readFileMaximumBytes", 256ULL * 1024ULL * 1024ULL);
+            }
+            if (chat_tools->optional("searchMaximumFiles") != nullptr) {
+                config.chat_tool_search_maximum_files = static_cast<std::uint32_t>(
+                    positive(*chat_tools, "searchMaximumFiles", 100000ULL));
+            }
+            if (chat_tools->optional("searchMaximumResults") != nullptr) {
+                config.chat_tool_search_maximum_results =
+                    static_cast<std::uint32_t>(
+                        positive(*chat_tools, "searchMaximumResults", 100000ULL));
+            }
+            if (chat_tools->optional("listDirectoryMaximumEntries") != nullptr) {
+                config.chat_tool_list_directory_maximum_entries =
+                    static_cast<std::uint32_t>(positive(
+                        *chat_tools, "listDirectoryMaximumEntries", 1000000ULL));
+            }
+            if (chat_tools->optional("commandTimeoutSeconds") != nullptr) {
+                config.chat_tool_command_timeout_seconds =
+                    static_cast<std::uint32_t>(
+                        positive(*chat_tools, "commandTimeoutSeconds", 3600ULL));
+            }
+            if (chat_tools->optional("commandMaximumOutputBytes") != nullptr) {
+                config.chat_tool_command_maximum_output_bytes = positive(
+                    *chat_tools, "commandMaximumOutputBytes",
+                    256ULL * 1024ULL * 1024ULL);
+            }
+        }
     }
     apply_values(config, environment);
     apply_values(config, overrides);
@@ -777,8 +800,7 @@ void ConfigurationManager::validate(const AppConfig& config) {
     }
     for (const auto& executable :
          {config.llama_server_executable, config.curl_executable,
-          config.parquet_helper_executable, config.llama_finetune_executable,
-          config.llama_export_lora_executable}) {
+          config.parquet_helper_executable}) {
         if (!executable.empty() &&
             (!std::filesystem::is_regular_file(executable) ||
              std::filesystem::is_symlink(executable))) {
@@ -973,10 +995,6 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         std::to_string(c.runner_startup_timeout_seconds) +
         ",\"stallTimeoutSeconds\":" +
         std::to_string(c.runner_stall_timeout_seconds) +
-        ",\"llamaFinetuneExecutable\":" +
-        quote(c.llama_finetune_executable.string()) +
-        ",\"llamaExportLoraExecutable\":" +
-        quote(c.llama_export_lora_executable.string()) +
         "},\n"
         "  \"localRunnerPool\":" + local_runner_pool_array(c.local_runner_pool) +
         ",\n"
@@ -1037,6 +1055,18 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         (c.cache_enabled ? "true" : "false") +
         ",\"maximumBytesPerCategory\":" +
         std::to_string(c.cache_maximum_bytes_per_category) + "},\n"
+        "  \"chatTools\":{\"readFileMaximumBytes\":" +
+        std::to_string(c.chat_tool_read_file_maximum_bytes) +
+        ",\"searchMaximumFiles\":" +
+        std::to_string(c.chat_tool_search_maximum_files) +
+        ",\"searchMaximumResults\":" +
+        std::to_string(c.chat_tool_search_maximum_results) +
+        ",\"listDirectoryMaximumEntries\":" +
+        std::to_string(c.chat_tool_list_directory_maximum_entries) +
+        ",\"commandTimeoutSeconds\":" +
+        std::to_string(c.chat_tool_command_timeout_seconds) +
+        ",\"commandMaximumOutputBytes\":" +
+        std::to_string(c.chat_tool_command_maximum_output_bytes) + "},\n"
         "  \"session\":{\"enabled\":" +
         (c.session_reuse_enabled ? "true" : "false") +
         ",\"maxSlots\":" + std::to_string(c.session_reuse_max_slots) +

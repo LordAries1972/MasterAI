@@ -23,8 +23,16 @@
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#elif defined(__APPLE__)
+// ADR-0004: no AF_ALG kernel crypto socket exists on Darwin; CommonCrypto
+// (part of libSystem, no extra link step) provides SHA-256/PBKDF2 directly,
+// and Security.framework's SecRandomCopyBytes (already linked for Keychain
+// secret storage, see storage.cpp) is the OS-backed CSPRNG.
+#include <CommonCrypto/CommonDigest.h>
+#include <CommonCrypto/CommonKeyDerivation.h>
+#include <Security/SecRandom.h>
 #else
-#error "MasterAI supports only Windows and Linux."
+#error "MasterAI supports only Windows, Linux, and macOS (Apple Silicon)."
 #endif
 
 namespace masterai {
@@ -144,6 +152,10 @@ std::vector<std::uint8_t> secure_random(const std::size_t size) {
         }
         completed += static_cast<std::size_t>(received);
     }
+#elif defined(__APPLE__)
+    if (SecRandomCopyBytes(kSecRandomDefault, bytes.size(), bytes.data()) != errSecSuccess) {
+        throw std::runtime_error("SecRandomCopyBytes failed");
+    }
 #endif
     return bytes;
 }
@@ -197,6 +209,11 @@ std::string sha256_hex(const std::string& value) {
         digest_size != static_cast<ssize_t>(digest.size())) {
         throw std::runtime_error("Linux AF_ALG SHA-256 operation failed");
     }
+#elif defined(__APPLE__)
+    if (value.size() > static_cast<std::size_t>(std::numeric_limits<CC_LONG>::max())) {
+        throw std::invalid_argument("SHA-256 input is too large");
+    }
+    CC_SHA256(value.data(), static_cast<CC_LONG>(value.size()), digest.data());
 #endif
     return hex_encode(digest.data(), digest.size());
 }
@@ -281,6 +298,24 @@ std::string sha256_file_hex(
     }
     close(operation);
     close(algorithm_socket);
+#elif defined(__APPLE__)
+    CC_SHA256_CTX context;
+    CC_SHA256_Init(&context);
+    while (input) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto count = input.gcount();
+        if (count > 0) {
+            CC_SHA256_Update(&context, buffer.data(), static_cast<CC_LONG>(count));
+        }
+        if (count > 0 && progress && !size_error) {
+            bytes_hashed += static_cast<std::uint64_t>(count);
+            progress(bytes_hashed, total_bytes);
+        }
+    }
+    if (!input.eof()) {
+        throw std::runtime_error("macOS CommonCrypto file SHA-256 read failed");
+    }
+    CC_SHA256_Final(digest.data(), &context);
 #endif
     return hex_encode(digest.data(), digest.size());
 }
@@ -392,6 +427,16 @@ std::vector<std::uint8_t> pbkdf2_hmac_sha256_32(
         for (std::size_t index = 0; index < t.size(); ++index) t[index] ^= u[index];
     }
     return std::vector<std::uint8_t>(t.begin(), t.end());
+#elif defined(__APPLE__)
+    // CommonCrypto implements PBKDF2-HMAC-SHA256 directly -- no need for the
+    // hand-rolled per-round HMAC loop the Linux AF_ALG path above uses,
+    // since there is no kernel PBKDF2 primitive on Linux to call instead.
+    std::vector<std::uint8_t> derived(kPasswordHashBytes);
+    const int status = CCKeyDerivationPBKDF(
+        kCCPBKDF2, password.c_str(), password.size(), salt.data(), salt.size(),
+        kCCPRFHmacAlgSHA256, iterations, derived.data(), derived.size());
+    if (status != 0) throw std::runtime_error("CommonCrypto PBKDF2 derivation failed");
+    return derived;
 #endif
 }
 

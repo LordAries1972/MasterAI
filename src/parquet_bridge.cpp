@@ -14,13 +14,13 @@
 
 #if defined(_WIN32)
 #include <windows.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #else
-#error "unsupported platform"
+#error "MasterAI supports only Windows, Linux, and macOS (Apple Silicon)."
 #endif
 
 namespace masterai {
@@ -175,7 +175,7 @@ std::string run_and_capture(const std::filesystem::path& executable,
     if (exit_code != 0U) throw std::runtime_error("DuckDB helper process failed: " + output);
     return output;
 }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 std::string run_and_capture(const std::filesystem::path& executable,
                             const std::vector<std::string>& arguments,
                             std::uint32_t timeout_seconds,

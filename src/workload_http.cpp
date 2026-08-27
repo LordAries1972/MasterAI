@@ -605,17 +605,18 @@ std::string WorkloadHttpController::load_model(
                 // through CalibrationService::resolve(), so it must repeat
                 // the cpu_only guard here rather than relying on resolve()
                 // to have already applied it.
+                const auto requested_context_length = static_cast<unsigned int>(
+                    root.required("contextLength").as_integer());
                 tuning.gpu_layers =
                     state_->configuration.accelerator_policy == "cpu_only"
                         ? 0U
                         : select_gpu_layers(
                               probe_hardware(state_->configuration.models_root),
                               model.manifest.required_gpu_backend,
-                              model.manifest.model_size_bytes);
+                              model.manifest.model_size_bytes,
+                              requested_context_length);
                 state_->inference->load(
-                    model,
-                    static_cast<unsigned int>(
-                        root.required("contextLength").as_integer()),
+                    model, requested_context_length,
                     state_->configuration.runner_port, 30U, 1U, tuning,
                     state_->configuration.accelerator_policy);
                 state_->audit.append("model.load", user.id, "success", id);

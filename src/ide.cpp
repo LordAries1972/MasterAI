@@ -17,11 +17,11 @@
 
 #if defined(_WIN32)
 #include <windows.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 #include <termios.h>
 #include <unistd.h>
 #else
-#error "MasterAI supports only Windows and Linux."
+#error "MasterAI supports only Windows, Linux, and macOS (Apple Silicon)."
 #endif
 
 namespace masterai {

@@ -22,8 +22,13 @@
 #include <poll.h>
 #include <sys/inotify.h>
 #include <unistd.h>
+#elif defined(__APPLE__)
+// ADR-0004: FSEvents is macOS's native recursive filesystem-change API --
+// unlike inotify it watches a whole directory subtree with one stream, so
+// there is no per-directory watch-descriptor bookkeeping or count cap here.
+#include <CoreServices/CoreServices.h>
 #else
-#error "MasterAI supports only Windows and Linux."
+#error "MasterAI supports only Windows, Linux, and macOS (Apple Silicon)."
 #endif
 
 namespace masterai {
@@ -404,6 +409,139 @@ private:
 
     int inotify_fd_{-1};
     std::map<int, DirectoryWatch> watch_directories_;
+#elif defined(__APPLE__)
+    struct WatchedRoot {
+        std::string project_id;
+        std::filesystem::path root;
+    };
+
+    // Guards watched_roots_ separately from mutex_ (which guards pending_):
+    // the FSEvents callback below runs synchronously on the worker thread's
+    // CFRunLoop during event delivery and only ever needs to resolve a
+    // changed path back to its owning project, so it never needs to touch
+    // pending_ directly and never needs to hold both locks at once.
+    std::mutex roots_mutex_;
+    std::map<std::string, WatchedRoot> watched_roots_;
+
+    static void fsevents_callback(ConstFSEventStreamRef,
+                                  void* client_info,
+                                  std::size_t event_count,
+                                  void* event_paths,
+                                  const FSEventStreamEventFlags[],
+                                  const FSEventStreamEventId[]) {
+        auto* self = static_cast<State*>(client_info);
+        auto** paths = static_cast<char**>(event_paths);
+        for (std::size_t index = 0U; index < event_count; ++index) {
+            self->handle_fsevents_path(paths[index]);
+        }
+    }
+
+    void handle_fsevents_path(const std::string& absolute_path_text) {
+        const std::filesystem::path absolute_path(absolute_path_text);
+        std::lock_guard<std::mutex> lock(roots_mutex_);
+        for (const auto& [project_id, watched] : watched_roots_) {
+            if (is_path_within(watched.root, absolute_path)) {
+                record_change(project_id, watched.root, absolute_path);
+                return;
+            }
+        }
+    }
+
+    // (Re)builds the FSEvents stream so it watches exactly the current
+    // catalog's project roots. FSEventStreamCreate takes its watched-path
+    // list up front -- macOS provides no API to add or remove paths on a
+    // live stream -- so this stops, invalidates, and releases any previous
+    // stream before creating its replacement. Called only when the catalog's
+    // project-root set has actually changed, piggybacking on the same
+    // kCatalogSyncInterval poll cadence Linux/Windows use to notice new or
+    // removed projects.
+    void rebuild_stream(const std::map<std::string, ProjectRecord>& catalog) {
+        if (stream_ != nullptr) {
+            FSEventStreamStop(stream_);
+            FSEventStreamInvalidate(stream_);
+            FSEventStreamRelease(stream_);
+            stream_ = nullptr;
+        }
+        {
+            std::lock_guard<std::mutex> lock(roots_mutex_);
+            watched_roots_.clear();
+            for (const auto& [id, project] : catalog) {
+                watched_roots_[id] = WatchedRoot{id, project.root};
+            }
+        }
+        if (catalog.empty()) return;
+        CFMutableArrayRef paths = CFArrayCreateMutable(
+            kCFAllocatorDefault, static_cast<CFIndex>(catalog.size()),
+            &kCFTypeArrayCallBacks);
+        for (const auto& [id, project] : catalog) {
+            CFStringRef path = CFStringCreateWithCString(
+                kCFAllocatorDefault, project.root.string().c_str(),
+                kCFStringEncodingUTF8);
+            CFArrayAppendValue(paths, path);
+            CFRelease(path);
+        }
+        FSEventStreamContext context{};
+        context.info = this;
+        stream_ = FSEventStreamCreate(
+            kCFAllocatorDefault, &State::fsevents_callback, &context, paths,
+            kFSEventStreamEventIdSinceNow,
+            static_cast<CFTimeInterval>(kCatalogSyncInterval.count()) / 1000.0,
+            kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer);
+        CFRelease(paths);
+        if (stream_ != nullptr) {
+            FSEventStreamScheduleWithRunLoop(stream_, CFRunLoopGetCurrent(),
+                                            kCFRunLoopDefaultMode);
+            FSEventStreamStart(stream_);
+        }
+    }
+
+    void run() {
+        std::map<std::string, ProjectRecord> watched_projects;
+        auto last_sync = std::chrono::steady_clock::time_point{};
+        while (!stopping_.load()) {
+            const auto now = std::chrono::steady_clock::now();
+            const bool due = last_sync.time_since_epoch().count() == 0 ||
+                            now - last_sync >= kCatalogSyncInterval;
+            std::map<std::string, ProjectRecord> catalog;
+            for (const auto& project : projects_->list()) catalog[project.id] = project;
+            if (due) {
+                bool changed = catalog.size() != watched_projects.size();
+                if (!changed) {
+                    for (const auto& [id, project] : catalog) {
+                        static_cast<void>(project);
+                        if (watched_projects.find(id) == watched_projects.end()) {
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+                if (changed) {
+                    for (const auto& [id, project] : catalog) {
+                        if (watched_projects.find(id) == watched_projects.end()) {
+                            // A project just noticed for the first time has
+                            // no baseline generation yet; request one so it
+                            // becomes searchable even before its next real
+                            // file change.
+                            indexes_->request_rebuild(project);
+                        }
+                    }
+                    rebuild_stream(catalog);
+                }
+                watched_projects = catalog;
+                last_sync = now;
+            }
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, true);
+            flush_ready(catalog);
+        }
+        if (stream_ != nullptr) {
+            FSEventStreamStop(stream_);
+            FSEventStreamInvalidate(stream_);
+            FSEventStreamRelease(stream_);
+            stream_ = nullptr;
+        }
+    }
+
+    FSEventStreamRef stream_{nullptr};
 #endif
 
     ProjectCatalog* projects_;

@@ -37,8 +37,25 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#elif defined(__APPLE__)
+// ADR-0004: <sys/prctl.h>/PR_SET_NO_NEW_PRIVS has no Darwin equivalent (see
+// tool_exec.cpp's run_sandboxed_process() for the same gap and reasoning);
+// the sandboxed MCP child process below skips that one hardening step on
+// macOS. clearenv() below is also a glibc/Linux extension Darwin's libc
+// does not implement -- the portable substitute is nulling out `environ`
+// directly (declared via <unistd.h> on both platforms).
+#include <arpa/inet.h>
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #else
-#error "MasterAI supports only Windows and Linux."
+#error "MasterAI supports only Windows, Linux, and macOS (Apple Silicon)."
 #endif
 
 namespace masterai {
@@ -604,11 +621,19 @@ McpOutboundResult invoke_stdio(const McpOutboundServer& server,
         if (setrlimit(RLIMIT_CPU, &cpu_limit) != 0 ||
             setrlimit(RLIMIT_FSIZE, &file_limit) != 0 ||
             setrlimit(RLIMIT_AS, &memory_limit) != 0 ||
-            setrlimit(RLIMIT_NPROC, &process_limit) != 0 ||
-            prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+            setrlimit(RLIMIT_NPROC, &process_limit) != 0
+#if defined(__linux__)
+            || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+#endif
+            ) {
             _exit(126);
         }
+#if defined(__APPLE__)
+        extern char** environ;
+        environ = nullptr;
+#else
         clearenv();
+#endif
         setenv("MASTERAI_MCP_SANDBOX", "1", 1);
         std::vector<std::string> values;
         values.push_back(server.executable.string());

@@ -50,3 +50,73 @@ abnormal parent exit before `unload()` runs can orphan the runner process --
 this is a real gap worth closing (forward work), distinct from anything
 Phase 30A's own admission/fail-closed logic is responsible for.
 
+## 2026-08-25 rerun: Phase 85 thread/ubatch calibration tuning
+
+Rerun on the same host (`qwen25-coder-3b-q4km`, GTX 960M 4 GiB, i7-6700HQ
+quad-core/eight-thread) via `masterai calibrate ... auto`, closing the honest
+"none of the above has a real measured tokens/sec number recorded" gap the
+Phase 85 status note left. Two consecutive runs against the production
+`config/settings.json` runtime, no other GPU-offloaded process competing for
+the card:
+
+| Run | Cold load | Prompt evaluation (154 tok) | Generation (64 tok) | Peak resident | GPU utilization | GPU peak temp |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 73.18 s | 3.131 s, 49.2 tok/s | 7.103 s, 9.01 tok/s | 1.96 GiB | 36.06% avg | 72°C |
+| 2 | 36.81 s | 2.874 s, 53.6 tok/s | 6.543 s, 9.78 tok/s | 2.14 GiB | 39.02% avg | 76°C |
+
+`llama-server`'s own `system_info` log line confirms `select_thread_count()`
+is genuinely driving the real launch, not just computing an unused number:
+every run (this rerun and the separate benchmark run below) shows
+`n_threads = 4 (n_threads_batch = 4) / 8` -- 4, this host's real physical
+core count, not the 8 logical threads llama.cpp's own default would pick.
+Generation throughput (9.0-9.8 tok/s) lands close to the 2026-08-13 minimal-
+workload baseline above (10.22 tok/s) and below the 2026-08-05 balanced-
+workload baseline (12.43 tok/s); cold load varied more between the two runs
+here (73.18 s vs 36.81 s) than either prior rerun, consistent with this being
+an older laptop GPU/disk under whatever else was resident at the time, not a
+regression -- no code changed between these two consecutive runs.
+
+A separate real end-to-end generation benchmark (`masterai benchmark-model
+... standard`, GPU-offloaded) against the smaller `llama32-1b-instruct-q4km`
+completed 4/5 cases, 936 tokens generated in 35.16 s (26.6 tok/s blended
+across prompt+generation for all five cases) -- the CLI's fixed 30-second
+runner-readiness timeout is too short for `qwen25-coder-3b-q4km`'s own
+73.18 s/36.81 s cold loads on this hardware (confirmed by `calibrate`, which
+has no such fixed cap), so that specific command could not produce a
+benchmark-model number for the 3B model on this pass; this is a real, narrow
+gap in `benchmark-model`'s hardcoded readiness window, not in Phase 85's
+calibration/caching changes themselves, and is left for a future pass since
+fixing it was outside this session's task.
+
+Honest remaining gap: the GPU scheduling-priority drop (Phase 85 addendum)
+ran without error or crash across every GPU-offloaded run in this session,
+but confirming the actual desktop-stutter symptom is gone requires a human
+watching the desktop during a live GPU-offloaded chat reply -- this session
+cannot observe that visually, so it stays open for an administrator to
+confirm.
+
+## 2026-08-26: broadening the model matrix beyond Qwen 3B
+
+Every calibration run above used the same model family (`qwen25-coder`) and
+size class (~3B). This pass adds two more real `masterai calibrate ...
+balanced` runs on the same host (GTX 960M 4 GiB, i7-6700HQ,
+`hardware.acceleratorPolicy=auto`) at both ends of the size range this
+catalog actually has installed, closing part of the "matrix across host/
+model/backend combinations is still partial" gap -- still one host, but no
+longer one model family/size.
+
+| Model | Size class | Cold load | Prompt evaluation | Generation | GPU utilization | GPU peak temp |
+|---|---|---:|---:|---:|---:|---:|
+| `granite31-2b-instruct-q4km` | ~2B (smaller) | 23.49 s | 7.47 s | 27.11 s | 29.0% avg | 76°C |
+| `deepseek-coder-6.7b-q4km` | ~6.7B (larger) | 57.48 s | 16.12 s | 7.06 s | 58.1% avg | 75°C |
+
+Both runs completed and persisted a `TuningProfile` cleanly with real GPU
+telemetry (`gpuTelemetryAvailable:true`), confirming the calibration
+pipeline generalizes correctly across model families, not just the
+`qwen25-coder`/`llama32` pairs exercised above -- cold-load time scales
+roughly with file size (2B fastest, 6.7B slowest) as expected, and GPU
+utilization rises with model size (more compute per token). This still
+does not cover a second physical host or a second GPU vendor/backend
+version, which remain the genuinely out-of-reach dimensions noted
+throughout this document and in `docs/PLAN.md` Phase 19/36.
+

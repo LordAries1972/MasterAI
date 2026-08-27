@@ -41,3 +41,37 @@ Reproduce with:
 ```
 masterai speculative-benchmark <settings> qwen25-coder-3b-q4km qwen25-coder-1.5b-q4km standard
 ```
+
+## Second pair, second host session (26 August 2026)
+
+Same host and command, a different compatible pair: target
+`llama32-3b-instruct-q4km`, draft `llama32-1b-instruct-q4km` (both declare
+`"architecture":"llama"`), `quick` benchmark profile.
+
+| Run | Draft model | Generated tokens | Elapsed | Tokens/sec |
+|---|---|---:|---:|---:|
+| Baseline (no draft) | none | 439 | 38.53 s | 11.39 |
+| Speculative (draft admitted) | `llama32-1b-instruct-q4km` | 439 | 64.80 s | 6.77 |
+
+**Result: -40.54% throughput** -- a second, larger regression on the same
+low-VRAM host, corroborating the qwen25-coder pair's result above rather
+than being pair-specific. Both runs generated their full token budget
+successfully (the dual-model launch path itself works correctly in both
+cases); the loss is consistent with `LaunchTuning::speculative_draft_gpu_
+layers` defaulting to 0 in both CLI runs -- the draft model never received a
+GPU-layers argument, so it most likely ran its forward passes on CPU
+alongside a GPU-resident target model, serializing the two instead of
+overlapping them. Reproduce with:
+
+```
+masterai speculative-benchmark <settings> llama32-3b-instruct-q4km llama32-1b-instruct-q4km quick
+```
+
+Across both pairs, this host's real, measured conclusion is that
+speculative decoding should stay un-admitted here: `hardware.
+acceleratorPolicy=auto` with a 4 GiB-VRAM GPU has no headroom to keep a
+second (draft) model resident without contention, and neither CLI run
+exercised a GPU-offloaded draft (`speculative_draft_gpu_layers`), which a
+future pass could measure separately as its own comparison point. A host
+with more VRAM/compute margin remains an open comparison for whoever runs
+this command there.

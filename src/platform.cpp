@@ -33,8 +33,18 @@
 #include <sys/resource.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#elif defined(__APPLE__)
+// ADR-0004: Apple Silicon (arm64) macOS. No <sys/sysinfo.h> equivalent on
+// Darwin -- memory/CPU stats come from sysctl/Mach host APIs instead.
+#include <dlfcn.h>
+#include <mach/mach.h>
+#include <mach/mach_host.h>
+#include <sys/resource.h>
+#include <sys/sysctl.h>
+#include <sys/utsname.h>
+#include <unistd.h>
 #else
-#error "MasterAI supports only Windows and Linux."
+#error "MasterAI supports only Windows, Linux, and macOS (Apple Silicon)."
 #endif
 
 namespace masterai {
@@ -256,6 +266,21 @@ unsigned int physical_cpu_count() noexcept {
     }
     return cores.empty() ? std::max(1U, std::thread::hardware_concurrency())
                          : static_cast<unsigned int>(cores.size());
+#elif defined(__APPLE__)
+    // hw.perflevel0.physicalcpu is the performance-core count on Apple
+    // Silicon's heterogeneous P/E core layout -- a better admission-sizing
+    // signal than mixing in efficiency cores. Falls back to the whole-chip
+    // physical count, then logical count, if that sysctl isn't present
+    // (older macOS releases before the perflevel naming was introduced).
+    const auto sysctl_uint = [](const char* name) -> unsigned int {
+        unsigned int value = 0U;
+        std::size_t size = sizeof(value);
+        if (sysctlbyname(name, &value, &size, nullptr, 0) != 0) return 0U;
+        return value;
+    };
+    unsigned int count = sysctl_uint("hw.perflevel0.physicalcpu");
+    if (count == 0U) count = sysctl_uint("hw.physicalcpu");
+    return count > 0U ? count : std::max(1U, std::thread::hardware_concurrency());
 #endif
 }
 
@@ -270,7 +295,7 @@ std::string probe_storage_class(const std::filesystem::path& storage_root) {
     if (type == DRIVE_RAMDISK) return "ram";
     if (type == DRIVE_FIXED) return "fixed";
     return "unknown";
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
     static_cast<void>(storage_root);
     return "local";
 #endif
@@ -402,6 +427,39 @@ HardwareInfo probe_hardware(const std::filesystem::path& storage_root) {
     }
     info.architecture = platform.machine;
     info.platform = "linux";
+#elif defined(__APPLE__)
+    constexpr std::uint64_t bytes_per_mib = 1024ULL * 1024ULL;
+    std::uint64_t total_bytes = 0U;
+    std::size_t total_size = sizeof(total_bytes);
+    if (sysctlbyname("hw.memsize", &total_bytes, &total_size, nullptr, 0) != 0) {
+        throw std::runtime_error("sysctlbyname(hw.memsize) failed");
+    }
+    info.total_ram_mib = total_bytes / bytes_per_mib;
+
+    vm_size_t page_size = 0U;
+    host_page_size(mach_host_self(), &page_size);
+    vm_statistics64_data_t vm_stats{};
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64,
+                          reinterpret_cast<host_info64_t>(&vm_stats),
+                          &count) == KERN_SUCCESS) {
+        const auto free_bytes =
+            static_cast<std::uint64_t>(vm_stats.free_count + vm_stats.inactive_count) *
+            static_cast<std::uint64_t>(page_size);
+        info.available_ram_mib = free_bytes / bytes_per_mib;
+    }
+    // Darwin has no separate page-file total the way Windows/Linux swap
+    // accounting works; total virtual capacity is reported as RAM (macOS
+    // dynamically resizes swap on disk, with no fixed ceiling to report).
+    info.total_virtual_memory_mib = info.total_ram_mib;
+    info.available_virtual_memory_mib = info.available_ram_mib;
+
+    struct utsname platform {};
+    if (uname(&platform) != 0) {
+        throw std::runtime_error("uname failed");
+    }
+    info.architecture = platform.machine;
+    info.platform = "macos";
 #endif
 
     std::error_code storage_error;
@@ -454,6 +512,20 @@ ProcessResourceSample probe_process_resources() {
         sample.page_faults =
             static_cast<std::uint64_t>(usage.ru_minflt + usage.ru_majflt);
     }
+#elif defined(__APPLE__)
+    mach_task_basic_info_data_t info{};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+        sample.resident_memory_bytes = info.resident_size;
+        sample.private_memory_bytes = info.virtual_size;
+        sample.commit_bytes = sample.private_memory_bytes;
+    }
+    struct rusage usage {};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        sample.page_faults =
+            static_cast<std::uint64_t>(usage.ru_minflt + usage.ru_majflt);
+    }
 #endif
     return sample;
 }
@@ -466,7 +538,7 @@ ProcessResourceSample probe_process_resources() {
 void lower_process_priority_for_background_work() {
 #if defined(_WIN32)
     SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
     [[maybe_unused]] const int nice_result = nice(5);
 #endif
 }
@@ -775,6 +847,57 @@ SystemUtilizationSample probe_system_utilization(
         total_delta > 0U
             ? 100.0 * static_cast<double>(total_delta - idle_delta) /
                   static_cast<double>(total_delta)
+            : 0.0;
+    sample.disk_read_bytes =
+        io_after.first >= io_before.first ? io_after.first - io_before.first : 0U;
+    sample.disk_write_bytes = io_after.second >= io_before.second
+                                  ? io_after.second - io_before.second
+                                  : 0U;
+#elif defined(__APPLE__)
+    // No /proc on Darwin: CPU load comes from the Mach host CPU-load-info
+    // counters (ticks, not bytes/time -- delta over the sleep interval is
+    // still a valid busy-vs-idle ratio); disk I/O comes from this process's
+    // own rusage block counters (ru_inblock/ru_oublock, 512-byte blocks per
+    // POSIX), which is process-scoped rather than system-wide like the
+    // Windows/Linux paths above -- the closest same-cost equivalent without
+    // adding an IOKit storage-statistics dependency.
+    const auto read_cpu_totals = []() {
+        host_cpu_load_info_data_t load{};
+        mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
+        host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO,
+                        reinterpret_cast<host_info_t>(&load), &count);
+        return load;
+    };
+    const auto read_process_io = []() {
+        struct rusage usage {};
+        getrusage(RUSAGE_SELF, &usage);
+        constexpr std::uint64_t bytes_per_block = 512ULL;
+        return std::make_pair(
+            static_cast<std::uint64_t>(usage.ru_inblock) * bytes_per_block,
+            static_cast<std::uint64_t>(usage.ru_oublock) * bytes_per_block);
+    };
+    const auto cpu_before = read_cpu_totals();
+    const auto io_before = read_process_io();
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(interval_milliseconds));
+    const auto cpu_after = read_cpu_totals();
+    const auto io_after = read_process_io();
+    const auto ticks_delta = [](unsigned int before, unsigned int after) {
+        return after >= before ? after - before : 0U;
+    };
+    const std::uint64_t user_delta = ticks_delta(
+        cpu_before.cpu_ticks[CPU_STATE_USER], cpu_after.cpu_ticks[CPU_STATE_USER]);
+    const std::uint64_t system_delta = ticks_delta(
+        cpu_before.cpu_ticks[CPU_STATE_SYSTEM], cpu_after.cpu_ticks[CPU_STATE_SYSTEM]);
+    const std::uint64_t nice_delta = ticks_delta(
+        cpu_before.cpu_ticks[CPU_STATE_NICE], cpu_after.cpu_ticks[CPU_STATE_NICE]);
+    const std::uint64_t idle_delta = ticks_delta(
+        cpu_before.cpu_ticks[CPU_STATE_IDLE], cpu_after.cpu_ticks[CPU_STATE_IDLE]);
+    const std::uint64_t busy_delta = user_delta + system_delta + nice_delta;
+    const std::uint64_t total_delta = busy_delta + idle_delta;
+    sample.cpu_percent =
+        total_delta > 0U
+            ? 100.0 * static_cast<double>(busy_delta) / static_cast<double>(total_delta)
             : 0.0;
     sample.disk_read_bytes =
         io_after.first >= io_before.first ? io_after.first - io_before.first : 0U;

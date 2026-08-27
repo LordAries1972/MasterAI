@@ -31,13 +31,13 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #else
-#error "MasterAI supports only Windows and Linux."
+#error "MasterAI supports only Windows, Linux, and macOS (Apple Silicon)."
 #endif
 
 namespace masterai {
@@ -1587,18 +1587,6 @@ std::pair<std::string, std::string> run_ensemble(
     }
 }
 
-// Whether a GGUF quantization label is full/near-full precision enough for
-// llama.cpp's finetune tooling to backpropagate reliably against -- see
-// run_llm_fine_tuning_job's quantization_warning comment. F32/F16/BF16 are
-// unquantized; Q8_0 is the lightest quantization llama.cpp itself documents
-// as safe for further training. Everything else (Q6_K and below) is not
-// refused, only flagged, since this is a quality caution, not a hard rule.
-bool llm_finetune_safe_quantization(const std::string& quantization) {
-    const auto label = ascii_lower(quantization);
-    return label == "f32" || label == "f16" || label == "bf16" ||
-           label == "q8_0";
-}
-
 }  // namespace
 
 class HttpServer::State final {
@@ -1685,7 +1673,7 @@ public:
         projects = std::make_unique<ProjectCatalog>(projects_root, records);
         mcp = std::make_unique<McpInboundServer>(
             *projects, value.models_root, value.memory_reserve_mib,
-            *allowed_commands);
+            *allowed_commands, configuration);
         ide = std::make_unique<IdeIntegrationService>(*projects);
         integrations =
             std::make_unique<server_internal::IntegrationHttpController>(
@@ -1737,10 +1725,6 @@ public:
         ml_dataset_versions = std::make_unique<DatasetVersionStore>(records);
         ml_trained_models = std::make_unique<TrainedModelStore>(records);
         ml_evaluation_results = std::make_unique<EvaluationResultStore>(records);
-        // Phase 73: real LLM LoRA fine-tuning run outcomes (see
-        // ml_finetune.cpp).
-        ml_llm_finetune_results =
-            std::make_unique<FineTuningRunResultStore>(records);
         // Phase 57: real model comparison (see ml_engine.cpp).
         ml_model_comparisons = std::make_unique<ModelComparisonStore>(records);
         ml_comparison_results = std::make_unique<ComparisonResultStore>(records);
@@ -3965,6 +3949,36 @@ public:
                                     json_escape(error.what()) + "\"}");
             }
         }
+        // Lets a Model Registry entry's source be corrected in place --
+        // create() now rejects a bad path (e.g. free text typed where a
+        // file path was expected) up front, but an entry created before
+        // that check existed, or an entry a caller otherwise wants to
+        // repoint, previously had no fix short of delete-and-recreate,
+        // which would orphan any Fine-Tuning job that already references
+        // this entry's id.
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/ml/models/", 0U) == 0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/source") == 0) {
+            if (auto denied = forbidden_unless(user->role, "ml.models.import")) return *denied;
+            const auto id = request.target.substr(
+                18U, request.target.size() - 18U - 7U);
+            try {
+                auto root = parse_json(request.body);
+                const auto source = root.required("source").as_string();
+                if (!ml_models->set_source(id, source)) {
+                    return response(404, "Not Found",
+                                    "{\"error\":\"ml_model_not_found\"}");
+                }
+                audit.append("ml.model.source", user->id, "success", id);
+                return response(200, "OK", "{\"updated\":true}");
+            } catch (const std::exception& error) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_ml_model_source\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
+        }
         if (request.method == "POST" &&
             request.target.rfind("/api/v1/ml/models/", 0U) == 0U &&
             request.target.size() > 7U &&
@@ -4306,33 +4320,15 @@ public:
                                     "{\"error\":\"unknown_dataset_content_format\"}");
                 }
                 // Parse before storing so bad content is rejected now, not
-                // at training time. Which validation runs depends on the
-                // Dataset's purpose (see Dataset::purpose in masterai.hpp):
-                // an "instruction" dataset is LLM fine-tuning data with no
-                // notion of a classification/regression target column at
-                // all, so it skips parse_tabular_csv entirely instead of
-                // being forced through checks (like the 64-distinct-label
-                // classification cap) that only make sense for tabular
-                // data. Categorical feature encoding is on for the tabular
-                // path (a fit, immediately discarded -- the real fit that
-                // gets persisted happens once training actually runs,
-                // against the exact dataset the job names) purely so a
-                // text/category feature column (e.g. "record_type") is
-                // accepted at upload time instead of being rejected with
-                // "every feature column must be numeric" for data a real
-                // training run will happily learn from -- see
-                // parse_tabular_csv's own comment in masterai.hpp.
-                if (dataset->purpose == "instruction") {
-                    const auto profile = validate_instruction_dataset_csv(
-                        csv, configuration.tabular_dataset_maximum_csv_bytes);
-                    ml_dataset_content->put(id, csv, target_column);
-                    record_dataset_content_upload(*ml_datasets,
-                                                  *ml_dataset_versions, id,
-                                                  csv, user->id);
-                    audit.append("ml.dataset.content", user->id, "success", id);
-                    return response(200, "OK",
-                                    instruction_dataset_profile_json(id, profile));
-                }
+                // at training time. Categorical feature encoding is on here
+                // (a fit, immediately discarded -- the real fit that gets
+                // persisted happens once training actually runs, against
+                // the exact dataset the job names) purely so a text/
+                // category feature column (e.g. "record_type") is accepted
+                // at upload time instead of being rejected with "every
+                // feature column must be numeric" for data a real training
+                // run will happily learn from -- see parse_tabular_csv's
+                // own comment in masterai.hpp.
                 const auto parsed = parse_tabular_csv(
                     csv, target_column,
                     configuration.tabular_dataset_maximum_csv_bytes,
@@ -5439,90 +5435,6 @@ public:
                 return response(404, "Not Found",
                                 "{\"error\":\"ml_fine_tuning_job_not_found\"}");
             }
-            // Phase 73: a "llm:"-prefixed method (e.g. "llm:code assistant")
-            // routes to the real LLM LoRA executor instead of Phase 70's
-            // tabular warm-start path -- a free-text convention matching
-            // FineTuningJob.method's own "free text, not a closed enum"
-            // design rather than a second type field. Runs on a detached
-            // background thread (run_llm_fine_tuning_job above) and returns
-            // 202 immediately, since a real llama.cpp finetune run can take
-            // far longer than the HTTP request timeout.
-            if (job->method.size() >= 4U &&
-                ascii_lower(job->method.substr(0U, 4U)) == "llm:") {
-                const auto base_entry = ml_models->find(job->model_id);
-                if (!base_entry) {
-                    return response(
-                        409, "Conflict",
-                        "{\"error\":\"ml_fine_tuning_base_model_not_found\"}");
-                }
-                if (base_entry->source.empty() ||
-                    !std::filesystem::is_regular_file(base_entry->source)) {
-                    return response(
-                        409, "Conflict",
-                        "{\"error\":\"ml_fine_tuning_base_model_file_missing\","
-                        "\"detail\":\"Model Registry entry " +
-                            json_escape(base_entry->id) +
-                            "'s source field is not a real, existing file "
-                            "path (\\\"" +
-                            json_escape(base_entry->source) +
-                            "\\\"); set it to the base GGUF's real path "
-                            "first\"}");
-                }
-                const auto content = ml_dataset_content->find(job->dataset_id);
-                if (!content) {
-                    return response(
-                        409, "Conflict",
-                        "{\"error\":\"ml_dataset_has_no_content\",\"detail\":"
-                        "\"upload CSV content to the job's dataset first\"}");
-                }
-                LlmFineTuneOptions llm_options;
-                try {
-                    if (!request.body.empty()) {
-                        auto root = parse_json(request.body);
-                        if (const auto* epochs = root.optional("epochs")) {
-                            llm_options.epochs = static_cast<std::uint32_t>(
-                                epochs->as_integer());
-                        }
-                        if (const auto* rate = root.optional("learningRate")) {
-                            llm_options.learning_rate = rate->as_double();
-                        }
-                        if (const auto* extra =
-                                root.optional("extraFinetuneArguments")) {
-                            llm_options.extra_finetune_arguments =
-                                extra->as_string();
-                        }
-                        if (const auto* extra =
-                                root.optional("extraExportLoraArguments")) {
-                            llm_options.extra_export_lora_arguments =
-                                extra->as_string();
-                        }
-                    }
-                } catch (const std::exception& error) {
-                    return response(
-                        400, "Bad Request",
-                        "{\"error\":\"invalid_ml_llm_fine_tuning_options\","
-                        "\"detail\":\"" + json_escape(error.what()) + "\"}");
-                }
-                ml_fine_tuning_jobs->set_status(id, FineTuningJobStatus::queued);
-                const FineTuningJob job_copy = *job;
-                const ModelRegistryEntry base_entry_copy = *base_entry;
-                const DatasetContentStore::Content content_copy = *content;
-                const std::string acting_user_id = user->id;
-                std::thread([this, job_copy, base_entry_copy, content_copy,
-                            llm_options, acting_user_id]() {
-                    run_llm_fine_tuning_job(job_copy, base_entry_copy,
-                                            content_copy, llm_options,
-                                            acting_user_id);
-                }).detach();
-                audit.append("ml.fine_tuning_job.llm_run", user->id, "started",
-                            id);
-                return response(
-                    202, "Accepted",
-                    "{\"status\":\"queued\",\"jobId\":\"" + json_escape(id) +
-                        "\",\"detail\":\"LLM fine-tuning is running in the "
-                        "background; poll GET /api/v1/ml/fine-tuning-jobs/" +
-                        json_escape(id) + "/llm-result for the outcome\"}");
-            }
             const auto base_model = ml_trained_models->find(job->model_id);
             if (!base_model) {
                 return response(
@@ -5579,80 +5491,6 @@ public:
                     "{\"error\":\"ml_fine_tuning_failed\",\"detail\":\"" +
                         json_escape(error.what()) + "\"}");
             }
-        }
-        // Phase 73: polling endpoint for a background LLM LoRA fine-tuning
-        // run started by the "llm:"-prefixed branch of POST .../run above.
-        if (request.method == "GET" &&
-            request.target.rfind("/api/v1/ml/fine-tuning-jobs/", 0U) == 0U &&
-            request.target.size() > 11U &&
-            request.target.compare(request.target.size() - 11U, 11U,
-                                   "/llm-result") == 0) {
-            if (auto denied = forbidden_unless(user->role, "ml.finetuning.view")) return *denied;
-            const auto id = request.target.substr(
-                28U, request.target.size() - 28U - 11U);
-            const auto result_json = ml_llm_finetune_results->find(id);
-            if (!result_json) {
-                return response(
-                    404, "Not Found",
-                    "{\"error\":\"ml_llm_fine_tuning_result_not_found\",\"detail\":"
-                    "\"no LLM fine-tuning run has completed for this job yet\"}");
-            }
-            return response(200, "OK", *result_json);
-        }
-        // Live progress for a background LLM LoRA fine-tuning run: while
-        // .../llm-result 404s until the run finishes, this tails whichever
-        // real log file the run is currently writing to on disk -- the
-        // llama-finetune/llama-export-lora child processes' own combined
-        // stdout+stderr, redirected straight to that file by
-        // run_llama_tool() (ml_finetune.cpp), so this is the tool's actual
-        // live output, not a fabricated percentage.
-        if (request.method == "GET" &&
-            request.target.rfind("/api/v1/ml/fine-tuning-jobs/", 0U) == 0U &&
-            request.target.size() > 13U &&
-            request.target.compare(request.target.size() - 13U, 13U,
-                                   "/llm-progress") == 0) {
-            if (auto denied = forbidden_unless(user->role, "ml.finetuning.view")) return *denied;
-            const auto id = request.target.substr(
-                28U, request.target.size() - 28U - 13U);
-            const auto job = ml_fine_tuning_jobs->find(id);
-            if (!job) {
-                return response(404, "Not Found",
-                                "{\"error\":\"ml_fine_tuning_job_not_found\"}");
-            }
-            const auto work_directory =
-                configuration.runtime_root / "ml-finetune" / id;
-            // export-lora only starts once finetune has already produced an
-            // adapter, so its log (when present) is always the more current
-            // stage to show.
-            std::string stage = "queued";
-            std::filesystem::path log_path;
-            if (std::filesystem::is_regular_file(work_directory / "export-lora.log")) {
-                stage = "exporting (llama-export-lora)";
-                log_path = work_directory / "export-lora.log";
-            } else if (std::filesystem::is_regular_file(work_directory / "finetune.log")) {
-                stage = "training (llama-finetune)";
-                log_path = work_directory / "finetune.log";
-            }
-            std::string log_tail;
-            if (!log_path.empty()) {
-                std::ifstream stream(log_path, std::ios::binary);
-                if (stream) {
-                    stream.seekg(0, std::ios::end);
-                    const auto size = static_cast<std::size_t>(stream.tellg());
-                    constexpr std::size_t max_bytes = 4096U;
-                    stream.seekg(static_cast<std::streamoff>(
-                        size > max_bytes ? size - max_bytes : 0U));
-                    std::ostringstream buffer;
-                    buffer << stream.rdbuf();
-                    log_tail = buffer.str();
-                }
-            }
-            return response(
-                200, "OK",
-                "{\"jobId\":\"" + json_escape(id) + "\",\"status\":\"" +
-                    fine_tuning_job_status_name(job->status) + "\",\"stage\":\"" +
-                    json_escape(stage) + "\",\"logTail\":\"" +
-                    json_escape(log_tail) + "\"}");
         }
         // Phase 46: Model Builder Interface (docs/PLAN.md "Machine Learning
         // Abilities" section 9) at full surface: identity/target-project/
@@ -9343,6 +9181,128 @@ public:
             request.target.compare(request.target.size() - 7U, 7U, "/remove") == 0) {
             return workloads->remove_download(request, *user);
         }
+        // Bring-your-own-model import. Unlike /api/v1/model-downloads
+        // (fetches bytes over HTTPS from an approved host), this copies a
+        // GGUF the operator already has on local disk straight into the
+        // catalog, computing its real SHA-256 and RAM estimate server-side
+        // rather than trusting client-supplied values -- there is no
+        // network transfer to protect against tampering here, so there is
+        // nothing to check a hash against except the file itself. Reuses
+        // write_model_manifest()/record_verified_model() (models.cpp), the
+        // same catalog-write path the download flow and LoRA fine-tuning
+        // promotion already use (see catalog_model_id above), and the
+        // "masterai-local-import:" source_url marker models.cpp's
+        // self_produced_derivative check recognizes so a self-declared
+        // license is accepted without matching the closed downloaded-model
+        // SPDX list.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/model-imports") {
+            if (auto denied = forbidden_unless(user->role, "downloads.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body);
+                const auto source_path_text = root.required("sourcePath").as_string();
+                const auto category = root.required("category").as_string();
+                const auto model_id = root.required("modelId").as_string();
+                const auto display_name = root.required("displayName").as_string();
+                const auto architecture = root.required("architecture").as_string();
+                const auto quantization = root.required("quantization").as_string();
+                const auto license = root.required("license").as_string();
+                const auto trusted = root.required("trusted").as_boolean();
+
+                // Duplicated from models.cpp/workload_http.cpp's own copies
+                // of the same two sets/helper (kept in sync by hand, same as
+                // those files' own comments already note).
+                static const std::set<std::string> import_categories{
+                    "general-programming", "code-completion", "code-review",
+                    "debugging", "documentation", "embeddings-code-search",
+                    "conversation"};
+                const auto is_safe_identifier = [](const std::string& value) {
+                    if (value.empty() || value.size() > 96U ||
+                        value.front() == '.' || value.back() == '.') {
+                        return false;
+                    }
+                    return std::all_of(value.begin(), value.end(), [](const char c) {
+                        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                               (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+                               c == '.';
+                    });
+                };
+
+                std::error_code canon_error;
+                const auto source_path = std::filesystem::weakly_canonical(
+                    std::filesystem::path(source_path_text), canon_error);
+                auto extension = source_path.extension().string();
+                std::transform(extension.begin(), extension.end(), extension.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+                if (canon_error || !std::filesystem::is_regular_file(source_path) ||
+                    extension != ".gguf" ||
+                    is_path_within(configuration.models_root, source_path) ||
+                    import_categories.find(category) == import_categories.end() ||
+                    // <= 90, not is_safe_identifier's own 96, so the
+                    // "local-" prefix below still fits within the 96-char
+                    // limit load_manifest() (models.cpp) enforces on the
+                    // manifest's revision field.
+                    model_id.size() > 90U || !is_safe_identifier(model_id) ||
+                    !is_safe_identifier(architecture) ||
+                    !is_safe_identifier(quantization) ||
+                    display_name.empty() || display_name.size() > 160U ||
+                    license.empty() || license.size() > 160U || !trusted) {
+                    throw std::runtime_error(
+                        "local model import request is invalid: sourcePath "
+                        "must be an existing .gguf file outside the models "
+                        "directory, category must be a known category, "
+                        "modelId/architecture/quantization must be safe "
+                        "identifiers, displayName/license must be "
+                        "non-empty, and trusted must be true");
+                }
+
+                const auto model_directory =
+                    configuration.models_root / category / model_id;
+                if (std::filesystem::exists(model_directory)) {
+                    throw std::runtime_error(
+                        "model id \"" + model_id +
+                        "\" already exists in category \"" + category + "\"");
+                }
+
+                const auto filename = source_path.filename().string();
+                const auto destination = model_directory / filename;
+                std::filesystem::create_directories(model_directory);
+                std::filesystem::copy_file(source_path, destination);
+
+                const auto sha256 = sha256_file_hex(destination);
+                const auto size_bytes = static_cast<std::uint64_t>(
+                    std::filesystem::file_size(destination));
+                const std::uint64_t size_mib =
+                    (size_bytes + 1024ULL * 1024ULL - 1ULL) / (1024ULL * 1024ULL);
+                const std::uint64_t minimum_ram_mib = size_mib + 512ULL;
+                const std::uint64_t recommended_ram_mib = size_mib + 1024ULL;
+
+                write_model_manifest(
+                    model_directory, model_id, display_name, category,
+                    architecture, quantization, minimum_ram_mib,
+                    recommended_ram_mib, filename, size_bytes, sha256,
+                    "masterai-local-import:" + source_path.string(),
+                    "local-" + model_id, license);
+                record_verified_model(configuration.models_root, model_id,
+                                      sha256, size_bytes);
+
+                audit.append("model.import.local", user->id, "success", model_id);
+                return response(
+                    201, "Created",
+                    "{\"id\":\"" + json_escape(model_id) + "\",\"category\":\"" +
+                        json_escape(category) + "\",\"sha256\":\"" + sha256 +
+                        "\",\"sizeBytes\":" + std::to_string(size_bytes) +
+                        ",\"minimumRamMiB\":" + std::to_string(minimum_ram_mib) +
+                        ",\"recommendedRamMiB\":" + std::to_string(recommended_ram_mib) +
+                        ",\"ready\":true}");
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_model_import\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
         if (request.method == "GET" &&
             request.target == "/api/v1/benchmarks") {
             return workloads->list_benchmarks();
@@ -9508,21 +9468,6 @@ private:
         model = TrainedTabularModel{};
         report = TabularTrainingReport{};
         try {
-            // A dataset registered with purpose "instruction" (LLM fine-
-            // tuning data, no target column) can never satisfy
-            // parse_tabular_csv below -- the web UI's Training Jobs dataset
-            // picker no longer offers one, but a direct API call can still
-            // reach here, so name the actual problem instead of letting it
-            // fall through to a confusing classification-validation error.
-            if (const auto dataset = ml_datasets->find(job.dataset_id);
-                dataset && dataset->purpose == "instruction") {
-                throw std::runtime_error(
-                    "dataset \"" + dataset->name +
-                    "\" is registered with purpose \"Instruction / "
-                    "fine-tuning text\", which has no target column -- "
-                    "tabular training needs a dataset registered with "
-                    "purpose \"Tabular data\" instead");
-            }
             // Categorical feature encoding: a feature column that isn't
             // purely numeric (e.g. a text "record_type" column) is one-hot
             // encoded here rather than rejected -- see parse_tabular_csv's
@@ -9888,194 +9833,6 @@ private:
         ml_trained_models->put(model);
         ml_models->set_state(model_id, ModelRegistryState::evaluation);
         return {std::move(report), std::move(model), model_id};
-    }
-
-    // Phase 73: the real LLM LoRA fine-tuning executor. Runs on a detached
-    // background thread (see the "llm:"-prefixed branch of POST
-    // .../fine-tuning-jobs/{id}/run below) because a genuine llama.cpp
-    // finetune run can take far longer than the HTTP request timeout, so
-    // `job`/`base_model_entry`/`content`/`user_id` all arrive already
-    // copied by value and this must not touch `request`/`user`. Writes its
-    // outcome to ml_llm_finetune_results (JSON), the only way a caller
-    // polling GET .../llm-result learns whether/how it finished; never
-    // reports success without a real merged GGUF file on disk.
-    void run_llm_fine_tuning_job(const FineTuningJob& job,
-                                 const ModelRegistryEntry& base_model_entry,
-                                 const DatasetContentStore::Content& content,
-                                 const LlmFineTuneOptions& options,
-                                 const std::string& user_id) {
-        ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::preparing);
-        const std::atomic_bool no_cancellation{false};
-        const auto work_directory =
-            configuration.runtime_root / "ml-finetune" / job.id;
-        try {
-            const auto training_text_path =
-                write_llm_finetune_training_text(
-                    content.csv, work_directory / "training.txt");
-            ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::running);
-            const auto result = run_llama_lora_finetune(
-                configuration, base_model_entry.source, training_text_path,
-                work_directory, options, no_cancellation);
-            const auto merged_entry = ml_models->create(
-                user_id, job.name + "-model", job.name + " (LoRA fine-tuned)",
-                "1", base_model_entry.family, base_model_entry.task,
-                "gguf-lora-merged", result.merged_gguf.string(), "",
-                base_model_entry.quantization);
-            ml_models->set_state(merged_entry.id, ModelRegistryState::evaluation);
-            // Promote the merged GGUF into the real model catalog (the
-            // manifest.json + verification-cache structure find_model()/
-            // ModelRegistry::scan() actually reads for chat/inference) so
-            // it's genuinely usable, not only tracked as ML-pipeline
-            // metadata -- ml_models->create() above registers it for the
-            // ML pipeline's own bookkeeping, but that alone was never
-            // visible to (or loadable by) the chat model picker. Two
-            // sources for architecture/quantization/RAM/license, in order
-            // of preference: the base model's own real catalog manifest
-            // (find_model() succeeds) when it has one; otherwise
-            // ModelRegistryEntry's own fields (whatever a human put on
-            // record when they manually registered that base model) plus
-            // a real size-derived RAM estimate -- see
-            // self_produced_derivative's comment in models.cpp for the
-            // matching validation-side exception this relies on. Best-
-            // effort: any failure here (disk full, permissions, an
-            // unsanitizable field, ...) still leaves the job "completed"
-            // with its real merged GGUF and ML Registry entry intact, just
-            // not catalog-promoted, named in catalogNote.
-            std::string catalog_model_id;
-            std::string catalog_note;
-            try {
-                const auto base_record = find_model(base_model_entry.id);
-                // is_safe_identifier (models.cpp) requires alnum/-/_/.
-                // only, non-empty, <=96 chars -- a manually-registered
-                // ModelRegistryEntry's free-text fields aren't guaranteed
-                // to satisfy that, so a value that doesn't gets replaced
-                // with "unknown" rather than silently truncated/mangled
-                // into something that misrepresents it.
-                const auto safe_or_unknown = [](const std::string& value) {
-                    const bool ok = !value.empty() && value.size() <= 96U &&
-                        value.front() != '.' && value.back() != '.' &&
-                        std::all_of(value.begin(), value.end(), [](const char c) {
-                            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                                   (c >= '0' && c <= '9') || c == '-' || c == '_' ||
-                                   c == '.';
-                        });
-                    return ok ? value : std::string("unknown");
-                };
-                const std::string category =
-                    base_record ? base_record->manifest.category : "conversation";
-                const std::string architecture = base_record
-                    ? base_record->manifest.architecture
-                    : safe_or_unknown(base_model_entry.family);
-                const std::string quantization = base_record
-                    ? base_record->manifest.quantization
-                    : safe_or_unknown(base_model_entry.quantization);
-                const std::string license_id =
-                    base_record ? base_record->manifest.license_id : base_model_entry.license;
-                if (license_id.empty()) {
-                    throw std::runtime_error(
-                        "base model \"" + base_model_entry.id +
-                        "\" has no license on record to inherit (its "
-                        "License field was left blank when it was "
-                        "registered) -- set one on that Model Registry "
-                        "entry, then re-run this fine-tuning job");
-                }
-                catalog_model_id = "finetuned-" + job.id;
-                const auto catalog_directory =
-                    configuration.models_root / category / catalog_model_id;
-                const auto catalog_file = catalog_directory / "model.gguf";
-                std::filesystem::create_directories(catalog_directory);
-                std::filesystem::copy_file(
-                    result.merged_gguf, catalog_file,
-                    std::filesystem::copy_options::overwrite_existing);
-                const auto sha256 = sha256_file_hex(catalog_file);
-                const auto size_bytes =
-                    static_cast<std::uint64_t>(std::filesystem::file_size(catalog_file));
-                // load_manifest() (models.cpp) only accepts a source_url
-                // starting with one of three real download hosts, or the
-                // "masterai-finetune:" marker its self_produced_derivative
-                // exception recognizes. The base's own real source_url is
-                // used when known (honestly naming where the base weights
-                // this is a LoRA derivative of came from); otherwise the
-                // marker, which is what makes the license/source_url
-                // exception above apply during the next scan().
-                const std::string source_url =
-                    base_record ? base_record->manifest.source_url
-                               : "masterai-finetune:" + job.id;
-                const std::string revision = base_record
-                    ? base_record->manifest.source_revision + "-lora-" + job.id
-                    : job.id;
-                std::uint64_t minimum_ram_mib = 0U;
-                std::uint64_t recommended_ram_mib = 0U;
-                if (base_record) {
-                    minimum_ram_mib = base_record->manifest.minimum_ram_mib;
-                    recommended_ram_mib = base_record->manifest.recommended_ram_mib;
-                } else {
-                    // No verified RAM figure exists for a manually-
-                    // registered base, so this is computed directly from
-                    // the merged file's own real size on disk (file size
-                    // plus a fixed runtime/context overhead) rather than
-                    // asserted -- an honest estimate, not a fabricated
-                    // authoritative number.
-                    const std::uint64_t size_mib =
-                        (size_bytes + 1024ULL * 1024ULL - 1ULL) / (1024ULL * 1024ULL);
-                    minimum_ram_mib = size_mib + 512ULL;
-                    recommended_ram_mib = size_mib + 1024ULL;
-                }
-                write_model_manifest(
-                    catalog_directory, catalog_model_id,
-                    job.name + " (LoRA fine-tuned)", category, architecture,
-                    quantization, minimum_ram_mib, recommended_ram_mib,
-                    "model.gguf", size_bytes, sha256, source_url, revision,
-                    license_id);
-                record_verified_model(configuration.models_root,
-                                      catalog_model_id, sha256, size_bytes);
-            } catch (const std::exception& error) {
-                catalog_model_id.clear();
-                catalog_note =
-                    std::string("merged GGUF was not promoted to the "
-                                "model catalog: ") + error.what();
-            }
-            // Non-fatal caution, not a hard block: llama.cpp's finetune
-            // tooling backpropagates against the base GGUF's real weights,
-            // so a base quantized below full/near-full precision (anything
-            // other than F32/F16/BF16/Q8_0) trains against already-lossy
-            // values -- the run still completes and produces a real adapter,
-            // but its quality is unreliable, so the job result names this
-            // honestly instead of only naming it in documentation.
-            const std::string quantization_warning =
-                base_model_entry.quantization.empty() ||
-                        llm_finetune_safe_quantization(base_model_entry.quantization)
-                    ? std::string{}
-                    : "base model quantization \"" + base_model_entry.quantization +
-                          "\" is below the precision LoRA fine-tuning "
-                          "reliably works against (F32, F16, BF16, or "
-                          "Q8_0 recommended); the adapter was still trained, "
-                          "but review its evaluation results carefully";
-            const std::string result_json =
-                "{\"status\":\"completed\",\"jobId\":\"" + json_escape(job.id) +
-                "\",\"modelId\":\"" + json_escape(merged_entry.id) +
-                "\",\"mergedModelPath\":\"" +
-                json_escape(result.merged_gguf.string()) +
-                "\",\"finetuneLogTail\":\"" +
-                json_escape(result.finetune_log_tail) +
-                "\",\"exportLoraLogTail\":\"" +
-                json_escape(result.export_lora_log_tail) +
-                "\",\"quantizationWarning\":\"" +
-                json_escape(quantization_warning) +
-                "\",\"catalogModelId\":\"" + json_escape(catalog_model_id) +
-                "\",\"catalogNote\":\"" + json_escape(catalog_note) + "\"}";
-            ml_llm_finetune_results->put(job.id, result_json);
-            ml_fine_tuning_jobs->set_status(
-                job.id, FineTuningJobStatus::awaiting_evaluation);
-            audit.append("ml.fine_tuning_job.llm_run", user_id, "success", job.id);
-        } catch (const std::exception& error) {
-            const std::string result_json =
-                "{\"status\":\"failed\",\"jobId\":\"" + json_escape(job.id) +
-                "\",\"error\":\"" + json_escape(error.what()) + "\"}";
-            ml_llm_finetune_results->put(job.id, result_json);
-            ml_fine_tuning_jobs->set_status(job.id, FineTuningJobStatus::failed);
-            audit.append("ml.fine_tuning_job.llm_run", user_id, "failure", job.id);
-        }
     }
 
     // Phase 56/69: the real evaluation harness's core, factored out the
@@ -10989,8 +10746,9 @@ private:
     // already re-reads straight from `configuration` (accelerator policy,
     // reply/context length, retrieval and cache toggles, session reuse,
     // rate/body limits, allow-lists, local/OS sign-in toggles, the runner
-    // generation stall timeout) so those take effect immediately. Every
-    // other field -- host/port/TLS, storage roots,
+    // generation stall timeout, the six chat_tool_* tool-execution bounds)
+    // so those take effect immediately. Every other field -- host/port/TLS,
+    // storage roots,
     // memory ceilings baked into MemoryBudgetManager at construction, the
     // runner executable/port, and anything else only ever read once at
     // server startup -- is saved for the next restart and reported back in
@@ -11075,6 +10833,22 @@ private:
         configuration.allowed_origins = incoming.allowed_origins;
         configuration.runner_stall_timeout_seconds =
             incoming.runner_stall_timeout_seconds;
+        // Phase 84 follow-up: applied live, no restart needed -- every
+        // chat_tool_* bound is read fresh from `configuration` at the top of
+        // each execute_chat_tool() call (tool_exec.cpp), not cached at
+        // process startup.
+        configuration.chat_tool_read_file_maximum_bytes =
+            incoming.chat_tool_read_file_maximum_bytes;
+        configuration.chat_tool_search_maximum_files =
+            incoming.chat_tool_search_maximum_files;
+        configuration.chat_tool_search_maximum_results =
+            incoming.chat_tool_search_maximum_results;
+        configuration.chat_tool_list_directory_maximum_entries =
+            incoming.chat_tool_list_directory_maximum_entries;
+        configuration.chat_tool_command_timeout_seconds =
+            incoming.chat_tool_command_timeout_seconds;
+        configuration.chat_tool_command_maximum_output_bytes =
+            incoming.chat_tool_command_maximum_output_bytes;
         // Phase 30A: an accelerator-policy change must retire the stale
         // CalibrationService immediately -- otherwise resolve()/calibrate()
         // would keep validating against the policy this process started
@@ -11478,10 +11252,8 @@ private:
     // resolves either source transparently: an existing Model Registry id
     // is returned as-is, and a catalog model id that isn't registered yet
     // gets a matching ModelRegistryEntry created on the spot -- "source"
-    // pointed at the real GGUF file on disk, exactly what the "llm:"
-    // fine-tuning executor (POST .../fine-tuning-jobs/{id}/run) requires
-    // of a base model's registry entry. An id matching neither source is
-    // returned unchanged so the caller's own existing not-found handling
+    // pointed at the real GGUF file on disk. An id matching neither source
+    // is returned unchanged so the caller's own existing not-found handling
     // (ml_models->create/find inside the create call, or the /run guard)
     // still reports it. An empty id (both base-model fields are optional)
     // is likewise returned unchanged.
@@ -12122,6 +11894,29 @@ private:
         GenerationOptions options;
     };
 
+    // Phase 100: the effective context-window ceiling for this turn's
+    // prompt-budget check -- the smaller of the admin-configured ceiling
+    // (`configuration.chat_context_length`) and the context_length the
+    // currently loaded runner was *actually* launched with, whenever that's
+    // known (`RunnerMetrics::context_length`; see its own comment in
+    // masterai.hpp for why the two can diverge -- a calibration profile or
+    // AdaptiveController's memory-pressure shrink can each choose something
+    // smaller than the configured ceiling for one particular launch).
+    // Without this, both budget checks below compared the prompt only
+    // against the static configured ceiling, so a prompt judged as fitting
+    // here could still be rejected by the runner itself with a raw,
+    // unfriendly exceed_context_size_error once the two values diverged --
+    // exactly the failure this closes. `actual == 0` means "no runner has
+    // loaded yet" (or a pre-Phase-100 metrics snapshot), which falls back
+    // to the configured ceiling exactly as before this phase.
+    std::uint64_t effective_chat_context_tokens() const {
+        const unsigned int actual =
+            inference != nullptr ? inference->metrics().context_length : 0U;
+        if (actual == 0U) return configuration.chat_context_length;
+        return std::min<std::uint64_t>(configuration.chat_context_length,
+                                       actual);
+    }
+
     // Phase 29: the same per-model prompt-template/reasoning-directive/
     // sampling-preset/context-budget logic send_chat_message() applies for
     // its own (non-routed) path, factored out so the tiering cascade below
@@ -12167,7 +11962,8 @@ private:
                 inference->tokenize(prepared.generation_prompt);
             constexpr std::uint64_t kContextMarginTokens = 32U;
             constexpr std::uint64_t kMinimumReplyTokens = 16U;
-            const std::uint64_t context_tokens = configuration.chat_context_length;
+            const std::uint64_t context_tokens =
+                effective_chat_context_tokens();
             if (prompt_token_count + kContextMarginTokens + kMinimumReplyTokens >
                 context_tokens) {
                 throw std::runtime_error(
@@ -12460,7 +12256,13 @@ private:
                "them instead of only describing what you would do, whenever "
                "the request actually calls for reading, writing, deleting a "
                "project file, listing/searching the project, or running an "
-               "admin-approved external command. To call one, end your "
+               "admin-approved external command. Never tell the user what "
+               "command or tool they could run, or what output they would "
+               "see, in place of actually calling it yourself -- if the "
+               "request calls for a tool, invoke it this turn instead of "
+               "describing it in prose; only describe a tool when the user "
+               "explicitly asked what tools exist rather than asking you to "
+               "use one. To call one, end your "
                "reply with exactly one block of the form " +
                std::string(kToolCallOpenMarker) +
                "\n{\"tool\":\"<name>\",\"arguments\":{...}}\n" +
@@ -12609,6 +12411,405 @@ private:
             if (name == known) return true;
         }
         return false;
+    }
+
+    // Phase 98: a small set of natural-language phrasings for the four
+    // "obviously mechanical" tools -- list_directory, read_file, search,
+    // run_command -- that send_chat_message() recognizes and executes
+    // immediately, before the message ever reaches the model. Without this,
+    // even a plain "list this directory" has to wait for a full model
+    // generation just to decide to call a tool a fixed phrase already
+    // answers unambiguously (see send_chat_message()'s own call site).
+    // Deliberately conservative: unmatched, ambiguous, or unresolvable
+    // phrasing returns nullopt and falls straight through to the ordinary
+    // model-mediated [[TOOL_CALL]] path further down, completely unchanged.
+    // write_file and delete_file are intentionally absent from this table --
+    // a write needs real content only the model can produce, and a delete is
+    // destructive enough that reaching for it should stay the model's own
+    // considered decision, not a phrase match. classify_tool_call_risk()
+    // still runs on whatever this detects, exactly as it does for a
+    // model-issued call, so a destructive run_command (or confirm_all mode)
+    // still pauses for an explicit Approve/Deny click -- this only skips the
+    // "decide to call a tool" model turn, never the approval gate.
+    struct NaturalToolTrigger {
+        const char* phrase;
+        const char* tool_name;
+    };
+    static constexpr NaturalToolTrigger kNaturalToolTriggers[] = {
+        // list_directory -- longer, more specific phrases first so the
+        // "earliest position, then longest phrase" tie-break below prefers
+        // them over a shorter phrase that happens to be their prefix.
+        {"show me the full directory listing of ", "list_directory"},
+        {"show me the full directory listing for ", "list_directory"},
+        {"show me the full directory of ", "list_directory"},
+        {"show me the full directory for ", "list_directory"},
+        {"show me the directory listing of ", "list_directory"},
+        {"show me the directory listing for ", "list_directory"},
+        {"show me the directory of ", "list_directory"},
+        {"show me the directory for ", "list_directory"},
+        {"show me the folder ", "list_directory"},
+        {"show the full directory of ", "list_directory"},
+        {"show the directory listing of ", "list_directory"},
+        {"show the directory listing for ", "list_directory"},
+        {"show the directory of ", "list_directory"},
+        {"show the directory for ", "list_directory"},
+        {"show the folder ", "list_directory"},
+        {"show directory listing of ", "list_directory"},
+        {"show directory listing for ", "list_directory"},
+        {"show directory ", "list_directory"},
+        {"directory listing of ", "list_directory"},
+        {"directory listing for ", "list_directory"},
+        {"list the contents of ", "list_directory"},
+        {"list the directory of ", "list_directory"},
+        {"list the directory ", "list_directory"},
+        {"list directory of ", "list_directory"},
+        {"list directory ", "list_directory"},
+        {"list the files in ", "list_directory"},
+        {"list files in ", "list_directory"},
+        {"show me files in ", "list_directory"},
+        {"show files in ", "list_directory"},
+        {"what's in the folder ", "list_directory"},
+        {"what is in the folder ", "list_directory"},
+        {"what's in folder ", "list_directory"},
+        {"what's in the directory ", "list_directory"},
+        {"what is in the directory ", "list_directory"},
+        {"working directory of ", "list_directory"},
+        {"the working directory of ", "list_directory"},
+        {"ls ", "list_directory"},
+        // read_file
+        {"show me the contents of the file ", "read_file"},
+        {"show me the file ", "read_file"},
+        {"show me file ", "read_file"},
+        {"read the file ", "read_file"},
+        {"read file ", "read_file"},
+        {"open the file ", "read_file"},
+        {"open file ", "read_file"},
+        // search
+        {"search the project for ", "search"},
+        {"search this project for ", "search"},
+        {"search the codebase for ", "search"},
+        {"search for ", "search"},
+        // run_command -- deliberately no bare "run "/"execute "/"cat "
+        // entries: those are common English words/prefixes ("in the long
+        // run, I want...", "the cat food is empty") that would substring-
+        // match inside ordinary unrelated sentences and hijack the turn
+        // into a doomed tool call instead of a real reply. Every phrase
+        // kept here names the command concept explicitly enough that a
+        // false positive is very unlikely.
+        {"run the command ", "run_command"},
+        {"run command ", "run_command"},
+        {"execute the command ", "run_command"},
+        {"execute command ", "run_command"},
+    };
+
+    // Finds the earliest, then (on a tie) longest, trigger phrase occurring
+    // anywhere in `lowercase_message` -- a real request is rarely typed as
+    // *only* the directive ("well then show me the full directory of ..."
+    // should still match), so this searches the whole message rather than
+    // requiring the phrase at position zero.
+    static const NaturalToolTrigger* find_natural_tool_trigger(
+        const std::string& lowercase_message, std::size_t& match_position) {
+        const NaturalToolTrigger* best = nullptr;
+        match_position = std::string::npos;
+        std::size_t best_length = 0U;
+        for (const auto& trigger : kNaturalToolTriggers) {
+            const std::string phrase{trigger.phrase};
+            const auto found = lowercase_message.find(phrase);
+            if (found == std::string::npos) continue;
+            if (best == nullptr || found < match_position ||
+               (found == match_position && phrase.size() > best_length)) {
+                best = &trigger;
+                match_position = found;
+                best_length = phrase.size();
+            }
+        }
+        return best;
+    }
+
+    // Trims the ASCII whitespace/punctuation a spoken sentence tends to
+    // trail an extracted argument with ("...of f:\projects\c++\masterai,
+    // please." -> "f:\projects\c++\masterai") without touching anything
+    // that might be meaningful inside a real path/query/command argument.
+    static std::string trim_natural_tool_argument(std::string text) {
+        const auto is_edge_char = [](char ch) {
+            return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' ||
+                  ch == '.' || ch == '!' || ch == '?' || ch == ',' ||
+                  ch == ':' || ch == ';' || ch == '"' || ch == '\'' ||
+                  ch == '`';
+        };
+        std::size_t start = 0U;
+        while (start < text.size() && is_edge_char(text[start])) ++start;
+        std::size_t end = text.size();
+        while (end > start && is_edge_char(text[end - 1U])) --end;
+        return text.substr(start, end - start);
+    }
+
+    // Normalizes a natural-language path argument against `project` --
+    // resolves phrasing like "this project"/"here"/"." to the project
+    // root, and an absolute path that names the project root (or somewhere
+    // under it) to the equivalent project-relative path the real tools
+    // require (see resolve_project_path()/tool_list_directory() in
+    // tool_exec.cpp, which both reject absolute paths outright). Returns
+    // nullopt for an absolute path outside the project root, or anything
+    // else that fails to resolve -- callers fall through to the ordinary
+    // model-mediated path in that case, so the model can explain the
+    // limitation in its own words rather than this failing silently.
+    static std::optional<std::string> normalize_natural_tool_path(
+        const std::string& raw_argument, const ProjectRecord& project) {
+        const auto trimmed = trim_natural_tool_argument(raw_argument);
+        if (trimmed.empty()) return std::string(".");
+        std::string lowered = trimmed;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                      [](unsigned char ch) { return std::tolower(ch); });
+        static const char* const kSelfReferences[] = {
+            ".", "here", "root", "the root", "this project", "the project",
+            "project root", "the project root", "this folder",
+            "the current folder", "current directory",
+            "the current directory", "this directory", "root folder",
+            "root directory"};
+        for (const char* self_reference : kSelfReferences) {
+            if (lowered == self_reference) return std::string(".");
+        }
+        const std::filesystem::path candidate(trimmed);
+        if (!candidate.is_absolute()) return trimmed;
+        std::error_code error;
+        const auto root = std::filesystem::weakly_canonical(project.root, error);
+        if (error) return std::nullopt;
+        const auto resolved = std::filesystem::weakly_canonical(candidate, error);
+        if (error || !is_path_within(root, resolved)) return std::nullopt;
+        if (resolved == root) return std::string(".");
+        const auto relative = std::filesystem::relative(resolved, root, error);
+        if (error) return std::nullopt;
+        return relative.generic_string();
+    }
+
+    // Splits a "run <command line>" argument into run_command's
+    // {executable, arguments:[...]} shape. Simple whitespace splitting --
+    // no shell, no quoting -- matches the same contract run_command already
+    // has for the model's own [[TOOL_CALL]] invocations of it.
+    static std::optional<ToolCallRequest> build_run_command_directive(
+        const std::string& raw_argument) {
+        const auto trimmed = trim_natural_tool_argument(raw_argument);
+        std::istringstream stream(trimmed);
+        std::string executable;
+        stream >> executable;
+        if (executable.empty()) return std::nullopt;
+        JsonValue::Array arguments_array;
+        std::string token;
+        while (stream >> token) {
+            arguments_array.emplace_back(std::string(token));
+        }
+        JsonValue::Object arguments_object;
+        arguments_object.emplace("executable", JsonValue(executable));
+        arguments_object.emplace("arguments",
+                                 JsonValue(std::move(arguments_array)));
+        return ToolCallRequest{"run_command",
+                               JsonValue(std::move(arguments_object))};
+    }
+
+    // Top-level natural-language tool detector send_chat_message() consults
+    // before ever touching the model (see its own call site). Returns
+    // nullopt for no match, an unresolvable path, or an empty query/command
+    // -- every one of those cases falls through to the normal model-
+    // mediated tool-call path unchanged, so the worst this can do is leave
+    // a request exactly as slow as it already was, never wrong.
+    static std::optional<ToolCallRequest> detect_natural_tool_directive(
+        const std::string& message, const ProjectRecord& project) {
+        std::string lowered = message;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                      [](unsigned char ch) { return std::tolower(ch); });
+        std::size_t match_position = 0U;
+        const auto* trigger = find_natural_tool_trigger(lowered, match_position);
+        if (trigger == nullptr) return std::nullopt;
+        const std::string tool_name{trigger->tool_name};
+        const std::string phrase{trigger->phrase};
+        const auto argument_start = match_position + phrase.size();
+        if (argument_start > message.size()) return std::nullopt;
+        const auto raw_argument = message.substr(argument_start);
+        if (tool_name == "list_directory") {
+            const auto path = normalize_natural_tool_path(raw_argument, project);
+            if (!path) return std::nullopt;
+            JsonValue::Object arguments;
+            arguments.emplace("path", JsonValue(*path));
+            return ToolCallRequest{tool_name, JsonValue(std::move(arguments))};
+        }
+        if (tool_name == "read_file") {
+            const auto path = normalize_natural_tool_path(raw_argument, project);
+            if (!path || *path == ".") return std::nullopt;
+            JsonValue::Object arguments;
+            arguments.emplace("path", JsonValue(*path));
+            return ToolCallRequest{tool_name, JsonValue(std::move(arguments))};
+        }
+        if (tool_name == "search") {
+            const auto query = trim_natural_tool_argument(raw_argument);
+            if (query.empty() || query.size() > 256U) return std::nullopt;
+            JsonValue::Object arguments;
+            arguments.emplace("query", JsonValue(query));
+            return ToolCallRequest{tool_name, JsonValue(std::move(arguments))};
+        }
+        return build_run_command_directive(raw_argument);
+    }
+
+    // Phase 99: a "what tools/commands are you authorised to use"-style
+    // question is a request for real, current server configuration -- not
+    // something a small local model can answer reliably. Left to the model
+    // (as the run_command screenshot that prompted this showed), it either
+    // guesses at a plausible-looking list or truncates mid-answer once it
+    // runs out of budget. This is answered immediately and deterministically
+    // from the actual tool set and the actual admin run_command allow-list,
+    // exactly like detect_natural_tool_directive() above skips the model for
+    // a mechanical action -- the difference is this never calls a tool at
+    // all, it just discloses what's really configured. Deliberately a broad-
+    // ish set of phrasings (unlike the tool triggers above, a false match
+    // here just answers a slightly-off question correctly rather than
+    // hijacking an unrelated request into a destructive action) so "show me
+    // what run_commands you are authorised to use", "what tools can you
+    // use", "which commands are you authorized to run", etc. all land here.
+    static bool is_capability_disclosure_query(
+        const std::string& lowercase_message) {
+        static constexpr const char* kPhrases[] = {
+            "tools are you author",     "tools can you use",
+            "tools do you have",        "tools can you access",
+            "which tools are you",      "list your tools",
+            "list the tools you",       "show me your tools",
+            "show me the tools you",    "tools are available to you",
+            "commands are you author",  "run_commands are you author",
+            "run commands are you author",
+            "commands can you run",     "commands can you use",
+            "which commands are you",   "list your commands",
+            "list the commands you",    "show me your commands",
+            "show me the commands you", "actions are you author",
+            "actions can you perform",  "actions are you allowed",
+            "what are your capabilities",
+            "are you authorised to do", "are you authorized to do",
+            "are you allowed to use",   "are you allowed to run",
+            // First-person variants -- not how a human usually phrases a
+            // question to the assistant, but exactly how the model itself
+            // tends to phrase it when a reply pauses to check its own
+            // capabilities out loud (e.g. "let me check what tools I am
+            // authorized to use" inside a generated reply that gets echoed
+            // back as the next turn's prompt, or a user pasting the model's
+            // own words back to ask about them). Matched the same way so
+            // that phrasing gets the same real answer instead of another
+            // model guess.
+            "tools am i author",        "tools am i allowed",
+            "tools can i use",          "tools can i access",
+            "commands am i author",     "commands am i allowed",
+            "run_commands am i author", "run commands am i author",
+            "commands can i run",       "commands can i use",
+            "actions am i author",      "actions am i allowed",
+            "actions can i perform",    "actions am i permitted",
+            "what am i authorised to do",
+            "what am i authorized to do",
+            "am i allowed to use",      "am i allowed to run",
+            "am i permitted to use",    "am i permitted to run",
+            // "permitted"/"enabled"/allow-list wording -- the same third-
+            // person questions above, but phrased with a synonym for
+            // "authorised" that the earlier "author" root doesn't catch.
+            "tools are you permitted",  "commands are you permitted",
+            "actions are you permitted",
+            "tools are enabled for you",
+            "commands are enabled for you",
+            "tools are configured for you",
+            "commands are configured for you",
+            "what's on your allow-list", "what is your allow-list",
+            "what's on your allow list", "what is your allow list",
+            "what's on the allow-list",  "what is the allow-list",
+            "what's on the allow list",  "what is the allow list",
+            "what commands are whitelisted",
+            "what's whitelisted for you", "what is whitelisted for you",
+            // "function(s)" -- some phrasing (and some models) call a tool a
+            // "function" instead; same trigger shapes as "tools"/"commands"
+            // above, third- and first-person.
+            "functions are you author",  "functions can you use",
+            "functions do you have",     "which functions are you",
+            "list your functions",       "show me your functions",
+            "functions am i author",     "functions can i use",
+            "functions am i allowed",
+            // "tool list"/"command list" -- a noun-phrase request rather
+            // than a question ("your tool list", "list of commands you").
+            "your tool list",            "your command list",
+            "list of tools you",         "list of commands you",
+            "full list of tools",        "full list of commands",
+            // General capability phrasing not already covered by a
+            // "tools"/"commands"/"actions"/"functions" root above.
+            "what are you capable of",   "what are you able to do",
+            "what can you actually do",  "what tools do you support",
+        };
+        for (const char* phrase : kPhrases) {
+            if (lowercase_message.find(phrase) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Builds the actual answer for is_capability_disclosure_query() -- the
+    // same six tools apply_tool_call_directive() tells the model about,
+    // plus (since that's what was specifically asked about) the real,
+    // currently-enabled run_command allow-list for this project, filtered
+    // to the platform this server is actually running on (an entry tagged
+    // for the other OS is real and enabled, but would just fail to find its
+    // executable here, so listing it would answer the question wrong).
+    static std::string build_capability_disclosure(
+        const std::optional<ProjectRecord>& project,
+        ChatToolExecutionMode tool_execution_mode,
+        AllowedCommandStore& allowed_commands) {
+        std::string text =
+            "Here is what's actually configured on this server -- not a "
+            "guess:\n\n"
+            "Tools available in a project chat:\n"
+            "- read_file{path} -- read a UTF-8 project file\n"
+            "- list_directory{path} -- list a directory and every "
+            "subdirectory beneath it as one tree\n"
+            "- search{query} -- search the project for text\n"
+            "- write_file{path,content} -- create or fully replace a "
+            "project file\n"
+            "- delete_file{path} -- delete a project file (always needs "
+            "your explicit approval)\n"
+            "- run_command{executable,arguments} -- run one admin-"
+            "approved external program\n\n";
+        if (!project) {
+            text += "This chat has no project selected, so none of these "
+                     "tools are actually available right now.";
+            return text;
+        }
+        if (tool_execution_mode == ChatToolExecutionMode::off) {
+            text += "Tool execution is turned OFF for this chat, so none "
+                     "of these tools can actually run right now -- change "
+                     "it in this chat's tool-execution setting first.";
+            return text;
+        }
+        if (tool_execution_mode == ChatToolExecutionMode::confirm_all) {
+            text += "This chat is set to confirm every tool action, so "
+                     "each one of these will pause for your explicit "
+                     "Approve/Deny before it runs.\n\n";
+        }
+        text += "run_command is restricted to an admin allow-list. The "
+                 "executables currently enabled for this project are:\n";
+        auto commands = allowed_commands.list();
+        std::vector<std::string> names;
+        for (const auto& command : commands) {
+            if (!command.enabled) continue;
+            if (!command.allowed_project_ids.empty() &&
+               command.allowed_project_ids.find(project->id) ==
+                   command.allowed_project_ids.end()) {
+                continue;
+            }
+#if defined(_WIN32)
+            if (command.os == CommandOs::linux) continue;
+#else
+            if (command.os == CommandOs::windows) continue;
+#endif
+            names.push_back(command.executable);
+        }
+        std::sort(names.begin(), names.end());
+        if (names.empty()) {
+            text += "(none enabled for this project)";
+        } else {
+            for (const auto& name : names) text += "- " + name + "\n";
+        }
+        return text;
     }
 
     // Small local models don't reliably follow the exact "end your reply
@@ -14084,6 +14285,183 @@ private:
             }
         }
 
+        // Phase 99: see is_capability_disclosure_query()'s own comment --
+        // "what tools/commands are you authorised to use" is answered here,
+        // immediately and deterministically, and never reaches the model.
+        // Checked before Phase 98's tool-directive detection below since
+        // this is a question about tools, not a request to run one, and
+        // must never be misread as one.
+        {
+            std::string lowered_prompt = prompt;
+            std::transform(lowered_prompt.begin(), lowered_prompt.end(),
+                          lowered_prompt.begin(),
+                          [](unsigned char ch) { return std::tolower(ch); });
+            if (is_capability_disclosure_query(lowered_prompt)) {
+                std::optional<ProjectRecord> capability_project;
+                if (!chat->project_id.empty()) {
+                    capability_project = projects->find(chat->project_id);
+                }
+                const std::string answer = build_capability_disclosure(
+                    capability_project, chat->tool_execution_mode,
+                    *allowed_commands);
+                chats->append(chat_id, ChatRole::user, prompt);
+                chats->append(chat_id, ChatRole::assistant, answer);
+                audit.append("chat.capability_query", user.id, "success",
+                             chat_id);
+                if (stream_socket != invalid_socket) {
+                    const std::string header =
+                        "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: application/x-ndjson; charset=utf-8\r\n"
+                        "Transfer-Encoding: chunked\r\nConnection: close\r\n"
+                        "Cache-Control: no-store\r\n"
+                        "X-Content-Type-Options: nosniff\r\n"
+                        "X-Frame-Options: DENY\r\n"
+                        "Referrer-Policy: no-referrer\r\n\r\n";
+                    if (!send_all(stream_socket, header)) return {};
+                    send_chunk(stream_socket,
+                               "{\"type\":\"token\",\"content\":\"" +
+                                   json_escape(answer) + "\"}\n");
+                    send_chunk(stream_socket,
+                               "{\"type\":\"complete\",\"promptTokens\":0,"
+                               "\"generatedTokens\":0}\n");
+                    send_all(stream_socket, "0\r\n\r\n");
+                    return {};
+                }
+                return response(200, "OK",
+                                "{\"content\":\"" + json_escape(answer) +
+                                    "\",\"promptTokens\":0,"
+                                    "\"generatedTokens\":0}");
+            }
+        }
+
+        // Phase 98: a natural-language directory/file/search/command
+        // request is executed immediately here, before the model is ever
+        // asked to decide anything -- see detect_natural_tool_directive()'s
+        // own comment for why. This only ever *replaces* the "decide to
+        // call a tool" model turn: a high_risk call (or a chat set to
+        // confirm_all) still pauses for a human Approve/Deny exactly as the
+        // model-mediated path further down does, and a safe call still asks
+        // the client to send one more turn afterward (autoDriveState
+        // "continue", same mechanism the model-mediated path already uses)
+        // so the model can comment on the real result in its own words.
+        // Works even with no project/model context beyond what's checked
+        // here, same as the memory directive above -- it never touches
+        // `inference`.
+        if (!chat->project_id.empty() &&
+           chat->tool_execution_mode != ChatToolExecutionMode::off) {
+            if (const auto natural_tool_project = projects->find(chat->project_id)) {
+                if (const auto directive =
+                        detect_natural_tool_directive(prompt,
+                                                      *natural_tool_project)) {
+                    chats->append(chat_id, ChatRole::user, prompt);
+                    const auto classified_risk = classify_tool_call_risk(
+                        directive->tool_name, directive->arguments);
+                    const bool confirm_all_mode =
+                        chat->tool_execution_mode ==
+                        ChatToolExecutionMode::confirm_all;
+                    const auto risk = confirm_all_mode
+                                          ? ChatToolRisk::high_risk
+                                          : classified_risk;
+                    const bool streaming_reply =
+                        stream_socket != invalid_socket;
+                    static constexpr const char* kNdjsonHeader =
+                        "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: application/x-ndjson; charset=utf-8\r\n"
+                        "Transfer-Encoding: chunked\r\nConnection: close\r\n"
+                        "Cache-Control: no-store\r\n"
+                        "X-Content-Type-Options: nosniff\r\n"
+                        "X-Frame-Options: DENY\r\n"
+                        "Referrer-Policy: no-referrer\r\n\r\n";
+                    if (risk == ChatToolRisk::high_risk) {
+                        PendingToolApproval approval;
+                        approval.id = generate_tool_approval_id();
+                        approval.chat_id = chat_id;
+                        approval.user_id = user.id;
+                        approval.tool_name = directive->tool_name;
+                        approval.arguments_json =
+                            json_stringify(directive->arguments);
+                        approval.reason =
+                            classified_risk == ChatToolRisk::high_risk
+                                ? ("This action (" + directive->tool_name +
+                                   ") was classified high-risk and needs "
+                                   "your explicit approval before it runs.")
+                                : ("This chat is set to confirm every tool "
+                                   "action -- " + directive->tool_name +
+                                   " needs your explicit approval before "
+                                   "it runs.");
+                        approval.created_epoch_seconds = epoch_seconds();
+                        pending_tool_approvals->create(approval);
+                        audit.append("chat.tool_call", user.id,
+                                     "pending_approval",
+                                     chat_id + "/" + directive->tool_name);
+                        const std::string event =
+                            "{\"type\":\"tool_approval_required\","
+                            "\"approvalId\":\"" + json_escape(approval.id) +
+                            "\",\"tool\":\"" +
+                            json_escape(directive->tool_name) +
+                            "\",\"arguments\":" +
+                            json_stringify(directive->arguments) +
+                            ",\"reason\":\"" + json_escape(approval.reason) +
+                            "\"}\n";
+                        if (streaming_reply) {
+                            if (!send_all(stream_socket, kNdjsonHeader)) {
+                                return {};
+                            }
+                            send_chunk(stream_socket, event);
+                            send_all(stream_socket, "0\r\n\r\n");
+                            return {};
+                        }
+                        return response(200, "OK",
+                                        event.substr(0U, event.size() - 1U));
+                    }
+                    const std::string tool_call_event =
+                        "{\"type\":\"tool_call\",\"tool\":\"" +
+                        json_escape(directive->tool_name) +
+                        "\",\"arguments\":" +
+                        json_stringify(directive->arguments) + "}\n";
+                    std::atomic_bool tool_cancellation{false};
+                    const auto outcome = execute_chat_tool(
+                        directive->tool_name, directive->arguments,
+                        *natural_tool_project, *allowed_commands,
+                        tool_cancellation, configuration);
+                    audit.append("chat.tool_call", user.id,
+                                 outcome.succeeded ? "success" : "failed",
+                                 chat_id + "/" + directive->tool_name);
+                    const std::string tool_result_turn =
+                        "[Tool result for " + directive->tool_name + "]\n" +
+                        outcome.result_text;
+                    chats->append(chat_id, ChatRole::user, tool_result_turn);
+                    const std::string tool_result_event =
+                        "{\"type\":\"tool_result\",\"tool\":\"" +
+                        json_escape(directive->tool_name) +
+                        "\",\"succeeded\":" +
+                        std::string(outcome.succeeded ? "true" : "false") +
+                        ",\"result\":" + outcome.structured_json + "}\n";
+                    if (streaming_reply) {
+                        if (!send_all(stream_socket, kNdjsonHeader)) {
+                            return {};
+                        }
+                        send_chunk(stream_socket, tool_call_event);
+                        send_chunk(stream_socket, tool_result_event);
+                        send_chunk(stream_socket,
+                                  "{\"type\":\"complete\",\"content\":\"\","
+                                  "\"promptTokens\":0,\"generatedTokens\":0,"
+                                  "\"autoDriveState\":\"continue\"}\n");
+                        send_all(stream_socket, "0\r\n\r\n");
+                        return {};
+                    }
+                    return response(
+                        200, "OK",
+                        "{\"content\":\"\",\"promptTokens\":0,"
+                        "\"generatedTokens\":0,\"autoDriveState\":"
+                        "\"continue\",\"toolResult\":" +
+                            tool_result_event.substr(
+                                0U, tool_result_event.size() - 1U) +
+                            "}");
+                }
+            }
+        }
+
         if (inference == nullptr) {
             return response(503, "Service Unavailable",
                             "{\"error\":\"inference_backend_not_configured\"}");
@@ -14384,7 +14762,7 @@ private:
                 // say anything useful -- treat it as an overflow instead.
                 constexpr std::uint64_t kMinimumReplyTokens = 16U;
                 const std::uint64_t context_tokens =
-                    configuration.chat_context_length;
+                    effective_chat_context_tokens();
                 if (prompt_token_count + kContextMarginTokens +
                         kMinimumReplyTokens >
                     context_tokens) {
@@ -15056,7 +15434,7 @@ private:
                         ? execute_chat_tool(tool_call->tool_name,
                                             tool_call->arguments, *project,
                                             *allowed_commands,
-                                            tool_cancellation)
+                                            tool_cancellation, configuration)
                         : ChatToolCallResult{
                               false, "This chat has no project bound to it, "
                                      "so file/command tools are unavailable.",
@@ -15260,13 +15638,35 @@ private:
             }
             audit.append("chat.generate", user.id,
                          "failed: " + failure_reason, chat_id);
+            // A denial purely from live resource pressure (the RAM ceiling
+            // or OS safety reserve -- see kMemoryAdmissionResourcePressureDiagnostic,
+            // masterai.hpp) is not the same thing as a genuine generation
+            // failure (a runner crash, a garbled model, ...): nothing is
+            // broken, the request is safe to retry once, and it is reported
+            // to the client as "warning"/"insufficient_memory" rather than
+            // folded into the generic "error"/"generation_failed" code, so
+            // the UI can show it as a retryable caution notice instead of a
+            // hard failure alarm.
+            const bool is_resource_pressure =
+                failure_reason == kMemoryAdmissionResourcePressureDiagnostic;
             if (stream_started) {
-                send_chunk(stream_socket,
-                           "{\"type\":\"error\",\"error\":\"generation_failed\","
-                           "\"detail\":\"" + json_escape(failure_reason) +
-                           "\"}\n");
+                send_chunk(
+                    stream_socket,
+                    is_resource_pressure
+                        ? "{\"type\":\"warning\",\"warning\":"
+                          "\"insufficient_memory\",\"detail\":\"" +
+                              json_escape(failure_reason) + "\"}\n"
+                        : "{\"type\":\"error\",\"error\":\"generation_failed\","
+                          "\"detail\":\"" + json_escape(failure_reason) +
+                          "\"}\n");
                 send_all(stream_socket, "0\r\n\r\n");
                 return {};
+            }
+            if (is_resource_pressure) {
+                return response(503, "Service Unavailable",
+                                "{\"warning\":\"insufficient_memory\","
+                                "\"detail\":\"" + json_escape(failure_reason) +
+                                    "\"}");
             }
             return response(400, "Bad Request",
                             "{\"error\":\"generation_failed\",\"detail\":\"" +
@@ -15370,7 +15770,7 @@ private:
                 project.has_value()
                     ? execute_chat_tool(approval->tool_name, arguments,
                                         *project, *allowed_commands,
-                                        tool_cancellation)
+                                        tool_cancellation, configuration)
                     : ChatToolCallResult{
                           false, "This chat has no project bound to it, so "
                                  "file/command tools are unavailable.",
@@ -15492,7 +15892,6 @@ private:
     std::unique_ptr<DatasetVersionStore> ml_dataset_versions;
     std::unique_ptr<TrainedModelStore> ml_trained_models;
     std::unique_ptr<EvaluationResultStore> ml_evaluation_results;
-    std::unique_ptr<FineTuningRunResultStore> ml_llm_finetune_results;
     std::unique_ptr<ModelComparisonStore> ml_model_comparisons;
     std::unique_ptr<ComparisonResultStore> ml_comparison_results;
     std::unique_ptr<KnowledgeIndexStore> ml_knowledge_index;
@@ -16115,6 +16514,23 @@ void HttpServer::stop() noexcept {
         // which could keep this call (and stop.ps1's 30-second wait for the
         // process to exit) blocked for as long as the reply took to finish.
         state_->cancel_all_generations();
+        // RunnerSupervisor::request_shutdown(): cancel_all_generations()
+        // above only reaches a request already inside generate() -- a
+        // request still stuck inside RunnerSupervisor::load()'s readiness-
+        // poll (e.g. retrying against a backend that crashed from a GPU
+        // driver timeout and never became ready) does not observe that
+        // per-request cancellation flag at all, and load() holds the same
+        // mutex_ unload() needs for its own teardown. Without this, that
+        // combination held the process open for up to the full runner
+        // startup timeout with no way to interrupt it -- this is what let
+        // it happen, not something a bystander should have to wait out or
+        // kill by hand.
+        if (state_->inference) state_->inference->request_shutdown();
+        if (state_->runner_pool) {
+            for (const auto& entry : state_->runner_pool->status()) {
+                state_->runner_pool->runner(entry.id).request_shutdown();
+            }
+        }
     }
 
     // Wait for in-flight request-handling threads to finish naturally (the

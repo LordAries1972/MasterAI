@@ -333,7 +333,8 @@ int main(int argc, char* argv[]) {
             masterai::AllowedCommandStore allowed_commands(records);
             masterai::McpInboundServer mcp(
                 projects, configuration.models_root,
-                configuration.memory_reserve_mib, allowed_commands);
+                configuration.memory_reserve_mib, allowed_commands,
+                configuration);
             std::signal(SIGINT, handle_signal);
             std::signal(SIGTERM, handle_signal);
             return masterai::run_mcp_stdio(

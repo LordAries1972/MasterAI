@@ -48,7 +48,9 @@
       "type": "object", "additionalProperties": false,
       "required": ["sourceUrl", "revision"],
       "properties": {
-        "sourceUrl": {"type": "string", "pattern": "^https://(huggingface\\.co|github\\.com)/"},
+        "sourceUrl": {"type": "string",
+          "description": "A real download URL, or the internal marker src/models.cpp's self_produced_derivative check recognizes for a model this codebase produced itself rather than downloaded: 'masterai-local-import:<originalPath>' for a user's own GGUF brought in via POST /api/v1/model-imports.",
+          "pattern": "^(https://(huggingface\\.co|github\\.com|modelscope\\.cn)/|masterai-local-import:)"},
         "revision": {"type": "string", "minLength": 7, "maxLength": 128}
       }
     },
@@ -56,8 +58,8 @@
       "type": "object", "additionalProperties": false,
       "required": ["spdx", "accepted"],
       "properties": {
-        "spdx": {"enum": ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause",
-          "CC-BY-4.0", "Llama-3.1", "Llama-3.2", "Gemma"]},
+        "spdx": {"type": "string", "minLength": 1, "maxLength": 160,
+          "description": "For a downloaded model, src/models.cpp requires one of: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, CC-BY-4.0, Llama-3.1, Llama-3.2, Gemma. For a self-produced-derivative model (sourceUrl above), any non-empty, human-declared license label is accepted instead -- see self_produced_derivative in src/models.cpp."},
         "accepted": {"const": true}
       }
     },

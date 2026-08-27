@@ -650,6 +650,17 @@ ModelRegistryEntry ModelRegistryStore::create(
     if (name.empty() || name.size() > 160U) {
         throw std::invalid_argument("model registry entry name is invalid");
     }
+    // A non-empty source must be a real file on disk: the fine-tuning
+    // executor (POST /api/v1/ml/fine-tuning-jobs/{id}/run in server.cpp) uses
+    // this field as a literal filesystem path, not a free-text description,
+    // and previously accepted anything (e.g. "Various") only to fail much
+    // later at run time with a confusing error. Rejecting a bad path here
+    // catches the mistake at registration time instead.
+    if (!source.empty() && !std::filesystem::is_regular_file(source)) {
+        throw std::invalid_argument(
+            "model registry entry source must be a real, existing file "
+            "path, not a free-text description");
+    }
     const std::lock_guard<std::mutex> lock(mutex_);
     ModelRegistryEntry entry;
     entry.id = random_id();
@@ -702,6 +713,27 @@ bool ModelRegistryStore::set_state(const std::string& id,
             "model registry entry must be approved before production");
     }
     found->second.state = state;
+    found->second.updated_at_epoch_seconds = epoch_seconds();
+    if (records_) persist(found->second);
+    return true;
+}
+
+bool ModelRegistryStore::set_source(const std::string& id,
+                                    const std::string& source) {
+    // Same existence check create() enforces, exposed as an update path so a
+    // bad source (e.g. free text typed where a file path was expected) can
+    // be corrected in place instead of deleting and recreating the entry --
+    // which would also orphan any Fine-Tuning job that already references
+    // this entry's id.
+    if (!source.empty() && !std::filesystem::is_regular_file(source)) {
+        throw std::invalid_argument(
+            "model registry entry source must be a real, existing file "
+            "path, not a free-text description");
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = entries_.find(id);
+    if (found == entries_.end()) return false;
+    found->second.source = source;
     found->second.updated_at_epoch_seconds = epoch_seconds();
     if (records_) persist(found->second);
     return true;

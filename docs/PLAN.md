@@ -1,5 +1,15 @@
 # Local Programming AI System — Detailed Implementation Plan
 
+## Copyrights and Water-Markings
+Anthropic, ChatGPT or an other AI system is NOT authorised at any given time to place water marks,
+copying of my works, or stamping with in my works nor is it ever allowed to claim copyrights on 
+my work at any given time by Daniel J. Hobson (Owner) of Australia 2026.  
+
+Whilst some of my work, has derived from Anthropic, 10% and above compliance in regards to 
+copyrights and given international law which is given to redeem you of ever such rights.  
+Violation of this compliance, will result in severe legal penalites by the full
+force of Australian Law 2026.  Thank you for your attention in this matter!
+
 ## Document Status
 
 This document is the authoritative phased implementation and validation record for MasterAI.
@@ -349,7 +359,18 @@ Current phase status:
   state, proving actual residency rather than only a requested offload flag.
   Both fixed workloads generated all 64 requested tokens without cancellation
   or allocation failure. Broader semantic-quality scoring remains forward
-  work and is not inferred from token completion alone.
+  work and is not inferred from token completion alone. **2026-08-26: the
+  model/size dimension of the matrix is now broadened** -- every calibration
+  run before this one used `qwen25-coder`-family ~3B models; two more real
+  `masterai calibrate` runs on this same host now cover a smaller
+  (`granite31-2b-instruct-q4km`, ~2B) and a larger (`deepseek-coder-6.7b-
+  q4km`, ~6.7B) model, both persisting a `TuningProfile` cleanly with real
+  GPU telemetry, cold-load time scaling with file size as expected (23.49 s
+  vs 57.48 s) and GPU utilization rising with model size (29.0% vs 58.1%
+  average) -- see `docs/performance/phase-19-qwen3b-matrix.md`'s "broadening
+  the model matrix" section. The host/GPU-vendor/backend-version dimensions
+  of the matrix remain single-host, as this session has only the one
+  physical machine to run on.
 - Phase 20: Complete as an optional evidence/admission layer (validated
   2026-08-05) — `AdvancedOptimizationRegistry` now strictly validates and
   durably restores the full per-candidate evidence contract, separates
@@ -688,12 +709,28 @@ Current phase status:
   measured acceptance rate for the resolved draft/target pair -- the
   "current default chat sampling presets ... mean the gate will not
   currently let it activate for live chat traffic" limitation this note
-  previously carried is closed. Priority C. Exit criterion status: still
-  explicitly unvalidated on real hardware, not claimed -- "generation
-  throughput improves on representative prompts" has a real, now-reachable
-  execution path but no measured run against it yet; that measurement
-  requires an administrator to actually run a calibration/benchmark pass
-  on real hardware, which this control plane never does on its own.
+  previously carried is closed. Priority C. **Exit criterion status
+  (evidence recorded 2026-08-18, corroborated 2026-08-26)**: real-hardware
+  `masterai speculative-benchmark` runs now exist for two compatible pairs
+  on this host (Intel i7-6700HQ / GTX 960M 4 GiB) -- `qwen25-coder-3b-q4km`
+  + `qwen25-coder-1.5b-q4km` (-22.52% throughput) and
+  `llama32-3b-instruct-q4km` + `llama32-1b-instruct-q4km` (-40.54%
+  throughput); see `docs/performance/phase-32-speculative-matrix.md` for
+  both. The measurement this exit criterion asked for is done: both runs
+  prove the real dual-model launch path itself works end to end (every
+  requested token generated successfully in both configurations), and both
+  honestly report that speculative decoding is *slower*, not faster, on
+  this specific low-VRAM host -- not a placeholder or an estimate. This is
+  a valid, negative real-hardware result, consistent with upstream
+  llama.cpp guidance that speculative decoding pays off only when there is
+  compute/VRAM headroom for a concurrently resident draft model, headroom
+  this 4 GiB host does not have; the honest operational conclusion is that
+  an administrator should not admit `speculative_decoding` on hardware
+  shaped like this one. Neither run set `speculative_draft_gpu_layers`
+  (both CLI invocations left it at its 0 default), so a GPU-offloaded draft
+  remains an open, separate comparison point for a future pass. A host with
+  more VRAM/compute margin measuring a positive result remains open for
+  whoever runs this command there.
 - Phase 33: Implemented (2026-08-13) — both halves. The local-only
   multi-runner orchestration half (2026-08-13, earlier pass):
   `LocalRunnerConfig`/`LocalRunnerPool` (`src/runner_pool.cpp`) generalize
@@ -951,8 +988,15 @@ Current phase status:
   this host** (`llama32-1b-instruct-q4km`, GTX 960M) — the second run
   compared cleanly against the first across all seven metrics (accepted),
   proving the whole recorded-evidence-vs-baseline path end to end, not just
-  its unit-tested pieces. See `docs/validation/phase-36-certification-
-  runbook.md`.
+  its unit-tested pieces. **2026-08-26: a second real model/profile pair
+  added on this same host** (`granite31-2b-instruct-q4km`, `standard`
+  profile, via `POST /api/v1/performance/certification` directly) — also a
+  first-run-then-matching-second-run pair, all seven comparisons passed.
+  This run also established that `benchmarks.run` (the scope this route
+  requires) is granted to the `developer` role, not administrator-only as
+  the route's earlier characterization implied; only the regression
+  thresholds route (`settings.manage`) is actually administrator-gated. See
+  `docs/validation/phase-36-certification-runbook.md`.
 - Phase 37: Implemented at a scoped-down level (2026-08-01) — the Machine
   Learning module foundation described in the "Machine Learning Abilities"
   section below. A new administrator-only `ml.dashboard.view` permission
@@ -2355,7 +2399,20 @@ Current phase status:
   human-reviewed labeling task where correctness genuinely matters. Every
   stage's outcome is a genuinely computed result; none fabricates
   pass/fail.
-- Phase 73: Implemented (2026-08-12) — real LLM LoRA fine-tuning (section 2
+- Phase 73: Implemented (2026-08-12), **removed (2026-08-25)** — upstream
+  `llama.cpp` removed the `finetune`/`export-lora` CLI tools this executor
+  depended on back on 2024-07-25 (PR #8669); no release since then ships
+  them, and any build old enough to still have them predates model
+  architectures added afterward (e.g. Qwen3), so it cannot load this
+  codebase's own models at all. The feature was never actually runnable
+  against a current `llama.cpp` build. `src/ml_finetune.cpp` was deleted;
+  the `AppConfig` fields, HTTP routes (`POST .../run`'s `llm:` branch,
+  `GET .../llm-result`, `GET .../llm-progress`), `FineTuningRunResultStore`,
+  the `Dataset` `"instruction"` purpose value, the `masterai-finetune:`
+  manifest marker, and the corresponding web UI were all removed too.
+  Phase 70's tabular warm-start fine-tuning is unaffected. Kept below for
+  historical record of what was implemented and why:
+- Phase 73 (original entry): real LLM LoRA fine-tuning (section 2
   item 10, section 18), gaining an execution path alongside Phase 70's
   tabular warm-start path rather than replacing it: a `FineTuningJob` whose
   `method` starts with the free-text `"llm:"` prefix (e.g.
@@ -2958,13 +3015,22 @@ Current phase status:
   existing Phase 24 comment directly above them documents that a worker
   pool costs more than the in-memory probe itself on small/medium indexes
   -- parallelizing them would have contradicted a reasoned, already-in-place
-  design decision, not fixed a gap. Honest limitation: none of the above has
-  a real measured tokens/sec number recorded against it yet (this session
-  does not build or run the binary -- see the Phase 19 status entry's
-  `docs/performance/phase-19-qwen3b-matrix.md` for the pre-existing
-  12.43 tok/s GPU / 6.48 tok/s CPU baseline these changes target); an
-  administrator re-running `masterai calibrate` and a generation benchmark
-  on real hardware is what turns this into a verified before/after number.
+  design decision, not fixed a gap. **Real-hardware evidence recorded
+  (2026-08-25)**: two consecutive `masterai calibrate ... auto` runs against
+  `qwen25-coder-3b-q4km` on the same GTX 960M/i7-6700HQ host measured 73.18 s
+  and 36.81 s cold load, 3.131 s/2.874 s prompt evaluation (49.2/53.6 tok/s),
+  and 7.103 s/6.543 s generation (9.01/9.78 tok/s) for the fixed 154-prompt/
+  64-generation sample; `llama-server`'s own log confirms
+  `n_threads = 4 (n_threads_batch = 4) / 8` on every run, i.e.
+  `select_thread_count()` is genuinely driving the real launch with this
+  host's true physical core count, not an unused computed value. A separate
+  real `masterai benchmark-model ... standard` run against the smaller
+  `llama32-1b-instruct-q4km` completed 4/5 cases, 936 tokens in 35.16 s
+  (26.6 tok/s blended). See `docs/performance/phase-19-qwen3b-matrix.md`'s
+  "2026-08-25 rerun" section for the full table and for why
+  `benchmark-model`'s fixed 30-second readiness timeout could not itself
+  benchmark the 3B model on this pass (a narrow, separate gap in that CLI
+  command, not in this phase's calibration/caching changes).
 - Phase 85 addendum: Implemented (2026-08-24) — GPU scheduling-priority
   drop for the runner process, closing a whole-PC stutter reported on every
   reply with GPU offload enabled. `RunnerSupervisor::load()`
@@ -2988,12 +3054,73 @@ Current phase status:
   call's own error-handling contract — this is a responsiveness nicety,
   never something generation correctness depends on. No Linux equivalent
   exists (WDDM is Windows-specific); Linux GPU compute scheduling is left
-  unchanged. Honest gap: not yet measured on real hardware with GPU offload
-  under load (this session does not build or run the binary) — an
-  administrator confirming the stutter is gone during a live GPU-offloaded
-  chat reply is what turns this into a verified fix.
+  unchanged. **Partial real-hardware evidence (2026-08-25)**: the priority-
+  drop code path ran without error or crash across every GPU-offloaded
+  `calibrate`/`benchmark-model` run in this session's own validation pass
+  (real GPU utilization/temperature telemetry confirmed offload was active
+  throughout). Honest gap that remains: confirming the actual desktop-
+  stutter symptom is gone is a subjective visual observation during a live
+  GPU-offloaded chat reply, which this session cannot make on the user's
+  behalf — an administrator watching their own desktop during a real reply
+  is what turns this into a verified fix.
+- Two real bugs found and fixed while building and running the full test
+  suite (`masterai_tests.exe`) to validate the above, plus a test-harness
+  hardening fix (2026-08-25):
+  1. `score_continual_learning_candidate_quality()` (`src/ml_safety_scan.cpp`)
+     scored a short refusal ("I cannot help with that.") at 0.6 -- above the
+     0.4 low-quality rejection floor `collect_continual_learning_candidates()`
+     uses -- because the refusal-marker deduction was only -0.4 and the
+     response was too long (25 chars) to also trip the separate <20-char
+     length penalty. The deduction is now -0.7, landing a bare refusal under
+     the threshold on its own regardless of length. This is a real
+     continual-learning data-quality gap, not new to this session: any
+     refusal response 20+ characters long (i.e. almost all of them) was
+     being admitted as a training candidate instead of rejected.
+  2. Phase 95's own timeout-enforcement test
+     (`test_phase95_training_job_execution_policy_and_timeout_enforcement`,
+     `test/tests.cpp`) requested 1,000,000 epochs to "guarantee" the 1-second
+     `maxRuntimeSeconds` deadline fires before training completes, without
+     accounting for `train_tabular_model()`'s own separate, older
+     epochs > 10,000 validation cap (`src/ml_engine.cpp`) -- every run was
+     rejected instantly with "epochs must be between 1 and 10000" instead of
+     a timeout, failing the test's `require()` before it reached its own
+     `stop.store(true)`/`server.stop()` cleanup. Fixed by scaling the
+     dataset to 50,000 rows (so the epoch cap itself, not epoch count, is
+     what has to carry the margin) and requesting exactly 10,000 epochs
+     instead. Found by adding temporary trace logging and bisecting; this
+     was masked by a second, independent problem below until fixed.
+  2b. That masked problem is a general test-harness gap, not specific to
+     Phase 95: `JoiningThread`'s destructor (`test/tests.cpp`) only joins a
+     background server thread -- it never calls `HttpServer::stop()` first.
+     Every HTTP-server test in this file starts its server thread, runs a
+     sequence of `require()` assertions, and only calls
+     `stop.store(true); server.stop();` explicitly at the very end; a
+     `require()` failure anywhere before that point throws past the explicit
+     stop call, and `JoiningThread::~JoiningThread()` then blocks forever in
+     `thread.join()` waiting for a server thread that was never told to stop
+     -- turning what should be a fast, readable test failure into a
+     permanent hang (confirmed directly: the process sat alive for minutes
+     burning under 2 seconds of CPU time before a forced kill). This exact
+     failure mode had apparently never been triggered before across this
+     file's several dozen uses of the same pattern. Fixed narrowly for
+     Phase 95's test only (the one that actually hit it) with a new
+     `ServerStopGuard` RAII helper declared immediately after
+     `JoiningThread server_thread{...}`, which calls `stop.store(true);
+     server.stop();` in its own destructor on every exit path including a
+     thrown exception -- reverse C++ destruction order means it runs before
+     `JoiningThread`'s join, so the thread is always unblocked first. The
+     same latent risk still exists, unfixed, in every other HTTP-server test
+     in this file that follows the older pattern; retrofitting all of them
+     was judged out of scope for this pass since none of them are currently
+     failing, but `ServerStopGuard` is now available (declared next to
+     `JoiningThread`) for any test that needs it, including a future pass
+     that adds it everywhere as a deliberate hardening sweep.
 - Dataset Manager instruction-purpose datasets and multi-line CSV field
-  parsing (section 10 below): `Dataset` gained a `purpose` field
+  parsing (section 10 below) — **the `"instruction"` purpose value was
+  removed (2026-08-25) along with Phase 73** (see that phase's removal
+  note above); `Dataset::purpose` now only supports `"tabular"`. The
+  multi-line CSV field parsing fix (`split_csv_records()`) described below
+  is unaffected. Kept for historical record: `Dataset` gained a `purpose` field
   (`"tabular"`, the default, or `"instruction"`; schema 8 -> 9, old records
   restore as `"tabular"`), settable from the Register Dataset form's new
   "What kind of data is this?" selector and persisted through
@@ -3131,7 +3258,11 @@ Current phase status:
   for that base model -- every other check (identity, category, format,
   backend, RAM math, digest, `license_accepted`) still applies in full. A
   base model whose License field was left blank still cannot be promoted --
-  there is genuinely no value to use, not one being withheld. Separately,
+  there is genuinely no value to use, not one being withheld. (The
+  `"masterai-finetune:"` marker and the LoRA promotion code that wrote it
+  no longer exist -- see Phase 73's removal note above; the
+  `"masterai-local-import:"` marker described below is unaffected.)
+  Separately,
   fixed a real bug in the base-has-manifest path from the same pass: it had
   set `source_url` to an internal string that the *existing* (pre-exception)
   host-prefix check would have rejected outright, silently landing the
@@ -3145,6 +3276,213 @@ Current phase status:
   `semanticEmbeddingEnabled`/`gitDiffEnabled`, that had the same gap), using
   the settings form's existing generic `data-path` read/write machinery, no
   new JS needed.
+- Phase 98: Implemented (2026-08-26) — instant natural-language execution
+  for the four "obviously mechanical" chat tools, closing a real latency
+  complaint: even a plain "list this directory" previously had to wait for
+  a full model generation (Phase 84's own [[TOOL_CALL]] convention) just to
+  decide to call a tool a fixed phrase already answers unambiguously, then
+  a *second* full generation afterward to phrase a reply. `detect_natural_
+  tool_directive()` (`src/server.cpp`) recognizes a bounded table of common
+  phrasings for `list_directory`/`read_file`/`search`/`run_command` (e.g.
+  "show me the directory of ...", "list files in ...", "search the project
+  for ...", "run the command ...") anywhere in the message and, in
+  `send_chat_message()`, executes the matched call immediately — before the
+  message ever reaches `inference` — the moment the request lands, the same
+  early "server operation, not a model decision" spot the existing
+  `extract_memory_directive()` fast path already occupies. `write_file` and
+  `delete_file` are deliberately absent from the table: a write needs real
+  content only the model can produce, and a delete is destructive enough
+  that reaching for it should stay the model's own considered decision, not
+  a phrase match. `classify_tool_call_risk()` still runs on whatever this
+  detects exactly as it does for a model-issued call, so a destructive
+  `run_command` (or a chat set to `ChatToolExecutionMode::confirm_all`)
+  still pauses for an explicit human Approve/Deny click before anything
+  runs — this fast path only ever skips the "decide to call a tool" model
+  turn, never the approval gate. A safe call still sends the client the
+  same `autoDriveState:"continue"` signal the model-mediated path already
+  relies on, so the browser's existing continuation loop (`runTurn()` in
+  `web_ui.cpp`, unchanged) automatically requests one real model turn
+  afterward to comment on the result in its own words — the fix removes
+  only the unnecessary "decide" generation, not genuine model commentary.
+  Path arguments get project-relative normalization
+  (`normalize_natural_tool_path()`): an absolute path naming the project
+  root (or somewhere under it) resolves to the equivalent relative path the
+  real tools require, phrasing like "this project"/"here"/"." resolves to
+  the project root itself, and an absolute path outside the project root —
+  or any other argument that fails to resolve — returns `nullopt` so the
+  request falls straight through to the ordinary model-mediated path
+  unchanged, never a hard failure shown to the user. Two generic triggers
+  ("run "/"execute "/"cat " as bare prefixes) were deliberately left out of
+  the table after review: they are common English words/prefixes ("in the
+  long run, I want...") that would substring-match inside ordinary
+  unrelated sentences and hijack the turn into a doomed tool call instead
+  of a real reply, so `run_command`/`read_file` are only matched by their
+  more explicit phrasings ("run the command ...", "read file ..."). Honest
+  remaining scope: this is phrase matching, not real natural-language
+  intent classification — a request that means the same thing in wording
+  the table doesn't cover still falls through to the slower model-mediated
+  path exactly as it always has, which is a graceful (if unoptimized)
+  fallback, never a wrong answer.
+- Phase 99: Implemented (2026-08-26) — instant, deterministic answers for
+  "what tools/commands are you authorised to use"-style questions, fixing a
+  real bug: asked that directly, the model previously had to generate the
+  answer from scratch and either hallucinated a plausible-looking list or
+  truncated mid-answer once it ran out of budget (e.g. stopping after "1.
+  read_file" on "Show me what run_commands you are authorised to use").
+  `is_capability_disclosure_query()` (`src/server.cpp`) recognizes a broad
+  set of phrasings ("what tools are you authorised to use", "which commands
+  can you run", "show me what run_commands you are authorised to use",
+  "what are your capabilities", etc.) anywhere in the message and, in
+  `send_chat_message()`, answers immediately from `build_capability_
+  disclosure()` — before the message ever reaches `inference` — the same
+  early "server operation, not a model decision" spot Phase 98's tool-
+  directive detection and the memory-directive fast path already occupy
+  (checked first, so a capability question is never misread as a request to
+  run one). The answer lists the same six real tools `apply_tool_call_
+  directive()` already tells the model about
+  (`read_file`/`list_directory`/`search`/`write_file`/`delete_file`/
+  `run_command`), then, since that's specifically what was asked about,
+  the actual currently-enabled `run_command` allow-list for the chat's
+  project straight from `AllowedCommandStore::list()` — filtered to
+  entries enabled, scoped to this project (or unscoped), and tagged for the
+  platform this server is actually running on (`#if defined(_WIN32)`), so
+  an entry that's real and enabled but tagged for the other OS — and would
+  just fail to find its executable here — isn't listed as available. Also
+  reports plainly when no project is selected (none of the tools are
+  actually available) or the chat's tool-execution mode is `off`/
+  `confirm_all`, rather than listing tools as if they'd just run. Broader
+  match phrasing than Phase 98's tool triggers is deliberate here: this
+  path never executes anything, so a false-positive match just answers a
+  slightly-off question correctly instead of hijacking the turn into an
+  action. Separately, chat history reload (`web_ui.cpp`'s `load()`) used to
+  render a persisted tool-result turn (`"[Tool result for <tool>]\n
+  <output>"`, the same shape Phase 98/99's fast paths and the ordinary
+  model-mediated `[[TOOL_CALL]]` path all persist) as a plain text bubble,
+  dumping the raw marker text on screen — only the live streamed turn ever
+  got the titled, scrollable `appendToolCard()` container. Reopening a chat
+  now matches that same persisted shape and renders it the same way, so a
+  `list_directory` (or any other tool) result looks identical whether it's
+  being watched live or read back later.
+- Phase 100: Implemented (2026-08-26) — fixed a real bug where the chat
+  prompt-budget pre-check (`send_chat_message()` and
+  `prepare_generation_for_model()` in `src/server.cpp`) could pass a prompt
+  it judged as fitting, only for the runner itself to reject it moments
+  later with a raw `exceed_context_size_error` HTTP 400 (e.g. "request
+  (6698 tokens) exceeds the available context size (6656 tokens)"). Root
+  cause: the pre-check compared the prompt against the *current* value of
+  `configuration.chat_context_length` — but a live, already-warm runner was
+  launched with whatever that setting held *at load time*
+  (`inference->load(*model, configuration.chat_context_length, ...)`,
+  unchanged in this phase). Raising `inference.chatContextLength` in
+  Settings, or an admin lowering it, while a model is already loaded left
+  the pre-check reasoning about a ceiling the running process was never
+  actually given — MasterAI's own "clear, actionable error" promise for
+  this case (see the surrounding comment, unchanged since it was written)
+  went unfulfilled for exactly that window. `RunnerMetrics` gained a
+  `context_length` field (`masterai.hpp`) recording exactly what
+  `RunnerSupervisor::load()` (`inference.cpp`) actually launched the live
+  process with; both budget checks now go through a new
+  `effective_chat_context_tokens()` helper that takes the smaller of the
+  live configured ceiling and that real, already-launched value (falling
+  back to the configured ceiling when no runner has loaded yet, i.e.
+  `context_length == 0`) instead of trusting the current config alone.
+  Applies transparently to a pool-routed runner too, since
+  `LocalRunnerPool::metrics()` (`runner_pool.cpp`) forwards the same
+  `RunnerSupervisor::metrics()` this reads. Honest scope note: two things
+  found during investigation were deliberately left alone as out of scope
+  for this fix. First, `MemoryPolicy::default_context_tokens`
+  (`memory.cpp`/`adaptive_controller.cpp`) — despite its name and its own
+  "most disruptive knob" comment — is tracked and adaptively shrunk under
+  memory pressure but never actually read by any runner-launch call in this
+  codebase, and has no System Configuration field at all; it currently
+  affects nothing real. Second, if a model's own native/trained context is
+  smaller than whatever `context_length` was requested at launch, llama.cpp
+  itself may settle on a smaller live `n_ctx` than MasterAI actually asked
+  for — this fix closes the gap versus *MasterAI's own* configured/launched
+  values, but does not query the runner's live `n_ctx` back (e.g. via its
+  `/props` endpoint) to catch that specific case too. Neither point changes
+  what this phase actually fixes: the specific, real mismatch between
+  MasterAI's own configured ceiling and its own already-launched runner.
+- Phase 101: Implemented (2026-08-26) — a real bug report: the model would
+  answer a "list the project files" style request with prose describing what
+  command the user could run (e.g. "you can use the following commands:
+  list all files...") instead of actually invoking `list_directory`, so
+  nothing real was ever shown. Two changes. First,
+  `apply_tool_call_directive()` (`src/server.cpp`) now explicitly forbids
+  this: "Never tell the user what command or tool they could run, or what
+  output they would see, in place of actually calling it yourself" — the
+  instruction previously only said tools were available, not that
+  describing them in place of using them was disallowed. This narrows model
+  behavior; it cannot force a small local model to comply every time, which
+  is why the second change makes the tool's own output more useful whenever
+  it *is* called. Second, `tool_list_directory()` (`src/tool_exec.cpp`,
+  shared by the chat tool loop and `mcp.cpp`'s `masterai.project.
+  list_directory`) walked only one directory level; it now walks the full
+  tree (`std::filesystem::recursive_directory_iterator`), rendering every
+  subdirectory indented beneath its parent, capped at a new
+  `kToolListMaxEntries` (4000) with an explicit "...(truncated after N
+  entries...)" line rather than silently dropping the rest — so a "show me
+  the project structure" request gets one honest, complete answer instead of
+  a shallow single-folder listing the model would otherwise have to walk
+  one call at a time. The chat UI's existing `appendToolCard()`/
+  `formatToolResultBody()` (`src/web_ui.cpp`) already rendered every tool
+  result — `list_directory` included — into a scrollable, copy-buttoned
+  `<pre>` block; that path needed no change, only the underlying data it
+  displays did. Tool-description strings naming the old one-level behavior
+  were updated to match in `src/server.cpp` (capability-disclosure text),
+  `src/mcp.cpp`, and `src/web_ui.cpp`'s MCP tools table.
+
+- Phase 102: Implemented (2026-08-27) — ADR-0004 extends platform support to
+  Linux ARM64 (Ubuntu 24.04 LTS arm64) and macOS on Apple Silicon (arm64
+  only, no Intel/x86-64 Mac; any M-series chip is in scope, primarily
+  targeting M4/M5/M6-class chipsets), closing the `scripts/build.sh`-vs-platform-
+  matrix inconsistency where `build.sh` already accepted `Linux-arm64` while
+  the matrix marked it unsupported. Linux ARM64 needed no new code paths —
+  `platform.cpp`'s CPU-feature probe already had an `__aarch64__` branch and
+  every other Linux code path is architecture-generic — only documentation
+  changes (`docs/architecture/platform-matrix.md`, this ADR) and a
+  `scripts/build.sh` platform-list fix (`Darwin-arm64` added alongside it).
+  macOS is genuinely new: every one of the 25 `src/` files that previously
+  branched strictly on `_WIN32`/`__linux__` (most ending in `#else #error
+  "MasterAI supports only Windows and Linux."`) now has a real `#elif
+  defined(__APPLE__)` implementation, not a stub — reusing PAM for identity
+  (`identity.cpp`), adding Keychain Services for non-password secret storage
+  (`storage.cpp`, replacing Linux's kernel-keyring syscalls with no Darwin
+  equivalent), CommonCrypto and `SecRandomCopyBytes` for hashing/PBKDF2/
+  random bytes (`security.cpp`, replacing the Linux AF_ALG kernel-crypto
+  socket), FSEvents for live project file watching (`project_watcher.cpp`,
+  replacing inotify — FSEvents watches a whole subtree per stream, so unlike
+  inotify there is no per-directory watch-descriptor cap to enforce), sysctl/
+  Mach host APIs for hardware and process-resource probing (`platform.cpp`,
+  replacing `sysinfo()`/`/proc`), and new `scripts/install-launchd.sh`/
+  `uninstall-launchd.sh` service scripts (replacing systemd; launchd has no
+  equivalent to systemd's `ProtectSystem=strict`/`NoNewPrivileges=`
+  hardening keys, documented as a known gap rather than silently doing less).
+  `<sys/prctl.h>`'s `PR_SET_NO_NEW_PRIVS` (Linux-only, no Darwin equivalent)
+  is skipped on macOS in the two sandboxed-child-process paths that used it
+  (`tool_exec.cpp`, `mcp_outbound.cpp`); their `setrlimit()`-based resource
+  caps stay in effect on every POSIX platform. `scripts/CMakeLists.txt` now
+  branches `MSVC` / `APPLE` / else(Linux) instead of `MSVC`/else, and fails
+  the configure step outright if a non-arm64 Apple build is attempted. GPU
+  vendor telemetry (NVML/ADLX) stays Windows-only — Apple Silicon has no
+  discrete GPU or comparable vendor SDK. See `docs/architecture/
+  ADR-0004-linux-arm64-and-macos-apple-silicon.md` for the full decision
+  record. **Validation gap, stated plainly**: no ARM64 Linux or Apple
+  Silicon hardware was available to build or run either target — both are
+  marked in `docs/architecture/platform-matrix.md` as code-complete but
+  unvalidated, the same honesty pattern already used for Ubuntu 26.04's
+  code-path-validated-not-packaging-certified status. Fixed a real,
+  pre-existing bug surfaced while wiring up this platform expansion:
+  `configure.sh`, `diagnose.sh`, `start.sh`, and `stop.sh` all hardcoded
+  `build/Linux-x86_64/<BuildType>/masterai` regardless of which platform was
+  actually built, silently failing to find the binary for anyone already
+  using `Linux-arm64` (or now `Darwin-arm64`) — each now takes an optional
+  trailing `[Platform]` argument (after `--foreground` in `start.sh`'s case)
+  defaulting to `Linux-x86_64` to keep every existing invocation working
+  unchanged. `build.sh`/`test.sh` were unaffected — they already took a
+  platform argument correctly. See `README.md`'s script reference table for
+  the updated argument lists. Windows x86-64 (this project's actively
+  validated target) and existing Linux x86-64 code paths are unchanged.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -8297,9 +8635,9 @@ Deliverables:
   Registry id is returned unchanged, and a local-catalog model id
   (`find_model()`) that isn't registered yet gets a matching
   `ModelRegistryEntry` created transparently, "source" pointed at the
-  real GGUF file on disk — exactly what the "llm:" fine-tuning executor
-  (`POST .../fine-tuning-jobs/{id}/run`) already required of a base
-  model's registry entry. Wired into both `POST
+  real GGUF file on disk (at the time, also exactly what the "llm:"
+  fine-tuning executor required of a base model's registry entry --
+  since removed, see Phase 73's removal note). Wired into both `POST
   /api/v1/ml/fine-tuning-jobs` and `POST
   /api/v1/ml/model-builder-configs`.
 - Web UI: the "Base model" selects for Fine-Tuning Job and Model Builder
@@ -8808,6 +9146,70 @@ Exit criteria:
   every pre-existing `evaluate_tabular_model()` caller is unaffected by the
   new optional parameter.
 
+### Phase 97 — Bring-your-own-model import, and a fixable Model Registry source (section 7)
+
+Status: Implemented (2026-08-25).
+
+Purpose: a user hit a Fine-Tuning run failure because their manually
+registered Model Registry entry's `source` field held free text ("Various")
+instead of a real file path — `ModelRegistryStore::create()` (`src/ml.cpp`)
+accepted any string verbatim, and the bad value only ever surfaced later, at
+Fine-Tuning run time, as a confusing `ml_fine_tuning_base_model_file_missing`
+error. There was also no supported way to bring a user's own local GGUF file
+into MasterAI at all short of hand-writing `manifest.json` and running the
+separate `verify-models` CLI — the web UI's "Download a model" form only
+fetches from Hugging Face/GitHub/ModelScope URLs.
+
+Deliverables:
+
+- `ModelRegistryStore::create()` (`src/ml.cpp`) now rejects a non-empty
+  `source` that isn't a real, existing regular file (`std::invalid_argument`,
+  surfaced as `400 invalid_ml_model`), catching the mistake at registration
+  time instead of at Fine-Tuning run time.
+- `ModelRegistryStore::set_source()` (new, `src/ml.cpp`/`masterai.hpp`) and
+  `POST /api/v1/ml/models/{id}/source` (`src/server.cpp`) let a bad entry —
+  including one created before this phase's validation existed — be
+  corrected in place, without deleting the entry and orphaning any
+  Fine-Tuning job that already references its id.
+- `POST /api/v1/model-imports` (`src/server.cpp`): copies a GGUF the operator
+  already has on local disk into the real model catalog
+  (`models/<category>/<modelId>/`), computing its SHA-256 and size
+  server-side (never trusting a client-supplied hash, since there is no
+  network transfer here to protect against). Reuses the same
+  `write_model_manifest()`/`record_verified_model()` catalog-write path the
+  download flow used (and, at the time, LoRA fine-tuning promotion also
+  used, per Phase 73 -- since removed), so an imported model is immediately
+  Ready — chat-usable and Fine-Tuning-usable — with no separate
+  `verify-models` pass required.
+- `load_manifest()`'s (`src/models.cpp`) existing `self_produced_derivative`
+  exception — at the time also recognizing the `"masterai-finetune:"`
+  source_url marker a LoRA run's own catalog promotion wrote (that marker
+  and the code writing it no longer exist -- see Phase 73's removal note)
+  — now also recognizes a new `"masterai-local-import:"` marker, so an
+  imported model's self-declared license doesn't have to match the closed
+  SPDX list required for a downloaded model.
+- `models/manifest.schema.json` updated to match: `provenance.sourceUrl`'s
+  pattern now documents both internal markers (and the previously-missing
+  `modelscope.cn` host the C++ validator already accepted), and
+  `license.spdx` is now open text with a description, instead of a closed
+  `enum` that never actually matched what `self_produced_derivative` allowed
+  in code.
+- Web UI (`src/web_ui.cpp`): a new "Import a local model" form on the
+  Download a model page, with a required trust-confirmation checkbox
+  (`trusted`, also enforced server-side); the Model Registry page's Source
+  field gained a field hint explaining it must be a real path, plus a Fix
+  source action (pencil icon) per row for an entry whose source looks empty
+  or is the literal string "Various" left over from before this phase.
+
+Exit criteria:
+
+- A Model Registry entry can no longer be created with a non-file-path
+  `source`.
+- An existing bad entry can be corrected without being deleted.
+- A GGUF already on the operator's disk can be brought into the catalog,
+  verified Ready, and used as a Fine-Tuning base entirely through the web
+  UI, with no manual manifest editing and no separate CLI verification step.
+
 Implementation status: Phase 37 (see the phase list above) implements the
 Dashboard interface below at a foundation level — real, zero-valued counts
 and an honest `available`/`planned` tag on every one of the 25 interfaces
@@ -8980,9 +9382,10 @@ Phases 58-60 add bounded knowledge-file ingestion, persisted authored
 hashing-vector indexes, and approved RAG retrieval/context execution. Phase 61
 adds a real process-isolated llama.cpp learned-embedding adapter with durable
 model/dimension provenance and changes durable user-memory recall from every
-turn to one persisted snapshot per conversation. LLM fine-tuning (Phase 73),
-RAG answer generation (Phase 76), and Inference Endpoints (Phase 62/77) are
-real executors too, and Phase 82 gives Deployment Manager and Synthetic
+turn to one persisted snapshot per conversation. RAG answer generation
+(Phase 76) and Inference Endpoints (Phase 62/77) are real executors too
+(LLM fine-tuning, Phase 73, was one too, then removed — see its removal
+note above), and Phase 82 gives Deployment Manager and Synthetic
 Data their own real executors as well, flipping all three of that pass's
 named interfaces from `planned` to `available` — see their own phase
 entries above; every other executor not named above remains `Planned`: a
@@ -11147,14 +11550,14 @@ No release may be called production-ready until it passes:
 |---|---|---|
 | 1 | Final project and binary name | Resolved: `MasterAI` / `masterai` |
 | 2 | C++ server foundation | Resolved: internally authored native C++17 HTTP control plane under rules 14–15 |
-| 3 | Supported Linux distributions | Resolved by ADR-0003: Ubuntu 24.04 LTS and Debian 13, x86-64 |
+| 3 | Supported Linux distributions | Resolved by ADR-0003: Ubuntu 24.04 LTS and Debian 13, x86-64. Extended by ADR-0004: Ubuntu 24.04 LTS arm64 added; macOS 15+ arm64 (Apple Silicon) also added as a non-Linux platform |
 | 4 | Minimum CPU and GPU support | Resolved by ADR-0003: SSE4.2/four threads/16 GiB; GPU optional, 8 GiB for acceleration |
 | 5 | Windows release target | Resolved: Windows x86-64 is the primary initial target |
 | 6 | Initial inference backend and pinned versions | Resolved by ADR-0003: `llama.cpp` b10156 / 91f8c9c |
 | 7 | Programming model taxonomy | Resolved in `docs/architecture/model-taxonomy.md` |
 | 8 | Local single-user bypass | Resolved: no bypass; authentication remains fail-closed |
 | 9 | Intranet TLS certificate strategy | Resolved by ADR-0003: same-host proxy with organisational/private-PKI or public CA certificate |
-| 10 | Identity and non-password secret storage | Resolved: ADR-0002 identity; DPAPI, Linux keyring, and systemd encrypted credentials in ADR-0003 |
+| 10 | Identity and non-password secret storage | Resolved: ADR-0002 identity; DPAPI, Linux keyring, and systemd encrypted credentials in ADR-0003. Extended by ADR-0004: macOS reuses ADR-0002's PAM-based identity and adds Keychain Services for non-password secret storage |
 | 11 | Release-1 attachment formats | Resolved by ADR-0003: bounded UTF-8 text/code formats; ambiguous binary rejected |
 | 12 | Voice transcription backend | Resolved by ADR-0003: optional isolated whisper.cpp v1.7.5 / 51c6961 |
 | 13 | MCP stable specification revision | Resolved: `2025-11-25` |

@@ -184,9 +184,11 @@ std::vector<GpuVendorTelemetry> probe_gpu_vendor_telemetry() {
 
 namespace masterai {
 
-// GPU vendor telemetry is Windows-only per the project's Windows-first
-// build scope (Linux support is optional and left to a future pass); fails
-// closed to an empty, unavailable result rather than a partial probe.
+// GPU vendor telemetry (NVML/ADLX) is Windows-only: it targets discrete
+// NVIDIA/AMD GPU utilization and thermal probing, neither of which Linux or
+// macOS (Apple Silicon has no discrete GPU or vendor SDK equivalent) needs
+// here -- fails closed to an empty, unavailable result rather than a
+// partial probe.
 std::vector<GpuVendorTelemetry> probe_gpu_vendor_telemetry() {
     return {};
 }

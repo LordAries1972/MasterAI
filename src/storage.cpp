@@ -20,6 +20,14 @@
 #include <cerrno>
 #include <sys/syscall.h>
 #include <unistd.h>
+#elif defined(__APPLE__)
+// ADR-0004: macOS has no kernel-keyring syscall equivalent to Linux's
+// SYS_add_key/SYS_keyctl, so non-password secrets are stored in the login
+// Keychain via Keychain Services instead -- the platform's own OS-protected
+// secret store, matching DPAPI's and the Linux keyring's "OS holds the key
+// material, MasterAI never does" property.
+#include <CoreFoundation/CoreFoundation.h>
+#include <Security/Security.h>
 #endif
 
 namespace masterai {
@@ -35,6 +43,26 @@ bool safe_name(const std::string& value) {
     }
     return true;
 }
+
+#if defined(__APPLE__)
+// Builds the CFDictionary Keychain Services query identifying one MasterAI
+// secret by name: a generic-password item scoped to the "masterai" service
+// so it neither collides with nor is visible to other applications'
+// Keychain items.
+CFMutableDictionaryRef keychain_query(const std::string& name) {
+    CFMutableDictionaryRef query = CFDictionaryCreateMutable(
+        kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
+    CFStringRef service = CFSTR("masterai");
+    CFDictionarySetValue(query, kSecAttrService, service);
+    CFStringRef account = CFStringCreateWithCString(
+        kCFAllocatorDefault, name.c_str(), kCFStringEncodingUTF8);
+    CFDictionarySetValue(query, kSecAttrAccount, account);
+    CFRelease(account);
+    return query;
+}
+#endif
 
 std::string hex(const std::string& value) {
     static constexpr char digits[] = "0123456789abcdef";
@@ -321,6 +349,8 @@ bool SecretStore::available() const noexcept {
     return true;
 #elif defined(__linux__) && defined(SYS_add_key) && defined(SYS_keyctl)
     return true;
+#elif defined(__APPLE__)
+    return true;
 #else
     return false;
 #endif
@@ -351,6 +381,31 @@ void SecretStore::set(const std::string& name, const std::string& secret) {
     const long id = syscall(SYS_add_key, "user", description.c_str(),
                             secret.data(), secret.size(), user_keyring);
     if (id < 0) throw std::runtime_error("Linux kernel keyring write failed");
+#elif defined(__APPLE__)
+    CFMutableDictionaryRef query = keychain_query(name);
+    CFDataRef data = CFDataCreate(
+        kCFAllocatorDefault, reinterpret_cast<const UInt8*>(secret.data()),
+        static_cast<CFIndex>(secret.size()));
+    CFDictionarySetValue(query, kSecValueData, data);
+    OSStatus status = SecItemAdd(query, nullptr);
+    if (status == errSecDuplicateItem) {
+        // An item for this name already exists: update its secret data
+        // rather than failing, matching DPAPI's/the Linux keyring's
+        // overwrite-on-reuse behaviour for the same name.
+        CFMutableDictionaryRef search = keychain_query(name);
+        CFMutableDictionaryRef update = CFDictionaryCreateMutable(
+            kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(update, kSecValueData, data);
+        status = SecItemUpdate(search, update);
+        CFRelease(search);
+        CFRelease(update);
+    }
+    CFRelease(data);
+    CFRelease(query);
+    if (status != errSecSuccess) {
+        throw std::runtime_error("macOS Keychain secret write failed");
+    }
 #endif
 }
 
@@ -389,6 +444,20 @@ std::optional<std::string> SecretStore::get(const std::string& name) const {
         throw std::runtime_error("Linux kernel keyring read failed");
     }
     return secret;
+#elif defined(__APPLE__)
+    CFMutableDictionaryRef query = keychain_query(name);
+    CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
+    CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
+    CFTypeRef result = nullptr;
+    const OSStatus status = SecItemCopyMatching(query, &result);
+    CFRelease(query);
+    if (status != errSecSuccess || result == nullptr) return std::nullopt;
+    CFDataRef data = static_cast<CFDataRef>(result);
+    std::string secret(
+        reinterpret_cast<const char*>(CFDataGetBytePtr(data)),
+        static_cast<std::size_t>(CFDataGetLength(data)));
+    CFRelease(result);
+    return secret;
 #else
     return std::nullopt;
 #endif
@@ -406,6 +475,10 @@ void SecretStore::erase(const std::string& name) {
     const long id = syscall(SYS_keyctl, keyctl_search, user_keyring, "user",
                             description.c_str(), 0);
     if (id >= 0) static_cast<void>(syscall(SYS_keyctl, keyctl_revoke, id));
+#elif defined(__APPLE__)
+    CFMutableDictionaryRef query = keychain_query(name);
+    static_cast<void>(SecItemDelete(query));  // Not-found is not an error here.
+    CFRelease(query);
 #endif
 }
 

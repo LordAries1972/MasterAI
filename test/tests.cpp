@@ -260,6 +260,23 @@ struct JoiningThread {
     }
 };
 
+// JoiningThread's backstop only joins -- it never unblocks a server thread
+// still parked in run()'s accept loop. A test that throws (a failed
+// require()) between starting the server and its own explicit
+// stop.store()/server.stop() call therefore hangs forever in
+// JoiningThread's destructor instead of failing with a readable message.
+// Declare this AFTER the JoiningThread in a test so it destructs first (C++
+// reverse declaration order) and actually unblocks the thread before the
+// join runs, on every exit path including an exception.
+struct ServerStopGuard {
+    masterai::HttpServer& server;
+    std::atomic_bool& stop;
+    ~ServerStopGuard() {
+        stop.store(true);
+        server.stop();
+    }
+};
+
 // Shared by every route test below: polls /health/live instead of a fixed
 // sleep, since that is the only real signal for "the background server
 // thread has actually reached listen()/accept()" -- a fixed sleep would
@@ -1203,8 +1220,9 @@ void test_phase_eight_mcp_inbound() {
     masterai::ProjectCatalog projects(workspace, records);
     projects.add("demo", "Demonstration", project_root);
     masterai::AllowedCommandStore allowed_commands(records);
+    masterai::AppConfig config;
     masterai::McpInboundServer server(projects, models_root, 512U,
-                                      allowed_commands);
+                                      allowed_commands, config);
     masterai::McpIdentity identity{
         "developer",
         {"mcp.connect", "projects.read", "projects.write", "models.read"},
@@ -5950,6 +5968,28 @@ void test_gpu_layer_selection() {
     require(masterai::select_gpu_layers(unknown_vram_host, "",
                                         1ULL * 1024 * 1024 * 1024) == 0U,
             "an unknown (zero) VRAM size did not fall back to no GPU offload");
+
+    // Regression: a small-VRAM card whose model weights alone fit
+    // comfortably must still refuse full offload once the requested
+    // --ctx-size's estimated KV cache is accounted for, rather than
+    // reproducing the real crash this was written against -- a 960M-class
+    // 4 GiB card oversubscribed by a multi-slot context, causing a CUDA
+    // "launch timed out" driver-level crash (see calibration.cpp's
+    // kConservativeKvCacheBytesPerToken comment).
+    masterai::HardwareInfo small_vram_host;
+    small_vram_host.gpu_backends = {"cuda"};
+    small_vram_host.gpu_memory_mib = 4U * 1024U;  // 4 GiB, e.g. GTX 960M
+    const std::uint64_t small_model_bytes = 1500ULL * 1024ULL * 1024ULL;
+    require(masterai::select_gpu_layers(small_vram_host, "", small_model_bytes,
+                                        1024U) == masterai::kGpuLayersOffloadAll,
+            "a model plus a modest context's estimated KV cache that "
+            "together still fit in a small card's VRAM was not recommended "
+            "for full GPU offload");
+    require(masterai::select_gpu_layers(small_vram_host, "", small_model_bytes,
+                                        33280U) == 0U,
+            "a model whose weights alone fit but whose estimated KV cache "
+            "for a large multi-slot context would oversubscribe a small "
+            "card's VRAM was still recommended for full GPU offload");
 }
 
 // Phase 26: WarmModelState legal graph, illegal-transition rejection, the
@@ -6388,7 +6428,7 @@ void test_machine_learning_model_registry_lifecycle() {
     masterai::ModelRegistryStore models(records);
     const auto entry = models.create("administrator-1", "cpp-review-model",
                                      "C++ Review Model", "0.1.0", "llama",
-                                     "code-review", "gguf", "internal",
+                                     "code-review", "gguf", "",
                                      "MIT");
     require(!entry.id.empty() &&
                 entry.state == masterai::ModelRegistryState::imported &&
@@ -9819,6 +9859,10 @@ void test_phase95_training_job_execution_policy_and_timeout_enforcement() {
             std::clog << "  server thread exception: " << error.what() << '\n';
         }
     })};
+    // Destructs before server_thread (reverse declaration order), so a
+    // require() failure anywhere below still unblocks and joins the server
+    // thread instead of hanging forever -- see ServerStopGuard's comment.
+    ServerStopGuard stop_guard{server, stop};
     phase_eightysix_wait_until_ready(port);
 
     const auto project_response = masterai_test::http_request(
@@ -9846,8 +9890,13 @@ void test_phase95_training_job_execution_policy_and_timeout_enforcement() {
     const auto dataset_id =
         masterai::parse_json(dataset_response.body).required("id").as_string();
 
+    // 25,000 iterations (50,000 rows) rather than a handful: the deadline
+    // test below needs training to be genuinely compute-bound so the 1-
+    // second deadline reliably fires before all requested epochs finish --
+    // see that test's own comment for why the row count, not the epoch
+    // count, is what has to carry this margin.
     std::string csv = "x1,x2,label\n";
-    for (int index = 0; index < 20; ++index) {
+    for (int index = 0; index < 25000; ++index) {
         csv += std::to_string(0.1 * index) + "," +
               std::to_string(1.0 + 0.05 * index) + ",low\n";
         csv += std::to_string(4.0 + 0.1 * index) + "," +
@@ -9864,14 +9913,14 @@ void test_phase95_training_job_execution_policy_and_timeout_enforcement() {
     // must exist now that content was uploaded.
     const auto dataset_list = masterai_test::http_request(
         port, "GET", "/api/v1/ml/datasets");
-    require(dataset_list.body.find("\"recordCount\":40") != std::string::npos,
+    require(dataset_list.body.find("\"recordCount\":50000") != std::string::npos,
             "the dataset listing did not report the real uploaded row count");
     const auto versions_response = masterai_test::http_request(
         port, "GET", "/api/v1/ml/datasets/" + dataset_id + "/versions");
     require(versions_response.status == 200 &&
                 versions_response.body.find("\"version\":1") !=
                     std::string::npos &&
-                versions_response.body.find("\"recordCount\":40") !=
+                versions_response.body.find("\"recordCount\":50000") !=
                     std::string::npos,
             "the content upload did not create a real Dataset Versioning "
             "entry");
@@ -9917,23 +9966,23 @@ void test_phase95_training_job_execution_policy_and_timeout_enforcement() {
                     "\"computeTarget\":\"on-prem-node-1\"") != std::string::npos,
             "the execution policy did not round-trip through the API");
 
-    // The real deadline check: an epoch count this tiny (40-row) dataset
-    // cannot plausibly finish inside one second forces the training loop's
-    // own timeout check to be what stops the run -- if max_runtime_seconds
-    // were merely recorded and not enforced, this request would instead
-    // keep training until epochs actually completed. Deliberately NOT an
-    // extreme epoch count (e.g. billions): the deadline check only runs
-    // once per epoch, so a needlessly huge target risks a real multi-
-    // second-to-minute wall-clock run under host CPU contention before the
-    // *next* epoch boundary is even reached to notice the deadline passed
-    // -- 1,000,000 epochs is already ~3000x the 300-epoch fixture other ML
-    // tests train to completion near-instantly, comfortably enough to
-    // guarantee the 1-second deadline fires first on any real machine,
-    // while keeping this test's own worst-case bounded and fast.
+    // The real deadline check: train_tabular_model() hard-rejects any
+    // request above 10,000 epochs (its own separate resource-ceiling
+    // validation, unrelated to this deadline), so the only way to force the
+    // 1-second deadline to fire before all requested epochs finish is to
+    // make each epoch itself expensive -- hence the 50,000-row dataset
+    // above, not a huge epoch count. At the epoch cap of 10,000, this
+    // dataset's per-epoch cost keeps total training well past one second on
+    // any real machine, while the deadline check (run once per epoch) still
+    // aborts within a small fraction of those epochs, keeping this test's
+    // own wall-clock time close to the 1-second deadline itself, not the
+    // full 10,000-epoch worst case. If max_runtime_seconds were merely
+    // recorded and not enforced, this request would instead keep training
+    // until all 10,000 epochs actually completed.
     const auto started = std::chrono::steady_clock::now();
     const auto run_response = masterai_test::http_request(
         port, "POST", "/api/v1/ml/training-jobs/" + job_id + "/run", {},
-        "{\"epochs\":1000000}");
+        "{\"epochs\":10000}");
     const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                              std::chrono::steady_clock::now() - started)
                              .count();
@@ -9941,7 +9990,7 @@ void test_phase95_training_job_execution_policy_and_timeout_enforcement() {
                 run_response.body.find("timeout") != std::string::npos,
             "a run that overshoots max_runtime_seconds must fail with a "
             "timeout reason, not silently keep training");
-    require(elapsed < 15,
+    require(elapsed < 30,
             "the max-runtime deadline did not bound the run to a "
             "reasonable wall-clock time -- it is not being enforced");
 

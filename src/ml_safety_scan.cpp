@@ -492,7 +492,12 @@ double score_continual_learning_candidate_quality(const std::string& user_messag
     const auto lowered = lower(response);
     for (const auto& marker : low_value_markers) {
         if (lowered.find(marker) != std::string::npos) {
-            score -= 0.4;
+            // A refusal is a strong signal on its own, so this deduction must
+            // land the score under the 0.4 low-quality threshold by itself
+            // even for a response otherwise too short to also trip the
+            // length penalty above (was 0.4, which left a short refusal at
+            // 0.6 -- still above the threshold).
+            score -= 0.7;
             break;
         }
     }

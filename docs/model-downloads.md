@@ -31,11 +31,11 @@ That combination — no auth headers, revision-pinned URLs, SHA-256 pinning — 
 
 ## Curated additions to the catalog
 
-All of these are Apache-2.0/MIT/permissive, have community GGUF conversions on Hugging Face or ModelScope, and — per `ml_finetune.cpp` — anything downloaded as GGUF is already a valid base model for the existing llama.cpp LoRA fine-tune path. Sizes below are full-precision param counts; actual download size depends on quantization.
+All of these are Apache-2.0/MIT/permissive, have community GGUF conversions on Hugging Face or ModelScope. Sizes below are full-precision param counts; actual download size depends on quantization.
 
 ### Best candidates for teaching/fine-tuning specifically
 
-The ML module being operational changes what's worth prioritizing: for *teaching a model* (LoRA fine-tuning locally), small size and architectural simplicity matter more than raw capability.
+**Note:** real LLM LoRA fine-tuning (Phase 73) was removed -- it depended on `llama.cpp`'s `finetune`/`export-lora` CLI tools, which upstream stopped shipping in every release since 2024-07-25, making the feature permanently non-functional (see README.md's Machine Learning section). The small models below remain good general download candidates but can no longer actually be LoRA fine-tuned through this codebase; only tabular classification/regression fine-tuning (Phase 70) is currently real.
 
 | Model | Params | License | Why it's a good teaching target |
 |---|---|---|---|

@@ -46,6 +46,22 @@ second identical-fingerprint run then compared cleanly against it (all
 seven regression comparisons passed, e.g. TTFT +2.7% against a 20%
 threshold, generation tokens/sec -2.6% against a -10% floor).
 
+26 August 2026, same host, a second model and a broader profile:
+`granite31-2b-instruct-q4km`, `standard` profile, `warm` cache, concurrency
+1, run directly against `POST /api/v1/performance/certification` (equivalent
+to the script above) under the "Test" account -- a `developer`-role
+account, not `administrator`; `benchmarks.run` (which `POST .../
+certification` requires) is granted to `developer` too, so an
+administrator login is not actually required to run a certification pass,
+only to change `/api/v1/performance/certification/thresholds` (`settings.
+manage`, administrator-only). First run `accepted: true` with no baseline
+(108 prompt tokens, 495 generated, 8.66 s TTFT, 2.83 GiB peak resident); a
+second identical-fingerprint run then compared cleanly against it (all
+seven metrics passed, e.g. TTFT -0.6%, generation tokens/sec +0.6%, average
+CPU -20.3% against a 25-point floor). This adds a second real model/profile
+combination to this host's evidence, still within the single-host,
+software-controllable scope this phase's exit criterion covers.
+
 ## Extending to another physical host
 
 1. Copy this repository (or just `build/`, `config/`, `models/`, and
