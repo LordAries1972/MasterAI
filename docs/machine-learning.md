@@ -49,6 +49,18 @@ JSONL export shapes produced by the separate Scraper Project dataset
 builder and rewrites them to clean text before chunking, instead of
 chunking raw JSON syntax.
 
+Since Phase 103, a Web Research page (`/app/ml/research`, off by default)
+adds a way to populate the knowledge base beyond manual uploads: it queries
+the enabled, administrator-keyed search provider(s) (Google Custom Search,
+Bing Web Search — official APIs only, no scraping), scores each result's
+source domain against an editable reliability-tier table, fetches and reads
+only the sources at or above a configurable reliability threshold (80% by
+default), and ingests relevant findings through the same
+`KnowledgeIndexStore::ingest()` path the Subject Knowledge Manager above
+uses — so research findings are immediately retrievable by the RAG page.
+Bounded by configuration (results per query, pages fetched, fetch timeout);
+relevance is judged by a simple keyword-overlap check, not a model call.
+
 Since Phase 66, every `ml.*` administrator action across every interface is
 visible in a dedicated read-only Audit Logs page (the most recent 200
 entries, newest first), and a Machine Learning Settings page exposes the

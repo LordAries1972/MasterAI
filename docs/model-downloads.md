@@ -10,7 +10,7 @@ Before picking sources, it matters what the pipeline can physically do. `Downloa
 - The **source URL must embed an immutable revision** — `models.cpp` rejects any request where `source_url` doesn't contain `immutable_revision` (a commit hash), so "latest" links are refused by design.
 - The URL's **host must be on an allow-list**: `huggingface.co`, `github.com`, or `modelscope.cn` (`models.cpp:213`).
 - Every download is verified against a **pinned SHA-256** before it's accepted.
-- The manifest's `licenseSpdx` must be in a **fixed allow-list**: `Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, CC-BY-4.0, Llama-3.1, Llama-3.2, Gemma`.
+- The manifest's `licenseSpdx` must be in a **fixed allow-list**: `Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, CC-BY-4.0, CC-BY-NC-4.0, Llama-3.1, Llama-3.2, Gemma`.
 
 That combination — no auth headers, revision-pinned URLs, SHA-256 pinning — is a deliberate security posture (immutable, verifiable, no credentials held by the server). It also silently rules out entire categories of "free" sources. That filter did most of the work in this research: a source is only actually useful here if a script can `curl` a fixed URL and get bytes back with no login step.
 
@@ -67,3 +67,16 @@ A `bartowski/granite-8b-code-instruct-GGUF` entry was investigated but the repos
 2. **Expanded the curated `PRESETS` catalog** in `src/web_ui.cpp` with 12 new entries covering the teaching tier, the general-chat gap between 1.5B and 8B, and the smallest code tier. Every commit hash and SHA-256 was read directly from the Hugging Face repo-files API before being added, matching how the existing entries were sourced — none are fabricated or computed locally.
 3. **Prioritized the "teaching" tier** (OLMo 2, SmolLM2 x2, TinyLlama, Granite 3.1 2B/8B) explicitly, since that's the stated use case for the ML module now being operational.
 4. All new entries use licenses already in `models.cpp`'s `allowed_licenses` list (`Apache-2.0`, `Gemma`, `Llama-3.2`), so no allow-list changes were needed.
+
+## Music category (September 2026)
+
+A new `music` category was added (Phase 98, `docs/PLAN.md`) for Text-to-Music, Voice-to-Music, and Text-to-Voice models — catalog/download only, since MasterAI's inference runtime is GGUF/llama.cpp-only and cannot yet run a safetensors or ONNX model. Two entries were seeded:
+
+| Model | Subtype | Format | License | Notes |
+|---|---|---|---|---|
+| `facebook/musicgen-small` | Text-to-Music | safetensors | CC-BY-NC-4.0 | Official Meta repo. Required adding `CC-BY-NC-4.0` to the license allow-list (see above) since MusicGen isn't commercially licensed. |
+| `rhasspy/piper-voices` (`en_US-amy-medium`) | Text-to-Voice | ONNX | MIT | Official Piper voices mirror; repo-level license is MIT. |
+
+**Voice-to-Music was investigated but not seeded.** Candidates found (`Mothersuperior/YuE2-hum-to-song`, singing-voice-conversion models) were either community adapter weights requiring a separate gated base model, or disabled/policy-restricted repos — nothing self-contained, reliably hosted, and adequately licensed turned up. The `music` category and its allow-list entries accept a Voice-to-Music model whenever a suitable one is found; none is in the curated suggestion list yet.
+
+Every source URL, pinned commit, SHA-256, and byte size for both seeded entries was read from the file's own Hugging Face Git LFS pointer (`.../raw/<revision>/<path>`), the same verification standard used for every other catalog entry.

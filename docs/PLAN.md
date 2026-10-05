@@ -3483,6 +3483,85 @@ Current phase status:
   platform argument correctly. See `README.md`'s script reference table for
   the updated argument lists. Windows x86-64 (this project's actively
   validated target) and existing Linux x86-64 code paths are unchanged.
+- Phase 103: Implemented at a scoped-down level (2026-09-22) — Web Research
+  and Knowledge Acquisition ("Machine Learning Abilities" section 52 below).
+  Queries the official Google Custom Search JSON API and/or Bing Web Search
+  API (administrator-supplied API keys, stored in the existing `SecretStore`
+  under `research:google_api_key`/`research:bing_api_key`, never in
+  `settings.json`) via `curl`, reusing the same subprocess launcher
+  `DownloadManager` already used for model transfers — extracted out of
+  `downloads.cpp` into `curl_process.hpp`/`curl_process.cpp`
+  (`run_curl_process()`) so both callers share one implementation instead of
+  two drifting copies. Each hit's source domain is scored 0-100 against a
+  new administrator-editable `ReliabilityTierStore` (seeded with a starting
+  set of `.gov`/`.edu`/standards-body/major-outlet tiers, longest-suffix
+  match, unmatched domains default to 40); hits scoring below the new global
+  `research.reliabilityThresholdPercent` setting (80% by default, per-install
+  configurable in Settings and via `AppConfig`) are dropped before any page
+  is fetched. Surviving pages (bounded by `research.maxPagesToFetch`) are
+  fetched via the same curl path and run through a new in-house
+  `html_extract_text()` (strips `<script>`/`<style>`/tags, decodes the
+  common entities, returns title/description/text) — no third-party
+  HTML/XML parser or HTTP/search-client library was added, per rule 14; the
+  official APIs plus `curl` are this phase's only network path, matching
+  rule 15's existing process-isolation pattern. A page is kept only if a
+  simple, explainable keyword-overlap check against the query judges it
+  relevant (not a separate model-judgment pass — a documented, deliberate
+  limit of this scoped-down phase); relevant pages are ingested through the
+  existing `KnowledgeIndexStore::ingest()` — the one ingestion path into the
+  learning system, reused rather than duplicated — so findings immediately
+  become retrievable by Retrieval-Augmented Generation and chat retrieval
+  like any other knowledge document. Each run (query, per-source reliability
+  score, fetched/relevant/ingested flags, and a plain-language summary) is
+  persisted by a new `ResearchRunStore` and exposed at
+  `GET /api/v1/research/runs[/{id}]`; running one is
+  `POST /api/v1/research/query`; the reliability tier table is
+  `GET`/`POST /api/v1/research/reliability-tiers[/{id}/delete]`; API keys are
+  set write-only via `POST /api/v1/research/credentials` (never echoed back
+  by any route). New `research.view`/`research.manage`/`research.run`
+  permissions (administrator-only, matching every `ml.*` permission) gate
+  these. Off by default (`research.enabled:false`) — no existing deployment
+  starts placing outbound search/fetch calls just from upgrading. A new
+  "Web Research" web UI page (`/app/ml/research`, under the Machine Learning
+  nav, right after Retrieval-Augmented Generation) walks a numbered
+  4-step flow (ask a question → optionally choose where findings are saved →
+  run → review results, each showing its reliability score and whether it
+  was saved), plus a Settings sub-section (reusing the same
+  `#systemConfigForm`/data-path mechanism the Machine Learning Settings page
+  uses) for the enable/provider toggles, threshold, bounds, API keys, and
+  the reliability-tier table. **Scope intentionally deferred**: result and
+  page counts are configuration-capped rather than open-ended (this is a
+  bounded research pass, not a crawler); relevance judging is keyword
+  overlap, not a model call; only two search providers are wired up
+  (Google, Bing) though the design supports adding more; and — like every
+  other real-model-dependent phase in this roadmap — actually exercising a
+  live Google/Bing API call needs administrator-supplied API keys this
+  session had no way to obtain or validate, so the exact response-shape
+  parsing (`google_custom_search()`/`bing_web_search()` in `research.cpp`)
+  is implemented against each API's documented JSON schema but not yet
+  validated against a live response; flagged here the same way Phases 4-7's
+  real-model exit criteria remain outstanding until a pinned backend/model
+  is exercised.
+- Phase 104: Implemented (2026-09-23) — three chat-reliability bugs fixed:
+  (1) `src/web_ui.cpp`'s auto-drive continuation loop had no notion of
+  which recursive chain owned the shared `generation`/`autoDriveAborted`/
+  `autoDriveTurns` state, so sending a new message while a prior chain was
+  still in flight orphaned it instead of stopping it — it kept appending
+  replies regardless of what was typed next; fixed with a bumped
+  `activeGenerationEpoch` every chain now checks before continuing or
+  cleaning up. (2) a `[[TOOL_CALL]]` block with malformed JSON was silently
+  erased with no diagnostic (`src/server.cpp`); it now appends a
+  `"[Tool call error]"` turn naming the parse failure and forces an
+  automatic model retry. (3) `classify_retrieval_request()`
+  (`src/retrieval.cpp`) was computed on every retrieval call but only ever
+  stamped onto the outcome for telemetry — it never actually steered
+  anything; a navigation-classified query now tries the `filename_path`
+  probe first (the classifier's own reasoning already called this the
+  strongest signal available) instead of after two weaker stages miss, and
+  the classification is folded into `retrieval_cache_key()`'s version tag
+  as a defensive (currently no-op) safeguard against a future classifier
+  change silently invalidating that assumption. See the Phase 104 section
+  below for full detail.
 
 Priority note: **Phase 30A CPU-only/GPU-disabled low-memory operation is
 implemented (2026-08-02)**, closing the integration/validation gap that
@@ -11527,6 +11606,199 @@ Administrators will be able to:
 * Monitor models after deployment.
 * Improve models through reviewed and versioned development cycles.
 * Maintain ownership and control over private data, training assets, model versions, and deployment infrastructure.
+
+### 58. Web Research and Knowledge Acquisition
+
+Implemented at a scoped-down level as Phase 103 (see the roadmap entry in
+section 26 above for the full implementation account). Design and scope:
+
+**Purpose.** Let an administrator (or the model, through the same permission
+gate) point MasterAI at a question and have it actively go find, judge, and
+learn from information on the open web, rather than only answering from
+whatever is already in the knowledge base.
+
+**Flow.** Query &rarr; search the enabled trusted engines (official APIs
+only) &rarr; score each result's source domain for reliability &rarr; drop
+anything below the configured threshold &rarr; fetch and extract text from
+the surviving pages, most reliable first, up to a configured page cap
+&rarr; keep only pages that look relevant to the query &rarr; ingest kept
+pages into the Machine Learning knowledge base (section 13, Knowledge
+Ingestion) through the same `KnowledgeIndexStore::ingest()` every other
+knowledge source uses &rarr; return a run record with per-source outcomes
+and a plain-language summary.
+
+**Search providers.** Google Custom Search JSON API and Bing Web Search
+API — official, ToS-compliant search APIs, each requiring an
+administrator-supplied API key (Google additionally needs a Programmable
+Search Engine id). No search-result-page scraping. Both are called the same
+way this codebase already calls its one other named network tool
+(`curl`, rule 15) rather than linking an HTTP/search-client library (rule
+14). Designed so additional providers can be added later without changing
+the run/scoring/ingestion pipeline.
+
+**Reliability scoring.** A configurable, administrator-editable table of
+domain-suffix &rarr; score (0-100) rules, seeded with a starting set
+(government/education/standards-body/major-outlet domains scored high,
+everything else defaulting lower), matched by longest suffix. This is
+deliberately a transparent, editable table rather than a black-box or
+model-based trust score, so an administrator can always see and change
+exactly why a source was or wasn't trusted.
+
+**Relevance judging.** A simple, explainable keyword-overlap check between
+the query and the fetched page's title/description/text. Not a separate
+model-judgment pass — a deliberate, documented limit of this phase, not an
+oversight; a future phase could add an LLM-graded relevance pass the same
+way Phase 76 added real generated RAG answers on top of Phase 60's
+retrieval-only baseline.
+
+**Bounds, not an open crawler.** Results per query, pages fetched per run,
+and per-fetch timeouts are all administrator-configured ceilings
+(`research.maxResultsPerQuery`, `research.maxPagesToFetch`,
+`research.fetchTimeoutSeconds`). This is a single bounded research pass
+over a handful of sources, not a standing or open-ended crawl.
+
+**Settings.** `research.enabled` (off by default), per-provider enable
+flags, the Google engine id, `research.reliabilityThresholdPercent`
+(the global reliability-threshold setting, 80% by default, requested
+explicitly as an administrator-adjustable option), result/page/timeout
+bounds, and default subject/vector-store targets. API keys are never stored
+in `settings.json`; they live in the existing `SecretStore`, set write-only
+through their own endpoint.
+
+**Permissions.** `research.view` (past runs, reliability tiers),
+`research.manage` (reliability tiers, API keys, settings), `research.run`
+(actually trigger a search/fetch/ingest pass) — administrator-only, matching
+every `ml.*` permission in this document.
+
+### Phase 98 — Music model download category
+
+Status: Implemented (2026-09-22), catalog/download only.
+
+Purpose: every model MasterAI could download or import was a GGUF
+text/code LLM — there was no way to fetch a music- or voice-generation
+model at all, and no category to file one under even if an operator hand-
+typed a download's source fields.
+
+Deliverables:
+
+- `"music"` added to the `category` allow-list enforced independently in
+  `create_download` (`src/workload_http.cpp`), `load_manifest()`
+  (`src/models.cpp`), the `download-model` CLI subcommand (`src/main.cpp`),
+  and `POST /api/v1/model-imports` (`src/server.cpp`) — a model in this
+  category lands under `models/music/<modelId>/`, same layout every other
+  category already uses.
+- `"CC-BY-NC-4.0"` added to the licensed-download allow-list (the same
+  three C++ copies, minus the import route, whose license field is free
+  text) so a non-commercial-licensed music model — the license MusicGen
+  actually ships under — can be accepted, not silently rejected.
+- Two curated catalog entries added to `model_catalog()`
+  (`src/model_catalog.cpp`): `facebook/musicgen-small` (Text-to-Music,
+  `model.safetensors`, CC-BY-NC-4.0) and `rhasspy/piper-voices`'
+  `en_US-amy-medium` (Text-to-Voice, ONNX, MIT). Both entries' source URL,
+  pinned commit revision, SHA-256, and byte size were read directly from
+  each file's Hugging Face Git LFS pointer (`.../raw/<rev>/<path>`), not
+  hand-typed, so nothing about them is a guess. No verifiable, adequately
+  licensed, self-contained Voice-to-Music model was found — the category
+  and its own allow-list entry exist and accept one, but no suggestion is
+  seeded for that subtype yet.
+- Web UI (`src/web_ui.cpp`): the Download and Import forms' Category
+  selects gained a `music` option labelled "music (Text-to-Music /
+  Voice-to-Music / Text-to-Voice)", the Category field's hint explains the
+  three subtypes live under one category, the License select gained
+  CC-BY-NC-4.0, and both new catalog entries' suggestion-picker label and
+  manifest display name spell out which of the three subtypes they are
+  (e.g. "MusicGen Small (Text-to-Music)"), so an operator sees the subtype
+  at the moment they pick a suggestion and everywhere the model's display
+  name appears afterward — not just once, buried in a category value.
+
+Out of scope: MasterAI's inference runtime is llama.cpp/GGUF-only: a
+downloaded music model reaches Ready in the Model Registry like any other,
+but there is no runner that can actually load or generate from a
+safetensors or ONNX file yet. Wiring up real music/voice inference is
+future work, not part of this phase.
+
+Exit criteria:
+
+- A Text-to-Music or Text-to-Voice model can be queued for download
+  through the web UI's curated suggestions, with its subtype visible in
+  the suggestion list and the model's own display name.
+- A hand-entered download or a GGUF import can use `category: "music"`
+  and, for a non-commercial-licensed source, `licenseSpdx: "CC-BY-NC-4.0"`.
+
+### Phase 104 — Chat reliability: auto-drive re-entrancy, tool-call parse-error recovery, and classification-steered retrieval
+
+Status: Implemented (2026-09-23).
+
+Purpose: three related chat-reliability reports — auto-drive appearing to
+"get stuck repeating itself no matter what's typed next", tool calls
+silently failing to run, and `classify_retrieval_request()`'s keyword/shape
+classification existing but never actually steering anything — traced to
+three distinct, previously-unfixed defects.
+
+Deliverables:
+
+- **Auto-drive re-entrancy** (`src/web_ui.cpp`). `runTurn()`'s recursive
+  auto-drive continuation loop and the shared `generation`
+  `AbortController`/`autoDriveAborted`/`autoDriveTurns` globals it depends
+  on had no notion of *which* chain owned them: sending a new message (or
+  clicking Approve/Deny) while a prior auto-drive chain's fetch was still
+  in flight reset `autoDriveTurns` out from under the old chain (un-
+  bounding its turn cap) and reassigned `generation`, so Escape/Stop could
+  no longer reach the orphaned old fetch — it kept recursing and appending
+  replies to the old task regardless of what the user typed next. A new
+  `activeGenerationEpoch` counter is now bumped (and the previous
+  controller aborted) at the start of every `streamMessage()`/
+  `resumeToolApproval()` call; each chain captures the epoch active when it
+  started and both its recursive continuation check and its own `finally`
+  cleanup re-verify that epoch is still current before acting, so a
+  superseded chain's next continuation check — or its cleanup nulling the
+  *new* chain's `generation` handle — is now a no-op instead of a race.
+- **Tool-call JSON parse-error recovery** (`src/server.cpp`). A
+  `[[TOOL_CALL]]{...}[[/TOOL_CALL]]` block whose JSON body failed to parse
+  (a small local model producing slightly malformed JSON) was silently
+  erased by `detect_and_strip_tool_call()` with no diagnostic anywhere —
+  the reply just looked truncated, with nothing telling the model or the
+  user the call had failed. `parse_tool_call_body()` now captures the
+  parse exception's message via an optional out-parameter threaded through
+  `detect_and_strip_tool_call()`; `send_chat_message()` appends a
+  `"[Tool call error]"` turn (same convention as a real tool's `"[Tool
+  result for ...]"` turn) naming the parse failure and the expected
+  `[[TOOL_CALL]]` shape, and forces `autoDriveState:"continue"` so the
+  model automatically retries with corrected JSON on its very next
+  auto-continued turn — the same client-side continuation mechanism a
+  successfully executed tool call already relies on, so the retry is
+  bounded by the same `AUTO_DRIVE_MAX_TURNS` cap this phase's auto-drive
+  fix above covers.
+- **Classification-steered retrieval** (`src/retrieval.cpp`).
+  `classify_retrieval_request()`'s own doc comment already calls an
+  explicit file-path-shaped token "the strongest, least ambiguous signal"
+  a query can carry, yet `retrieve_uncached()` only ever used the
+  classification to stamp `outcome.classification` for telemetry/
+  disclosure — it never actually influenced which strategy ran first. A
+  new Stage 0, gated on `classification == navigation` and a non-empty
+  `path_tokens`, now runs the `filename_path` probe before the
+  identifier/exact-text stages instead of after both have already missed;
+  the pre-existing Stage 2 `filename_path` fallback is skipped when Stage 0
+  already tried the identical token set, so no probe runs twice. Separately,
+  `retrieval_cache_key()`'s `version_tag` now folds in
+  `classify_retrieval_request(trimmed_query)` — a no-op today (the
+  classifier is already a pure function of `trimmed_query`, which is
+  already part of the key), but it means a cached entry can never be served
+  across a future classifier change without both the query text and its
+  classification still agreeing, rather than trusting query-text equality
+  alone to keep implying the same classification forever.
+
+Exit criteria:
+
+- Sending a new chat message while an auto-drive chain is still running
+  aborts that chain's in-flight fetch and starts a clean new one; Escape/
+  Stop reliably cancels whichever chain is actually current.
+- A malformed `[[TOOL_CALL]]` body produces a visible `"[Tool call
+  error]"` transcript turn and an automatic model retry instead of a
+  silently truncated reply.
+- A navigation-classified query (an explicit file-path-shaped token) tries
+  the `filename_path` probe first rather than after two weaker stages have
+  already missed.
 
 ## 27. Release Gates
 

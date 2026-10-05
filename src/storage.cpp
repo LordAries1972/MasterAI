@@ -592,7 +592,14 @@ bool role_allows(const UserRole role, const std::string& permission) {
           // Monitoring and Diagnostics): read-only aggregation over other
           // stores' already-real data (see the monitoring endpoint's own
           // comment in server.cpp), so there is no ...manage counterpart.
-          "ml.monitoring.view"}},
+          "ml.monitoring.view",
+          // Phase 103 (docs/PLAN.md "Machine Learning Abilities" section 52,
+          // Web Research and Knowledge Acquisition): administrator-only,
+          // matching every other ml.*-adjacent permission above.
+          // research.run gates actually triggering a search/fetch/ingest
+          // pass; research.manage covers the reliability-tier table and API
+          // credentials; research.view covers past-run history.
+          "research.view", "research.manage", "research.run"}},
         {UserRole::developer,
          {"identity.read", "models.read", "models.load", "tokens.create",
           "ide.connect", "mcp.connect", "mcp.invoke", "mcp.tools.invoke",

@@ -15,10 +15,10 @@ namespace {
 const std::set<std::string> allowed_categories{
     "general-programming", "code-completion", "code-review",
     "debugging", "documentation", "embeddings-code-search",
-    "conversation"};
+    "conversation", "music"};
 const std::set<std::string> allowed_licenses{
     "Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause",
-    "CC-BY-4.0", "Llama-3.1", "Llama-3.2", "Gemma"};
+    "CC-BY-4.0", "CC-BY-NC-4.0", "Llama-3.1", "Llama-3.2", "Gemma"};
 
 bool is_safe_identifier(const std::string& value) {
     if (value.empty() || value.size() > 96U || value.front() == '.' ||

@@ -439,6 +439,32 @@ struct AppConfig {
     // assigned; false (the default) leaves every chat's explicit model_id
     // selection completely unaffected, even if tiers are configured.
     bool model_routing_enabled{false};
+    // Phase 103: Web Research and Knowledge Acquisition (docs/PLAN.md
+    // "Machine Learning Abilities" section 52). Off by default, matching
+    // every other opt-in capability above -- no existing deployment starts
+    // making outbound search/page-fetch calls just from upgrading. Actual
+    // Google/Bing API keys are never stored here; they live in SecretStore
+    // under "research:google_api_key" / "research:bing_api_key" (see
+    // ResearchEngine's own comment in masterai.hpp), matching the
+    // credential_secret_name convention used elsewhere (mcp_outbound.cpp).
+    bool research_enabled{false};
+    bool research_google_enabled{false};
+    bool research_bing_enabled{false};
+    // Google Programmable Search Engine id ("cx"): identifies which search
+    // engine configuration to query, not a credential.
+    std::string research_google_engine_id;
+    // The reliability-threshold global setting the research feature is
+    // built around: search hits scored below this percentage by
+    // ReliabilityTierStore are discarded before any page is fetched.
+    unsigned int research_reliability_threshold_percent{80U};
+    std::uint32_t research_max_results_per_query{5U};
+    std::uint32_t research_max_pages_to_fetch{5U};
+    std::uint32_t research_fetch_timeout_seconds{20U};
+    // Where findings land when a research request doesn't specify its own
+    // subject/vector store -- both may be left empty, in which case a
+    // request without an explicit target is rejected rather than guessing.
+    std::string research_default_subject_id;
+    std::string research_default_vector_store_id;
 };
 
 class ConfigurationManager final {
@@ -6681,6 +6707,200 @@ std::string knowledge_index_profile_json(
     const std::string& vector_store_id,
     const std::vector<KnowledgeChunk>& chunks);
 std::string rag_retrieval_result_json(const RagRetrievalResult& result);
+
+// Phase 103: Web Research and Knowledge Acquisition (docs/PLAN.md "Machine
+// Learning Abilities" section 52). Queries trusted search engines (Google
+// Custom Search JSON API, Bing Web Search API -- official APIs only, called
+// through curl via curl_process.hpp; no scraping of search-result pages and
+// no linked HTTP/search-client library, per rule 14), scores each hit's
+// source domain for reliability against an administrator-editable tier list,
+// keeps only hits at or above the configured threshold
+// (AppConfig::research_reliability_threshold_percent, 80% by default),
+// fetches the surviving pages (bounded by research_max_pages_to_fetch),
+// extracts their visible text with a small in-house HTML-to-text pass (no
+// third-party HTML parser), and ingests genuinely relevant findings through
+// the existing KnowledgeIndexStore::ingest() -- the one ingestion path into
+// the learning system, reused rather than duplicated. This is a bounded,
+// synchronous research pass over a handful of results, not an open-ended
+// crawler: result/page counts and fetch timeouts are all configuration-
+// capped, and relevance is judged by simple text matching against the
+// query, not a separate model-judgment pass.
+
+// One domain-pattern -> reliability-score (0-100) rule. `domain_suffix` is
+// matched against a hit's host by longest-suffix match (e.g. ".gov" matches
+// "www.nist.gov"); the tier with the longest matching suffix wins, and an
+// unmatched host falls back to ReliabilityTierStore::default_score().
+struct ReliabilityTier {
+    std::string id;
+    std::string domain_suffix;
+    unsigned int score{50U};
+    std::string label;  // administrator-facing note, e.g. "Government/.gov"
+};
+
+// RecordStore-backed, editable domain-reliability table. Seeded with a
+// sensible default tier set on first construction (nothing to configure
+// before the feature works), and persisted the same restore()-on-construct
+// way as KnowledgeIndexStore.
+class ReliabilityTierStore final {
+public:
+    explicit ReliabilityTierStore(RecordStore& records);
+    std::vector<ReliabilityTier> list() const;
+    ReliabilityTier upsert(const std::string& domain_suffix,
+                           unsigned int score, const std::string& label);
+    bool remove(const std::string& id);
+    // Longest-suffix match against `tiers`; unmatched hosts get this.
+    static unsigned int default_score() noexcept;
+    unsigned int score_for_host(const std::string& host) const;
+
+private:
+    void restore();
+    void seed_defaults();
+    RecordStore* records_{nullptr};
+    std::map<std::string, ReliabilityTier> tiers_;
+    mutable std::mutex mutex_;
+};
+
+// One search-engine hit before it has been scored/fetched.
+struct RawSearchHit {
+    std::string engine;  // "google" | "bing"
+    std::string title;
+    std::string url;
+    std::string snippet;
+};
+
+// html_extract_text()'s result: enough of a page's content to judge
+// relevance and to ingest, without a full DOM parse.
+struct ExtractedPageText {
+    std::string title;
+    std::string description;
+    std::string text;
+};
+
+// Strips <script>/<style> content and every remaining tag, decodes the
+// handful of HTML entities search-result pages commonly use, and returns
+// bounded plain text plus the <title> and meta-description if present.
+ExtractedPageText html_extract_text(const std::string& html,
+                                    std::size_t maximum_text_bytes = 65536U);
+
+// One page a research run decided was worth keeping (or attempted and
+// failed/skipped) -- the per-finding rows inside a ResearchRun.
+struct ResearchFinding {
+    std::string url;
+    std::string title;
+    std::string engine;
+    unsigned int reliability_score{0U};
+    bool fetched{false};
+    bool relevant{false};
+    bool ingested{false};
+    std::string knowledge_document_id;
+    std::string snippet;
+    std::string error;  // empty unless this hit failed/was skipped
+};
+
+struct ResearchRun {
+    std::string id;
+    std::string query;
+    std::string requested_by;
+    std::string subject_id;
+    std::string vector_store_id;
+    std::vector<ResearchFinding> findings;
+    std::string summary;
+    std::uint64_t started_at_epoch_seconds{0};
+    std::uint64_t completed_at_epoch_seconds{0};
+};
+
+// RecordStore-backed persistence of past research runs (list/find), the
+// same shape as the other Phase 58+ result stores (e.g.
+// SubjectExamResultStore).
+class ResearchRunStore final {
+public:
+    explicit ResearchRunStore(RecordStore& records);
+    void put(const ResearchRun& run);
+    std::optional<ResearchRun> find(const std::string& id) const;
+    std::vector<ResearchRun> list() const;
+
+private:
+    void restore();
+    RecordStore* records_{nullptr};
+    std::map<std::string, ResearchRun> runs_;
+    mutable std::mutex mutex_;
+};
+
+// Calls the Google Custom Search JSON API (requires an API key and a
+// Programmable Search Engine id, neither of which this function reads from
+// configuration itself -- callers pass them explicitly) via curl, and
+// parses the response with the shared JsonValue parser (json.hpp). Throws
+// std::runtime_error on a transport failure, non-2xx response, or
+// unparseable body.
+// `cancellation`, set true, terminates an in-progress curl subprocess
+// immediately (see run_curl_process()) instead of waiting out its full
+// timeout_seconds -- ResearchEngine::run() passes through the same flag
+// HttpServer::stop() flips for shutdown, so a research call in flight during
+// shutdown no longer blocks it for however long its remaining page fetches
+// would otherwise take.
+std::vector<RawSearchHit> google_custom_search(
+    const std::string& query, const std::string& api_key,
+    const std::string& engine_id,
+    const std::filesystem::path& curl_executable,
+    const std::filesystem::path& log_path, std::uint32_t timeout_seconds,
+    std::uint32_t max_results, const std::atomic_bool& cancellation);
+
+// Calls the Bing Web Search API the same way google_custom_search() calls
+// Google's.
+std::vector<RawSearchHit> bing_web_search(
+    const std::string& query, const std::string& api_key,
+    const std::filesystem::path& curl_executable,
+    const std::filesystem::path& log_path, std::uint32_t timeout_seconds,
+    std::uint32_t max_results, const std::atomic_bool& cancellation);
+
+// Fetches one page via curl and runs it through html_extract_text().
+// Throws std::runtime_error on a transport failure or non-2xx response.
+ExtractedPageText fetch_page_text(const std::string& url,
+                                  const std::filesystem::path& curl_executable,
+                                  const std::filesystem::path& log_path,
+                                  std::uint32_t timeout_seconds,
+                                  std::uint64_t max_bytes,
+                                  const std::atomic_bool& cancellation);
+
+// Orchestrates the full Phase 103 flow described above: search the enabled
+// providers, score and filter by reliability, fetch and extract the
+// surviving pages, ingest relevant findings into `knowledge`, and return the
+// completed ResearchRun. Constructed once per Server (see server.cpp) with
+// its configuration; run() is safe to call concurrently for different
+// queries (it holds no mutable state of its own beyond the stores it is
+// given, which are independently synchronized).
+class ResearchEngine final {
+public:
+    ResearchEngine(AppConfig configuration, std::filesystem::path curl_executable,
+                   std::filesystem::path log_root, std::string google_api_key,
+                   std::string bing_api_key, ReliabilityTierStore& tiers,
+                   KnowledgeIndexStore& knowledge,
+                   const KnowledgeEmbeddingFunction& vectorize = {});
+    // `cancellation` is checked before each search-provider call and each
+    // page fetch, and forwarded into the curl subprocess itself, so a caller
+    // can abort a run already in progress (see HttpServer::stop(), which
+    // registers/flips this the same way it does for chat generations)
+    // instead of waiting out however many fetches are still queued.
+    ResearchRun run(const std::string& requested_by, const std::string& query,
+                    const std::string& subject_id,
+                    const std::string& vector_store_id,
+                    const std::atomic_bool& cancellation) const;
+
+private:
+    AppConfig configuration_;
+    std::filesystem::path curl_executable_;
+    std::filesystem::path log_root_;
+    std::string google_api_key_;
+    std::string bing_api_key_;
+    ReliabilityTierStore* tiers_{nullptr};
+    KnowledgeIndexStore* knowledge_{nullptr};
+    KnowledgeEmbeddingFunction vectorize_;
+};
+
+std::string reliability_tier_json(const ReliabilityTier& tier);
+std::string reliability_tiers_json(const std::vector<ReliabilityTier>& tiers);
+std::string research_run_json(const ResearchRun& run);
+std::string research_runs_json(const std::vector<ResearchRun>& runs);
 
 // Phases 62-65: the remaining four docs/PLAN.md "Machine Learning
 // Abilities" section-2 interfaces (Inference Endpoints, Hardware and

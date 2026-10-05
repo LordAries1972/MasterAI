@@ -587,7 +587,7 @@ std::string application_script() {
         "catch(x){showSystemError('Setup failed: '+x.message);}}"
         "async function load(){csrf=sessionStorage.getItem('csrf')||'';"
         "applyHintsPref();try{"
-        "const [me,p,c,mem,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,mlse,mlhs,mle,mlmo,mlck,mldp,mlcmp,mlkd,mlend,mlnode,mlpipe,mlpolicy,mlcard,mlaudit,mlmon,cfg,report]="
+        "const [me,p,c,mem,m,b,d,u,ml,mlp,mlm,mld,mls,mllt,mlpj,mltj,mler,mlex,mlft,mlmb,mlie,mlsr,mlvs,mlrag,mlse,mlhs,mle,mlmo,mlck,mldp,mlcmp,mlkd,mlend,mlnode,mlpipe,mlpolicy,mlcard,mlaudit,mlmon,mlresruns,mlrestiers,cfg,report]="
         "await Promise.all([api('/api/v1/users/me'),"
         "api('/api/v1/projects').catch(()=>({projects:[]})),"
         "api('/api/v1/chats'),"
@@ -663,6 +663,10 @@ std::string application_script() {
         "fetchFor('#mlMonitoringPanel','/api/v1/ml/monitoring',"
         "{systemResources:null,trainingJobCounts:{},evaluationMetrics:[],"
         "inferenceBenchmarks:[]}),"
+        // Phase 103: Web Research and Knowledge Acquisition.
+        "fetchFor('#researchRunsList','/api/v1/research/runs',{researchRuns:[]}),"
+        "fetchFor('#researchTiersList','/api/v1/research/reliability-tiers',"
+        "{reliabilityTiers:[]}),"
         // 403/503 for anyone who isn't an administrator, or when no
         // settings.json path is known to the running server -- both are
         // quiet, expected no-ops here exactly like the ml.* fetches above.
@@ -714,9 +718,15 @@ std::string application_script() {
         "renderMlModelCards(mlcard.modelCards);"
         "renderMlAuditLogs(mlaudit.auditLogs);"
         "renderMlMonitoring(mlmon);"
+        "renderResearchRuns(mlresruns.researchRuns);"
+        "renderResearchTiers(mlrestiers.reliabilityTiers);"
         "fillMlSelect('#mlKnowledgeSubjectId',mls.subjects,'Choose a subject',"
         "x=>x.name);fillMlSelect('#mlSubjectExamSubjectId',mls.subjects,"
         "'Choose a subject',x=>x.name);"
+        "fillMlSelect('#researchSubjectId',mls.subjects,"
+        "'Use the configured default',x=>x.name);"
+        "fillMlSelect('#researchVectorStoreId',mlvs.vectorStores,"
+        "'Use the configured default',x=>x.name);"
         "fillMlSelect('#mlKnowledgeVectorStoreId',mlvs.vectorStores,"
         "'Choose a vector store',x=>x.name+' ('+x.status+')');"
         "fillMlSelect('#mlRagConfigVectorStoreId',mlvs.vectorStores,"
@@ -1951,6 +1961,35 @@ std::string application_script() {
         "'/api/v1/ml/knowledge-documents/'+encodeURIComponent("
         "btn.dataset.deleteMlKnowledge)+'/delete','POST');await load();}"
         "catch(x){showSystemError('Delete knowledge file failed: '+x.message);}});}}"
+        // Phase 103: Web Research and Knowledge Acquisition. Each finding
+        // row shows whether it cleared the reliability threshold, whether
+        // the page was actually fetched, and whether it was saved to the
+        // knowledge base -- the same three-step story the run's own
+        // summary line tells in prose.
+        "function renderResearchRuns(runs){const el=q('#researchRunsList');"
+        "if(!el)return;if(!runs.length){el.innerHTML="
+        "'<p>No research has been run yet.</p>';return;}"
+        "el.innerHTML=runs.map(run=>'<div class=\"researchRun\">"
+        "<h3>'+esc(run.query)+'</h3><p>'+esc(run.summary)+'</p>'+"
+        "table(['Source','Reliability','Fetched','Saved',''],"
+        "run.findings.map(f=>[f.url?"
+        "'<a href=\"'+esc(f.url)+'\" target=\"_blank\" rel=\"noopener\">'+"
+        "esc(f.title||f.url)+'</a>':esc(f.title),"
+        "String(f.reliabilityScore)+'%',f.fetched?'Yes':'No',"
+        "f.ingested?'Yes':(f.error?esc(f.error):'No'),"
+        "f.ingested?'<span class=\"stateTag stateTag-approved\">saved</span>':''"
+        "]))+'</div>').join('');}"
+        "function renderResearchTiers(tiers){const el=q('#researchTiersList');"
+        "if(!el)return;if(!tiers.length){el.innerHTML="
+        "'<p>No reliability tiers configured.</p>';return;}"
+        "el.innerHTML=table(['Domain suffix','Score','Label',''],"
+        "tiers.map(x=>[esc(x.domainSuffix),String(x.score)+'%',esc(x.label),"
+        "deleteBtn('delete-research-tier',x.id)]));"
+        "for(const btn of el.querySelectorAll('[data-delete-research-tier]')){"
+        "btn.addEventListener('click',async()=>{try{await api("
+        "'/api/v1/research/reliability-tiers/'+encodeURIComponent("
+        "btn.dataset.deleteResearchTier)+'/delete','POST');await load();}"
+        "catch(x){showSystemError('Delete reliability tier failed: '+x.message);}});}}"
         // Data Labeling (docs/PLAN.md "Machine Learning Abilities" section
         // 14): each row carries its own status dropdown, mirroring the
         // Subject Knowledge Manager's review-status pattern above, plus a
@@ -3654,6 +3693,21 @@ std::string application_script() {
         // ever stops the *current* fetch, not turns still to come.
         "let autoDriveAborted=false;let autoDriveTurns=0;"
         "const AUTO_DRIVE_MAX_TURNS=25;"
+        // Identifies which runTurn()/resumeToolApproval() recursive chain is
+        // currently the live one. autoDriveAborted/autoDriveTurns above are
+        // shared, mutable globals with no notion of *which* chain they
+        // belong to -- if a user sent a new message (or Approve/Denied a
+        // tool) while a prior auto-drive chain's fetch was still in flight,
+        // that reset autoDriveTurns out from under the old chain (un-
+        // bounding it) and reassigned the shared `generation` controller, so
+        // Escape/Stop could no longer reach the orphaned old fetch: it kept
+        // recursing, appending replies to the old task no matter what the
+        // user typed next. Each chain now captures the epoch active when it
+        // started and re-checks it before every recursive continuation;
+        // starting a new chain bumps the epoch (and aborts the previous
+        // controller) so any older chain's next continuation check sees a
+        // stale epoch and stops.
+        "let activeGenerationEpoch=0;"
         // Live status text shown in place of the generic 'Thinking' spinner
         // once something concrete is actually happening (a tool running) --
         // only replaces the spinner while no real reply text has streamed
@@ -3982,7 +4036,7 @@ std::string application_script() {
         // than inside the server's own request handler). Bounded by
         // AUTO_DRIVE_MAX_TURNS and stopped immediately by autoDriveAborted
         // (Escape/Stop -- see the listeners below).
-        "async function runTurn(chatId,content,attachmentIds,autoDrive,box,userEl){"
+        "async function runTurn(chatId,content,attachmentIds,autoDrive,box,userEl,epoch){"
         "generation=new AbortController();"
         "const assistantEl=appendMessage(box,'assistant','');"
         // Shown until the first real event streams back -- reasoning models
@@ -3999,13 +4053,20 @@ std::string application_script() {
         "if(!r.ok)throw parseFailedResponseError(await r.text());"
         "const completeEvent=await readTurnStream(r,box,chatId,userEl,assistantEl);"
         "if(completeEvent&&completeEvent.autoDriveState==='continue'&&"
-        "!autoDriveAborted&&autoDriveTurns<AUTO_DRIVE_MAX_TURNS){"
+        "!autoDriveAborted&&autoDriveTurns<AUTO_DRIVE_MAX_TURNS&&"
+        "epoch===activeGenerationEpoch){"
         "autoDriveTurns++;"
-        "await runTurn(chatId,'Continue.',[],true,box,null);}}"
+        "await runTurn(chatId,'Continue.',[],true,box,null,epoch);}}"
         // Resumes a paused high-risk tool call from its Approve/Deny card,
         // then keeps the auto-drive loop going the same way runTurn()'s own
         // tail call does.
         "async function resumeToolApproval(chatId,approvalId,decision,box){"
+        // An explicit Approve/Deny click is a fresh user action, same as
+        // sending a new message -- it supersedes whatever chain (if any) is
+        // still running, rather than joining it.
+        "if(generation)generation.abort();"
+        "activeGenerationEpoch++;const epoch=activeGenerationEpoch;"
+        "autoDriveAborted=false;autoDriveTurns=0;"
         "try{generation=new AbortController();"
         "const r=await fetch('/api/v1/chats/'+encodeURIComponent(chatId)+"
         "'/tool-approvals/'+encodeURIComponent(approvalId),"
@@ -4014,10 +4075,15 @@ std::string application_script() {
         "if(!r.ok)throw parseFailedResponseError(await r.text());"
         "const completeEvent=await readTurnStream(r,box,chatId,null,null);"
         "if(completeEvent&&completeEvent.autoDriveState==='continue'&&"
-        "!autoDriveAborted&&autoDriveTurns<AUTO_DRIVE_MAX_TURNS){"
-        "autoDriveTurns++;await runTurn(chatId,'Continue.',[],true,box,null);}}"
+        "!autoDriveAborted&&autoDriveTurns<AUTO_DRIVE_MAX_TURNS&&"
+        "epoch===activeGenerationEpoch){"
+        "autoDriveTurns++;await runTurn(chatId,'Continue.',[],true,box,null,epoch);}}"
         "catch(x){showSystemError('Failed to resume: '+x.message);}"
-        "finally{generation=null;}}"
+        // Only clears the shared `generation` handle if this chain is still
+        // the active one -- an aborted, superseded chain's own cleanup must
+        // not null out the *new* chain's controller out from under it (see
+        // the epoch comment above streamMessage's abort/bump).
+        "finally{if(epoch===activeGenerationEpoch)generation=null;}}"
         // A brand-new chat (no project/model form of its own any more) is
         // created lazily on the first message: the composer's own project
         // and model pickers supply what /api/v1/chats needs, and the URL
@@ -4031,6 +4097,14 @@ std::string application_script() {
         "const command=SLASH_COMMANDS[content.trim().toLowerCase()];"
         "if(command){q('#messageContent').value='';command();return;}"
         "const autoDrive=isTaskContinuationCommand(content);"
+        // Sending a new message supersedes any chain still running (e.g. an
+        // auto-drive loop the user typed over instead of pressing Stop) --
+        // abort its in-flight fetch and bump the epoch so its next
+        // recursive continuation check (in runTurn/resumeToolApproval)
+        // finds a stale epoch and stops, instead of both chains appending
+        // replies to the same chat concurrently.
+        "if(generation)generation.abort();"
+        "activeGenerationEpoch++;const epoch=activeGenerationEpoch;"
         "autoDriveAborted=false;autoDriveTurns=0;"
         "try{let chatId=q('#messageChat').value;"
         "if(!chatId){const projectId=q('#chatProject').value,modelId=q('#chatModel').value;"
@@ -4074,7 +4148,7 @@ std::string application_script() {
         // query bubble's title with the prompt-token count.
         "const userEl=appendMessage(box,'user',content);"
         "box.scrollTop=box.scrollHeight;"
-        "await runTurn(chatId,content,attachmentIds,autoDrive,box,userEl);}"
+        "await runTurn(chatId,content,attachmentIds,autoDrive,box,userEl,epoch);}"
         "catch(x){const cancelled=x.name==='AbortError';"
         // A RAM-ceiling/OS-safety-reserve admission denial (memory.cpp's
         // MemoryBudgetManager::reserve(), surfaced by the server as the
@@ -4122,7 +4196,11 @@ std::string application_script() {
         "el.dataset.raw=x.message;"
         "el.append(title,body);addMessageCopyButton(el);"
         "box.scrollTop=box.scrollHeight;}}"
-        "finally{generation=null;}}"
+        // Same epoch guard as resumeToolApproval()'s finally above -- a
+        // superseded chain aborted by a newer streamMessage()/
+        // resumeToolApproval() call must not null out that newer chain's
+        // own `generation` controller.
+        "finally{if(epoch===activeGenerationEpoch)generation=null;}}"
         // Fills the raw source fields from the Hugging Face helper inputs;
         // the operator still supplies model ID, RAM figures, SHA-256, and
         // license acceptance separately, so nothing about validation changes.
@@ -5146,6 +5224,43 @@ std::string application_script() {
         "showFormSuccess('Retrieved '+result.retrievedCount+' chunk(s) with '+"
         "result.searchStrategy+' search.');}catch(x){out.textContent='';"
         "showSystemError('RAG retrieval failed: '+x.message);}});"
+        // Phase 103: Web Research and Knowledge Acquisition. A research
+        // pass can take a while (a search-API round trip plus several page
+        // fetches), so the button is disabled and a plain-language status
+        // line shown while it runs.
+        "if(q('#newResearchQuery'))q('#newResearchQuery').addEventListener("
+        "'submit',async e=>{e.preventDefault();const btn="
+        "e.target.querySelector('button');const status=q('#researchQueryStatus');"
+        "btn.disabled=true;status.textContent="
+        "'Searching, scoring sources, and reading the most reliable pages "
+        "-- this can take a little while...';"
+        "try{await api('/api/v1/research/query','POST',{"
+        "query:q('#researchQuery').value,"
+        "subjectId:q('#researchSubjectId').value,"
+        "vectorStoreId:q('#researchVectorStoreId').value});"
+        "status.textContent='';q('#researchQuery').value='';await load();}"
+        "catch(x){status.textContent='';"
+        "showSystemError('Research failed: '+x.message);}"
+        "finally{btn.disabled=false;}});"
+        "if(q('#newResearchTier'))"
+        "q('#newResearchTier').addEventListener("
+        "'submit',e=>submit(e,'/api/v1/research/reliability-tiers',"
+        "()=>({domainSuffix:q('#researchTierDomainSuffix').value,"
+        "score:Number(q('#researchTierScore').value),"
+        "label:q('#researchTierLabel').value})));"
+        "if(q('#researchCredentialsForm'))"
+        "q('#researchCredentialsForm').addEventListener('submit',async e=>{"
+        "e.preventDefault();const status=q('#researchCredentialsStatus');"
+        "try{const body={};"
+        "if(q('#researchGoogleApiKey').value)"
+        "body.googleApiKey=q('#researchGoogleApiKey').value;"
+        "if(q('#researchBingApiKey').value)"
+        "body.bingApiKey=q('#researchBingApiKey').value;"
+        "await api('/api/v1/research/credentials','POST',body);"
+        "q('#researchGoogleApiKey').value='';q('#researchBingApiKey').value='';"
+        "status.textContent='Saved. Keys are never shown again once saved.';}"
+        "catch(x){showSystemError('Save research credentials failed: '+"
+        "x.message);}});"
         "if(q('#newMlSubjectExam'))"
         "q('#newMlSubjectExam').addEventListener("
         "'submit',e=>submit(e,'/api/v1/ml/subject-exams',"
@@ -5939,7 +6054,10 @@ std::string application_page(const UserRecord& user, const std::string& section,
             field_hint("How the model will be classified in the model "
                        "inventory and default model pickers -- pick "
                        "whichever best matches the model's intended "
-                       "workload.") +
+                       "workload. Music covers Text-to-Music, "
+                       "Voice-to-Music, and Text-to-Voice models alike -- "
+                       "check the suggestion's own label or display name "
+                       "for which of those three it is.") +
             "<select id=\"downloadCategory\">"
             "<option value=\"general-programming\">general-programming</option>"
             "<option value=\"code-completion\">code-completion</option>"
@@ -5948,6 +6066,8 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<option value=\"documentation\">documentation</option>"
             "<option value=\"embeddings-code-search\">embeddings-code-search"
             "</option><option value=\"conversation\">conversation</option>"
+            "<option value=\"music\">music (Text-to-Music / "
+            "Voice-to-Music / Text-to-Voice)</option>"
             "</select></label>"
             "<label>Model ID" +
             field_hint("The internal identifier used to reference this "
@@ -6017,6 +6137,7 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<option value=\"BSD-2-Clause\">BSD-2-Clause</option>"
             "<option value=\"BSD-3-Clause\">BSD-3-Clause</option>"
             "<option value=\"CC-BY-4.0\">CC-BY-4.0</option>"
+            "<option value=\"CC-BY-NC-4.0\">CC-BY-NC-4.0</option>"
             "<option value=\"Llama-3.1\">Llama-3.1</option>"
             "<option value=\"Llama-3.2\">Llama-3.2</option>"
             "<option value=\"Gemma\">Gemma</option></select>"
@@ -6061,6 +6182,8 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<option value=\"documentation\">documentation</option>"
             "<option value=\"embeddings-code-search\">embeddings-code-search"
             "</option><option value=\"conversation\">conversation</option>"
+            "<option value=\"music\">music (Text-to-Music / "
+            "Voice-to-Music / Text-to-Voice)</option>"
             "</select></label>"
             "<label>Model ID" +
             field_hint("A short internal identifier for this model, e.g. "
@@ -7571,6 +7694,138 @@ std::string application_page(const UserRecord& user, const std::string& section,
             "<div id=\"mlRagConfigsList\">Loading...</div>"
             "<h3>Retrieval evidence</h3><pre id=\"mlRagQueryResult\">No query "
             "executed yet.</pre>"
+            "</div></section>";
+    } else if (section == "ml-research") {
+        // Phase 103 (docs/PLAN.md "Machine Learning Abilities" section 52,
+        // Web Research and Knowledge Acquisition): search trusted engines,
+        // keep only reliable sources, read the surviving pages, and save
+        // what's relevant into the knowledge base RAG queries against.
+        // Laid out as four numbered steps (ML UI non-expert bar) since this
+        // page runs an end-to-end action rather than editing a list, plus a
+        // clearly separated Settings sub-section that reuses the same
+        // #systemConfigForm/#systemConfigStatus machinery the Machine
+        // Learning Settings page does (see that section's own comment).
+        body =
+            "<section id=\"panel-ml-research\" class=\"panel\">"
+            "<div>"
+            "<h2>Research a question</h2>"
+            "<p>Searches your enabled, trusted search engines; keeps only "
+            "sources at or above your configured reliability threshold; "
+            "reads the surviving pages; and saves anything relevant into "
+            "the Machine Learning knowledge base, where Retrieval-Augmented "
+            "Generation and chat retrieval can use it.</p>"
+            "<form id=\"newResearchQuery\">"
+            "<label>Step 1: what do you want to research?" +
+            field_hint("Plain-language question or topic, e.g. "
+                       "\"latest NIST password guidance\".") +
+            "<textarea id=\"researchQuery\" rows=\"2\" required "
+            "maxlength=\"512\"></textarea></label>"
+            "<label>Step 2 (optional): save findings to" +
+            field_hint("Leave both blank to use the subject and vector "
+                       "store configured as defaults below in Settings.") +
+            "<select id=\"researchSubjectId\">"
+            "<option value=\"\">Use the configured default subject</option>"
+            "</select></label>"
+            "<label><select id=\"researchVectorStoreId\">"
+            "<option value=\"\">Use the configured default vector store"
+            "</option></select></label>"
+            "<p><strong>Step 3:</strong> run the research pass.</p>"
+            "<button title=\"Run research\">" ICON_PLAY_SVG " Research</button>"
+            "<p id=\"researchQueryStatus\" role=\"status\"></p>"
+            "</form>"
+            "<p><strong>Step 4:</strong> results appear below, most "
+            "reliable source first, each showing whether it was saved to "
+            "the knowledge base.</p>"
+            "<div id=\"researchRunsList\">Loading...</div>"
+            "</div><div>"
+            "<h2>Settings</h2>"
+            "<p>Off by default. Enabling research makes MasterAI place "
+            "outbound calls to the search engines and websites you enable "
+            "below.</p>"
+            "<form id=\"systemConfigForm\">"
+            "<label><input type=\"checkbox\" id=\"cfgResearchEnabled\" "
+            "data-path=\"research.enabled\" data-type=\"bool\"> Enable web "
+            "research</label>"
+            "<label><input type=\"checkbox\" id=\"cfgResearchGoogleEnabled\" "
+            "data-path=\"research.googleEnabled\" data-type=\"bool\"> Use "
+            "Google Custom Search</label>"
+            "<label>Google Programmable Search Engine id (cx)" +
+            field_hint("From your Google Programmable Search Engine "
+                       "control panel -- not a secret, just which search "
+                       "engine configuration to query.") +
+            "<input id=\"cfgResearchGoogleEngineId\" type=\"text\" "
+            "data-path=\"research.googleEngineId\"></label>"
+            "<label><input type=\"checkbox\" id=\"cfgResearchBingEnabled\" "
+            "data-path=\"research.bingEnabled\" data-type=\"bool\"> Use Bing "
+            "Web Search</label>"
+            "<label>Reliability threshold, percent" +
+            field_hint("Sources scored below this by your reliability "
+                       "tiers below are skipped without being fetched. "
+                       "80% by default.") +
+            "<input id=\"cfgResearchReliabilityThresholdPercent\" "
+            "type=\"number\" min=\"0\" max=\"100\" "
+            "data-path=\"research.reliabilityThresholdPercent\"></label>"
+            "<label>Maximum results per search" +
+            field_hint("How many hits to request from each enabled "
+                       "engine before scoring and filtering.") +
+            "<input id=\"cfgResearchMaxResultsPerQuery\" type=\"number\" "
+            "min=\"1\" max=\"10\" "
+            "data-path=\"research.maxResultsPerQuery\"></label>"
+            "<label>Maximum pages fetched per research pass" +
+            field_hint("Caps how many reliable-enough pages are actually "
+                       "downloaded and read in one research pass.") +
+            "<input id=\"cfgResearchMaxPagesToFetch\" type=\"number\" "
+            "min=\"1\" max=\"20\" "
+            "data-path=\"research.maxPagesToFetch\"></label>"
+            "<label>Fetch timeout, seconds" +
+            field_hint("How long to wait for the search API or a page "
+                       "fetch before giving up on that one source.") +
+            "<input id=\"cfgResearchFetchTimeoutSeconds\" type=\"number\" "
+            "min=\"1\" max=\"120\" "
+            "data-path=\"research.fetchTimeoutSeconds\"></label>"
+            "<label>Default subject id" +
+            field_hint("Used when a research request doesn't choose one "
+                       "of its own.") +
+            "<input id=\"cfgResearchDefaultSubjectId\" type=\"text\" "
+            "data-path=\"research.defaultSubjectId\"></label>"
+            "<label>Default vector store id" +
+            field_hint("Used when a research request doesn't choose one "
+                       "of its own.") +
+            "<input id=\"cfgResearchDefaultVectorStoreId\" type=\"text\" "
+            "data-path=\"research.defaultVectorStoreId\"></label>"
+            "<button title=\"Save research settings\">" ICON_SAVE_SVG " Save research settings</button>"
+            "</form>"
+            "<p id=\"systemConfigStatus\" role=\"status\"></p>"
+            "<h3>Search API keys</h3>"
+            "<p>Stored securely, never shown again once saved. Leave a "
+            "field blank to keep its existing key unchanged.</p>"
+            "<form id=\"researchCredentialsForm\">"
+            "<label>Google Custom Search API key"
+            "<input id=\"researchGoogleApiKey\" type=\"password\" "
+            "autocomplete=\"off\"></label>"
+            "<label>Bing Web Search API key"
+            "<input id=\"researchBingApiKey\" type=\"password\" "
+            "autocomplete=\"off\"></label>"
+            "<button title=\"Save API keys\">" ICON_SAVE_SVG " Save API keys</button>"
+            "</form>"
+            "<p id=\"researchCredentialsStatus\" role=\"status\"></p>"
+            "<h3>Reliability tiers</h3>"
+            "<p>How much MasterAI trusts a source domain, 0-100%. Longer, "
+            "more specific matches win over shorter ones (e.g. "
+            "\"nist.gov\" over \".gov\"). Unmatched domains default to " +
+            std::to_string(ReliabilityTierStore::default_score()) + "%.</p>"
+            "<form id=\"newResearchTier\">"
+            "<label>Domain suffix<input id=\"researchTierDomainSuffix\" "
+            "required maxlength=\"253\" placeholder=\"e.g. nist.gov or "
+            ".edu\"></label>"
+            "<label>Reliability score, percent"
+            "<input id=\"researchTierScore\" type=\"number\" min=\"0\" "
+            "max=\"100\" value=\"50\" required></label>"
+            "<label>Label (optional)<input id=\"researchTierLabel\" "
+            "maxlength=\"120\" placeholder=\"e.g. Government (.gov)\">"
+            "</label>"
+            "<button title=\"Add or update reliability tier\">" ICON_PLUS_SVG " Add/update tier</button></form>"
+            "<div id=\"researchTiersList\">Loading...</div>"
             "</div></section>";
     } else if (section == "ml-subject-exams") {
         // Phase 51 (docs/PLAN.md "Machine Learning Abilities" section 24):
@@ -9722,6 +9977,11 @@ std::string application_page(const UserRecord& user, const std::string& section,
                 nav_link("/app/ml/rag-configs",
                          "Retrieval-Augmented Generation",
                          section == "ml-rag-configs") +
+                // Phase 103: placed right after RAG, which is what its
+                // findings feed -- a research pass ingests into the same
+                // knowledge base RAG configurations query.
+                nav_link("/app/ml/research", "Web Research",
+                         section == "ml-research") +
                 nav_link("/app/ml/training-jobs", "Training Jobs",
                          section == "ml-training-jobs") +
                 nav_link("/app/ml/fine-tuning-jobs", "Fine-Tuning",

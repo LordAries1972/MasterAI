@@ -11,7 +11,8 @@
     "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"},
     "displayName": {"type": "string", "minLength": 1, "maxLength": 160},
     "category": {"enum": ["general-programming", "code-completion", "code-review",
-      "debugging", "documentation", "embeddings-code-search"]},
+      "debugging", "documentation", "embeddings-code-search", "conversation",
+      "music"]},
     "model": {
       "type": "object", "additionalProperties": false,
       "required": ["format", "architecture", "quantization"],
@@ -59,7 +60,7 @@
       "required": ["spdx", "accepted"],
       "properties": {
         "spdx": {"type": "string", "minLength": 1, "maxLength": 160,
-          "description": "For a downloaded model, src/models.cpp requires one of: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, CC-BY-4.0, Llama-3.1, Llama-3.2, Gemma. For a self-produced-derivative model (sourceUrl above), any non-empty, human-declared license label is accepted instead -- see self_produced_derivative in src/models.cpp."},
+          "description": "For a downloaded model, src/models.cpp requires one of: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, CC-BY-4.0, CC-BY-NC-4.0, Llama-3.1, Llama-3.2, Gemma. For a self-produced-derivative model (sourceUrl above), any non-empty, human-declared license label is accepted instead -- see self_produced_derivative in src/models.cpp."},
         "accepted": {"const": true}
       }
     },

@@ -594,10 +594,10 @@ int main(int argc, char* argv[]) {
             static const std::set<std::string> categories{
                 "general-programming", "code-completion", "code-review",
                 "debugging", "documentation", "embeddings-code-search",
-                "conversation"};
+                "conversation", "music"};
             static const std::set<std::string> licenses{
                 "Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause",
-                "CC-BY-4.0", "Llama-3.1", "Llama-3.2", "Gemma"};
+                "CC-BY-4.0", "CC-BY-NC-4.0", "Llama-3.1", "Llama-3.2", "Gemma"};
             if (filename.filename() != filename) {
                 throw std::runtime_error("download filename must be a leaf name");
             }

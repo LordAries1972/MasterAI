@@ -2,7 +2,11 @@
 
 > Part of the [MasterAI README](../README.md).
 
-Models are organized by programming purpose:
+Models are organized by category -- one workload per folder, plus a
+`music` category for Text-to-Music, Voice-to-Music, and Text-to-Voice
+models (download/catalog support only; MasterAI's inference runtime is
+GGUF/llama.cpp-only, so a music-category model reaches Ready but has no
+runner yet):
 
 ```text
 models/
@@ -11,7 +15,9 @@ models/
 ├── code-review/
 ├── debugging/
 ├── documentation/
-└── embeddings-code-search/
+├── embeddings-code-search/
+├── conversation/
+└── music/
 ```
 
 Each installed model uses:

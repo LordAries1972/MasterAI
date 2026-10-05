@@ -172,8 +172,17 @@ MasterAI provides a native, administrator-only Machine Learning administration
 area at `/app/ml` with durable lifecycle records for every interface the plan
 names, plus real executors: tabular training by gradient descent, evaluation
 scoring, model comparison, knowledge-file ingestion, local/learned embedding
-vector stores, RAG retrieval and grounded answer generation, and more. Job
-types still marked `Planned` record intent and state, not execution.
+vector stores, RAG retrieval and grounded answer generation, web research
+(`/app/ml/research`, off by default), and more. Job types still marked
+`Planned` record intent and state, not execution.
+
+Web research (Phase 103) queries the official Google Custom Search and Bing
+Web Search APIs (administrator-supplied keys), scores each result's source
+domain against an editable reliability-tier table, fetches and reads only
+the sources at or above a configurable reliability threshold (80% by
+default), and saves relevant findings into the same knowledge base RAG
+retrieval draws on. Disabled until an administrator turns it on and
+configures at least one provider.
 
 Overview and the honest capability boundary:
 [docs/machine-learning.md](docs/machine-learning.md). Classroom-style guide:

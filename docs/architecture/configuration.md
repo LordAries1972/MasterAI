@@ -120,6 +120,31 @@ vendored or linked, distributed separately, configured by filesystem path.
 | `parquetHelperExecutable` | string path, optional | `""` | Approved DuckDB CLI (`duckdb.exe`/`duckdb`) executable. Blank disables Parquet knowledge-document ingestion; other supported media types (text/Markdown/CSV/JSON/JSONL) are unaffected. |
 | `maximumDocumentBytes` | integer | `26214400` (25 MiB); `268435456` (256 MiB) | Per-file size ceiling applied to every knowledge-document upload, replacing the previously hardcoded 2 MiB constant. |
 
+## `research` (optional)
+
+Phase 103, Web Research and Knowledge Acquisition (`research.cpp`). Queries
+the official Google Custom Search / Bing Web Search APIs via the same
+`curl`-subprocess path `downloads` above uses, scores results with an
+editable reliability-tier table (`GET`/`POST
+/api/v1/research/reliability-tiers`), and ingests relevant, reliable-enough
+pages through the same `KnowledgeIndexStore::ingest()` the `knowledge`
+section above configures. Off by default. API keys are **not** part of this
+section — they are set write-only via `POST /api/v1/research/credentials`
+and stored in `SecretStore`, never in `settings.json`.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Master on/off switch for the whole feature. |
+| `googleEnabled` | boolean | `false` | Query the Google Custom Search JSON API (requires `googleEngineId` here and an API key set via the credentials endpoint). |
+| `bingEnabled` | boolean | `false` | Query the Bing Web Search API (requires an API key set via the credentials endpoint). |
+| `googleEngineId` | string | `""` | Google Programmable Search Engine id (`cx`) — not a credential. |
+| `reliabilityThresholdPercent` | integer, 0-100 | `80` | Sources scored below this by the reliability-tier table are skipped without being fetched. The global reliability-threshold setting. |
+| `maxResultsPerQuery` | integer, positive | `5` | Most results requested from each enabled provider per research run. |
+| `maxPagesToFetch` | integer, positive | `5` | Most pages actually fetched (after reliability filtering) per research run. |
+| `fetchTimeoutSeconds` | integer, positive | `20` | Per-request timeout for both search-API calls and page fetches. |
+| `defaultSubjectId` | string | `""` | Subject a research request lands in when it doesn't specify one. |
+| `defaultVectorStoreId` | string | `""` | Vector store a research request ingests into when it doesn't specify one. A request is rejected if neither this nor a request-supplied vector store id is set. |
+
 ## `indexing` (optional)
 
 | Field | Type | Default | Meaning |

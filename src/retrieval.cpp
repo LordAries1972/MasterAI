@@ -259,8 +259,16 @@ CacheKey retrieval_cache_key(const RetrievalRequest& request,
     key.policy_generation = request.policy_generation;
     key.canonical_identity = trimmed_query;
     key.content_digest = sha256_hex(trimmed_query);
+    // classify_retrieval_request() is a pure function of trimmed_query
+    // alone today, so folding it in changes no cache behavior right now --
+    // it is here so a cached entry can never be served across a future
+    // classifier change (e.g. one that also weighs project-specific
+    // context) without both the query text and its classification still
+    // matching, rather than silently trusting query-text equality alone to
+    // keep implying the same classification forever.
     key.version_tag =
         std::string("retrieval-v1|") +
+        to_string(classify_retrieval_request(trimmed_query)) + "|" +
         (request.priority == RetrievalPriority::interactive ? "i" : "b") +
         (request.semantic_embedding_enabled ? "1" : "0") +
         (request.mcp_resource_enabled ? "1" : "0") +
@@ -817,22 +825,55 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
         }
     };
 
+    bool partial = false;
+    std::string strategy = "none";
+    bool sufficient = false;
+    // Stage 0 (interactive, navigation-classified queries only):
+    // classify_retrieval_request()'s own doc comment already calls an
+    // explicit file-path-shaped token "the strongest, least ambiguous
+    // signal" a query can carry -- yet retrieval used to compute
+    // `classification` only to stamp it onto the outcome for telemetry,
+    // never acting on it, and always tried the identifier/exact-text probes
+    // below first regardless. Run the filename/path probe first here
+    // instead, for exactly the query shape the classifier itself already
+    // identified as unambiguous, so the strongest signal is tried before
+    // two weaker ones instead of after.
+    bool path_stage_attempted = false;
+    if (classification == RetrievalRequestClassification::navigation &&
+        !path_tokens.empty()) {
+        path_stage_attempted = true;
+        for (const auto& token : path_tokens) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                partial = true;
+                break;
+            }
+            merge("filename_path",
+                  indexes_.search_path(request.project.id, token,
+                                       per_step_results),
+                  2.0, "path fragment " + token + " matched (navigation)");
+            if (!fused.empty()) break;
+        }
+        if (!fused.empty()) strategy = "filename_path";
+        sufficient = !fused.empty();
+    }
+
     // Stage 1 (interactive): exact symbol matches. These are in-memory,
     // sub-millisecond index probes; creating/joining a worker pool costs
     // more than the lookup on small/medium indexes. Run them inline and
     // stop at the first sufficient hit. Broader lexical work below retains
     // bounded task parallelism where the per-task cost can amortize it.
-    bool partial = false;
-    for (const auto& token : tokens) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            partial = true;
-            break;
+    if (!sufficient) {
+        for (const auto& token : tokens) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                partial = true;
+                break;
+            }
+            merge("exact_symbol",
+                  indexes_.search_symbol(request.project.id, token,
+                                         per_step_results),
+                  3.0, "identifier " + token + " matched by exact boundary");
+            if (!fused.empty()) break;
         }
-        merge("exact_symbol",
-              indexes_.search_symbol(request.project.id, token,
-                                     per_step_results),
-              3.0, "identifier " + token + " matched by exact boundary");
-        if (!fused.empty()) break;
     }
 
     // Bug fix: `strategy` must only ever be stamped with a stage's name once
@@ -852,11 +893,11 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
     // each of these blocks is gated on `!sufficient` (i.e. `fused` was still
     // empty on entry), a non-empty `fused` afterward can only be this
     // stage's own contribution.
-    std::string strategy = fused.empty() ? "none" : "exact_symbol";
+    if (strategy == "none" && !fused.empty()) strategy = "exact_symbol";
     // "Least expensive sufficient": exact symbol matches are the cheapest,
     // most precise strategy, so any hit at all is treated as sufficient and
     // broader (and more expensive) stages are skipped entirely.
-    bool sufficient = !fused.empty();
+    sufficient = !fused.empty();
 
     // Stage 2 (interactive): exact literal text, then filename/path match.
     if (!sufficient && std::chrono::steady_clock::now() < deadline) {
@@ -870,7 +911,10 @@ RetrievalOutcome RetrievalPlanner::retrieve_uncached(
         sufficient = !fused.empty();
     }
 
-    if (!sufficient && !path_tokens.empty() &&
+    // Skipped when Stage 0 above already tried this exact set of path
+    // tokens against the same index and came up empty -- retrying would
+    // just repeat a deterministic miss.
+    if (!sufficient && !path_stage_attempted && !path_tokens.empty() &&
         std::chrono::steady_clock::now() < deadline) {
         for (const auto& token : path_tokens) {
             if (std::chrono::steady_clock::now() >= deadline) {

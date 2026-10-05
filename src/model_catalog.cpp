@@ -1504,6 +1504,35 @@ const std::vector<ModelCatalogEntry>& model_catalog() {
             "TinyLlama-1.1B-Chat-v1.0", "llama",
             "Q8_0", "Apache-2.0"
         },
+        // Music category: not GGUF/llama.cpp models like everything above --
+        // MasterAI has no inference runtime for these yet, only download/
+        // catalog support, so they land under models_root/music/<modelId>/
+        // and can be chatted with once a future phase adds a runner for
+        // them. Label/displayName spell out which of Text-to-Music,
+        // Voice-to-Music, or Text-to-Voice each one is, since "music" alone
+        // doesn't say what the model actually takes as input.
+        {
+            "musicgen-small-text-to-music", "8",
+            "MusicGen Small -- Text-to-Music (~2.4 GiB)",
+            "music", "musicgen-small", "model.safetensors",
+            "https://huggingface.co/facebook/musicgen-small/resolve/4c8334b02c6ec4e8664a91979669a501ec497792/model.safetensors",
+            "4c8334b02c6ec4e8664a91979669a501ec497792",
+            "1bdc99d43eb6c775967df24b65b0a9f847c0907e95664698d93b5a1c35f5090d",
+            4096ULL, 8192ULL, 2364427288ULL,
+            "MusicGen Small (Text-to-Music)", "musicgen",
+            "FP32", "CC-BY-NC-4.0"
+        },
+        {
+            "piper-amy-medium-text-to-voice", "1",
+            "Piper en_US Amy Medium -- Text-to-Voice (~63 MB)",
+            "music", "piper-en-us-amy-medium", "en_US-amy-medium.onnx",
+            "https://huggingface.co/rhasspy/piper-voices/resolve/375a0fe641dea077c2a47b4e9a056d6da521eed3/en/en_US/amy/medium/en_US-amy-medium.onnx",
+            "375a0fe641dea077c2a47b4e9a056d6da521eed3",
+            "b3a6e47b57b8c7fbe6a0ce2518161a50f59a9cdd8a50835c02cb02bdd6206c18",
+            512ULL, 1024ULL, 63201294ULL,
+            "Piper en_US Amy Medium (Text-to-Voice)", "vits",
+            "FP32", "MIT"
+        },
     };
     return catalog;
 }

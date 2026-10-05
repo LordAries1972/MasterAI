@@ -171,7 +171,8 @@ Do not skip directly to training commands. A training tool can execute a bad pla
 - [16. Glossary of essential terms](#16-glossary-of-essential-terms)
 - [17. Classroom review questions](#17-classroom-review-questions)
 - [18. Final sequential checklist](#18-final-sequential-checklist)
-- [19. Closing lesson](#19-closing-lesson)
+- [19. Web research: teaching MasterAI to look things up](#19-web-research-teaching-masterai-to-look-things-up)
+- [20. Closing lesson](#20-closing-lesson)
 - [Related project documentation](#related-project-documentation)
 
 ---
@@ -2173,7 +2174,76 @@ Use this as the authoritative order for a model-development exercise:
 
 ---
 
-## 19. Closing lesson
+## 19. Web research: teaching MasterAI to look things up
+
+Every lesson so far assumes the knowledge already exists somewhere you can
+give MasterAI: a file you upload, a dataset you register, a subject package
+you author. Phase 103 adds one more way in — MasterAI can go and look for
+information itself, on the open web, and bring back only what it judges
+trustworthy enough to keep.
+
+**What it is, in one sentence:** you ask a question, MasterAI asks a couple
+of trusted search engines, keeps only the sources it trusts enough, reads
+those pages, and saves anything relevant into the same knowledge base
+Retrieval-Augmented Generation (section 7.3) already draws on.
+
+```mermaid
+flowchart LR
+    A[Your question] --> B[Search enabled engines\nGoogle / Bing official APIs]
+    B --> C[Score each result's\nsource domain, 0-100]
+    C --> D{At or above your\nreliability threshold?}
+    D -- No --> X[Skipped, not fetched]
+    D -- Yes --> E[Fetch the page]
+    E --> F{Looks relevant\nto the question?}
+    F -- No --> Y[Fetched, not saved]
+    F -- Yes --> G[Saved into the\nknowledge base]
+    G --> H[Usable by RAG and\nchat retrieval]
+```
+
+**Why reliability scoring comes before fetching, not after.** MasterAI does
+not visit every page that shows up in a search — it visits, in order, the
+most reliable sources first, and never visits anything below your
+configured threshold (80% by default) at all. You control what "reliable"
+means: Settings &gt; Web Research (`/app/ml/research`) has an editable table
+of domain suffixes and scores — `.gov` and `.edu` are scored high out of the
+box, but you can add, change, or remove any rule.
+
+**Why a page can be fetched but not saved.** Being reliable enough to visit
+is not the same as being relevant to your question. After fetching a page,
+MasterAI does a simple word-overlap check between your question and the
+page's content; only pages that clear that check get saved. This is
+deliberately simple — not a second model call judging relevance — so it is
+fast, cheap, and easy to reason about. A future phase may add a real
+model-judged relevance pass, the same way Phase 76 added real generated
+answers on top of Phase 60's retrieval-only RAG baseline.
+
+**Setting it up, step by step:**
+
+1. Get an API key for at least one search provider: a Google Custom Search
+   JSON API key plus a Programmable Search Engine id ("cx"), and/or a Bing
+   Web Search API key.
+2. Open Settings &gt; Web Research, turn on **Enable web research**, turn on
+   the provider(s) you have keys for, and save the keys in the Search API
+   keys form (they are never shown again once saved).
+3. Choose a default subject and vector store to save findings into (or
+   leave them blank and choose per-question instead).
+4. Ask a question on the same page: MasterAI searches, scores, fetches,
+   judges, and saves — then shows you exactly what it kept and why.
+
+**Honest capability boundary.** This is a bounded research pass, not a web
+crawler: the number of results and pages it will fetch per question, and
+how long it will wait for each one, are all capped in Settings. It only
+speaks to the two official search APIs above — it does not scrape search
+result pages, and it does not browse links it finds on a page. Relevance
+judging is a plain keyword check, not model comprehension of the page.
+And like every capability in this guide that depends on a live external
+service, the accuracy and freshness of what it finds is only as good as
+what Google or Bing themselves return that day — MasterAI does not verify
+facts, it only decides which sources are worth reading and keeping.
+
+---
+
+## 20. Closing lesson
 
 Machine learning is controlled experimental engineering. A model learns statistical behavior from data and objectives; it does not automatically acquire truth, policy, or judgment. The safest and most efficient path is to begin with the smallest intervention that can satisfy the requirement: a clear prompt, then authorized context or retrieval, then fine-tuning only when persistent behavior must change.
 

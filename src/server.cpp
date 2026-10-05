@@ -1740,6 +1740,29 @@ public:
         ml_compute_nodes = std::make_unique<ComputeNodeStore>(records);
         ml_automation_pipelines = std::make_unique<AutomationPipelineStore>(records);
         ml_safety_governance = std::make_unique<SafetyGovernanceStore>(records);
+        // Phase 103: Web Research and Knowledge Acquisition. The tier
+        // store and run history persist independently of whether the
+        // feature is enabled; research_engine itself is only exercised by
+        // routes gated on configuration.research_enabled. Rebuilt
+        // unconditionally on every configuration reload, the same way
+        // ml_knowledge_index above is -- restore() just re-reads whatever
+        // is already in `records`, it does not duplicate or reset it.
+        research_reliability_tiers = std::make_unique<ReliabilityTierStore>(records);
+        research_runs = std::make_unique<ResearchRunStore>(records);
+        {
+            const auto google_key = secrets->get("research:google_api_key");
+            const auto bing_key = secrets->get("research:bing_api_key");
+            // Findings always ingest with the fixed
+            // "authored_hashing_vectorizer_v1" method (see
+            // ResearchEngine::run()), which needs no vectorize callback --
+            // KnowledgeIndexStore::ingest() falls back to its own
+            // authored_hash_embedding_impl for that method, same as every
+            // other authored-hashing ingest call in this codebase.
+            research_engine = std::make_unique<ResearchEngine>(
+                value, value.curl_executable, value.runtime_root / "logs",
+                google_key.value_or(""), bing_key.value_or(""),
+                *research_reliability_tiers, *ml_knowledge_index);
+        }
         attachments = std::make_unique<AttachmentStore>(
             value.runtime_root / "attachments", records);
         benchmarks = std::make_unique<BenchmarkStore>(records);
@@ -6694,6 +6717,161 @@ public:
             return response(200, "OK", knowledge_index_profile_json(
                 id, ml_knowledge_index->chunks_for_store(id)));
         }
+        // Phase 103: Web Research and Knowledge Acquisition -- see
+        // ResearchEngine's masterai.hpp comment for the full search/score/
+        // fetch/ingest design. research.run actually triggers a pass;
+        // research.view covers reading past runs; research.manage covers
+        // the reliability-tier table and the write-only credential setter.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/research/query") {
+            if (auto denied = forbidden_unless(user->role, "research.run")) return *denied;
+            if (!configuration.research_enabled) {
+                return response(409, "Conflict",
+                                "{\"error\":\"research_not_enabled\"}");
+            }
+            try {
+                auto root = parse_json(request.body, configuration.max_request_bytes);
+                const auto query = root.required("query").as_string();
+                std::string subject_id;
+                std::string vector_store_id;
+                if (root.optional("subjectId") != nullptr) {
+                    subject_id = root.required("subjectId").as_string();
+                }
+                if (root.optional("vectorStoreId") != nullptr) {
+                    vector_store_id = root.required("vectorStoreId").as_string();
+                }
+                // Registered for the lifetime of this run so HttpServer::stop()
+                // can flip `cancellation` via cancel_all_research() instead of
+                // blocking until every remaining search/fetch call in this run
+                // finishes (or times out) on its own.
+                std::atomic_bool cancellation{false};
+                struct ResearchCancellationGuard {
+                    State* state;
+                    std::atomic_bool* flag;
+                    ~ResearchCancellationGuard() {
+                        state->unregister_research_cancellation(flag);
+                    }
+                };
+                register_research_cancellation(&cancellation);
+                ResearchCancellationGuard research_cancellation_guard{this, &cancellation};
+                const auto run = research_engine->run(user->id, query, subject_id,
+                                                      vector_store_id, cancellation);
+                research_runs->put(run);
+                audit.append("research.query", user->id, "success", run.id);
+                return response(200, "OK", research_run_json(run));
+            } catch (const std::invalid_argument& error) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_research_query\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            } catch (const std::exception& error) {
+                audit.append("research.query", user->id, "failure", error.what());
+                return response(502, "Bad Gateway",
+                                "{\"error\":\"research_query_failed\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "GET" &&
+            request.target == "/api/v1/research/runs") {
+            if (auto denied = forbidden_unless(user->role, "research.view")) return *denied;
+            return response(200, "OK",
+                            "{\"researchRuns\":" +
+                                research_runs_json(research_runs->list()) + "}");
+        }
+        if (request.method == "GET" &&
+            request.target.rfind("/api/v1/research/runs/", 0U) == 0U) {
+            if (auto denied = forbidden_unless(user->role, "research.view")) return *denied;
+            const std::string prefix = "/api/v1/research/runs/";
+            const auto id = request.target.substr(prefix.size());
+            const auto run = research_runs->find(id);
+            if (!run) {
+                return response(404, "Not Found",
+                                "{\"error\":\"research_run_not_found\"}");
+            }
+            return response(200, "OK", research_run_json(*run));
+        }
+        if (request.method == "GET" &&
+            request.target == "/api/v1/research/reliability-tiers") {
+            if (auto denied = forbidden_unless(user->role, "research.view")) return *denied;
+            return response(200, "OK",
+                            "{\"reliabilityTiers\":" +
+                                reliability_tiers_json(
+                                    research_reliability_tiers->list()) + "}");
+        }
+        if (request.method == "POST" &&
+            request.target == "/api/v1/research/reliability-tiers") {
+            if (auto denied = forbidden_unless(user->role, "research.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body, configuration.max_request_bytes);
+                const auto domain_suffix = root.required("domainSuffix").as_string();
+                const auto score = static_cast<unsigned int>(
+                    root.required("score").as_integer());
+                const std::string label = root.optional("label") != nullptr
+                                              ? root.required("label").as_string()
+                                              : std::string();
+                const auto tier = research_reliability_tiers->upsert(
+                    domain_suffix, score, label);
+                audit.append("research.reliabilitytier.upsert", user->id,
+                            "success", tier.id);
+                return response(200, "OK", reliability_tier_json(tier));
+            } catch (const std::exception& error) {
+                return response(
+                    400, "Bad Request",
+                    "{\"error\":\"invalid_reliability_tier\",\"detail\":\"" +
+                        json_escape(error.what()) + "\"}");
+            }
+        }
+        if (request.method == "POST" &&
+            request.target.rfind("/api/v1/research/reliability-tiers/", 0U) ==
+                0U &&
+            request.target.size() > 7U &&
+            request.target.compare(request.target.size() - 7U, 7U,
+                                   "/delete") == 0) {
+            if (auto denied = forbidden_unless(user->role, "research.manage")) return *denied;
+            const std::string prefix = "/api/v1/research/reliability-tiers/";
+            const auto id = request.target.substr(
+                prefix.size(), request.target.size() - prefix.size() - 7U);
+            if (!research_reliability_tiers->remove(id)) {
+                return response(404, "Not Found",
+                                "{\"error\":\"reliability_tier_not_found\"}");
+            }
+            audit.append("research.reliabilitytier.delete", user->id, "success", id);
+            return response(200, "OK", "{\"deleted\":true}");
+        }
+        // Write-only: sets the Google/Bing API keys in SecretStore. Never
+        // echoed back by any route -- GET /reliability-tiers and the run
+        // JSON never include them, matching how no other credential in
+        // this codebase is ever read back over the API.
+        if (request.method == "POST" &&
+            request.target == "/api/v1/research/credentials") {
+            if (auto denied = forbidden_unless(user->role, "research.manage")) return *denied;
+            try {
+                auto root = parse_json(request.body, configuration.max_request_bytes);
+                if (root.optional("googleApiKey") != nullptr) {
+                    secrets->set("research:google_api_key",
+                                root.required("googleApiKey").as_string());
+                }
+                if (root.optional("bingApiKey") != nullptr) {
+                    secrets->set("research:bing_api_key",
+                                root.required("bingApiKey").as_string());
+                }
+                audit.append("research.credentials.set", user->id, "success", "");
+                // Rebuilding research_engine here (instead of waiting for
+                // the next configuration reload) means a freshly saved key
+                // is usable immediately.
+                const auto google_key = secrets->get("research:google_api_key");
+                const auto bing_key = secrets->get("research:bing_api_key");
+                research_engine = std::make_unique<ResearchEngine>(
+                    configuration, configuration.curl_executable,
+                    configuration.runtime_root / "logs", google_key.value_or(""),
+                    bing_key.value_or(""), *research_reliability_tiers,
+                    *ml_knowledge_index);
+                return response(200, "OK", "{\"saved\":true}");
+            } catch (const std::exception& error) {
+                return response(400, "Bad Request",
+                                "{\"error\":\"invalid_research_credentials\",\"detail\":\"" +
+                                    json_escape(error.what()) + "\"}");
+            }
+        }
         // Phase 60: execute one approved RAG configuration against its real
         // populated index and return ranked chunks plus citation-ready
         // context. Phase 76 adds an optional real generated answer
@@ -8837,6 +9015,12 @@ public:
                            ? application_page(*user, "ml-settings")
                            : response(302, "Found", "", {"Location: /app"});
             }
+            // Phase 103: Web Research and Knowledge Acquisition.
+            if (target == "/app/ml/research") {
+                return is_administrator
+                           ? application_page(*user, "ml-research")
+                           : response(302, "Found", "", {"Location: /app"});
+            }
             if (target == "/app/ml/monitoring") {
                 return is_administrator
                            ? application_page(*user, "ml-monitoring")
@@ -9215,7 +9399,7 @@ public:
                 static const std::set<std::string> import_categories{
                     "general-programming", "code-completion", "code-review",
                     "debugging", "documentation", "embeddings-code-search",
-                    "conversation"};
+                    "conversation", "music"};
                 const auto is_safe_identifier = [](const std::string& value) {
                     if (value.empty() || value.size() > 96U ||
                         value.front() == '.' || value.back() == '.') {
@@ -9373,6 +9557,28 @@ public:
     void cancel_all_generations() noexcept {
         std::lock_guard<std::mutex> lock(active_generation_cancellations_mutex);
         for (auto* flag : active_generation_cancellations) flag->store(true);
+    }
+
+    // Registration pair for an in-flight ResearchEngine::run()'s own local
+    // `cancellation` flag, same reasoning as
+    // register_generation_cancellation() above.
+    void register_research_cancellation(std::atomic_bool* flag) {
+        std::lock_guard<std::mutex> lock(active_research_cancellations_mutex);
+        active_research_cancellations.push_back(flag);
+    }
+    void unregister_research_cancellation(std::atomic_bool* flag) noexcept {
+        std::lock_guard<std::mutex> lock(active_research_cancellations_mutex);
+        auto& flags = active_research_cancellations;
+        flags.erase(std::remove(flags.begin(), flags.end(), flag), flags.end());
+    }
+    // Called from HttpServer::stop(), same reasoning as
+    // cancel_all_generations() above: a research run already in progress
+    // when shutdown is requested has to be told to stop, or stop() would
+    // block for however long its remaining search/fetch calls still had
+    // left to run.
+    void cancel_all_research() noexcept {
+        std::lock_guard<std::mutex> lock(active_research_cancellations_mutex);
+        for (auto* flag : active_research_cancellations) flag->store(true);
     }
 
 private:
@@ -10849,6 +11055,36 @@ private:
             incoming.chat_tool_command_timeout_seconds;
         configuration.chat_tool_command_maximum_output_bytes =
             incoming.chat_tool_command_maximum_output_bytes;
+        // Phase 103: applied live, no restart needed -- research_engine
+        // holds its own AppConfig snapshot (see ResearchEngine's masterai.hpp
+        // comment), so a settings-only change (no key change) still needs a
+        // rebuild here to actually take effect, the same way an
+        // accelerator-policy change rebuilds CalibrationService just below.
+        configuration.research_enabled = incoming.research_enabled;
+        configuration.research_google_enabled = incoming.research_google_enabled;
+        configuration.research_bing_enabled = incoming.research_bing_enabled;
+        configuration.research_google_engine_id = incoming.research_google_engine_id;
+        configuration.research_reliability_threshold_percent =
+            incoming.research_reliability_threshold_percent;
+        configuration.research_max_results_per_query =
+            incoming.research_max_results_per_query;
+        configuration.research_max_pages_to_fetch =
+            incoming.research_max_pages_to_fetch;
+        configuration.research_fetch_timeout_seconds =
+            incoming.research_fetch_timeout_seconds;
+        configuration.research_default_subject_id =
+            incoming.research_default_subject_id;
+        configuration.research_default_vector_store_id =
+            incoming.research_default_vector_store_id;
+        if (research_engine && research_reliability_tiers && ml_knowledge_index) {
+            const auto google_key = secrets->get("research:google_api_key");
+            const auto bing_key = secrets->get("research:bing_api_key");
+            research_engine = std::make_unique<ResearchEngine>(
+                configuration, configuration.curl_executable,
+                configuration.runtime_root / "logs", google_key.value_or(""),
+                bing_key.value_or(""), *research_reliability_tiers,
+                *ml_knowledge_index);
+        }
         // Phase 30A: an accelerator-policy change must retire the stale
         // CalibrationService immediately -- otherwise resolve()/calibrate()
         // would keep validating against the policy this process started
@@ -13125,8 +13361,14 @@ private:
     // Shared by both passes of detect_and_strip_tool_call() below (the
     // marker-delimited body and the marker-less fallback span) so the parse
     // logic exists in exactly one place.
+    // `error_out`, when supplied, captures the first parse failure's
+    // exception message -- so a malformed [[TOOL_CALL]] body can be reported
+    // back to the model instead of silently vanishing from the reply (see
+    // detect_and_strip_tool_call()'s call site, which turns this into a
+    // "[Tool call error]" turn the model reads on its next auto-continued
+    // turn).
     static std::optional<ToolCallRequest> parse_tool_call_body(
-        const std::string& body) {
+        const std::string& body, std::string* error_out = nullptr) {
         try {
             const auto parsed = parse_json(body);
             ToolCallRequest request;
@@ -13135,13 +13377,16 @@ private:
                 request.arguments = *arguments;
             }
             return request;
-        } catch (const std::exception&) {
+        } catch (const std::exception& parse_exception) {
+            if (error_out != nullptr && error_out->empty()) {
+                *error_out = parse_exception.what();
+            }
             return std::nullopt;
         }
     }
 
     static std::optional<ToolCallRequest> detect_and_strip_tool_call(
-        std::string& text) {
+        std::string& text, std::string* parse_error_out = nullptr) {
         std::optional<ToolCallRequest> result;
         std::size_t search_from = 0U;
         while (true) {
@@ -13164,7 +13409,8 @@ private:
                 // Malformed body -- still stripped below, just not
                 // executed; keep scanning for a later, valid block.
                 result = parse_tool_call_body(
-                    text.substr(body_start, close_pos - body_start));
+                    text.substr(body_start, close_pos - body_start),
+                    parse_error_out);
             }
             text.erase(open_pos, after_close - open_pos);
             search_from = open_pos;
@@ -13176,7 +13422,8 @@ private:
         while (const auto span = find_bare_tool_call_span(text)) {
             if (!result.has_value()) {
                 result = parse_tool_call_body(
-                    text.substr(span->first, span->second - span->first));
+                    text.substr(span->first, span->second - span->first),
+                    parse_error_out);
             }
             text.erase(span->first, span->second - span->first);
         }
@@ -15310,11 +15557,22 @@ private:
             // comment), and that text must never reach the transcript
             // either way -- only *executing* the parsed call stays gated on
             // tools actually being available for this chat.
+            // Populated only when a marker-delimited (or bare-fallback)
+            // tool-call attempt was found but its JSON body failed to parse
+            // -- previously that attempt just vanished from the reply with
+            // no diagnostic to the model or the user; see the "continue"
+            // override below, which turns this into a "[Tool call error]"
+            // turn the model reads on an auto-continued next turn instead.
+            std::string tool_call_parse_error;
             const std::optional<ToolCallRequest> tool_call_detected =
-                detect_and_strip_tool_call(generated.text);
+                detect_and_strip_tool_call(generated.text,
+                                           &tool_call_parse_error);
             const std::optional<ToolCallRequest> tool_call =
                 (auto_drive || tools_available) ? tool_call_detected
                                                 : std::nullopt;
+            const bool tool_call_malformed =
+                (auto_drive || tools_available) &&
+                !tool_call.has_value() && !tool_call_parse_error.empty();
             // Persist the runner-reported token figures with the transcript:
             // the reply's generated count on the assistant message, and the
             // evaluated prompt count back-filled onto this turn's user
@@ -15324,6 +15582,26 @@ private:
                           generated.generated_tokens);
             chats->set_last_message_tokens(chat_id, ChatRole::user,
                                            generated.prompt_tokens);
+            // A [[TOOL_CALL]] attempt whose JSON body didn't parse used to
+            // just vanish from the reply (detect_and_strip_tool_call() still
+            // strips it either way) with nothing telling the model it
+            // failed -- appended as a "[Tool call error]" turn instead, the
+            // same way a real tool's result is, so the model reads the
+            // parse failure on its next turn and can retry with corrected
+            // JSON. auto_drive_state_json is forced to "continue" below so
+            // that next turn is sent automatically, exactly as a
+            // successfully executed tool call already does.
+            if (tool_call_malformed) {
+                const std::string tool_error_turn =
+                    "[Tool call error]\nYour [[TOOL_CALL]] block could not "
+                    "be parsed: " + tool_call_parse_error +
+                    ". Retry with exactly one well-formed block in the form "
+                    "[[TOOL_CALL]]{\"tool\":\"<name>\",\"arguments\":{...}}"
+                    "[[/TOOL_CALL]].";
+                chats->append(chat_id, ChatRole::user, tool_error_turn);
+                audit.append("chat.tool_call", user.id, "parse_failed",
+                             chat_id);
+            }
             queries.transition(query_id, QueryStage::release,
                                QueryStatus::generating);
             queries.finish(
@@ -15341,11 +15619,13 @@ private:
             // application_script()'s runAutoDrive()) to send another turn
             // with no further user input; "complete" tells it to stop.
             const char* auto_drive_state_json =
-                auto_drive_state == AutoDriveState::continue_next
+                tool_call_malformed
                     ? "continue"
-                    : (auto_drive_state == AutoDriveState::complete
-                          ? "complete"
-                          : "none");
+                    : (auto_drive_state == AutoDriveState::continue_next
+                          ? "continue"
+                          : (auto_drive_state == AutoDriveState::complete
+                                ? "complete"
+                                : "none"));
             // Phase 84: a tool call this turn preempts the plain
             // "complete" event above with one of two shapes instead --
             // "tool_approval_required" (a high_risk call, executed nothing,
@@ -15901,6 +16181,14 @@ private:
     std::unique_ptr<ComputeNodeStore> ml_compute_nodes;
     std::unique_ptr<AutomationPipelineStore> ml_automation_pipelines;
     std::unique_ptr<SafetyGovernanceStore> ml_safety_governance;
+    // Phase 103: Web Research and Knowledge Acquisition -- see
+    // ResearchEngine's masterai.hpp comment. research_engine is rebuilt
+    // whenever configuration reloads (it captures a configuration snapshot
+    // and the two API keys) so a settings or credentials change takes
+    // effect on the next research request without a restart.
+    std::unique_ptr<ReliabilityTierStore> research_reliability_tiers;
+    std::unique_ptr<ResearchRunStore> research_runs;
+    std::unique_ptr<ResearchEngine> research_engine;
     std::unique_ptr<AttachmentStore> attachments;
     std::unique_ptr<RunnerSupervisor> inference;
     // Phase 33 (LOCAL-ONLY slice): opt-in local multi-runner pool. Null
@@ -15933,6 +16221,15 @@ private:
     // download-cancellation path above already does.
     std::mutex active_generation_cancellations_mutex;
     std::vector<std::atomic_bool*> active_generation_cancellations;
+    // Same pattern as active_generation_cancellations above, for an
+    // in-flight ResearchEngine::run() (see register_research_cancellation()/
+    // unregister_research_cancellation() and the RAII guard at that call
+    // site). Without this, a research run's own sequential page fetches had
+    // nothing telling them to stop, so a run in progress at shutdown could
+    // block stop() for as long as its remaining fetches would otherwise take
+    // to time out one by one.
+    std::mutex active_research_cancellations_mutex;
+    std::vector<std::atomic_bool*> active_research_cancellations;
     std::unique_ptr<BenchmarkStore> benchmarks;
     // Phase 36: full performance benchmark matrix and regression gate.
     std::unique_ptr<PerformanceCertificationStore> certifications;
@@ -16503,7 +16800,7 @@ void HttpServer::stop() noexcept {
 
     // Signal every in-flight download to stop immediately, rather than
     // letting shutdown wait out its full transfer: without this, a large
-    // in-progress download could keep this call (and stop.ps1's 30-second
+    // in-progress download could keep this call (and stop.ps1's 60-second
     // wait for the process to exit) blocked for as long as the transfer
     // itself takes.
     if (state_) {
@@ -16511,9 +16808,14 @@ void HttpServer::stop() noexcept {
         // Same reasoning as cancel_all_downloads() above, for a chat reply
         // that's still streaming: without this, active_connections_ below
         // would not drop to zero until that generation finished on its own,
-        // which could keep this call (and stop.ps1's 30-second wait for the
+        // which could keep this call (and stop.ps1's 60-second wait for the
         // process to exit) blocked for as long as the reply took to finish.
         state_->cancel_all_generations();
+        // Same reasoning again, for a research run mid-flight: without this,
+        // its own sequential search/fetch calls had nothing telling them to
+        // stop, so this call could block for however long those remaining
+        // calls would otherwise take to finish or time out one by one.
+        state_->cancel_all_research();
         // RunnerSupervisor::request_shutdown(): cancel_all_generations()
         // above only reaches a request already inside generate() -- a
         // request still stuck inside RunnerSupervisor::load()'s readiness-

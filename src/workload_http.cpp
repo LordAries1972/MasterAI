@@ -686,7 +686,7 @@ std::string WorkloadHttpController::create_download(
         static const std::set<std::string> categories{
             "general-programming", "code-completion", "code-review",
             "debugging", "documentation", "embeddings-code-search",
-            "conversation"};
+            "conversation", "music"};
         if (std::filesystem::path(filename).filename().string() != filename ||
             categories.find(category) == categories.end() ||
             std::filesystem::path(model_id).filename().string() != model_id ||
@@ -713,7 +713,7 @@ std::string WorkloadHttpController::create_download(
         const auto size_bytes = root.required("sizeBytes").as_integer();
         static const std::set<std::string> licenses{
             "Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause",
-            "CC-BY-4.0", "Llama-3.1", "Llama-3.2", "Gemma"};
+            "CC-BY-4.0", "CC-BY-NC-4.0", "Llama-3.1", "Llama-3.2", "Gemma"};
         const auto is_safe_identifier = [](const std::string& value) {
             if (value.empty() || value.size() > 96U || value.front() == '.' ||
                 value.back() == '.') {

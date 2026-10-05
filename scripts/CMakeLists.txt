@@ -25,6 +25,7 @@ add_library(masterai_core STATIC
     ../src/model_catalog.cpp
     ../src/workflows.cpp
     ../src/inference.cpp
+    ../src/curl_process.cpp
     ../src/downloads.cpp
     ../src/benchmarks.cpp
     ../src/mcp.cpp
@@ -59,6 +60,7 @@ add_library(masterai_core STATIC
     ../src/ml.cpp
     ../src/ml_engine.cpp
     ../src/ml_knowledge.cpp
+    ../src/research.cpp
     ../src/ml_safety_scan.cpp
     ../src/telemetry_agent.cpp
     ../src/inference_metrics.cpp

@@ -67,6 +67,8 @@ Testing/
 *.tmp
 *.zip
 *.zst
+*.csv
+*.parquet
 
 # Common editor and operating-system debris
 .DS_Store

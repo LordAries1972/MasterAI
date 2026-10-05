@@ -254,7 +254,10 @@ AppConfig ConfigurationManager::load(
                             // re-validate ("unknown configuration field:
                             // modelRouting") the moment save_atomic() called
                             // load() on its own freshly written temp file.
-                            "topology", "modelRouting"},
+                            "topology", "modelRouting",
+                            // Phase 103: optional, absent in every
+                            // pre-Phase-103 settings file.
+                            "research"},
                      "");
         config.schema_version =
             static_cast<int>(root.required("schemaVersion").as_integer());
@@ -685,6 +688,60 @@ AppConfig ConfigurationManager::load(
             }
         }
 
+        // Phase 103: Web Research and Knowledge Acquisition. API keys are
+        // deliberately not part of this section -- they live in
+        // SecretStore, set through POST /api/v1/research/credentials, never
+        // in settings.json as plaintext.
+        if (const auto* research = root.optional("research")) {
+            require_only(*research,
+                         {"enabled", "googleEnabled", "bingEnabled",
+                          "googleEngineId", "reliabilityThresholdPercent",
+                          "maxResultsPerQuery", "maxPagesToFetch",
+                          "fetchTimeoutSeconds", "defaultSubjectId",
+                          "defaultVectorStoreId"},
+                         "research.");
+            if (research->optional("enabled") != nullptr) {
+                config.research_enabled = research->required("enabled").as_boolean();
+            }
+            if (research->optional("googleEnabled") != nullptr) {
+                config.research_google_enabled =
+                    research->required("googleEnabled").as_boolean();
+            }
+            if (research->optional("bingEnabled") != nullptr) {
+                config.research_bing_enabled =
+                    research->required("bingEnabled").as_boolean();
+            }
+            if (research->optional("googleEngineId") != nullptr) {
+                config.research_google_engine_id =
+                    research->required("googleEngineId").as_string();
+            }
+            if (research->optional("reliabilityThresholdPercent") != nullptr) {
+                config.research_reliability_threshold_percent =
+                    static_cast<unsigned int>(non_negative(
+                        *research, "reliabilityThresholdPercent", 100U));
+            }
+            if (research->optional("maxResultsPerQuery") != nullptr) {
+                config.research_max_results_per_query = static_cast<std::uint32_t>(
+                    positive(*research, "maxResultsPerQuery", 5U));
+            }
+            if (research->optional("maxPagesToFetch") != nullptr) {
+                config.research_max_pages_to_fetch = static_cast<std::uint32_t>(
+                    positive(*research, "maxPagesToFetch", 5U));
+            }
+            if (research->optional("fetchTimeoutSeconds") != nullptr) {
+                config.research_fetch_timeout_seconds = static_cast<std::uint32_t>(
+                    positive(*research, "fetchTimeoutSeconds", 20U));
+            }
+            if (research->optional("defaultSubjectId") != nullptr) {
+                config.research_default_subject_id =
+                    research->required("defaultSubjectId").as_string();
+            }
+            if (research->optional("defaultVectorStoreId") != nullptr) {
+                config.research_default_vector_store_id =
+                    research->required("defaultVectorStoreId").as_string();
+            }
+        }
+
         if (const auto* cache = root.optional("cache")) {
             require_only(*cache, {"enabled", "maximumBytesPerCategory"},
                          "cache.");
@@ -929,6 +986,21 @@ void ConfigurationManager::validate(const AppConfig& config) {
         config.scratch_free_space_reserve_mib == 0U) {
         throw std::runtime_error("scratch quota/reserve configuration is invalid");
     }
+    // Phase 103: Web Research and Knowledge Acquisition. Bounds only --
+    // whether the required API keys/engine id are actually present is a
+    // run() -time check (ResearchEngine::run), not a startup-validation
+    // one, since keys live in SecretStore and aren't visible here.
+    if (config.research_reliability_threshold_percent > 100U) {
+        throw std::runtime_error(
+            "research.reliabilityThresholdPercent must be 0-100");
+    }
+    if (config.research_max_results_per_query == 0U ||
+        config.research_max_pages_to_fetch == 0U ||
+        config.research_fetch_timeout_seconds == 0U) {
+        throw std::runtime_error(
+            "research maxResultsPerQuery/maxPagesToFetch/"
+            "fetchTimeoutSeconds must be positive");
+    }
 }
 
 std::filesystem::path resolve_page_file_root(const AppConfig& configuration) {
@@ -1073,7 +1145,23 @@ std::string ConfigurationManager::serialize(const AppConfig& c) {
         ",\"idleRetentionSeconds\":" +
         std::to_string(c.session_reuse_idle_retention_seconds) + "},\n"
         "  \"performance\":{\"autoTune\":" +
-        (c.performance_auto_tune ? "true" : "false") + "}\n}\n";
+        (c.performance_auto_tune ? "true" : "false") + "},\n"
+        "  \"research\":{\"enabled\":" +
+        (c.research_enabled ? "true" : "false") +
+        ",\"googleEnabled\":" + (c.research_google_enabled ? "true" : "false") +
+        ",\"bingEnabled\":" + (c.research_bing_enabled ? "true" : "false") +
+        ",\"googleEngineId\":" + quote(c.research_google_engine_id) +
+        ",\"reliabilityThresholdPercent\":" +
+        std::to_string(c.research_reliability_threshold_percent) +
+        ",\"maxResultsPerQuery\":" +
+        std::to_string(c.research_max_results_per_query) +
+        ",\"maxPagesToFetch\":" +
+        std::to_string(c.research_max_pages_to_fetch) +
+        ",\"fetchTimeoutSeconds\":" +
+        std::to_string(c.research_fetch_timeout_seconds) +
+        ",\"defaultSubjectId\":" + quote(c.research_default_subject_id) +
+        ",\"defaultVectorStoreId\":" +
+        quote(c.research_default_vector_store_id) + "}\n}\n";
 }
 
 void ConfigurationManager::save_atomic(const AppConfig& config,
